@@ -21,6 +21,21 @@ describe('AI tool surface', () => {
     expect(() => z.toJSONSchema(RuleReviewOutput)).not.toThrow();
   });
 
+  it('answer schema suits strict structured output: every property required, no open objects', () => {
+    const walk = (node: unknown): void => {
+      if (!node || typeof node !== 'object') return;
+      const n = node as Record<string, unknown>;
+      if (n.type === 'object') {
+        const props = Object.keys((n.properties ?? {}) as object);
+        expect(props.length).toBeGreaterThan(0);
+        expect([...((n.required ?? []) as string[])].sort()).toEqual(props.sort());
+        expect(n.additionalProperties).toBe(false);
+      }
+      for (const v of Object.values(n)) walk(v);
+    };
+    walk(z.toJSONSchema(RuleReviewOutput, { io: 'input' }));
+  });
+
   it('does not export a way to mint user approval from the package root', () => {
     expect(Object.keys(api)).not.toContain('userOrigin');
     expect(Object.keys(api)).not.toContain('mintUserOrigin');
@@ -73,7 +88,26 @@ describe('AI tool surface', () => {
     };
     const seen: unknown[] = [];
     const answers = [
-      { newRules: [good, bad], tunings: [], summary: 'Two ideas.' },
+      {
+        newRules: [good, bad, { ...good, ruleJson: '{not json' }].map((r) => ({
+          ruleJson: 'ruleJson' in r ? r.ruleJson : JSON.stringify(r.rule),
+          rationale: r.rationale,
+          evidence: [],
+        })),
+        tunings: [
+          {
+            ruleId: 'new-network-listener',
+            exclusionJson: JSON.stringify({
+              field: 'process.teamId',
+              op: 'eq',
+              value: 'ABCDE12345',
+            }),
+            rationale: 'Docker opens listeners all day.',
+            evidence: [],
+          },
+        ],
+        summary: 'Three ideas.',
+      },
       { newRules: [], tunings: [], summary: 'Dropped the broad one.' },
     ];
     const runner: AnalyzeRunner = {
@@ -86,9 +120,10 @@ describe('AI tool surface', () => {
     const out = await runRuleReview(runner, { engine, pipeline, history: stores.history });
     expect(out.ok).toBe(true);
     expect(out.summary).toBe('Dropped the broad one.');
-    expect(out.submissions[0]).toMatchObject({ accepted: 1, rejected: 1 });
+    expect(out.submissions[0]).toMatchObject({ accepted: 2, rejected: 2 });
+    expect(JSON.stringify(seen[1])).toContain('ruleJson is not valid JSON');
     expect(JSON.stringify(seen[1])).toContain('broad');
-    expect(pipeline.list().filter((p) => p.status === 'awaiting_review')).toHaveLength(1);
+    expect(pipeline.list().filter((p) => p.status === 'awaiting_review')).toHaveLength(2);
   });
 
   it('reports a runner failure without throwing', async () => {

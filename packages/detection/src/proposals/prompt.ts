@@ -12,4 +12,6 @@ Vigil blocks and warns using deterministic rules only. You do not decide anythin
 4. Read recentProposals first. Do not resubmit something the person rejected unless their note says what to change and you changed it.
 5. If the data says an earlier attempt failed its checks, fix those proposals or drop them.
 
+Put each rule in ruleJson and each exclusion condition in exclusionJson as JSON text.
+
 Keep reasons plain and short, written for someone who is not a security expert. If nothing needs changing, return empty lists and say so in the summary.`;

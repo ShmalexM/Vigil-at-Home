@@ -3,12 +3,7 @@ import type { DetectionEngine } from '../engine.js';
 import { COMPUTED_FIELDS, KNOWN_FIELDS } from '../rules/fields.js';
 import type { EventHistory } from '../state/stores.js';
 import { DetectionRule, MATCH_OPS } from '../types.js';
-import {
-  ProposeRuleInput,
-  ProposeTuningInput,
-  type RulePipeline,
-  type SubmitResult,
-} from './pipeline.js';
+import { type RulePipeline, type SubmitResult } from './pipeline.js';
 import { RULE_REVIEW_PROMPT } from './prompt.js';
 import { summarizeTelemetry } from './telemetry.js';
 
@@ -91,14 +86,48 @@ export function detectionReadTools(ctx: DetectionToolContext): ReadToolLike[] {
   return [telemetry as unknown as ReadToolLike, guide as unknown as ReadToolLike];
 }
 
-/** The structured answer of a rule-review run. */
-export const RuleReviewOutput = z.object({
-  newRules: z.array(ProposeRuleInput).max(3),
-  tunings: z.array(ProposeTuningInput).max(5),
+/**
+ * The structured answer of a rule-review run. Every property is required and
+ * rules travel as JSON text, because strict structured output (Codex) only
+ * accepts schemas without optional fields or open-ended objects. Vigil parses
+ * and validates the JSON itself in submitReview.
+ */
+export const RuleReviewOutput = z.strictObject({
+  newRules: z
+    .array(
+      z.strictObject({
+        /** The rule as a JSON object in the format from get_rule_language. */
+        ruleJson: z.string().max(20_000),
+        rationale: z.string().max(2000),
+        evidence: z.array(z.string().max(500)).max(20),
+      }),
+    )
+    .max(3),
+  tunings: z
+    .array(
+      z.strictObject({
+        ruleId: z.string().max(100),
+        /** One condition, as JSON, to add to the rule's exclusions. */
+        exclusionJson: z.string().max(5000),
+        rationale: z.string().max(2000),
+        evidence: z.array(z.string().max(500)).max(20),
+      }),
+    )
+    .max(5),
   /** One or two sentences for the user on what was proposed and why. */
   summary: z.string().max(1000),
 });
 export type RuleReviewOutput = z.infer<typeof RuleReviewOutput>;
+
+function parseJson(text: string, what: string): { value?: unknown; error?: string } {
+  try {
+    return { value: JSON.parse(text) as unknown };
+  } catch (err) {
+    return {
+      error: `${what} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
 
 export interface ReviewSubmission {
   results: Array<{ kind: 'new_rule' | 'tuning'; ref: string; result: SubmitResult }>;
@@ -113,12 +142,27 @@ export function submitReview(
   provider: string,
 ): ReviewSubmission {
   const results: ReviewSubmission['results'] = [];
+  const failed = (errors: string[]): SubmitResult => ({ ok: false, errors, warnings: [] });
   for (const r of output.newRules) {
-    const ref = typeof r.rule.id === 'string' ? r.rule.id : '(no id)';
-    results.push({ kind: 'new_rule', ref, result: pipeline.submitRule(r, provider) });
+    const { value: rule, error } = parseJson(r.ruleJson, 'ruleJson');
+    const ref =
+      rule && typeof rule === 'object' && typeof (rule as { id?: unknown }).id === 'string'
+        ? (rule as { id: string }).id
+        : '(no id)';
+    const result = error
+      ? failed([error])
+      : pipeline.submitRule({ rule, rationale: r.rationale, evidence: r.evidence }, provider);
+    results.push({ kind: 'new_rule', ref, result });
   }
   for (const t of output.tunings) {
-    results.push({ kind: 'tuning', ref: t.ruleId, result: pipeline.submitTuning(t, provider) });
+    const { value: addExclusion, error } = parseJson(t.exclusionJson, 'exclusionJson');
+    const result = error
+      ? failed([error])
+      : pipeline.submitTuning(
+          { ruleId: t.ruleId, addExclusion, rationale: t.rationale, evidence: t.evidence },
+          provider,
+        );
+    results.push({ kind: 'tuning', ref: t.ruleId, result });
   }
   const accepted = results.filter((r) => r.result.ok).length;
   return { results, accepted, rejected: results.length - accepted };

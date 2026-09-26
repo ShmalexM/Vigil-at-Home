@@ -61,7 +61,7 @@ It uses the shared types in `@vigil/core` directly (`SensorEvent`, `Rule` with `
 The AI layer (`@vigil/ai`) runs a scheduled review with `runRuleReview(runner, ctx)`:
 
 1. The agent gets two read-only tools ([`proposals/tools.ts`](src/proposals/tools.ts)): `get_rule_language` (the rule format and the constraints below) and `get_telemetry_summary` (aggregates only: home folders become `~`, emails removed, no command lines or arguments; plus each rule's hit and dismiss counts and your notes on proposals you rejected).
-2. It answers in the `RuleReviewOutput` shape: up to three new rules, up to five tunings and a summary. Vigil submits them; the agent has no tool that changes anything.
+2. It answers in the `RuleReviewOutput` shape (every field required and rules as JSON text, so it works with strict structured output such as Codex's): up to three new rules, up to five tunings and a summary. Vigil submits them; the agent has no tool that changes anything.
 3. Each proposal is checked. The schema and linter allow known fields only, bounded size, safe regexes (no backreferences or nested quantifiers), existing lists only, and no exclusion so broad it hides everything. AI rules get an `ai-` prefix and always start in `shadow`.
 4. **No hard response on behaviour alone.** An AI rule can kill, block, quarantine, disable or add a Santa rule only when it names a specific hash, team ID, signing ID, host, address or extension, or uses a list. A behaviour rule may suspend only at high or critical severity. It may never release anything.
 5. **Replay.** The rule runs over the last 14 days in an isolated engine, with a fresh baseline and a warm-up period. The report shows hits, alerts per day, distinct programs, hits on things you already said were fine, hits on Apple programs, overlap with existing rules and samples, with a verdict of `never_fired`, `quiet`, `ok` or `noisy`.
@@ -176,6 +176,7 @@ Feeds can trigger automatic blocks, so the importer distrusts them:
 
 - **Validation.** Hashes must be 64 hex characters. Private, reserved, loopback and link-local addresses are dropped, and so are ranges wider than /16 (IPv4) or /48 (IPv6). Domains that belong to shared platforms or to macOS (Apple, iCloud, Google, GitHub, Microsoft, AWS, Cloudflare, Dropbox, Discord and similar) are dropped, along with their subdomains and parents. Users can add their own never-list domains and networks.
 - **Isolation.** Each source's entries are stored separately and then combined. A source that fails, times out, is too large, or suddenly shrinks to under 10% of its previous size keeps its old entries. Feeds can only write the three `known_bad_*` lists; `user_blocked_sha256` is never touched.
+- **Live check.** The `Live threat feeds` workflow downloads the real feeds on GitHub's runners weekly and whenever the feed code changes.
 - **Refresh.** Requests are https only and conditional (ETag and Last-Modified). A failed fetch is retried within the hour, and a source with no successful fetch for three intervals is reported as stale.
 
 An IP address on a list is blocked outright. A website on a list only raises an alert, because a malicious site behind a CDN shares its address with many innocent ones.
