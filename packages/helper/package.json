@@ -1,0 +1,20 @@
+{
+  "name": "@vigil/helper",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Vigil at Home privileged helper: a root daemon that runs only a fixed list of reversible actions",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": "./src/client.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@vigil/core": "workspace:*",
+    "@vigil/sensors": "workspace:*",
+    "zod": "^4.1.0"
+  }
+}
