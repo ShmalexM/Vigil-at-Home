@@ -46,6 +46,14 @@ export const ProcessRef = z.object({
   teamId: z.string().optional(),
   signing: SigningStatus.optional(),
   parentPath: z.string().optional(),
+  /** Gatekeeper quarantine attribute on the executable, when it was downloaded. */
+  quarantine: z
+    .object({
+      originUrl: z.string().optional(),
+      /** The app that downloaded it, e.g. Safari. */
+      agent: z.string().optional(),
+    })
+    .optional(),
 });
 export type ProcessRef = z.infer<typeof ProcessRef>;
 
