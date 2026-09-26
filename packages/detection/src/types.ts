@@ -2,12 +2,12 @@ import type { Alert } from '@vigil/core';
 import {
   EventKind as CoreEventKind,
   FieldTest as CoreFieldTest,
-  Id,
-  ProcessRef,
   Rule as CoreRule,
   SantaRuleType,
-  Timestamp,
+  type FirstSeen as CoreFirstSeen,
+  type InList as CoreInList,
   type Action,
+  type ProcessRef,
   type RuleMatch,
   type RuleMode,
   type SensorEvent,
@@ -15,64 +15,21 @@ import {
 import { z } from 'zod';
 
 /**
- * Detection's additions to @vigil/core. Each one is an `.extend()` of a core
- * schema and has been proposed for core; once core carries it, the local copy
- * here is deleted and nothing else changes.
+ * Detection works on @vigil/core's events, rules and actions. The rule schemas
+ * below are core's, tightened for input that may come from an AI: known field
+ * paths only, bounded sizes, no unknown keys, at least one popup reason.
  */
 
 // ---------------------------------------------------------------- events
 
-/** Set when the executable carries the com.apple.quarantine attribute (it came from the internet). */
-export const Quarantine = z.object({
-  originUrl: z.string().optional(),
-  agent: z.string().optional(),
-});
-
-export const DetectionProcessRef = ProcessRef.extend({ quarantine: Quarantine.optional() });
-export type DetectionProcessRef = z.infer<typeof DetectionProcessRef>;
-
-const extraBase = {
-  id: Id,
-  ts: Timestamp,
-  source: z.enum(['osquery', 'santa', 'vigil', 'test']),
-  raw: z.unknown().optional(),
-};
-
-/** A program started accepting connections. */
-export const NetworkListenEvent = z.object({
-  ...extraBase,
-  kind: z.literal('network.listen'),
-  protocol: z.enum(['tcp', 'udp', 'other']),
-  localAddress: z.string(),
-  localPort: z.number().int(),
-  process: DetectionProcessRef.optional(),
-});
-export type NetworkListenEvent = z.infer<typeof NetworkListenEvent>;
-
-export const BrowserExtensionEvent = z.object({
-  ...extraBase,
-  kind: z.literal('browser.extension'),
-  change: z.enum(['added', 'modified', 'removed']),
-  browser: z.string(),
-  extensionId: z.string(),
-  name: z.string().optional(),
-  permissions: z.array(z.string()).optional(),
-});
-export type BrowserExtensionEvent = z.infer<typeof BrowserExtensionEvent>;
-
-/** Everything the engine can evaluate: core events (whose process may carry `quarantine`) plus the two above. */
-export type DetectionEvent = SensorEvent | NetworkListenEvent | BrowserExtensionEvent;
-
-export const DetectionEventKind = z.enum([
-  ...CoreEventKind.options,
-  'network.listen',
-  'browser.extension',
-]);
+export type DetectionEvent = SensorEvent;
+export type DetectionProcessRef = ProcessRef;
+export const DetectionEventKind = CoreEventKind;
 export type DetectionEventKind = z.infer<typeof DetectionEventKind>;
 
 // ---------------------------------------------------------------- rules
 
-export const MATCH_OPS = [...CoreFieldTest.shape.op.options, 'notIn'] as const;
+export const MATCH_OPS = CoreFieldTest.shape.op.options;
 export type MatchOp = (typeof MATCH_OPS)[number];
 
 export const FieldPath = z
@@ -96,14 +53,9 @@ export const FieldTest = CoreFieldTest.extend({
 }).strict();
 export type FieldTest = z.infer<typeof FieldTest>;
 
-/** True when this combination of values was never seen on this Mac for this rule's event kinds. */
-export interface FirstSeenCondition {
-  firstSeen: { key: string[] };
-}
-/** True when the field's value is on a named local list. IPs match by CIDR, domains by parent domain. */
-export interface InListCondition {
-  inList: { list: string; field: string };
-}
+/** Core's firstSeen and inList conditions. */
+export type FirstSeenCondition = CoreFirstSeen;
+export type InListCondition = CoreInList;
 export type Condition =
   | FieldTest
   | { all: Condition[] }
@@ -185,4 +137,4 @@ export interface Detection {
   event: DetectionEvent;
 }
 
-export type { Action, Alert, RuleMatch, RuleMode, SensorEvent };
+export type { Action, Alert, ProcessRef, RuleMatch, RuleMode, SensorEvent };

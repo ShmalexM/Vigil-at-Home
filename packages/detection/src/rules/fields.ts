@@ -79,6 +79,7 @@ export const KNOWN_FIELDS = new Set<string>([
   // persistence
   'change',
   'mechanism',
+  'label',
   'program',
   'programArgs',
   // santa.decision
@@ -90,6 +91,8 @@ export const KNOWN_FIELDS = new Set<string>([
   'extensionId',
   'name',
   'permissions',
+  // system.alert (details.* fields are subtype-specific)
+  'subtype',
   ...COMPUTED_FIELDS,
 ]);
 

@@ -35,8 +35,18 @@ const SCRIPT_RUNNERS = [
   ...SHELLS,
 ];
 
-const SUSPEND = { kind: 'process.suspend', pid: '{{process.pid}}' } as const;
-const KILL = { kind: 'process.kill', pid: '{{process.pid}}' } as const;
+const SUSPEND = {
+  kind: 'process.suspend',
+  pid: '{{process.pid}}',
+  startTime: '{{process.startTime}}',
+  path: '{{process.path}}',
+} as const;
+const KILL = {
+  kind: 'process.kill',
+  pid: '{{process.pid}}',
+  startTime: '{{process.startTime}}',
+  path: '{{process.path}}',
+} as const;
 const SANTA_BLOCK_BINARY = {
   kind: 'santa.rule.set',
   ruleType: 'binary',

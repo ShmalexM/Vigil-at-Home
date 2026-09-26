@@ -115,7 +115,9 @@ export class SafetyFloor {
     switch (action.kind) {
       case 'process.suspend':
       case 'process.kill': {
-        if (!proc || action.pid !== proc.pid) return 'it does not name the process that was seen';
+        if (!proc || action.pid !== proc.pid || (action.path && action.path !== proc.path)) {
+          return 'it does not name the process that was seen';
+        }
         return this.processProtection(proc);
       }
       case 'network.block': {

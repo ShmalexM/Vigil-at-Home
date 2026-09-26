@@ -270,15 +270,14 @@ export class DetectionEngine {
   private resolveResponse(rule: DetectionRule, e: DetectionEvent, downgrades: string[]): Action[] {
     const actions: Action[] = [];
     for (const tpl of rule.response) {
+      // Values the event lacks are left out; the Action schema decides whether they were required.
       const resolved: Record<string, unknown> = {};
-      let missing = false;
       for (const [k, v] of Object.entries(tpl)) {
         const r = k === 'kind' ? v : resolveTemplateValue(v, e);
-        if (r === undefined) missing = true;
-        resolved[k] = r;
+        if (r !== undefined) resolved[k] = r;
       }
-      const parsed = missing ? undefined : Action.safeParse(resolved);
-      if (!parsed?.success) {
+      const parsed = Action.safeParse(resolved);
+      if (!parsed.success) {
         downgrades.push(`Skipped ${tpl.kind}: the event does not say what to act on.`);
         continue;
       }

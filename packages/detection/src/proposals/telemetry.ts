@@ -108,11 +108,12 @@ export function summarizeTelemetry(opts: {
         break;
       }
       case 'network.listen': {
-        listeners.set(`${prog}:${e.localPort}`, {
+        const listener: { program: string; port?: number; address?: string } = {
           program: prog,
           port: e.localPort,
-          address: e.localAddress,
-        });
+        };
+        if (e.localAddress) listener.address = e.localAddress;
+        listeners.set(`${prog}:${e.localPort}`, listener);
         break;
       }
       case 'browser.extension': {

@@ -133,6 +133,34 @@ describe('safety floor', () => {
     expect(d.execute).toEqual([{ kind: 'process.suspend', pid: 900 }]);
     expect(d.downgrades).toHaveLength(2);
   });
+
+  it('pins process actions to the path it saw and leaves out values the event lacks', () => {
+    const pinned = [
+      {
+        kind: 'process.kill',
+        pid: '{{process.pid}}',
+        startTime: '{{process.startTime}}',
+        path: '{{process.path}}',
+      },
+    ];
+    const eng = new DetectionEngine(
+      [testRule({ id: 'r-pin', mode: 'block', condition: isEvil, response: pinned })],
+      memoryStores(),
+    );
+    const d = eng.evaluate(exec(evil))[0]!;
+    const kill = d.execute[0]!;
+    expect(kill).toMatchObject({ kind: 'process.kill', pid: 900, path: evil.path });
+    if (evil.startTime === undefined) expect(kill).not.toHaveProperty('startTime');
+  });
+
+  it('refuses a process action whose path does not match the process seen', () => {
+    const eng = new DetectionEngine([], memoryStores());
+    const why = eng['safety'].check(
+      { kind: 'process.kill', pid: 900, path: '/Applications/Other.app/x' },
+      exec(evil),
+    );
+    expect(why).toMatch(/does not name the process/);
+  });
 });
 
 describe('first seen and learning', () => {

@@ -28,7 +28,7 @@ flowchart LR
   B --> E
 ```
 
-It builds on the shared types in `@vigil/core` (`SensorEvent`, `Rule`, `RuleMatch`, `Alert`, `Action`, `canChangeMode`, `authorizeAction`). The few additions it needs are `.extend()`s of those schemas in [`src/types.ts`](src/types.ts), proposed for core: `firstSeen` and `inList` conditions and the `notIn` op; rule `exclusions`, `reasons` and `dedupe`; `process.quarantine`; and `network.listen` and `browser.extension` events.
+It uses the shared types in `@vigil/core` directly (`SensorEvent`, `Rule` with `firstSeen`, `inList`, `exclusions`, `reasons` and `dedupe`, `RuleMatch`, `Alert`, `Action`, `canChangeMode`, `authorizeAction`). [`src/types.ts`](src/types.ts) only tightens the rule schema for input that may come from an AI (known field paths, bounded sizes, at least one popup reason) and adds the optional `santa` field.
 
 ## What the engine returns
 
