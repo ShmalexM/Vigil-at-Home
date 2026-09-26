@@ -5,9 +5,9 @@ name: macOS checks
 #   test      full test suite on macOS                  (repo)
 #   app       launches the app and checks the popup     (apps/desktop)
 #   sensors   pf, osquery and Santa checks              (packages/sensors, packages/helper)
-#   ai-live   live escape tests against a local model   (packages/ai)
 # Add a job here rather than a new workflow. Screenshots and logs go to the
-# run's artifacts.
+# run's artifacts. Checks that don't need macOS (the AI escape test, live
+# threat feeds) have their own Linux workflows.
 
 on:
   pull_request:
