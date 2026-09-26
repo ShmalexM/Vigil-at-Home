@@ -1,0 +1,81 @@
+name: Release
+
+# Builds the Mac app. Pushing a tag like v0.1.0 publishes a draft GitHub
+# release; running it by hand only uploads the build as a workflow artifact.
+#
+# Signing is optional. With no Apple secrets the app is ad hoc signed: it runs,
+# but macOS asks the user to approve it once in System Settings > Privacy &
+# Security. To sign and notarize, add these repository secrets:
+#   CSC_LINK, CSC_KEY_PASSWORD        Developer ID Application certificate (.p12, base64) and password
+#   APPLE_API_KEY                     App Store Connect API key (.p8 contents)
+#   APPLE_API_KEY_ID, APPLE_API_ISSUER
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+  # Also check packaging whenever the packaging setup changes.
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - apps/desktop/electron-builder.yml
+      - apps/desktop/package.json
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
+
+      - name: Set the app version from the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: apps/desktop
+        run: npm pkg set version="${GITHUB_REF_NAME#v}"
+
+      - name: Build and package
+        working-directory: apps/desktop
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          pnpm build
+          if [[ -n "$CSC_LINK" && -n "$CSC_KEY_PASSWORD" && -n "$APPLE_API_KEY_CONTENT" && -n "$APPLE_API_KEY_ID" && -n "$APPLE_API_ISSUER" ]]; then
+            echo "Signing with Developer ID and notarizing."
+            export APPLE_API_KEY="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+            printf '%s' "$APPLE_API_KEY_CONTENT" > "$APPLE_API_KEY"
+            pnpm exec electron-builder --mac --publish never -c.mac.notarize=true
+          else
+            echo "No Apple signing secrets: building an ad hoc signed app."
+            unset CSC_LINK CSC_KEY_PASSWORD
+            CSC_IDENTITY_AUTO_DISCOVERY=false pnpm exec electron-builder --mac --publish never \
+              -c.mac.identity=- -c.mac.notarize=false
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vigil-at-home-mac
+          path: |
+            apps/desktop/dist/*.dmg
+            apps/desktop/dist/*.zip
+
+      - name: Draft a GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --title "Vigil at Home $GITHUB_REF_NAME" \
+            --notes "Unsigned builds: on first launch, open System Settings > Privacy & Security and choose Open Anyway." \
+            apps/desktop/dist/*.dmg apps/desktop/dist/*.zip
