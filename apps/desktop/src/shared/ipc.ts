@@ -78,8 +78,8 @@ export interface AlertDetail {
 
 export interface RuleView {
   rule: Rule;
-  /** Matches in the last 7 days, all modes. */
-  matches7d: number;
+  /** Matches in the last 14 days (the detection engine's replay window), all modes. */
+  matches: number;
 }
 
 export interface SettingsView {

@@ -19,6 +19,8 @@ export function makeRule(over: Partial<Rule> = {}): Rule {
     eventKinds: ['process.exec'],
     condition: { field: 'process.path', op: 'eq', value: '/tmp/evil' },
     response: [],
+    exclusions: [],
+    reasons: [],
     tags: [],
     createdAt: 1,
     updatedAt: 1,

@@ -106,6 +106,16 @@ export function describeEvent(e: SensorEvent): string {
       return `Startup item ${e.change}: ${base(e.path)}`;
     case 'santa.decision':
       return `Santa ${e.decision === 'block' ? 'blocked' : 'allowed'} ${base(e.process.path)}`;
+    case 'network.listen':
+      return `Listening on port ${e.localPort}`;
+    case 'browser.extension':
+      return `${e.browser} extension ${e.change}: ${e.name ?? e.extensionId}`;
+    case 'system.alert':
+      return {
+        xprotect_detected: 'XProtect found malware',
+        tcc_modified: 'Privacy permission changed',
+        gatekeeper_override: 'Gatekeeper was overridden',
+      }[e.subtype];
   }
 }
 

@@ -15,6 +15,8 @@ export const TEST_RULE: Rule = {
   eventKinds: ['process.exec'],
   condition: { field: 'process.path', op: 'eq', value: '/usr/bin/true' },
   response: [],
+  exclusions: [],
+  reasons: [],
   tags: [],
   createdAt: 0,
   updatedAt: 0,

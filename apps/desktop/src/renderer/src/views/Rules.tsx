@@ -55,7 +55,7 @@ export function RulesView() {
 }
 
 function RuleRow({ view }: { view: RuleView }) {
-  const { rule, matches7d } = view;
+  const { rule, matches } = view;
   const toast = useToast();
   const [confirmBlock, setConfirmBlock] = useState(false);
 
@@ -83,7 +83,7 @@ function RuleRow({ view }: { view: RuleView }) {
         <SeverityMark severity={rule.severity} />
         <Chip title="How often this rule is expected to be right">{rule.fidelity} fidelity</Chip>
         <span className="t-small" style={{ width: 96, textAlign: 'right' }}>
-          {matches7d} match{matches7d === 1 ? '' : 'es'} / 7d
+          {matches} match{matches === 1 ? '' : 'es'} / 14d
         </span>
         <Segmented
           label={`Mode for ${rule.name}`}

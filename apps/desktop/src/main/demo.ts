@@ -6,7 +6,15 @@ import type { VigilCore } from './service.js';
  * rule packs land. Development builds only (`VIGIL_DEMO=1 pnpm dev`).
  */
 export async function seedDemo(core: VigilCore, now = Date.now()): Promise<void> {
-  const base = { version: 1, tags: [], createdAt: now, updatedAt: now, response: [] };
+  const base = {
+    version: 1,
+    tags: [],
+    createdAt: now,
+    updatedAt: now,
+    response: [],
+    exclusions: [],
+    reasons: [],
+  };
   const rules: Rule[] = [
     {
       ...base,

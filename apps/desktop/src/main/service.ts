@@ -10,6 +10,8 @@ import { TEST_RULE } from './test-alert.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 export const EVENT_RETENTION_DAYS = 30;
+/** Same window the detection engine replays AI-drafted rules over before approval. */
+export const RULE_REVIEW_DAYS = 14;
 
 /**
  * Everything the main process runs, minus Electron. Windows and IPC sit on
@@ -67,11 +69,11 @@ export class VigilCore {
   }
 
   rules(): RuleView[] {
-    const counts = this.store.ruleMatchCounts(this.now() - 7 * DAY);
+    const counts = this.store.ruleMatchCounts(this.now() - RULE_REVIEW_DAYS * DAY);
     return this.store
       .listRules()
       .filter((r) => r.id !== TEST_RULE.id)
-      .map((rule) => ({ rule, matches7d: counts.get(rule.id) ?? 0 }));
+      .map((rule) => ({ rule, matches: counts.get(rule.id) ?? 0 }));
   }
 
   /** From the UI, so the actor is the user. */
