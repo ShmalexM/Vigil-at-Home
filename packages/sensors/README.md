@@ -55,5 +55,15 @@ is its sync server on the same Mac:
 - That a profile the user installs by hand counts as "forced" for Santa. Expected, since
   that is how custom settings payloads work, but not yet tested.
 - Santa accepting the pinned private CA through `ServerAuthRootsFile` for `127.0.0.1`.
-- The exact osquery `process_open_sockets`, `listening_ports` and `chrome_extensions`
-  columns on current macOS.
+
+## osquery setup
+
+`osqueryConfig()` goes in `/var/osquery/osquery.conf` and `osqueryFlags()` in
+`/var/osquery/osquery.flags`. osquery ignores startup-only settings (logger plugin,
+watchdog limits, extensions) when they are in the config file, so those live in the
+flag file that osquery's launchd job reads.
+
+`src/osquery.mac.test.ts` runs every scheduled query against the real tables on
+macOS 15 with osquery 5.23, and runs osqueryd with the generated files to check that
+its results log parses into listen and connection events
+(`VIGIL_MAC_INTEGRATION=1 pnpm --filter @vigil/sensors test:mac`, as root).

@@ -10,6 +10,26 @@
 
 export const OSQUERY_RESULTS_LOG = '/var/log/osquery/osqueryd.results.log';
 export const OSQUERY_CONFIG_PATH = '/var/osquery/osquery.conf';
+/** osquery's launchd job reads startup flags from here. */
+export const OSQUERY_FLAGS_PATH = '/var/osquery/osquery.flags';
+
+/**
+ * Startup-only flags. osquery ignores these when they appear in the config
+ * file (verified on macOS 15 with osquery 5.23), so they go in the flagfile
+ * that osquery's launchd job passes with --flagfile.
+ */
+export function osqueryFlags(): string {
+  return (
+    [
+      '--logger_plugin=filesystem',
+      // Keep osquery light on a laptop.
+      '--watchdog_level=0',
+      '--watchdog_memory_limit=200',
+      '--watchdog_utilization_limit=10',
+      '--disable_extensions=true',
+    ].join('\n') + '\n'
+  );
+}
 
 export const QUERY_NAMES = {
   networkConnections: 'vigil_network_connections',
@@ -31,17 +51,11 @@ export function osqueryConfig(opts: OsqueryConfigOptions = {}): string {
   const config = {
     options: {
       host_identifier: 'uuid',
-      logger_plugin: 'filesystem',
       logger_path: '/var/log/osquery',
       // One JSON line per row change, which is what Vigil parses.
       logger_event_type: true,
       schedule_splay_percent: 10,
-      // Keep osquery light on a laptop.
-      watchdog_level: 0,
-      watchdog_memory_limit: 200,
-      watchdog_utilization_limit: 10,
       disable_distributed: true,
-      disable_extensions: true,
     },
     schedule: {
       [QUERY_NAMES.networkConnections]: {

@@ -49,10 +49,22 @@ what the helper itself did: resume needs a pause in the journal, unblock needs a
 - **Journal.** Every action is recorded in a root-only journal (`helper-journal.json`),
   which `helper.journal` returns.
 
-## Not yet verified on a real Mac
+## Checked on a real Mac
 
-- pf evaluating the `com.apple/vigil` anchor from the stock `/etc/pf.conf`.
-- `launchctl bootout` / `bootstrap` for agents in the logged-in user's `gui/<uid>` domain.
+`src/helper.mac.test.ts` runs every action against a real macOS 15 system as root
+(`VIGIL_MAC_INTEGRATION=1 pnpm --filter @vigil/helper test:mac`, on GitHub's hosted Macs):
+
+- The stock `/etc/pf.conf` evaluates `com.apple/*`, so a block in `com.apple/vigil`
+  really stops traffic to that address, unblocking brings it back, and blocks are
+  re-applied after pf forgets them.
+- Pause, resume and kill hit the right process, and a pid that now runs a different
+  program, or a system process, is refused.
+- Quarantine and restore keep the file's permissions.
+- A launch daemon (`system`) and a launch agent in the logged-in user's `gui/<uid>`
+  session are unloaded, moved aside and restored.
+
+## Still open
+
 - Packaging: the helper has to run as a single root-owned executable in
   `/Library/PrivilegedHelperTools` (bundled Node or Electron's node, registered with
   `SMAppService`). The app shell decides this; `launchd/com.vigilathome.helper.plist` is
