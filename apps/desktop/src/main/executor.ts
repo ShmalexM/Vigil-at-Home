@@ -1,0 +1,21 @@
+import type { Action, ActionResult } from '@vigil/core';
+
+/**
+ * Carries out a response action. The real implementation talks to the
+ * privileged helper and Santa (built in the sensors package). Callers have
+ * already checked `authorizeAction`; implementations should check it again.
+ */
+export interface ActionExecutor {
+  execute(action: Action): Promise<ActionResult>;
+}
+
+/** Records what would happen without touching the system. Used until the helper is installed. */
+export class DryRunExecutor implements ActionExecutor {
+  readonly log: Action[] = [];
+
+  async execute(action: Action): Promise<ActionResult> {
+    this.log.push(action);
+    const at = Date.now();
+    return action.kind === 'file.quarantine' ? { at, quarantineId: `dry-${at}` } : { at };
+  }
+}
