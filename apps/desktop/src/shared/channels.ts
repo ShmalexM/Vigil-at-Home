@@ -1,0 +1,23 @@
+// Channel names only, with no runtime imports, so the sandboxed preload can bundle it.
+export const CALL_NAMES = [
+  'getStatus',
+  'listAlerts',
+  'getAlertDetail',
+  'decide',
+  'reopen',
+  'undoAction',
+  'approveProposal',
+  'rejectProposal',
+  'listRules',
+  'setRuleMode',
+  'listActions',
+  'getSettings',
+  'setTheme',
+  'sendTestAlert',
+  'openMain',
+  'closePopup',
+  'fitPopup',
+  'quit',
+] as const;
+
+export const PUSH_NAMES = ['changed', 'popup', 'navigate', 'theme'] as const;

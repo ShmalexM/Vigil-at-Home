@@ -1,0 +1,213 @@
+import { join } from 'node:path';
+import { app, BrowserWindow, nativeTheme, screen, shell, Tray, type Rectangle } from 'electron';
+import trayIcon from '../../resources/trayTemplate.png?asset';
+import trayAlertIcon from '../../resources/trayAlertTemplate.png?asset';
+import type { Pushes, ThemePref } from '../shared/ipc.js';
+
+const POPOVER = { width: 380, height: 540 };
+const POPUP = { width: 420, height: 400 };
+
+/** Where renderer pages are served from, for loading and for checking IPC senders. */
+export function rendererOrigin(): string {
+  return process.env['ELECTRON_RENDERER_URL'] ?? 'file://';
+}
+
+function secure(win: BrowserWindow): BrowserWindow {
+  // Never navigate away from the app or open new windows inside it.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('https://')) void shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (e) => e.preventDefault());
+  return win;
+}
+
+function load(win: BrowserWindow, route: string): void {
+  const dev = process.env['ELECTRON_RENDERER_URL'];
+  if (dev) void win.loadURL(`${dev}#${route}`);
+  else void win.loadFile(join(import.meta.dirname, '../renderer/index.html'), { hash: route });
+}
+
+const webPreferences = () => ({
+  preload: join(import.meta.dirname, '../preload/index.cjs'),
+  contextIsolation: true,
+  sandbox: true,
+  nodeIntegration: false,
+  spellcheck: false,
+});
+
+/**
+ * The app's three surfaces:
+ * - the menu-bar item and its popover ("Needs you"),
+ * - the main window,
+ * - the always-on-top detection popup.
+ */
+export class Windows {
+  private tray?: Tray;
+  private popover?: BrowserWindow;
+  private main?: BrowserWindow;
+  private popup?: BrowserWindow;
+
+  createTray(): void {
+    this.tray = new Tray(trayIcon);
+    this.tray.setToolTip('Vigil at Home');
+    this.tray.on('click', () => this.togglePopover());
+    this.tray.on('right-click', () => this.togglePopover());
+  }
+
+  /** Menu-bar icon: count of alerts waiting on the user, alert glyph when any. */
+  setNeedsYou(count: number): void {
+    if (!this.tray) return;
+    this.tray.setImage(count > 0 ? trayAlertIcon : trayIcon);
+    if (process.platform === 'darwin') this.tray.setTitle(count > 0 ? ` ${count}` : '');
+    this.tray.setToolTip(count > 0 ? `Vigil at Home: ${count} need you` : 'Vigil at Home');
+  }
+
+  togglePopover(): void {
+    if (this.popover?.isVisible()) {
+      this.popover.hide();
+      return;
+    }
+    if (!this.popover || this.popover.isDestroyed()) {
+      this.popover = secure(
+        new BrowserWindow({
+          ...POPOVER,
+          show: false,
+          frame: false,
+          resizable: false,
+          movable: false,
+          fullscreenable: false,
+          skipTaskbar: true,
+          alwaysOnTop: true,
+          transparent: process.platform === 'darwin',
+          vibrancy: 'popover',
+          backgroundColor: process.platform === 'darwin' ? '#00000000' : '#141414',
+          webPreferences: webPreferences(),
+        }),
+      );
+      this.popover.on('blur', () => this.popover?.hide());
+      load(this.popover, 'popover');
+    }
+    const pos = popoverPosition(this.tray?.getBounds());
+    this.popover.setPosition(pos.x, pos.y, false);
+    this.popover.show();
+    this.popover.focus();
+  }
+
+  openMain(route = 'home'): void {
+    this.popover?.hide();
+    if (this.main && !this.main.isDestroyed()) {
+      this.send(this.main, 'navigate', route);
+      this.main.show();
+      this.main.focus();
+      return;
+    }
+    this.main = secure(
+      new BrowserWindow({
+        width: 1180,
+        height: 760,
+        minWidth: 900,
+        minHeight: 600,
+        show: false,
+        title: 'Vigil at Home',
+        titleBarStyle: 'hiddenInset',
+        trafficLightPosition: { x: 16, y: 18 },
+        backgroundColor: nativeTheme.shouldUseDarkColors ? '#141414' : '#F2F4F8',
+        webPreferences: webPreferences(),
+      }),
+    );
+    this.main.once('ready-to-show', () => this.main?.show());
+    // A Dock icon only while the main window is open.
+    void app.dock?.show();
+    this.main.on('closed', () => app.dock?.hide());
+    load(this.main, route);
+  }
+
+  /**
+   * Show the detection popup without taking keyboard focus from what the user
+   * is typing. It floats above full-screen apps and every Space, because
+   * Focus modes can hide ordinary notifications.
+   */
+  showPopup(alertId: string): void {
+    if (!this.popup || this.popup.isDestroyed()) {
+      this.popup = secure(
+        new BrowserWindow({
+          ...POPUP,
+          show: false,
+          frame: false,
+          resizable: false,
+          minimizable: false,
+          maximizable: false,
+          fullscreenable: false,
+          skipTaskbar: true,
+          hasShadow: true,
+          transparent: true,
+          backgroundColor: '#00000000',
+          ...(process.platform === 'darwin' ? { type: 'panel' } : {}),
+          webPreferences: webPreferences(),
+        }),
+      );
+      this.popup.setAlwaysOnTop(true, 'screen-saver');
+      this.popup.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+      load(this.popup, `popup/${alertId}`);
+      this.popup.once('ready-to-show', () => this.placeAndShowPopup());
+      return;
+    }
+    this.send(this.popup, 'popup', alertId);
+    this.placeAndShowPopup();
+  }
+
+  private placeAndShowPopup(): void {
+    if (!this.popup) return;
+    const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    const wa = display.workArea;
+    this.popup.setPosition(wa.x + wa.width - POPUP.width - 12, wa.y + 12, false);
+    this.popup.showInactive();
+  }
+
+  /** Resize the popup to its content, keeping it pinned to the top-right corner. */
+  fitPopup(height: number): void {
+    if (!this.popup || this.popup.isDestroyed()) return;
+    const wa = screen.getDisplayMatching(this.popup.getBounds()).workArea;
+    const h = Math.min(height, wa.height - 24);
+    this.popup.setBounds({
+      x: wa.x + wa.width - POPUP.width - 12,
+      y: wa.y + 12,
+      width: POPUP.width,
+      height: h,
+    });
+  }
+
+  hidePopup(): void {
+    this.popup?.hide();
+  }
+
+  broadcast<K extends keyof Pushes>(channel: K, ...args: Pushes[K]): void {
+    for (const win of BrowserWindow.getAllWindows()) this.send(win, channel, ...args);
+  }
+
+  applyTheme(pref: ThemePref): void {
+    nativeTheme.themeSource = pref;
+    this.broadcast('theme', pref);
+  }
+
+  private send<K extends keyof Pushes>(win: BrowserWindow, channel: K, ...args: Pushes[K]): void {
+    if (!win.isDestroyed()) win.webContents.send(`vigil:${channel}`, ...args);
+  }
+}
+
+function popoverPosition(tray: Rectangle | undefined): { x: number; y: number } {
+  const anchor = tray && tray.width > 0 ? tray : undefined;
+  const display = anchor
+    ? screen.getDisplayMatching(anchor)
+    : screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const wa = display.workArea;
+  const x = anchor
+    ? Math.round(anchor.x + anchor.width / 2 - POPOVER.width / 2)
+    : wa.x + wa.width - POPOVER.width - 12;
+  const y = anchor ? anchor.y + anchor.height + 4 : wa.y + 4;
+  return {
+    x: Math.min(Math.max(x, wa.x + 4), wa.x + wa.width - POPOVER.width - 4),
+    y,
+  };
+}
