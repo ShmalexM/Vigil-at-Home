@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -17,7 +18,7 @@ import { createServer, connect, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SensorEvent } from '@vigil/core';
-import { osqueryConfig, QUERY_NAMES } from './osquery/config.js';
+import { osqueryConfig, osqueryFlags, QUERY_NAMES } from './osquery/config.js';
 import { osqueryLineToEvents } from './osquery/resultParser.js';
 
 const enabled = process.platform === 'darwin' && process.env.VIGIL_MAC_INTEGRATION === '1';
@@ -118,10 +119,13 @@ describe.skipIf(!enabled)('osquery on a real Mac', () => {
         osqueryConfig({ networkIntervalSeconds: 2, persistenceIntervalSeconds: 2 }),
       );
       cfg.options.logger_path = join(dir, 'log');
+      mkdirSync(cfg.options.logger_path);
       writeFileSync(join(dir, 'osquery.conf'), JSON.stringify(cfg));
+      writeFileSync(join(dir, 'osquery.flags'), osqueryFlags());
       daemon = spawn(
         bin('osqueryd'),
         [
+          `--flagfile=${join(dir, 'osquery.flags')}`,
           `--config_path=${join(dir, 'osquery.conf')}`,
           `--database_path=${join(dir, 'db')}`,
           `--pidfile=${join(dir, 'osqueryd.pid')}`,
@@ -169,6 +173,7 @@ describe.skipIf(!enabled)('osquery on a real Mac', () => {
         existsSync(log()),
         `osqueryd wrote no results log (exit ${daemon?.exitCode}):\n${daemonOutput}`,
       ).toBe(true);
+      expect(daemonOutput).not.toMatch(/CLI only flag/);
       expect(seenListen).toBe(true);
       expect([...kinds]).toContain('network.connection');
     }, 90_000);
