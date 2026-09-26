@@ -61,6 +61,12 @@ Vigil's tools run inside Vigil's process (the Claude SDK's in-process MCP server
 
 Binaries are found by absolute path (including the usual Homebrew and `~/.local/bin` locations that a Finder-launched app misses). The first one seen is recorded. A signed binary may update as long as its Apple Team ID stays the same; an unsigned one must keep the same hash. A change stops runs until the user accepts it.
 
+## Spending
+
+`ai.spending(log)` builds the spending page's data from the prompt log the app keeps: each plan's limit windows with the part Vigil used, and Vigil's own runs per day by provider and job, with tokens and Claude Code's cost estimate. Plan windows come from the vendors' own CLIs (Claude Code's usage call, which the SDK marks experimental, and Codex's `account/rateLimits/read`), so Vigil never touches a login. Only Vigil's runs are counted; the user's other conversations with these tools are never read.
+
+In API-key mode, `quota.apiKeyMonthlyCapUsd` stops Claude once `spentThisMonthUsd` (supplied by the app from its log) reaches the cap.
+
 ## Quota
 
 Subscription windows come from the vendors' own signals (Claude's `rate_limit_event`, Codex's `account/rateLimits/updated`). Background work stops once Vigil has used its share of a window (10% by default) or the window is 90% full. Work marked `now` runs until the vendor refuses, and then falls through to the next provider, usually Ollama.

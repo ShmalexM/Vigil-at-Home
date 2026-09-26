@@ -28,6 +28,8 @@ export interface AiSettings {
   readonly quota: {
     /** Vigil's share of each subscription usage window for background work, in percent. */
     readonly backgroundSharePercent: number;
+    /** Claude in apiKey mode stops for the month once Vigil's runs have cost this much. */
+    readonly apiKeyMonthlyCapUsd?: number;
   };
   /** Providers turned off remotely by a Vigil update, for example after a change in terms. */
   readonly pausedByVigil: readonly ProviderId[];

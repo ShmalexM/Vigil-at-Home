@@ -4,9 +4,11 @@ import { buildSystemPrompt, buildUserPrompt } from './prompt.js';
 import { QuotaTracker } from './quota.js';
 import { redactAndSerialize, redactValue } from './redact.js';
 import type { AiSettings } from './settings.js';
+import { spendingDays, spendingLimits, spendingPlans, type SpendingSnapshot } from './spending.js';
 import type {
   AdapterRunOutput,
   PromptLog,
+  PromptLogEntry,
   ProviderAdapter,
   ProviderId,
   ProviderStatus,
@@ -15,10 +17,13 @@ import type {
   SignInFlow,
   RunRequest,
   RunResult,
+  RunUsage,
   ToolAudit,
 } from './types.js';
 
 const STATUS_TTL_MS = 5 * 60_000;
+const PLAN_USAGE_TTL_MS = 5 * 60_000;
+const DAY_MS = 24 * 60 * 60_000;
 
 export interface AiRunner {
   run<T>(request: RunRequest<T>): Promise<RunResult<T> & { readonly audit?: ToolAudit }>;
@@ -29,6 +34,12 @@ export interface AiRunner {
    * `canSignIn`. The provider is re-checked once it finishes.
    */
   signIn(provider: ProviderId): Promise<SignInFlow>;
+  /**
+   * For the spending page: each plan's windows with Vigil's share, and Vigil's
+   * own runs per day from the prompt log the app keeps. Asks each signed-in
+   * vendor CLI for fresh plan numbers at most every few minutes.
+   */
+  spending(log: Iterable<PromptLogEntry>, options?: { days?: number }): Promise<SpendingSnapshot>;
   readonly quota: QuotaTracker;
 }
 
@@ -37,6 +48,11 @@ export interface AiRunnerDeps {
   readonly adapters: readonly ProviderAdapter[];
   readonly log: PromptLog;
   readonly now?: () => number;
+  /**
+   * What Vigil's Claude runs cost this calendar month, from the app's prompt
+   * log. Needed only for the API-key monthly cap.
+   */
+  readonly spentThisMonthUsd?: (provider: ProviderId) => Promise<number>;
 }
 
 export function jsonSchemaFor(output: z.ZodType): Record<string, unknown> {
@@ -56,6 +72,33 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
   const adapters = new Map(deps.adapters.map((a) => [a.id, a]));
   const statusCache = new Map<ProviderId, { status: ProviderStatus; at: number }>();
   const redaction = deps.settings.redaction;
+  const planNames = new Map<ProviderId, string>();
+  let planUsageAt = -Infinity;
+
+  async function refreshPlanUsage(): Promise<void> {
+    if (now() - planUsageAt < PLAN_USAGE_TTL_MS) return;
+    planUsageAt = now();
+    await Promise.all(
+      deps.settings.order.map(async (id) => {
+        const adapter = adapters.get(id);
+        if (!adapter?.readUsage || !enabled(deps.settings, id)) return;
+        if ((await statusOf(adapter)).state !== 'ready') return;
+        const usage = await adapter.readUsage();
+        if (!usage) return;
+        if (usage.plan) planNames.set(id, usage.plan);
+        usage.windows.forEach((w) => quota.observe(w));
+      }),
+    );
+  }
+
+  /** The API-key cap applies only to Claude on the user's own key. */
+  async function overMonthlyCap(id: ProviderId): Promise<boolean> {
+    const cap = deps.settings.quota.apiKeyMonthlyCapUsd;
+    if (id !== 'claude' || deps.settings.claude.mode !== 'apiKey' || cap === undefined)
+      return false;
+    if (!deps.spentThisMonthUsd) return false;
+    return (await deps.spentThisMonthUsd(id)) >= cap;
+  }
 
   async function statusOf(adapter: ProviderAdapter, fresh = false): Promise<ProviderStatus> {
     const cached = statusCache.get(adapter.id);
@@ -111,6 +154,17 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
       return out;
     },
 
+    async spending(log, options = {}) {
+      await refreshPlanUsage();
+      const at = now();
+      return {
+        asOf: at,
+        plans: spendingPlans(quota, planNames, at),
+        days: spendingDays(log, at - (options.days ?? 30) * DAY_MS),
+        limits: spendingLimits(deps.settings),
+      };
+    },
+
     async signIn(id) {
       const adapter = adapters.get(id);
       if (!adapter?.signIn) throw new Error(`${id} is signed in with its own app, not from Vigil.`);
@@ -138,6 +192,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
         outcome: 'ok' | RunFailureReason,
         audit?: ToolAudit,
         detail?: string,
+        usage?: RunUsage,
       ) =>
         deps.log.record({
           id: logId,
@@ -150,6 +205,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
           outcome,
           ...(audit ? { audit } : {}),
           ...(detail ? { detail } : {}),
+          ...(usage ? { usage } : {}),
         });
 
       let lastReason: RunFailureReason = 'no_provider';
@@ -160,7 +216,9 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
         if (!adapter || !enabled(deps.settings, id)) continue;
         const status = await statusOf(adapter);
         if (status.state !== 'ready') continue;
-        const allowed = request.urgency === 'now' ? quota.allowNow(id) : quota.allowBackground(id);
+        const allowed =
+          (request.urgency === 'now' ? quota.allowNow(id) : quota.allowBackground(id)) &&
+          !(await overMonthlyCap(id));
         if (!allowed) {
           lastReason = 'quota';
           continue;
@@ -188,23 +246,23 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
               rejected: true,
               ...(out.resetsAt ? { resetsAt: out.resetsAt } : {}),
             });
-            record(id, 'quota', out.audit);
+            record(id, 'quota', out.audit, undefined, out.usage);
             lastReason = 'quota';
             break;
           }
           if (out.kind === 'error') {
             statusCache.delete(id);
-            record(id, 'error', out.audit, out.message);
+            record(id, 'error', out.audit, out.message, out.usage);
             lastReason = 'error';
             lastDetail = out.message;
             break;
           }
           const parsed = request.output.safeParse(out.json);
           if (parsed.success) {
-            record(id, 'ok', out.audit);
+            record(id, 'ok', out.audit, undefined, out.usage);
             return { ok: true, value: parsed.data, provider: id, logId, audit: out.audit };
           }
-          record(id, 'invalid_output', out.audit, parsed.error.message);
+          record(id, 'invalid_output', out.audit, parsed.error.message, out.usage);
           lastReason = 'invalid_output';
           lastDetail = parsed.error.message;
           prompt = `${userPrompt}\n\nYour previous answer did not match the required format: ${parsed.error.message}`;

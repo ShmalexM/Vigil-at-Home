@@ -6,7 +6,12 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { afterAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { buildChildEnv } from '../env.js';
-import { claudeQueryOptions, makeCanUseTool, vigilToolName } from './claude.js';
+import {
+  claudeQueryOptions,
+  createClaudeAdapter,
+  makeCanUseTool,
+  vigilToolName,
+} from './claude.js';
 import { memoryPinStore } from '../executable.js';
 import {
   CODEX_DISABLED_FEATURES,
@@ -226,6 +231,26 @@ describe.skipIf(!bundledCodex())('Codex app-server as launched', () => {
     } finally {
       rpc.close();
     }
+  }, 60_000);
+});
+
+describe.skipIf(!bundledClaude() || !bundledCodex())('Plan usage from the real CLIs', () => {
+  it('asks each CLI for its plan without calling a model or hanging', async () => {
+    const claude = createClaudeAdapter({
+      mode: 'subscription',
+      pins: memoryPinStore(),
+      executablePath: bundledClaude()!,
+    });
+    const codex = createCodexAdapter({
+      codexHome: await tempDir('vigil-codex-usage-'),
+      pins: memoryPinStore(),
+      executablePath: bundledCodex()!,
+    });
+    const started = Date.now();
+    // Neither is signed in here, so both report no plan rather than failing.
+    expect(await claude.readUsage!()).toBeUndefined();
+    expect(await codex.readUsage!()).toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(40_000);
   }, 60_000);
 });
 

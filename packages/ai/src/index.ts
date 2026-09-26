@@ -4,12 +4,19 @@ import { createCodexAdapter } from './providers/codex.js';
 import { createOllamaAdapter } from './providers/ollama.js';
 import { createAiRunner, type AiRunner } from './runner.js';
 import type { AiSettings } from './settings.js';
-import type { PromptLog, ProviderAdapter } from './types.js';
+import type { PromptLog, ProviderAdapter, ProviderId } from './types.js';
 
 export * from './types.js';
 export { CLAUDE_SUBSCRIPTION_NOTE, defaultAiSettings, type AiSettings } from './settings.js';
 export { createAiRunner, jsonSchemaFor, type AiRunner, type AiRunnerDeps } from './runner.js';
 export { readTool } from './tools.js';
+export type {
+  SpendingDay,
+  SpendingLimits,
+  SpendingPlan,
+  SpendingSnapshot,
+  SpendingWindow,
+} from './spending.js';
 export {
   detectAiApps,
   watchAiApps,
@@ -29,6 +36,8 @@ export interface VigilAiOptions {
   readonly pins: PinStore;
   /** Reads the Anthropic API key from the Keychain. Only used in apiKey mode. */
   readonly getAnthropicApiKey?: () => Promise<string | undefined>;
+  /** What Vigil's runs on this provider cost this calendar month (for the API-key cap). */
+  readonly spentThisMonthUsd?: (provider: ProviderId) => Promise<number>;
 }
 
 /** The runner with the three built-in adapters, configured from settings. */
@@ -51,5 +60,10 @@ export function createVigilAi(options: VigilAiOptions): AiRunner {
       ...(settings.ollama.model ? { model: settings.ollama.model } : {}),
     }),
   ];
-  return createAiRunner({ settings, adapters, log: options.log });
+  return createAiRunner({
+    settings,
+    adapters,
+    log: options.log,
+    ...(options.spentThisMonthUsd ? { spentThisMonthUsd: options.spentThisMonthUsd } : {}),
+  });
 }
