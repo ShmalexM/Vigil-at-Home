@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { SensorEvent } from '@vigil/core';
-import { parseSantaLogLine, santaLogLineToEvent, santaLogLineToNotice } from './santa/logParser.js';
+import { parseSantaLogLine, santaLogLineToEvent } from './santa/logParser.js';
 
 // Sample lines copied from Santa's own serializer tests (BasicStringTest.mm),
 // with the timestamp prefix the file logger adds.
@@ -137,9 +137,9 @@ describe('Santa log parser', () => {
   });
 });
 
-describe('Santa security notices', () => {
+describe('macOS security alerts from Santa', () => {
   it('parses XProtect detections', () => {
-    const n = santaLogLineToNotice(
+    const n = ev(
       P +
         'action=XPROTECT_DETECTED|signature_version=v1.0|malware_identifier=Eicar' +
         '|incident_identifier=C42221A2-7C14-4107-8B06-FB94D602187' +
@@ -154,7 +154,7 @@ describe('Santa security notices', () => {
   });
 
   it('parses TCC changes', () => {
-    const n = santaLogLineToNotice(
+    const n = ev(
       P +
         'action=TCC_MODIFICATION|event_type=CREATE|service=SystemPolicyDocumentsFolder' +
         '|identity=security.northpole.santa|identity_type=POLICY_ID|auth_right=ALLOWED' +
@@ -165,6 +165,5 @@ describe('Santa security notices', () => {
       subtype: 'tcc_modified',
       details: { service: 'SystemPolicyDocumentsFolder', authRight: 'ALLOWED' },
     });
-    expect(santaLogLineToNotice(P + 'action=EXEC|decision=ALLOW|pid=1|path=/x')).toBeUndefined();
   });
 });

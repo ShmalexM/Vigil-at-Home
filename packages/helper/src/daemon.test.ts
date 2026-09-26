@@ -11,8 +11,8 @@ import { FakeSystem } from './testing/fakeSystem.js';
 
 let root: string;
 let paths: HelperPaths;
-let stop: () => Promise<void>;
-let client: HelperClient;
+let stop: (() => Promise<void>) | undefined;
+let client: HelperClient | undefined;
 const port = 47000 + Math.floor(Math.random() * 1000);
 
 beforeAll(async () => {
@@ -26,10 +26,14 @@ beforeAll(async () => {
   };
   writeFileSync(paths.santaLog as string, '');
   writeFileSync(paths.osqueryResults as string, '');
+  // Handing the socket to the console user needs root; CI runs as a normal
+  // user, where the socket simply stays with the current user.
+  const sys = new FakeSystem();
+  sys.console = process.getuid!() === 0 ? 501 : undefined;
   stop = await runDaemon({
     paths,
     syncPort: port,
-    sys: new FakeSystem(),
+    sys,
     log: () => {},
     approvalOwnerUid: process.getuid!(),
     opensslBin: 'openssl',
@@ -38,8 +42,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  client.close();
-  await stop();
+  client?.close();
+  await stop?.();
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -68,10 +72,10 @@ function santaPost(stage: string, body: unknown): Promise<any> {
 
 describe('helper daemon', () => {
   it('serves commands, Santa sync and live sensor events together', async () => {
-    const status = await client.call<{ activeActions: number }>({ kind: 'helper.status' });
+    const status = await client!.call<{ activeActions: number }>({ kind: 'helper.status' });
     expect(status.activeActions).toBe(0);
 
-    await client.call({
+    await client!.call({
       kind: 'santa.rule.set',
       ruleType: 'teamid',
       identifier: 'ABCDE12345',
@@ -85,8 +89,8 @@ describe('helper daemon', () => {
     ]);
 
     const got: SensorEvent[] = [];
-    client.onEvent((e) => got.push(e));
-    await client.subscribe();
+    client!.onEvent((e) => got.push(e));
+    await client!.subscribe();
     appendFileSync(
       paths.santaLog as string,
       '[2026-09-26T21:00:00.000Z] I santad: action=EXEC|decision=DENY|reason=TEAMID|teamid=ABCDE12345|pid=9|ppid=1|uid=501|user=a|mode=M|path=/tmp/evil|args=/tmp/evil|machineid=M1\n',

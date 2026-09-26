@@ -10,7 +10,7 @@
 
 import { createHash } from 'node:crypto';
 import type { EventOfKind, SensorEvent } from '@vigil/core';
-import { defined, nonEmpty, num, pidOf, type ProcessRef, type SystemNotice } from '../types.js';
+import { defined, nonEmpty, num, pidOf, type ProcessRef } from '../types.js';
 
 const LINE_RE = /^\[([^\]]+)\]\s+\S+\s+santad:\s+(action=.*)$/;
 
@@ -95,7 +95,7 @@ const UNKNOWN_PROCESS: ProcessRef = { pid: 0, path: '' };
 
 /**
  * Turn one Santa log line into a SensorEvent. Returns undefined for lines we
- * don't map (FORK, login window events, security notices, junk).
+ * don't map (FORK, login window events, junk).
  */
 export function santaLogLineToEvent(
   line: string,
@@ -191,44 +191,24 @@ export function santaLogLineToEvent(
         }),
       };
     }
-    default:
-      return undefined;
-  }
-}
-
-/** XProtect, TCC and Gatekeeper lines, which core has no event kind for yet. */
-export function santaLogLineToNotice(
-  line: string,
-  now: () => number = Date.now,
-): SystemNotice | undefined {
-  const parsed = parseSantaLogLine(line);
-  if (!parsed) return undefined;
-  const f = parsed.fields;
-  const base = {
-    id: eventId(line),
-    ts: Number.isFinite(parsed.ts) ? parsed.ts : now(),
-    source: 'santa' as const,
-  };
-  const details = (o: Record<string, string | undefined>) =>
-    Object.fromEntries(Object.entries(o).filter(([, v]) => v)) as Record<string, string>;
-  switch (f.action) {
     case 'XPROTECT_DETECTED':
-      return defined({
+      return {
         ...base,
-        subtype: 'xprotect_detected' as const,
-        path: nonEmpty(f.detected_path),
-        process: actor(f),
+        kind: 'system.alert',
+        subtype: 'xprotect_detected',
+        ...defined({ path: nonEmpty(f.detected_path), process: actor(f) }),
         details: details({
           malware: f.malware_identifier,
           signatureVersion: f.signature_version,
           incident: f.incident_identifier,
         }),
-      });
+      };
     case 'TCC_MODIFICATION':
-      return defined({
+      return {
         ...base,
-        subtype: 'tcc_modified' as const,
-        process: actor(f, 'event_') ?? actor(f),
+        kind: 'system.alert',
+        subtype: 'tcc_modified',
+        ...defined({ process: actor(f, 'event_') ?? actor(f) }),
         details: details({
           eventType: f.event_type,
           service: f.service,
@@ -237,17 +217,22 @@ export function santaLogLineToNotice(
           authRight: f.auth_right,
           authReason: f.auth_reason,
         }),
-      });
+      };
     case 'GATEKEEPER_OVERRIDE':
-      return defined({
+      return {
         ...base,
-        subtype: 'gatekeeper_override' as const,
-        path: nonEmpty(f.target),
-        sha256: nonEmpty(f.hash),
-        process: actor(f),
+        kind: 'system.alert',
+        subtype: 'gatekeeper_override',
+        ...defined({ path: nonEmpty(f.target), sha256: nonEmpty(f.hash), process: actor(f) }),
         details: {},
-      });
+      };
     default:
       return undefined;
   }
+}
+
+function details(o: Record<string, string | undefined>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(o)) if (v) out[k] = v;
+  return out;
 }

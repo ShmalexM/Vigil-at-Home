@@ -7,24 +7,6 @@ export type { ProcessRef, SensorEvent };
 
 export type SensorEventSink = (event: SensorEvent) => void;
 
-/**
- * macOS security notices Santa logs that @vigil/core has no event kind for
- * yet (proposed to the core owners). Parsed and surfaced separately so no
- * signal is lost; they move into SensorEvent once core adds the kind.
- */
-export interface SystemNotice {
-  id: string;
-  ts: number;
-  source: 'santa';
-  subtype: 'xprotect_detected' | 'tcc_modified' | 'gatekeeper_override';
-  path?: string;
-  sha256?: string;
-  process?: ProcessRef;
-  details: Record<string, string>;
-}
-
-export type SystemNoticeSink = (notice: SystemNotice) => void;
-
 type OptionalKeys<T> = { [K in keyof T]: undefined extends T[K] ? K : never }[keyof T];
 type RequiredKeys<T> = Exclude<keyof T, OptionalKeys<T>>;
 

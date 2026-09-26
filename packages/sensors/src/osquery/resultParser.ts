@@ -81,6 +81,40 @@ export function osqueryLineToEvents(line: string, opts: OsqueryParseOptions = {}
         },
       ];
     }
+    case QUERY_NAMES.listeningPorts: {
+      if (!added) return [];
+      const localPort = port(c.port);
+      if (localPort === undefined) return [];
+      return [
+        {
+          ...base,
+          kind: 'network.listen',
+          protocol: protocolName(c.protocol),
+          localPort,
+          ...defined({ localAddress: c.address || undefined }),
+          process: defined({ pid: pidOf(c.pid) ?? 0, path: c.path ?? '', uid: pidOf(c.uid) }),
+        },
+      ];
+    }
+    case QUERY_NAMES.browserExtensions: {
+      if (!c.identifier) return [];
+      const permissions = c.permissions
+        ? c.permissions
+            .split(',')
+            .map((p) => p.trim())
+            .filter(Boolean)
+        : undefined;
+      return [
+        {
+          ...base,
+          kind: 'browser.extension',
+          change: added ? 'added' : 'removed',
+          browser: c.browser_type || 'chrome',
+          extensionId: c.identifier,
+          ...defined({ name: c.name || undefined, permissions }),
+        },
+      ];
+    }
     case QUERY_NAMES.launchd: {
       const path = c.path ?? '';
       const args = c.program_arguments ? c.program_arguments.split(' ').filter(Boolean) : undefined;
@@ -90,7 +124,12 @@ export function osqueryLineToEvents(line: string, opts: OsqueryParseOptions = {}
           kind: 'persistence',
           change: added ? 'added' : 'removed',
           mechanism: launchdMechanism(path),
-          ...defined({ path, program: c.program || args?.[0] || undefined, programArgs: args }),
+          ...defined({
+            path,
+            label: c.label || undefined,
+            program: c.program || args?.[0] || undefined,
+            programArgs: args,
+          }),
         },
       ];
     }

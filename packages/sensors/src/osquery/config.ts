@@ -1,8 +1,8 @@
 // The osquery configuration Vigil installs. osquery only observes (it cannot
 // block), so it covers what Santa's event log does not: which programs talk
-// to which addresses, and startup items as a periodic cross-check of Santa's
-// real-time launch-item events. (Listening ports are waiting on an event kind
-// in @vigil/core.)
+// to which addresses, what opens a port to the network, which browser
+// extensions are installed, and startup items as a periodic cross-check of
+// Santa's real-time launch-item events.
 //
 // Queries are differential: osquery logs only rows that were added or
 // removed since the previous run, one JSON object per line, to
@@ -13,6 +13,8 @@ export const OSQUERY_CONFIG_PATH = '/var/osquery/osquery.conf';
 
 export const QUERY_NAMES = {
   networkConnections: 'vigil_network_connections',
+  listeningPorts: 'vigil_listening_ports',
+  browserExtensions: 'vigil_browser_extensions',
   launchd: 'vigil_launchd',
   crontab: 'vigil_crontab',
 } as const;
@@ -50,6 +52,20 @@ export function osqueryConfig(opts: OsqueryConfigOptions = {}): string {
           "('127.0.0.1', '::1', '0.0.0.0', '::', '') AND s.remote_address NOT LIKE 'fe80:%';",
         interval: net,
         description: 'Outbound connections with the owning program',
+      },
+      [QUERY_NAMES.listeningPorts]: {
+        query:
+          'SELECT DISTINCT l.pid, p.path, p.name, p.uid, l.port, l.address, l.protocol FROM listening_ports l ' +
+          "JOIN processes p USING (pid) WHERE l.port != 0 AND l.address NOT IN ('127.0.0.1', '::1');",
+        interval: persist,
+        description: 'Programs accepting connections from the network',
+      },
+      [QUERY_NAMES.browserExtensions]: {
+        query:
+          'SELECT e.browser_type, e.identifier, e.name, e.version, e.permissions, e.path FROM users ' +
+          'CROSS JOIN chrome_extensions e USING (uid);',
+        interval: persist * 5,
+        description: 'Chrome, Brave, Edge and other Chromium extensions',
       },
       [QUERY_NAMES.launchd]: {
         query:

@@ -61,6 +61,7 @@ describe('osquery', () => {
       kind: 'persistence',
       change: 'added',
       mechanism: 'launch_daemon',
+      label: 'com.x',
       program: '/usr/local/bin/x',
       programArgs: ['/usr/local/bin/x', '--run'],
     });
@@ -75,6 +76,53 @@ describe('osquery', () => {
       }),
     );
     expect(SensorEvent.parse(rm)).toMatchObject({ change: 'removed', mechanism: 'launch_agent' });
+  });
+
+  it('parses listening ports and browser extensions', () => {
+    const [listen] = osqueryLineToEvents(
+      JSON.stringify({
+        name: QUERY_NAMES.listeningPorts,
+        unixTime: 5,
+        counter: 2,
+        action: 'added',
+        columns: {
+          pid: '99',
+          path: '/tmp/backdoor',
+          uid: '501',
+          port: '4444',
+          address: '0.0.0.0',
+          protocol: '6',
+        },
+      }),
+    );
+    expect(SensorEvent.parse(listen)).toMatchObject({
+      kind: 'network.listen',
+      protocol: 'tcp',
+      localPort: 4444,
+      localAddress: '0.0.0.0',
+      process: { pid: 99, path: '/tmp/backdoor' },
+    });
+    const [ext] = osqueryLineToEvents(
+      JSON.stringify({
+        name: QUERY_NAMES.browserExtensions,
+        unixTime: 6,
+        counter: 2,
+        action: 'added',
+        columns: {
+          browser_type: 'chrome',
+          identifier: 'abcdefghijklmnopabcdefghijklmnop',
+          name: 'Helper',
+          permissions: 'tabs, cookies, <all_urls>',
+        },
+      }),
+    );
+    expect(SensorEvent.parse(ext)).toMatchObject({
+      kind: 'browser.extension',
+      change: 'added',
+      browser: 'chrome',
+      name: 'Helper',
+      permissions: ['tabs', 'cookies', '<all_urls>'],
+    });
   });
 
   it('ignores removed connections, unknown queries and bad JSON', () => {

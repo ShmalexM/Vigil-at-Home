@@ -3,16 +3,14 @@
 // the same sink through `hub.emit`.
 
 import { FileTailer, type TailPosition } from './tail.js';
-import { santaLogLineToEvent, santaLogLineToNotice } from './santa/logParser.js';
+import { santaLogLineToEvent } from './santa/logParser.js';
 import { osqueryLineToEvents } from './osquery/resultParser.js';
 import { DEFAULT_PATHS } from './santa/profile.js';
 import { OSQUERY_RESULTS_LOG } from './osquery/config.js';
-import type { SensorEvent, SensorEventSink, SystemNoticeSink } from './types.js';
+import type { SensorEvent, SensorEventSink } from './types.js';
 
 export interface SensorHubOptions {
   sink: SensorEventSink;
-  /** XProtect, TCC and Gatekeeper notices from Santa's log. */
-  onNotice?: SystemNoticeSink;
   santaLogPath?: string | false;
   osqueryResultsPath?: string | false;
   /** Saved positions so a restart resumes where it stopped instead of skipping or replaying. */
@@ -34,10 +32,6 @@ export class SensorHub {
       this.addTailer('santa', santa, (line) => {
         const e = santaLogLineToEvent(line);
         if (e) this.emit(e);
-        else if (opts.onNotice) {
-          const n = santaLogLineToNotice(line);
-          if (n) opts.onNotice(n);
-        }
       });
     const osq = opts.osqueryResultsPath ?? OSQUERY_RESULTS_LOG;
     if (osq)

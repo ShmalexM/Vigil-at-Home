@@ -25,15 +25,10 @@ import {
   isRelease,
 } from '@vigil/core';
 
-// The process actions carry an optional expected executable path, so the
-// helper can refuse when a pid has been reused by another program. (Proposed
-// for @vigil/core; harmless once core has it.)
-const withPath = { path: z.string().min(1).max(4096).optional() };
-
 export const HelperAction = z.discriminatedUnion('kind', [
-  ProcessSuspend.extend(withPath),
-  ProcessResume.extend(withPath),
-  ProcessKill.extend(withPath),
+  ProcessSuspend,
+  ProcessResume,
+  ProcessKill,
   NetworkBlock,
   NetworkUnblock,
   FileQuarantine,
@@ -81,7 +76,6 @@ export function isAction(cmd: HelperCommand): cmd is HelperAction {
 /** Commands that loosen protection and so need the user's admin password. */
 export function needsApproval(cmd: HelperCommand): boolean {
   if (!isAction(cmd)) return false;
-  // Validate the core shape (without the helper-only path) and ask core.
   return isRelease(CoreAction.parse(cmd));
 }
 

@@ -4,14 +4,16 @@ What Vigil sees on a Mac, turned into `@vigil/core` `SensorEvent`s.
 
 ```
 Santa (Endpoint Security)
-  ├─ /var/db/santa/santa.log ──► santaLogLineToEvent ──┐   every launch, block, file
-  │                                                     │   write, launch item, in real time
+  ├─ /var/db/santa/santa.log ──► santaLogLineToEvent ──┐   every launch, block, file write,
+  │                                                     │   launch item, XProtect/TCC/Gatekeeper
+  │                                                     │   alert, in real time
   └─ sync HTTPS (preflight, eventupload, ruledownload,  │
      postflight) ◄──► SantaSyncServer ─── blocks ───────┤
                          ▲                              ├─► SensorHub ─► sink (the helper
                          └── RuleStore (Vigil's rules)  │                 streams them to the app)
-osquery ── osqueryd.results.log ──► osqueryLineToEvents ┘   outbound connections, launchd
-                                                            and cron changes, every 10–60 s
+osquery ── osqueryd.results.log ──► osqueryLineToEvents ┘   outbound connections, listening
+                                                            ports, browser extensions, launchd
+                                                            and cron changes, every 10–300 s
 ```
 
 ## Santa as the blocker
@@ -53,4 +55,5 @@ is its sync server on the same Mac:
 - That a profile the user installs by hand counts as "forced" for Santa. Expected, since
   that is how custom settings payloads work, but not yet tested.
 - Santa accepting the pinned private CA through `ServerAuthRootsFile` for `127.0.0.1`.
-- The exact osquery `process_open_sockets` columns on current macOS.
+- The exact osquery `process_open_sockets`, `listening_ports` and `chrome_extensions`
+  columns on current macOS.
