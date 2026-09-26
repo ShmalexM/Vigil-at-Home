@@ -140,7 +140,9 @@ export class Windows {
           maximizable: false,
           fullscreenable: false,
           skipTaskbar: true,
-          hasShadow: true,
+          // The card draws its own shadow. A native shadow on a transparent
+          // window keeps the old outline after fitPopup resizes it on macOS.
+          hasShadow: false,
           transparent: true,
           backgroundColor: '#00000000',
           ...(process.platform === 'darwin' ? { type: 'panel' } : {}),
