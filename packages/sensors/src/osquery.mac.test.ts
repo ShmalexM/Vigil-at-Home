@@ -110,6 +110,7 @@ describe.skipIf(!enabled)('osquery on a real Mac', () => {
   describe('osqueryd with the generated config', () => {
     let dir: string;
     let daemon: ChildProcess | undefined;
+    let daemonOutput = '';
 
     beforeAll(() => {
       dir = mkdtempSync(join(tmpdir(), 'vigil-osqueryd-'));
@@ -128,9 +129,15 @@ describe.skipIf(!enabled)('osquery on a real Mac', () => {
           `--extensions_socket=${join(dir, 'osquery.em')}`,
           '--disable_watchdog',
           '--force',
+          '--verbose',
         ],
-        { stdio: 'ignore' },
+        { stdio: ['ignore', 'pipe', 'pipe'] },
       );
+      const keep = (d: Buffer) => {
+        daemonOutput = (daemonOutput + d.toString()).slice(-8000);
+      };
+      daemon.stdout?.on('data', keep);
+      daemon.stderr?.on('data', keep);
     });
 
     afterAll(() => {
@@ -142,7 +149,11 @@ describe.skipIf(!enabled)('osquery on a real Mac', () => {
       const log = () => join(dir, 'log', 'osqueryd.results.log');
       const kinds = new Set<string>();
       let seenListen = false;
-      for (let i = 0; i < 60 && !(seenListen && kinds.has('network.connection')); i++) {
+      for (
+        let i = 0;
+        i < 60 && daemon?.exitCode === null && !(seenListen && kinds.has('network.connection'));
+        i++
+      ) {
         await new Promise((r) => setTimeout(r, 1000));
         if (!existsSync(log())) continue;
         for (const line of readFileSync(log(), 'utf8').split('\n').filter(Boolean)) {
@@ -154,7 +165,10 @@ describe.skipIf(!enabled)('osquery on a real Mac', () => {
           }
         }
       }
-      expect(existsSync(log()), 'osqueryd wrote no results log').toBe(true);
+      expect(
+        existsSync(log()),
+        `osqueryd wrote no results log (exit ${daemon?.exitCode}):\n${daemonOutput}`,
+      ).toBe(true);
       expect(seenListen).toBe(true);
       expect([...kinds]).toContain('network.connection');
     }, 90_000);
