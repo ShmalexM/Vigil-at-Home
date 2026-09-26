@@ -59,3 +59,4 @@ export {
 } from './proposals/tools.js';
 export { RULE_REVIEW_PROMPT } from './proposals/prompt.js';
 export { mergeRules } from './merge.js';
+export * from './feeds/index.js';

@@ -148,19 +148,42 @@ A core `Rule` plus the detection fields:
 
 ## Built-in pack
 
-Twenty-one macOS rules in [`packs/macos-core.ts`](src/packs/macos-core.ts), each tested against a malicious sample and a benign look-alike in [`pack.test.ts`](src/__tests__/pack.test.ts).
+Twenty-two macOS rules in [`packs/macos-core.ts`](src/packs/macos-core.ts), each tested against a malicious sample and a benign look-alike in [`pack.test.ts`](src/__tests__/pack.test.ts).
 
-| Mode   | Rules                                                                                                                                                                                                                                                                                                                                                                               |
-| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| block  | known-bad hash (kill + Santa rule), program you blocked (kill + Santa rule), known-bad destination (firewall only), untrusted program reading passwords, cookies, keychain, SSH keys or wallets (suspend), fake password dialog (kill), TCC database tampering (suspend)                                                                                                            |
-| alert  | Santa block, download piped to shell, base64 piped to shell, unsigned download opened, quarantine flag removed, Gatekeeper disabled, keychain dump, new unsigned program in `/tmp` or `/Users/Shared`, launch item running a script or temp program, launch item pretending to be Apple, new launch item, new network listener, broad-access browser extension, mass document reads |
-| shadow | unsigned program's first network connection                                                                                                                                                                                                                                                                                                                                         |
+| Mode   | Rules                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| block  | known-bad hash (kill + Santa rule), program you blocked (kill + Santa rule), known-bad IP address (firewall only), untrusted program reading passwords, cookies, keychain, SSH keys or wallets (suspend), fake password dialog (kill), TCC database tampering (suspend)                                                                                                                                                                                             |
+| alert  | known-bad website (offers to firewall its address, since CDNs share addresses), Santa block, download piped to shell, base64 piped to shell, unsigned download opened, quarantine flag removed, Gatekeeper disabled, keychain dump, new unsigned program in `/tmp` or `/Users/Shared`, launch item running a script or temp program, launch item pretending to be Apple, new launch item, new network listener, broad-access browser extension, mass document reads |
+| shadow | unsigned program's first network connection                                                                                                                                                                                                                                                                                                                                                                                                                         |
+
+## Threat lists
+
+`FeedImporter` keeps `known_bad_ips`, `known_bad_domains` and `known_bad_sha256` current. The app calls `run()` on a timer; nothing here is on the inline path.
+
+```ts
+const feeds = new FeedImporter(DEFAULT_FEEDS, stores.lists, stores.feeds);
+await feeds.run(); // fetches only the sources that are due
+feeds.status(); // per source: entries, last fetch, last error, stale
+```
+
+| Source (default, CC0)               | List                | Every | Notes                                                |
+| ----------------------------------- | ------------------- | ----- | ---------------------------------------------------- |
+| Feodo Tracker recommended blocklist | `known_bad_ips`     | 6 h   | Confirmed botnet command servers                     |
+| URLhaus hostfile                    | `known_bad_domains` | 6 h   | Hosts currently serving malware                      |
+| MalwareBazaar recent SHA-256 export | `known_bad_sha256`  | 1 h   | Only the last 48 h, so entries are kept for 180 days |
+
+Feeds can trigger automatic blocks, so the importer distrusts them:
+
+- **Validation.** Hashes must be 64 hex characters. Private, reserved, loopback and link-local addresses are dropped, and so are ranges wider than /16 (IPv4) or /48 (IPv6). Domains that belong to shared platforms or to macOS (Apple, iCloud, Google, GitHub, Microsoft, AWS, Cloudflare, Dropbox, Discord and similar) are dropped, along with their subdomains and parents. Users can add their own never-list domains and networks.
+- **Isolation.** Each source's entries are stored separately and then combined. A source that fails, times out, is too large, or suddenly shrinks to under 10% of its previous size keeps its old entries. Feeds can only write the three `known_bad_*` lists; `user_blocked_sha256` is never touched.
+- **Refresh.** Requests are https only and conditional (ETag and Last-Modified). A failed fetch is retried within the hour, and a source with no successful fetch for three intervals is reported as stale.
+
+An IP address on a list is blocked outright. A website on a list only raises an alert, because a malicious site behind a CDN shares its address with many innocent ones.
 
 ## What this package does not do
 
 - Collect events or talk to osquery or Santa (the sensors package).
 - Run any action. It returns core `Action`s; the app and privileged helper run them.
 - Run the AI. `@vigil/ai` does, with the tools, answer shape and prompt from here.
-- Fetch threat feeds. Lists are loaded with `stores.lists.replace(name, entries, meta)`. The rules expect `known_bad_sha256`, `known_bad_domains`, `known_bad_ips` and `user_blocked_sha256`.
 
 Tests and checks run from the repo root with `pnpm check`. Node 22.5 or later is needed (the tests use `node:sqlite`).

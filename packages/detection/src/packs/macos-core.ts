@@ -121,17 +121,12 @@ export const macosCoreRules: DetectionRuleInput[] = [
     id: 'known-bad-destination',
     name: 'Connection to a known-malicious address',
     description:
-      'A program connected to an address or host on a threat list. Vigil blocks the address; the program keeps running, so a browser that loaded a bad page is not killed.',
+      'A program connected to an IP address on a threat list (for example a botnet command server). Vigil blocks the address; the program keeps running, so a browser that loaded a bad page is not killed.',
     mode: 'block',
     severity: 'high',
     fidelity: 'high',
     eventKinds: ['network.connection'],
-    condition: {
-      any: [
-        { inList: { list: 'known_bad_ips', field: 'remoteAddress' } },
-        { inList: { list: 'known_bad_domains', field: 'remoteHost' } },
-      ],
-    },
+    condition: { inList: { list: 'known_bad_ips', field: 'remoteAddress' } },
     response: [{ kind: 'network.block', address: '{{remoteAddress}}' }],
     reasons: [
       '{{process.name}} connected to {{remoteHost|remoteAddress}}, which is on a threat list.',
@@ -139,6 +134,24 @@ export const macosCoreRules: DetectionRuleInput[] = [
     ],
     dedupe: { key: ['remoteAddress'], windowSec: 3600 },
     tags: ['attack.command_and_control'],
+  }),
+  rule({
+    id: 'known-bad-domain',
+    name: 'Connection to a known-malicious website',
+    description:
+      'A program connected to a host name on a threat list (for example one serving malware). Many sites share one address behind a CDN, so Vigil asks before blocking the address instead of blocking it outright.',
+    mode: 'alert',
+    severity: 'high',
+    fidelity: 'medium',
+    eventKinds: ['network.connection'],
+    condition: { inList: { list: 'known_bad_domains', field: 'remoteHost' } },
+    response: [{ kind: 'network.block', address: '{{remoteAddress}}' }],
+    reasons: [
+      '{{process.name}} connected to {{remoteHost}}, which is on a list of sites spreading malware.',
+      'The address {{remoteAddress}} may also serve other sites, so Vigil asks before blocking it.',
+    ],
+    dedupe: { key: ['remoteHost'], windowSec: 3600 },
+    tags: ['attack.command_and_control', 'attack.initial_access'],
   }),
   rule({
     id: 'credential-theft-untrusted',

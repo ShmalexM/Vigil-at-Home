@@ -1,3 +1,4 @@
+import { MemoryFeedStateStore, type FeedState, type FeedStateStore } from '../feeds/importer.js';
 import type { Proposal, ProposalStore } from '../proposals/pipeline.js';
 import type { DetectionEvent, DetectionRule } from '../types.js';
 import {
@@ -51,6 +52,7 @@ export const DETECTION_MIGRATIONS: string[] = [
      id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, status TEXT NOT NULL, body TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS det_rules (
      id TEXT PRIMARY KEY, version INTEGER NOT NULL, body TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS det_feeds (source_id TEXT PRIMARY KEY, state TEXT NOT NULL)`,
 ];
 
 export function migrate(db: SqlDatabase): void {
@@ -276,9 +278,24 @@ class SqliteRuleRepository implements RuleRepository {
   }
 }
 
+class SqliteFeedStateStore extends MemoryFeedStateStore {
+  constructor(private readonly db: SqlDatabase) {
+    super();
+    const rows = db.prepare('SELECT state FROM det_feeds').all() as Array<{ state: string }>;
+    for (const r of rows) super.put(JSON.parse(r.state) as FeedState);
+  }
+  override put(state: FeedState): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO det_feeds (source_id, state) VALUES (?, ?)')
+      .run(state.sourceId, JSON.stringify(state));
+    super.put(state);
+  }
+}
+
 export interface SqliteDetectionStores extends Stores {
   proposals: ProposalStore;
   rules: RuleRepository;
+  feeds: FeedStateStore;
 }
 
 /** Run migrations and load state from disk. Reads stay in memory; writes go through to SQLite. */
@@ -292,5 +309,6 @@ export function sqliteStores(db: SqlDatabase): SqliteDetectionStores {
     history: new SqliteEventHistory(db),
     proposals: new SqliteProposalStore(db),
     rules: new SqliteRuleRepository(db),
+    feeds: new SqliteFeedStateStore(db),
   };
 }

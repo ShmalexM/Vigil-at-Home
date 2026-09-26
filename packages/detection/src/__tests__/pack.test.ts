@@ -64,14 +64,20 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
     good: [exec(chrome)],
   },
   'known-bad-destination': {
+    bad: [[connect(devTool, '203.0.113.50'), { mode: 'block', actions: ['network.block'] }]],
+    good: [
+      connect(chrome, '142.250.1.1', 'google.com'),
+      connect(chrome, '198.51.100.4', 'x.evil-c2.test'),
+    ],
+  },
+  'known-bad-domain': {
     bad: [
       [
         connect(chrome, '198.51.100.4', 'x.evil-c2.test'),
-        { mode: 'block', actions: ['network.block'] },
+        { mode: 'alert', actions: ['network.block'] },
       ],
-      [connect(devTool, '203.0.113.50'), { mode: 'block', actions: ['network.block'] }],
     ],
-    good: [connect(chrome, '142.250.1.1', 'google.com')],
+    good: [connect(chrome, '142.250.1.1', 'google.com'), connect(devTool, '203.0.113.50')],
   },
   'credential-theft-untrusted': {
     bad: [
