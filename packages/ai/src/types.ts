@@ -60,6 +60,8 @@ export interface ProviderStatus {
   /** The account the vendor reports, for display only. */
   readonly account?: string;
   readonly detail?: string;
+  /** True when Vigil can start the vendor's sign-in itself (see `AiRunner.signIn`). */
+  readonly canSignIn?: boolean;
 }
 
 /** One usage window as the vendor reports it (for example Claude's five_hour, Codex's primary). */
@@ -90,16 +92,56 @@ export interface ToolAudit {
   readonly denied: string[];
 }
 
-export type AdapterRunOutput =
+/** What one run cost, as the vendor reported it. */
+export interface RunUsage {
+  readonly inputTokens: number;
+  readonly cachedInputTokens: number;
+  readonly outputTokens: number;
+  /**
+   * Claude Code's own estimate in US dollars (API list price, not a bill). Null
+   * where there is no per-token price: a ChatGPT plan, or a local model.
+   */
+  readonly costUsd: number | null;
+}
+
+export type AdapterRunOutput = (
   | { readonly kind: 'ok'; readonly json: unknown; readonly audit: ToolAudit }
   | { readonly kind: 'quota'; readonly resetsAt?: number; readonly audit: ToolAudit }
-  | { readonly kind: 'error'; readonly message: string; readonly audit: ToolAudit };
+  | { readonly kind: 'error'; readonly message: string; readonly audit: ToolAudit }
+) & { readonly usage?: RunUsage };
+
+/** A provider's plan and limit windows, read from its own CLI. */
+export interface PlanUsage {
+  /** The plan name as the vendor reports it (pro, max, plus...). */
+  readonly plan?: string;
+  readonly windows: readonly UsageWindow[];
+}
 
 export interface ProviderAdapter {
   readonly id: ProviderId;
   /** Cheap and side-effect free. Never opens a session, runs hooks or opens a browser. */
   probe(): Promise<ProviderStatus>;
   run(input: AdapterRunInput): Promise<AdapterRunOutput>;
+  /**
+   * Starts the vendor's own sign-in in the user's browser, for providers where
+   * Vigil can do that without seeing the login. Absent when the user signs in
+   * with the vendor's app instead.
+   */
+  signIn?(): Promise<SignInFlow>;
+  /**
+   * The plan's limit windows, asked of the vendor's own CLI (which uses its
+   * own login). Undefined when the account has none, such as an API key.
+   */
+  readUsage?(): Promise<PlanUsage | undefined>;
+}
+
+/** A sign-in the vendor runs. Vigil only opens the URL; the login stays with the vendor's CLI. */
+export interface SignInFlow {
+  /** The vendor's own sign-in page, to open in the user's browser. */
+  readonly url: string;
+  /** Resolves true once the vendor reports the sign-in finished. */
+  readonly completed: Promise<boolean>;
+  cancel(): void;
 }
 
 /** Where every prompt that leaves the Mac is recorded, so the user can see it. */
@@ -118,4 +160,5 @@ export interface PromptLogEntry {
   readonly outcome: 'ok' | RunFailureReason;
   readonly audit?: ToolAudit;
   readonly detail?: string;
+  readonly usage?: RunUsage;
 }

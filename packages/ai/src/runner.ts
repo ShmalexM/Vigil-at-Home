@@ -12,6 +12,7 @@ import type {
   ProviderStatus,
   ReadTool,
   RunFailureReason,
+  SignInFlow,
   RunRequest,
   RunResult,
   ToolAudit,
@@ -23,6 +24,11 @@ export interface AiRunner {
   run<T>(request: RunRequest<T>): Promise<RunResult<T> & { readonly audit?: ToolAudit }>;
   /** Fresh status for every configured provider, for the settings screen. */
   status(): Promise<ProviderStatus[]>;
+  /**
+   * Starts a provider's own sign-in in the browser, when `status()` reports
+   * `canSignIn`. The provider is re-checked once it finishes.
+   */
+  signIn(provider: ProviderId): Promise<SignInFlow>;
   readonly quota: QuotaTracker;
 }
 
@@ -93,9 +99,24 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
         if (deps.settings.pausedByVigil.includes(id))
           out.push({ provider: id, state: 'paused_by_vigil' });
         else if (!deps.settings[id].enabled) out.push({ provider: id, state: 'disabled' });
-        else out.push(await statusOf(adapter, true));
+        else {
+          const status = await statusOf(adapter, true);
+          out.push(
+            status.state === 'needs_sign_in' && adapter.signIn
+              ? { ...status, canSignIn: true }
+              : status,
+          );
+        }
       }
       return out;
+    },
+
+    async signIn(id) {
+      const adapter = adapters.get(id);
+      if (!adapter?.signIn) throw new Error(`${id} is signed in with its own app, not from Vigil.`);
+      const flow = await adapter.signIn();
+      void flow.completed.then(() => statusCache.delete(id));
+      return flow;
     },
 
     async run<T>(request: RunRequest<T>) {

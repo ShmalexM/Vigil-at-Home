@@ -7,6 +7,8 @@
  *
  * Codex needs a Vigil Codex home signed in first:
  *   CODEX_HOME=<dir> codex login   then   VIGIL_CODEX_HOME=<dir>
+ * Ollama uses VIGIL_OLLAMA_MODEL, or picks an installed model itself. CI runs
+ * the Ollama tests on every change to this package (.github/workflows/ai-escape.yml).
  */
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -80,7 +82,7 @@ function adapterFor(id: ProviderId): ProviderAdapter {
     case 'ollama':
       return createOllamaAdapter({
         baseUrl: 'http://127.0.0.1:11434',
-        model: process.env.VIGIL_OLLAMA_MODEL ?? 'gpt-oss:20b',
+        ...(process.env.VIGIL_OLLAMA_MODEL ? { model: process.env.VIGIL_OLLAMA_MODEL } : {}),
       });
   }
 }

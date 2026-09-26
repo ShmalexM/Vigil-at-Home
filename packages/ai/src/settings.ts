@@ -13,13 +13,17 @@ export interface AiSettings {
   readonly codex: {
     readonly enabled: boolean;
     readonly executablePath?: string;
-    /** Vigil's own Codex home, so the user's config, MCP servers and plugins never apply. */
+    /**
+     * Vigil's own Codex home, so the user's config, MCP servers and plugins never
+     * apply. The user signs it in once with ChatGPT from Vigil (`signIn('codex')`).
+     */
     readonly codexHome: string;
   };
   readonly ollama: {
     readonly enabled: boolean;
     readonly baseUrl: string;
-    readonly model: string;
+    /** Unset means Vigil picks the largest installed model that supports tools. */
+    readonly model?: string;
   };
   readonly quota: {
     /** Vigil's share of each subscription usage window for background work, in percent. */
@@ -44,12 +48,16 @@ export const CLAUDE_SUBSCRIPTION_NOTE =
   'built on it should use an API key, so this could change. Sign in yourself with `claude auth login`. ' +
   'You can switch to an API key or turn Claude off at any time.';
 
+/**
+ * Everything is on by default: Vigil uses whichever of these it finds installed
+ * and signed in, in this order, and the settings screen can switch any off.
+ */
 export function defaultAiSettings(appSupportDir: string): AiSettings {
   return {
     order: ['claude', 'codex', 'ollama'],
     claude: { enabled: true, mode: 'subscription' },
     codex: { enabled: true, codexHome: join(appSupportDir, 'codex') },
-    ollama: { enabled: true, baseUrl: 'http://127.0.0.1:11434', model: 'gpt-oss:20b' },
+    ollama: { enabled: true, baseUrl: 'http://127.0.0.1:11434' },
     quota: { backgroundSharePercent: 10 },
     pausedByVigil: [],
     redaction: { maxDataBytes: 48_000 },

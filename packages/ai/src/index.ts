@@ -10,6 +10,12 @@ export * from './types.js';
 export { CLAUDE_SUBSCRIPTION_NOTE, defaultAiSettings, type AiSettings } from './settings.js';
 export { createAiRunner, jsonSchemaFor, type AiRunner, type AiRunnerDeps } from './runner.js';
 export { readTool } from './tools.js';
+export {
+  detectAiApps,
+  watchAiApps,
+  type AiAppsSnapshot,
+  type WatchAiAppsOptions,
+} from './watch.js';
 export { memoryPinStore, type ExecutablePin, type PinStore } from './executable.js';
 export { QuotaTracker } from './quota.js';
 export { createClaudeAdapter } from './providers/claude.js';
@@ -40,7 +46,10 @@ export function createVigilAi(options: VigilAiOptions): AiRunner {
       pins: options.pins,
       ...(settings.codex.executablePath ? { executablePath: settings.codex.executablePath } : {}),
     }),
-    createOllamaAdapter({ baseUrl: settings.ollama.baseUrl, model: settings.ollama.model }),
+    createOllamaAdapter({
+      baseUrl: settings.ollama.baseUrl,
+      ...(settings.ollama.model ? { model: settings.ollama.model } : {}),
+    }),
   ];
   return createAiRunner({ settings, adapters, log: options.log });
 }

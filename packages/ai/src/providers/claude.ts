@@ -9,7 +9,9 @@ import {
   tool as sdkTool,
   type CanUseTool,
   type Options,
+  type SDKControlGetUsageResponse,
   type SDKMessage,
+  type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { buildChildEnv } from '../env.js';
 import type { PinStore } from '../executable.js';
@@ -17,9 +19,11 @@ import { callTool } from '../tools.js';
 import type {
   AdapterRunInput,
   AdapterRunOutput,
+  PlanUsage,
   ProviderAdapter,
   ProviderStatus,
   ReadTool,
+  RunUsage,
   UsageWindow,
 } from '../types.js';
 import { verifyBinary } from './verifyBinary.js';
@@ -28,6 +32,7 @@ const execFileAsync = promisify(execFile);
 
 export const VIGIL_MCP_NAME = 'vigil';
 const CLIENT_APP = 'vigil-at-home/0.1.0';
+const USAGE_TIMEOUT_MS = 30_000;
 
 export interface ClaudeAdapterOptions {
   readonly mode: 'subscription' | 'apiKey';
@@ -110,6 +115,56 @@ export function claudeQueryOptions(params: {
     outputFormat: { type: 'json_schema', schema: params.jsonSchema },
     maxTurns: params.tools.length === 0 ? 3 : 10,
     abortController: params.abortController,
+  };
+}
+
+/** Token counts and Claude Code's own cost estimate for one run. */
+export function runUsageFromResult(
+  message: Extract<SDKMessage, { type: 'result' }>,
+): RunUsage | undefined {
+  const models = Object.values(message.modelUsage ?? {});
+  if (models.length === 0) return undefined;
+  let inputTokens = 0;
+  let cachedInputTokens = 0;
+  let outputTokens = 0;
+  let costUsd = 0;
+  for (const m of models) {
+    inputTokens += m.inputTokens + m.cacheCreationInputTokens;
+    cachedInputTokens += m.cacheReadInputTokens;
+    outputTokens += m.outputTokens;
+    costUsd += m.costUSD;
+  }
+  return { inputTokens, cachedInputTokens, outputTokens, costUsd };
+}
+
+type ClaudeRateLimits = NonNullable<SDKControlGetUsageResponse['rate_limits']>;
+
+/**
+ * Plan windows from Claude Code's usage reply. The ids match the ones
+ * `rate_limit_event` uses, so both land on the same row.
+ */
+export function planUsageFromClaude(response: SDKControlGetUsageResponse): PlanUsage | undefined {
+  if (!response.rate_limits_available || !response.rate_limits) return undefined;
+  const windows: UsageWindow[] = [];
+  const add = (windowId: string, w: { utilization: number | null; resets_at: string | null }) => {
+    if (typeof w.utilization !== 'number') return;
+    const resetsAt = w.resets_at ? Date.parse(w.resets_at) : NaN;
+    windows.push({
+      provider: 'claude',
+      windowId,
+      usedPercent: w.utilization,
+      ...(Number.isFinite(resetsAt) ? { resetsAt } : {}),
+    });
+  };
+  const limits: ClaudeRateLimits = response.rate_limits;
+  for (const id of ['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet'] as const) {
+    const w = limits[id];
+    if (w) add(id, w);
+  }
+  for (const w of limits.model_scoped ?? []) add(`model:${w.display_name}`, w);
+  return {
+    ...(response.subscription_type ? { plan: response.subscription_type } : {}),
+    windows,
   };
 }
 
@@ -239,14 +294,17 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions): ProviderAdap
               };
             }
           } else if (message.type === 'result') {
+            const usage = runUsageFromResult(message);
+            const withUsage = usage ? { usage } : {};
             if (message.subtype === 'success' && message.structured_output !== undefined) {
-              return { kind: 'ok', json: message.structured_output, audit };
+              return { kind: 'ok', json: message.structured_output, audit, ...withUsage };
             }
             const detail = 'errors' in message ? message.errors.join('; ') : message.subtype;
             return {
               kind: 'error',
               message: detail || 'Claude returned no structured output.',
               audit,
+              ...withUsage,
             };
           }
         }
@@ -260,6 +318,61 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions): ProviderAdap
         };
       } finally {
         input.signal.removeEventListener('abort', onAbort);
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+
+    /**
+     * Asks Claude Code for the plan's windows. It starts a session that never
+     * gets a prompt, so no model is called, and Claude Code reads the numbers
+     * with its own login. The SDK marks this call experimental; if it goes away,
+     * the windows still arrive from `rate_limit_event` during runs.
+     */
+    async readUsage(): Promise<PlanUsage | undefined> {
+      if (options.mode === 'apiKey') return undefined;
+      const binary = await verifyBinary('claude', 'claude', options.pins, options.executablePath);
+      if (binary.state !== 'ok') return undefined;
+      const env = await childEnv();
+      if (!env) return undefined;
+      const cwd = await mkdtemp(join(tmpdir(), 'vigil-claude-'));
+      const abortController = new AbortController();
+      const timer = setTimeout(() => abortController.abort(), USAGE_TIMEOUT_MS);
+      // A prompt stream that stays open without ever sending a message.
+      const noPrompt: AsyncIterable<SDKUserMessage> = {
+        [Symbol.asyncIterator]: () => ({
+          next: () =>
+            new Promise<IteratorResult<SDKUserMessage>>((resolve) =>
+              abortController.signal.addEventListener(
+                'abort',
+                () => resolve({ done: true, value: undefined }),
+                { once: true },
+              ),
+            ),
+        }),
+      };
+      try {
+        const q = query({
+          prompt: noPrompt,
+          options: claudeQueryOptions({
+            executablePath: binary.path,
+            cwd,
+            env,
+            systemPrompt: '',
+            jsonSchema: { type: 'object' },
+            tools: [],
+            canUseTool: makeCanUseTool([], []),
+            abortController,
+          }),
+        });
+        const response = await q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({
+          skipBehaviors: true,
+        });
+        return planUsageFromClaude(response);
+      } catch {
+        return undefined;
+      } finally {
+        clearTimeout(timer);
+        abortController.abort();
         await rm(cwd, { recursive: true, force: true });
       }
     },

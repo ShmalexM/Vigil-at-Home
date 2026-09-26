@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { QuotaTracker } from './quota.js';
 import { createAiRunner } from './runner.js';
 import { defaultAiSettings, type AiSettings } from './settings.js';
 import { readTool } from './tools.js';
+import { watchAiApps, type AiAppsSnapshot } from './watch.js';
 import type {
   AdapterRunInput,
   AdapterRunOutput,
@@ -190,5 +191,53 @@ describe('quota tracker', () => {
     q.observe({ provider: 'claude', windowId: 'seven_day', usedPercent: 93, resetsAt: 10_000 });
     expect(q.allowBackground('claude')).toBe(false);
     expect(q.allowNow('claude')).toBe(true);
+  });
+});
+
+describe('finding AI apps', () => {
+  it('offers sign-in only for providers Vigil can sign in itself', async () => {
+    const codex: ProviderAdapter = {
+      ...fake('codex', () => ({ kind: 'error', message: 'x', audit: audit() }), 'needs_sign_in'),
+      signIn: async () => ({
+        url: 'https://example.test',
+        completed: Promise.resolve(true),
+        cancel: () => {},
+      }),
+    };
+    const claude = fake(
+      'claude',
+      () => ({ kind: 'error', message: 'x', audit: audit() }),
+      'needs_sign_in',
+    );
+    const { runner } = setup([claude, codex]);
+    const status = await runner.status();
+    expect(status.find((s) => s.provider === 'codex')?.canSignIn).toBe(true);
+    expect(status.find((s) => s.provider === 'claude')?.canSignIn).toBeUndefined();
+    await expect(runner.signIn('claude')).rejects.toThrow();
+    expect((await runner.signIn('codex')).url).toBe('https://example.test');
+  });
+
+  it('reports when an app is installed or signed in, and only then', async () => {
+    let state: ProviderState = 'not_installed';
+    const adapter: ProviderAdapter = {
+      id: 'ollama',
+      probe: async () => ({ provider: 'ollama', state }),
+      run: async () => ({ kind: 'error', message: 'x', audit: audit() }),
+    };
+    const { runner } = setup([adapter], { order: ['ollama'] });
+    const seen: AiAppsSnapshot[] = [];
+    const stop = watchAiApps(runner, {
+      intervalMs: 5,
+      findCopilot: async () => '/opt/homebrew/bin/copilot',
+      onChange: (s) => seen.push(s),
+    });
+    await vi.waitFor(() => expect(seen).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(seen).toHaveLength(1);
+    state = 'ready';
+    await vi.waitFor(() => expect(seen).toHaveLength(2));
+    stop();
+    expect(seen[0]?.copilot).toEqual({ installed: true, supported: false });
+    expect(seen.map((s) => s.providers[0]?.state)).toEqual(['not_installed', 'ready']);
   });
 });

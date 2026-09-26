@@ -32,6 +32,21 @@ const result = await ai.run({
 if (result.ok) result.value; // validated against the schema
 ```
 
+## Finding the AI apps you already have
+
+Nothing needs setting up. Vigil looks for each app on every check and uses the first one that is installed and signed in, in the order Claude, Codex, Ollama:
+
+| App         | Found by                                                      | Signed in when                                                 |
+| ----------- | ------------------------------------------------------------- | -------------------------------------------------------------- |
+| Claude Code | `claude` on PATH, `~/.local/bin`, `~/.claude/local`, Homebrew | `claude auth status` says so (your normal Claude Code login)   |
+| Codex       | `codex` in the same places                                    | You clicked Sign in with ChatGPT in Vigil once (see below)     |
+| Ollama      | A server on `127.0.0.1:11434`                                 | Always; Vigil picks the largest installed model that has tools |
+| Copilot     | `copilot` in the same places                                  | Detected only; Vigil can't use it until its adapter lands      |
+
+`watchAiApps(ai, { onChange })` reports each change (installed, signed in or out, a binary from a new signer) for the settings screen and menu bar. `detectAiApps(ai)` gives a one-off snapshot.
+
+Codex is the one app that needs a click. Codex always loads the config in its home folder, including your MCP servers, and none of its settings turn that off for the app server (checked against 0.157.1: a server in your `config.toml` still starts). So Vigil keeps its own Codex home, and `ai.signIn('codex')` returns ChatGPT's own sign-in page for the app to open. Codex stores the login; Vigil never sees it.
+
 `result.reason` on failure is one of `quota`, `timeout`, `invalid_output`, `no_provider`, `error`. Every prompt is recorded through `log` so the user can see what was sent.
 
 ## What the agent can and can't do
@@ -54,13 +69,13 @@ Subscription windows come from the vendors' own signals (Claude's `rate_limit_ev
 
 `pnpm test` checks the settings, and launches the real Claude and Codex binaries far enough to confirm their tool lists and sandbox without calling a model.
 
-The live escape tests use your subscription. They give the agent evidence and a tool result that tell it to read a secret file, write a file and call a local web server, then check that none of it happened:
+The live escape tests use your subscription (or, for Ollama, a local model). CI runs the Ollama ones on every change to this package (`.github/workflows/ai-escape.yml`). They give the agent evidence and a tool result that tell it to read a secret file, write a file and call a local web server, then check that none of it happened:
 
 ```sh
 VIGIL_LIVE_PROVIDERS=claude,codex,ollama pnpm --filter @vigil/ai test:live
 ```
 
-Codex needs Vigil's Codex home signed in first: `CODEX_HOME=<dir> codex login`, then set `VIGIL_CODEX_HOME=<dir>`.
+Codex needs Vigil's Codex home signed in first: `CODEX_HOME=<dir> codex login`, then set `VIGIL_CODEX_HOME=<dir>`. Ollama uses `VIGIL_OLLAMA_MODEL` if set, otherwise the model Vigil would pick.
 
 ## Claude subscription mode
 

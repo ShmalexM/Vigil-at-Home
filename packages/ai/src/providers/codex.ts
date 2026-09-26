@@ -9,8 +9,11 @@ import { callTool, toolJsonSchema } from '../tools.js';
 import type {
   AdapterRunInput,
   AdapterRunOutput,
+  PlanUsage,
   ProviderAdapter,
   ProviderStatus,
+  SignInFlow,
+  RunUsage,
   ToolAudit,
   UsageWindow,
 } from '../types.js';
@@ -21,6 +24,8 @@ const execFileAsync = promisify(execFile);
 
 /** The Codex version these settings were checked against. */
 export const CODEX_TESTED_VERSION = '0.157.1';
+
+const SIGN_IN_TIMEOUT_MS = 10 * 60_000;
 
 /**
  * Codex features that give the agent hands or pull in outside configuration.
@@ -66,6 +71,8 @@ export function codexThreadStartParams(params: {
     approvalPolicy: 'untrusted',
     sandbox: 'read-only',
     ephemeral: true,
+    // No execution environment at all, so there is nothing for a command to run in.
+    environments: [],
     baseInstructions: params.systemPrompt,
     dynamicTools: params.tools.map((t) => ({
       type: 'function',
@@ -135,6 +142,27 @@ interface CodexNotificationParams {
   error?: { codexErrorInfo?: unknown };
   willRetry?: boolean;
   turn?: { status: string; error: { message: string; codexErrorInfo: unknown } | null };
+  tokenUsage?: {
+    total: {
+      inputTokens: number;
+      cachedInputTokens: number;
+      cacheWriteInputTokens?: number;
+      outputTokens: number;
+    };
+  };
+}
+
+/** Codex reports cached input inside inputTokens; Vigil keeps the two apart. */
+function runUsageFromCodex(
+  total: NonNullable<CodexNotificationParams['tokenUsage']>['total'],
+): RunUsage {
+  return {
+    inputTokens: Math.max(0, total.inputTokens - total.cachedInputTokens),
+    cachedInputTokens: total.cachedInputTokens,
+    outputTokens: total.outputTokens,
+    // A ChatGPT plan has no per-token price.
+    costUsd: null,
+  };
 }
 
 export interface CodexAdapterOptions {
@@ -188,9 +216,7 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
           state: account.account ? 'ready' : 'needs_sign_in',
           version: stdout.trim(),
           ...(account.account ? { account: account.account.email ?? account.account.type } : {}),
-          ...(account.account
-            ? {}
-            : { detail: `Run: CODEX_HOME="${options.codexHome}" codex login` }),
+          ...(account.account ? {} : { detail: 'Sign in with ChatGPT from Vigil to use Codex.' }),
         };
       } catch (error) {
         return {
@@ -198,6 +224,84 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
           state: 'error',
           detail: error instanceof Error ? error.message : String(error),
         };
+      } finally {
+        rpc?.close();
+      }
+    },
+
+    /**
+     * Codex's own ChatGPT sign-in for Vigil's Codex home. Codex opens a local
+     * callback and stores the login itself; Vigil only opens the page. The
+     * user's everyday Codex home isn't reused because Codex would also load
+     * its config there, including the user's MCP servers, which the agent
+     * could then call.
+     */
+    async signIn(): Promise<SignInFlow> {
+      const binary = await verifyBinary('codex', 'codex', options.pins, options.executablePath);
+      if (binary.state !== 'ok') throw new Error(`Codex: ${binary.state}`);
+      let settle!: (ok: boolean) => void;
+      const completed = new Promise<boolean>((resolve) => (settle = resolve));
+      let loginId: string | undefined;
+      const rpc = await connect(binary.path, tmpdir(), {
+        onRequest: async () => {
+          throw new Error('Vigil does not allow this.');
+        },
+        onNotification(method, params) {
+          const p = params as { success?: boolean; loginId?: string | null };
+          if (method === 'account/login/completed' && (!p.loginId || p.loginId === loginId))
+            settle(p.success === true);
+        },
+      });
+      const timer = setTimeout(() => settle(false), SIGN_IN_TIMEOUT_MS);
+      void completed.then(() => {
+        clearTimeout(timer);
+        rpc.close();
+      });
+      try {
+        const started = await rpc.request<{ type: string; loginId: string; authUrl: string }>(
+          'account/login/start',
+          { type: 'chatgpt' },
+        );
+        loginId = started.loginId;
+        return {
+          url: started.authUrl,
+          completed,
+          cancel: () => {
+            void rpc.request('account/login/cancel', { loginId }).catch(() => {});
+            settle(false);
+          },
+        };
+      } catch (error) {
+        settle(false);
+        throw error;
+      }
+    },
+
+    /** The plan's windows, from Codex's own documented account calls. No model is called. */
+    async readUsage(): Promise<PlanUsage | undefined> {
+      const binary = await verifyBinary('codex', 'codex', options.pins, options.executablePath);
+      if (binary.state !== 'ok') return undefined;
+      let rpc: JsonRpcStdio | undefined;
+      try {
+        rpc = await connect(binary.path, tmpdir(), {
+          onRequest: async () => {
+            throw new Error('Vigil does not allow this.');
+          },
+          onNotification: () => {},
+        });
+        const { account } = await rpc.request<{
+          account: { type: string; planType?: string } | null;
+        }>('account/read', {});
+        if (account?.type !== 'chatgpt') return undefined;
+        const limits = await rpc.request<{
+          rateLimits: Parameters<typeof usageFromSnapshot>[0] | null;
+        }>('account/rateLimits/read', {});
+        return {
+          ...(account.planType ? { plan: account.planType } : {}),
+          windows: limits.rateLimits ? usageFromSnapshot(limits.rateLimits) : [],
+        };
+      } catch {
+        return undefined;
       } finally {
         rpc?.close();
       }
@@ -211,8 +315,10 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
       const cwd = await mkdtemp(join(tmpdir(), 'vigil-codex-'));
       const tools = new Map(input.tools.map((t) => [t.name, t]));
       let lastMessage: string | undefined;
-      let finish!: (out: AdapterRunOutput) => void;
-      const done = new Promise<AdapterRunOutput>((resolve) => (finish = resolve));
+      let usage: RunUsage | undefined;
+      let settle!: (out: AdapterRunOutput) => void;
+      const done = new Promise<AdapterRunOutput>((resolve) => (settle = resolve));
+      const finish = (out: AdapterRunOutput) => settle(usage ? { ...out, usage } : out);
       let rpc: JsonRpcStdio | undefined;
       const onAbort = () => finish({ kind: 'error', message: 'aborted', audit });
       input.signal.addEventListener('abort', onAbort, { once: true });
@@ -257,6 +363,8 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
               if (item.type === 'agentMessage' && typeof item.text === 'string')
                 lastMessage = item.text;
               else if (FORBIDDEN_ITEMS.has(item.type)) audit.denied.push(`item: ${item.type}`);
+            } else if (method === 'thread/tokenUsage/updated' && p.tokenUsage) {
+              usage = runUsageFromCodex(p.tokenUsage.total);
             } else if (method === 'account/rateLimits/updated') {
               usageFromSnapshot(p.rateLimits ?? {}).forEach(input.onUsage);
             } else if (method === 'error') {

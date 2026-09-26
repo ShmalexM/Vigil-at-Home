@@ -4,12 +4,14 @@ import type {
   AdapterRunOutput,
   ProviderAdapter,
   ProviderStatus,
+  RunUsage,
   ToolAudit,
 } from '../types.js';
 
 export interface OllamaAdapterOptions {
   readonly baseUrl: string;
-  readonly model: string;
+  /** A model to use. Without one, Vigil picks the largest installed model that supports tools. */
+  readonly model?: string;
   readonly fetch?: typeof fetch;
 }
 
@@ -29,32 +31,77 @@ const MAX_TOOL_ROUNDS = 6;
 export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdapter {
   const http = options.fetch ?? fetch;
   const base = options.baseUrl.replace(/\/$/, '');
+  let chosen: string | undefined;
+
+  async function supportsTools(model: string): Promise<boolean> {
+    const res = await http(`${base}/api/show`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model }),
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (!res.ok) return false;
+    const body = (await res.json()) as { capabilities?: string[] };
+    return (body.capabilities ?? []).includes('tools');
+  }
+
+  /** The configured model if it's installed, otherwise the largest installed one with tool support. */
+  async function pickModel(models: ReadonlyArray<{ name: string; size?: number }>) {
+    if (options.model) {
+      const wanted = options.model;
+      return models.some((m) => m.name === wanted || m.name === `${wanted}:latest`)
+        ? wanted
+        : undefined;
+    }
+    const bySize = [...models].sort((a, b) => (b.size ?? 0) - (a.size ?? 0));
+    for (const m of bySize) if (await supportsTools(m.name)) return m.name;
+    return undefined;
+  }
 
   return {
     id: 'ollama',
 
     async probe(): Promise<ProviderStatus> {
+      let models: Array<{ name: string; size?: number }>;
       try {
         const res = await http(`${base}/api/tags`, { signal: AbortSignal.timeout(3_000) });
         if (!res.ok) return { provider: 'ollama', state: 'error', detail: `HTTP ${res.status}` };
-        const body = (await res.json()) as { models?: Array<{ name: string }> };
-        const names = (body.models ?? []).map((m) => m.name);
-        const present = names.some((n) => n === options.model || n === `${options.model}:latest`);
-        return present
-          ? { provider: 'ollama', state: 'ready', version: options.model }
-          : {
-              provider: 'ollama',
-              state: 'not_installed',
-              detail: `Run: ollama pull ${options.model}`,
-            };
+        models = ((await res.json()) as { models?: typeof models }).models ?? [];
       } catch {
         return { provider: 'ollama', state: 'not_installed', detail: 'Ollama is not running.' };
       }
+      try {
+        chosen = await pickModel(models);
+      } catch (error) {
+        return {
+          provider: 'ollama',
+          state: 'error',
+          detail: error instanceof Error ? error.message : String(error),
+        };
+      }
+      return chosen
+        ? { provider: 'ollama', state: 'ready', version: chosen }
+        : {
+            provider: 'ollama',
+            state: 'not_installed',
+            detail: `Run: ollama pull ${options.model ?? 'gpt-oss:20b'}`,
+          };
     },
 
     async run(input: AdapterRunInput): Promise<AdapterRunOutput> {
       const audit: ToolAudit = { called: [], denied: [] };
+      const model = options.model ?? chosen;
+      if (!model) return { kind: 'error', message: 'No Ollama model with tool support.', audit };
       const tools = new Map(input.tools.map((t) => [t.name, t]));
+      let inputTokens = 0;
+      let outputTokens = 0;
+      // Local, so there is nothing to pay.
+      const usage = (): RunUsage => ({
+        inputTokens,
+        cachedInputTokens: 0,
+        outputTokens,
+        costUsd: 0,
+      });
       const messages: ChatMessage[] = [
         { role: 'system', content: input.systemPrompt },
         { role: 'user', content: input.userPrompt },
@@ -66,7 +113,7 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
             headers: { 'content-type': 'application/json' },
             signal: input.signal,
             body: JSON.stringify({
-              model: options.model,
+              model,
               messages,
               stream: false,
               format: input.jsonSchema,
@@ -85,13 +132,24 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
             }),
           });
           if (!res.ok) return { kind: 'error', message: `Ollama HTTP ${res.status}`, audit };
-          const body = (await res.json()) as { message: ChatMessage };
+          const body = (await res.json()) as {
+            message: ChatMessage;
+            prompt_eval_count?: number;
+            eval_count?: number;
+          };
+          inputTokens += body.prompt_eval_count ?? 0;
+          outputTokens += body.eval_count ?? 0;
           const calls = body.message.tool_calls ?? [];
           if (calls.length === 0) {
             try {
-              return { kind: 'ok', json: JSON.parse(body.message.content), audit };
+              return { kind: 'ok', json: JSON.parse(body.message.content), audit, usage: usage() };
             } catch {
-              return { kind: 'error', message: 'Ollama answer was not JSON.', audit };
+              return {
+                kind: 'error',
+                message: 'Ollama answer was not JSON.',
+                audit,
+                usage: usage(),
+              };
             }
           }
           messages.push(body.message);
@@ -107,7 +165,7 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
             messages.push({ role: 'tool', tool_name: call.function.name, content: text });
           }
         }
-        return { kind: 'error', message: 'Too many tool calls.', audit };
+        return { kind: 'error', message: 'Too many tool calls.', audit, usage: usage() };
       } catch (error) {
         return {
           kind: 'error',

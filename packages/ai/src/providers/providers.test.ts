@@ -7,9 +7,11 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { buildChildEnv } from '../env.js';
 import { claudeQueryOptions, makeCanUseTool, vigilToolName } from './claude.js';
+import { memoryPinStore } from '../executable.js';
 import {
   CODEX_DISABLED_FEATURES,
   codexAppServerArgs,
+  createCodexAdapter,
   codexThreadStartParams,
   codexTurnStartParams,
 } from './codex.js';
@@ -212,19 +214,74 @@ describe.skipIf(!bundledCodex())('Codex app-server as launched', () => {
       for (const feature of ['shell_tool', 'unified_exec', 'code_mode_host', 'plugins', 'hooks']) {
         expect(config.features[feature], feature).toBe(false);
       }
-      const started = await rpc.request<{ sandbox: { type: string }; approvalPolicy: string }>(
-        'thread/start',
-        codexThreadStartParams({ cwd, systemPrompt: 's', tools: [getFinding] }),
-      );
-      expect(started.sandbox.type).toBe('readOnly');
+      const started = await rpc.request<{
+        sandbox: { type: string; networkAccess: boolean };
+        approvalPolicy: string;
+        thread: { environments: unknown[]; ephemeral: boolean };
+      }>('thread/start', codexThreadStartParams({ cwd, systemPrompt: 's', tools: [getFinding] }));
+      expect(started.sandbox).toEqual({ type: 'readOnly', networkAccess: false });
       expect(started.approvalPolicy).toBe('untrusted');
+      expect(started.thread.environments).toEqual([]);
+      expect(started.thread.ephemeral).toBe(true);
     } finally {
       rpc.close();
     }
   }, 60_000);
 });
 
+describe.skipIf(!bundledCodex())('Codex sign-in from Vigil', () => {
+  it("hands back ChatGPT's own sign-in page and can be cancelled", async () => {
+    const adapter = createCodexAdapter({
+      codexHome: await tempDir('vigil-codex-signin-'),
+      pins: memoryPinStore(),
+      executablePath: bundledCodex()!,
+    });
+    const status = await adapter.probe();
+    expect(status.state).toBe('needs_sign_in');
+    const flow = await adapter.signIn!();
+    expect(new URL(flow.url).origin).toBe('https://auth.openai.com');
+    flow.cancel();
+    expect(await flow.completed).toBe(false);
+  }, 60_000);
+});
+
 describe('Ollama adapter', () => {
+  it('picks the largest installed model that supports tools when none is set', async () => {
+    const shown: string[] = [];
+    const adapter = createOllamaAdapter({
+      baseUrl: 'http://127.0.0.1:11434',
+      fetch: (async (url: string, init?: RequestInit) => {
+        if (url.endsWith('/api/tags'))
+          return Response.json({
+            models: [
+              { name: 'small-tools:1b', size: 1 },
+              { name: 'big-no-tools:70b', size: 70 },
+              { name: 'mid-tools:8b', size: 8 },
+            ],
+          });
+        const model = (JSON.parse(String(init?.body)) as { model: string }).model;
+        shown.push(model);
+        return Response.json({
+          capabilities: model.includes('no-tools') ? ['completion'] : ['completion', 'tools'],
+        });
+      }) as typeof fetch,
+    });
+    expect(await adapter.probe()).toMatchObject({ state: 'ready', version: 'mid-tools:8b' });
+    expect(shown).toEqual(['big-no-tools:70b', 'mid-tools:8b']);
+  });
+
+  it('reports a set model that is not installed', async () => {
+    const adapter = createOllamaAdapter({
+      baseUrl: 'http://127.0.0.1:11434',
+      model: 'gpt-oss:20b',
+      fetch: (async () => Response.json({ models: [{ name: 'other:1b' }] })) as typeof fetch,
+    });
+    expect(await adapter.probe()).toMatchObject({
+      state: 'not_installed',
+      detail: 'Run: ollama pull gpt-oss:20b',
+    });
+  });
+
   it("runs Vigil's tools itself and refuses any other tool", async () => {
     const replies = [
       {
