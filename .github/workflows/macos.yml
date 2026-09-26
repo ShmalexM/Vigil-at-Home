@@ -47,6 +47,11 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # pnpm can skip Electron's postinstall when the store is restored from
+      # cache, so fetch the binary explicitly.
+      - name: Download Electron
+        working-directory: apps/desktop
+        run: node node_modules/electron/install.js
       - run: pnpm --filter @vigil/desktop build
       - name: Check the detection popup
         working-directory: apps/desktop

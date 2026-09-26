@@ -11,6 +11,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright-core';
 
@@ -37,11 +38,8 @@ function screenshot(name) {
 }
 
 const app = await electron.launch({
-  executablePath: join(
-    appDir,
-    'node_modules/electron/dist',
-    mac ? 'Electron.app/Contents/MacOS/Electron' : 'electron',
-  ),
+  // The electron package exports the path of its downloaded binary.
+  executablePath: createRequire(join(appDir, 'package.json'))('electron'),
   args: [...(mac ? [] : ['--no-sandbox']), appDir],
   env: { ...process.env, ELECTRON_ENABLE_LOGGING: '1' },
 });
