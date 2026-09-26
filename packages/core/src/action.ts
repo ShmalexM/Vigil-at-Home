@@ -11,16 +11,22 @@ export const ProcessSuspend = z.object({
   kind: z.literal('process.suspend'),
   pid: z.number().int().positive(),
   startTime: Timestamp.optional(),
+  /** Executable the pid must still be running; the helper refuses if it changed. */
+  path: z.string().optional(),
 });
 export const ProcessResume = z.object({
   kind: z.literal('process.resume'),
   pid: z.number().int().positive(),
   startTime: Timestamp.optional(),
+  /** Executable the pid must still be running; the helper refuses if it changed. */
+  path: z.string().optional(),
 });
 export const ProcessKill = z.object({
   kind: z.literal('process.kill'),
   pid: z.number().int().positive(),
   startTime: Timestamp.optional(),
+  /** Executable the pid must still be running; the helper refuses if it changed. */
+  path: z.string().optional(),
 });
 export const NetworkBlock = z.object({
   kind: z.literal('network.block'),
@@ -142,7 +148,12 @@ export function canPropose(actor: Actor, action: Action): Authorization {
 export function undoOf(action: Action, result?: ActionResult): Action | undefined {
   switch (action.kind) {
     case 'process.suspend':
-      return { kind: 'process.resume', pid: action.pid, ...opt('startTime', action.startTime) };
+      return {
+        kind: 'process.resume',
+        pid: action.pid,
+        ...opt('startTime', action.startTime),
+        ...opt('path', action.path),
+      };
     case 'network.block':
       return { kind: 'network.unblock', address: action.address, ...opt('port', action.port) };
     case 'file.quarantine':

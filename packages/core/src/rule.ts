@@ -26,6 +26,7 @@ export const FieldTest = z.object({
     'lt',
     'exists',
     'cidr',
+    'notIn',
   ]),
   value: z
     .union([z.string(), z.number(), z.boolean(), z.array(z.union([z.string(), z.number()]))])
@@ -35,12 +36,26 @@ export const FieldTest = z.object({
 });
 export type FieldTest = z.infer<typeof FieldTest>;
 
+/** True when this combination of field values has never been seen on this Mac for the event kind. */
+export const FirstSeen = z.object({ firstSeen: z.object({ key: z.array(z.string()).min(1) }) });
+export type FirstSeen = z.infer<typeof FirstSeen>;
+
+/**
+ * True when `field` is in a named local list, e.g. known_bad_sha256,
+ * known_bad_domains, known_bad_ips, user_blocked_sha256. IPs match by CIDR,
+ * domains by parent domain.
+ */
+export const InList = z.object({ inList: z.object({ list: z.string(), field: z.string() }) });
+export type InList = z.infer<typeof InList>;
+
 export type Condition =
-  FieldTest | { all: Condition[] } | { any: Condition[] } | { not: Condition };
+  FieldTest | FirstSeen | InList | { all: Condition[] } | { any: Condition[] } | { not: Condition };
 
 export const Condition: z.ZodType<Condition> = z.lazy(() =>
   z.union([
     FieldTest,
+    FirstSeen,
+    InList,
     z.object({ all: z.array(Condition).min(1) }),
     z.object({ any: z.array(Condition).min(1) }),
     z.object({ not: Condition }),
@@ -91,6 +106,17 @@ export const Rule = z.object({
   eventKinds: z.array(EventKind).min(1),
   condition: Condition,
   threshold: Threshold.optional(),
+  /** Any match here suppresses the rule. AI tuning adds exclusions rather than editing the condition. */
+  exclusions: z.array(Condition).default([]),
+  /**
+   * Plain-language lines for the popup, rendered without AI. May use
+   * `{{field.path}}` placeholders from the matching event.
+   */
+  reasons: z.array(z.string()).default([]),
+  /** Collapse repeat matches with the same key values within the window into one alert. */
+  dedupe: z
+    .object({ key: z.array(z.string()).min(1), windowSec: z.number().int().positive() })
+    .optional(),
   response: z.array(ResponseTemplate).default([]),
   /** MITRE ATT&CK technique ids and free tags. */
   tags: z.array(z.string()).default([]),
