@@ -1,0 +1,30 @@
+# Packaging for Vigil at Home. Releases are unsigned (ad hoc) until Apple
+# signing keys are added to the repo secrets; see .github/workflows/release.yml.
+appId: app.vigilathome.desktop
+productName: Vigil at Home
+copyright: Copyright © Vigil at Home contributors
+directories:
+  output: dist
+  buildResources: resources
+files:
+  - out/**
+  - package.json
+asar: true
+mac:
+  category: public.app-category.utilities
+  icon: resources/icon.png
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  hardenedRuntime: true
+  extendInfo:
+    # Menu-bar app: no Dock icon until the main window opens.
+    LSUIElement: true
+dmg:
+  title: Vigil at Home
+# Linux is only used to smoke-test packaging in CI; macOS is the product.
+linux:
+  target: dir
+  executableName: vigil-at-home
