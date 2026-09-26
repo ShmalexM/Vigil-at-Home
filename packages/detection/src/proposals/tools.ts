@@ -1,116 +1,197 @@
-import { z } from "zod";
-import type { DetectionEngine } from "../engine.js";
-import { MATCH_OPS, RuleSchema } from "../rules/schema.js";
-import { COMPUTED_FIELDS, KNOWN_FIELDS } from "../rules/fields.js";
-import type { EventHistory } from "../state/stores.js";
-import { ProposeRuleInput, ProposeTuningInput, type RulePipeline, type SubmitResult } from "./pipeline.js";
-import { summarizeTelemetry, type TelemetrySummary } from "./telemetry.js";
+import { z } from 'zod';
+import type { DetectionEngine } from '../engine.js';
+import { COMPUTED_FIELDS, KNOWN_FIELDS } from '../rules/fields.js';
+import type { EventHistory } from '../state/stores.js';
+import { DetectionRule, MATCH_OPS } from '../types.js';
+import {
+  ProposeRuleInput,
+  ProposeTuningInput,
+  type RulePipeline,
+  type SubmitResult,
+} from './pipeline.js';
+import { RULE_REVIEW_PROMPT } from './prompt.js';
+import { summarizeTelemetry } from './telemetry.js';
 
 /**
- * The only detection capabilities an AI agent gets. Two of them only queue a
- * proposal; the other two only read. None can change a live rule, allow a
- * program or touch the Mac. The subscription-integration layer registers
- * these as MCP tools with the input schemas below.
+ * How detection plugs into the AI layer (@vigil/ai). The agent gets two
+ * read-only tools. Its answer is a structured list of proposals, which Vigil
+ * (not the agent) submits to the pipeline, where they are checked, replayed
+ * and queued for the user. Nothing the agent does changes a live rule.
+ *
+ * The shapes here match @vigil/ai's ReadTool and RunRequest structurally, so
+ * this package does not depend on it.
  */
-export interface ToolContext {
+export interface DetectionToolContext {
   engine: DetectionEngine;
   pipeline: RulePipeline;
   history: EventHistory;
-  /** Which provider is running (claude, codex, copilot, ollama...), for the audit trail and rate limits. */
-  provider: string;
   now?: () => number;
 }
 
-export const TelemetrySummaryInput = z
-  .object({ sinceHours: z.number().int().min(1).max(24 * 30).default(24 * 7) })
-  .strict();
-
-export const RuleLanguageInput = z.object({}).strict();
-
-export const detectionTools = {
-  get_telemetry_summary: {
-    description:
-      "Read a redacted summary of recent activity on this Mac (top network talkers, unsigned programs, new login items, listeners, browser extensions) and how each detection rule is performing, including rules the user marked as wrong and proposals they rejected with their reasons. Use this to find gaps and noisy rules.",
-    input: TelemetrySummaryInput,
-  },
-  get_rule_language: {
-    description:
-      "Read the rule format: fields, operators, and the constraints proposals must meet. Call this before proposing.",
-    input: RuleLanguageInput,
-  },
-  propose_rule: {
-    description:
-      "Propose a new deterministic detection rule. It is checked, replayed against this Mac's recent history, and shown to the user, who decides whether it goes live. You cannot enable it yourself. Errors come back so you can fix and resubmit.",
-    input: ProposeRuleInput,
-  },
-  propose_tuning: {
-    description:
-      "Propose an exclusion that stops an existing rule firing on something specific (a program, signer, domain) that is clearly benign. The change is replayed and shown to the user; it is refused if it would hide a confirmed threat.",
-    input: ProposeTuningInput,
-  },
-} as const;
-
-export type DetectionToolName = keyof typeof detectionTools;
-
-/** JSON Schemas for MCP registration. */
-export function detectionToolJsonSchemas(): Record<DetectionToolName, { description: string; inputSchema: unknown }> {
-  const out = {} as Record<DetectionToolName, { description: string; inputSchema: unknown }>;
-  for (const [name, t] of Object.entries(detectionTools) as Array<[DetectionToolName, (typeof detectionTools)[DetectionToolName]]>) {
-    out[name] = { description: t.description, inputSchema: z.toJSONSchema(t.input, { io: "input" }) };
-  }
-  return out;
+export interface ReadToolLike<Shape extends z.ZodRawShape = z.ZodRawShape> {
+  readonly name: string;
+  readonly description: string;
+  readonly input: Shape;
+  run(args: z.infer<z.ZodObject<Shape>>): Promise<unknown>;
 }
 
 export function ruleLanguageGuide() {
+  const schema = z.toJSONSchema(DetectionRule, { io: 'input' }) as Record<string, unknown>;
+  delete schema.$schema;
   return {
-    ruleJsonSchema: z.toJSONSchema(RuleSchema, { io: "input" }),
+    ruleJsonSchema: schema,
     fields: [...KNOWN_FIELDS],
     computedFields: COMPUTED_FIELDS,
     operators: MATCH_OPS,
     constraints: [
-      'Your rule id gets an "ai-" prefix. Stage is always chosen by the user; anything you set is ignored.',
-      "block needs a specific anchor: a hash, signer (teamId/signingId), domain, address, extension id, launch item, or a list.",
-      "Behaviour-only rules may ask for suspend only at high or critical severity; otherwise use alert or record.",
-      "suspend applies to processes. Network and persistence rules use block or alert.",
-      "Regexes: at most 256 characters, no backreferences or nested quantifiers.",
-      "Prefer narrow rules. A rule that would interrupt the user more than once a day on replay is marked noisy.",
-      "firstSeen means never seen on this Mac before. On a new install Vigil is still learning, so these only record at first.",
-      "Explain in reasons, in plain language, what happened. Use {{field.path}} to fill values from the event.",
+      'Your rule id gets an "ai-" prefix. Every proposed rule starts in shadow mode; only the user makes it louder. Any mode, origin, version or dates you set are ignored.',
+      'Responses that kill, block, quarantine, disable or add a Santa rule need a specific anchor: a hash, team ID, signing ID, host, address or extension ID, or a list.',
+      'A behaviour-only rule may respond with process.suspend only at high or critical severity; otherwise give no response and let it alert.',
+      'Responses may only contain a threat: nothing that resumes, unblocks, restores or allows.',
+      'Regexes: at most 256 characters, with no backreferences or nested quantifiers.',
+      'Prefer narrow rules. A rule that would alert more than once a day on replay is marked noisy.',
+      'firstSeen means never seen on this Mac before. On a new install Vigil is still learning, so these only record at first.',
+      'Write reasons in plain language for someone who is not a security expert. Use {{field.path}} to fill values from the event.',
     ],
   };
 }
 
-export type ToolResult =
-  | { ok: true; summary: TelemetrySummary }
-  | { ok: true; guide: ReturnType<typeof ruleLanguageGuide> }
-  | SubmitResult
-  | { ok: false; errors: string[] };
-
-export function handleDetectionTool(name: string, input: unknown, ctx: ToolContext): ToolResult {
+export function detectionReadTools(ctx: DetectionToolContext): ReadToolLike[] {
   const now = ctx.now ?? Date.now;
-  switch (name) {
-    case "get_telemetry_summary": {
-      const parsed = TelemetrySummaryInput.safeParse(input ?? {});
-      if (!parsed.success) return { ok: false, errors: parsed.error.issues.map((i) => i.message) };
+  const telemetry: ReadToolLike<{ sinceHours: z.ZodDefault<z.ZodNumber> }> = {
+    name: 'get_telemetry_summary',
+    description:
+      "Read a redacted summary of recent activity on this Mac (top network talkers, unsigned programs, new login items, listeners, browser extensions), how each detection rule is doing, and the user's notes on proposals they rejected. Use it to find gaps and noisy rules.",
+    input: {
+      sinceHours: z
+        .number()
+        .int()
+        .min(1)
+        .max(24 * 30)
+        .default(24 * 7),
+    },
+    run: async ({ sinceHours }) => {
       const to = now();
-      return {
-        ok: true,
-        summary: summarizeTelemetry({
-          history: ctx.history,
-          engine: ctx.engine,
-          pipeline: ctx.pipeline,
-          from: to - parsed.data.sinceHours * 3_600_000,
-          to,
-        }),
-      };
-    }
-    case "get_rule_language":
-      return { ok: true, guide: ruleLanguageGuide() };
-    case "propose_rule":
-      return ctx.pipeline.submitRule(input, ctx.provider);
-    case "propose_tuning":
-      return ctx.pipeline.submitTuning(input, ctx.provider);
-    default:
-      return { ok: false, errors: [`unknown tool ${name}`] };
+      return summarizeTelemetry({
+        history: ctx.history,
+        engine: ctx.engine,
+        pipeline: ctx.pipeline,
+        from: to - sinceHours * 3_600_000,
+        to,
+      });
+    },
+  };
+  const guide: ReadToolLike<Record<string, never>> = {
+    name: 'get_rule_language',
+    description:
+      'Read the rule format: fields, operators, and the constraints proposals must meet. Call this before proposing.',
+    input: {},
+    run: async () => ruleLanguageGuide(),
+  };
+  return [telemetry as unknown as ReadToolLike, guide as unknown as ReadToolLike];
+}
+
+/** The structured answer of a rule-review run. */
+export const RuleReviewOutput = z.object({
+  newRules: z.array(ProposeRuleInput).max(3),
+  tunings: z.array(ProposeTuningInput).max(5),
+  /** One or two sentences for the user on what was proposed and why. */
+  summary: z.string().max(1000),
+});
+export type RuleReviewOutput = z.infer<typeof RuleReviewOutput>;
+
+export interface ReviewSubmission {
+  results: Array<{ kind: 'new_rule' | 'tuning'; ref: string; result: SubmitResult }>;
+  accepted: number;
+  rejected: number;
+}
+
+/** Submit a review run's proposals. Vigil does this, not the agent. */
+export function submitReview(
+  output: RuleReviewOutput,
+  pipeline: RulePipeline,
+  provider: string,
+): ReviewSubmission {
+  const results: ReviewSubmission['results'] = [];
+  for (const r of output.newRules) {
+    const ref = typeof r.rule.id === 'string' ? r.rule.id : '(no id)';
+    results.push({ kind: 'new_rule', ref, result: pipeline.submitRule(r, provider) });
   }
+  for (const t of output.tunings) {
+    results.push({ kind: 'tuning', ref: t.ruleId, result: pipeline.submitTuning(t, provider) });
+  }
+  const accepted = results.filter((r) => r.result.ok).length;
+  return { results, accepted, rejected: results.length - accepted };
+}
+
+/** What a runner (@vigil/ai's AiRunner) must accept. */
+export interface AnalyzeRunner {
+  run<T>(req: {
+    purpose: 'analyze';
+    urgency: 'background';
+    instructions: string;
+    data: unknown;
+    output: z.ZodType<T>;
+    tools?: readonly ReadToolLike[];
+    deadlineMs: number;
+  }): Promise<
+    { ok: true; value: T; provider: string } | { ok: false; reason: string; detail?: string }
+  >;
+}
+
+/**
+ * One scheduled rule review: the agent reads, answers with proposals, Vigil
+ * submits them. If some fail the checks, the agent gets one more run with the
+ * errors so it can fix them.
+ */
+export async function runRuleReview(
+  runner: AnalyzeRunner,
+  ctx: DetectionToolContext,
+  opts: { deadlineMs?: number } = {},
+): Promise<{ ok: boolean; submissions: ReviewSubmission[]; summary?: string; error?: string }> {
+  const tools = detectionReadTools(ctx);
+  const deadlineMs = opts.deadlineMs ?? 5 * 60_000;
+  const submissions: ReviewSubmission[] = [];
+  let data: unknown = {};
+  let summary: string | undefined;
+  for (let round = 0; round < 2; round++) {
+    const res = await runner.run({
+      purpose: 'analyze',
+      urgency: 'background',
+      instructions: RULE_REVIEW_PROMPT,
+      data,
+      output: RuleReviewOutput,
+      tools,
+      deadlineMs,
+    });
+    if (!res.ok) {
+      const out: { ok: boolean; submissions: ReviewSubmission[]; summary?: string; error: string } =
+        {
+          ok: submissions.length > 0,
+          submissions,
+          error: res.detail ? `${res.reason}: ${res.detail}` : res.reason,
+        };
+      if (summary !== undefined) out.summary = summary;
+      return out;
+    }
+    summary = res.value.summary;
+    const sub = submitReview(res.value, ctx.pipeline, res.provider);
+    submissions.push(sub);
+    const failed = sub.results.filter((r) => !r.result.ok && r.result.errors.length > 0);
+    if (failed.length === 0) break;
+    data = {
+      previousAttemptFailedChecks: failed.map((f) => ({
+        kind: f.kind,
+        ref: f.ref,
+        errors: f.result.errors,
+      })),
+      note: 'Fix these and resubmit only the ones you still believe in. The accepted ones are already queued.',
+    };
+  }
+  const out: { ok: boolean; submissions: ReviewSubmission[]; summary?: string } = {
+    ok: true,
+    submissions,
+  };
+  if (summary !== undefined) out.summary = summary;
+  return out;
 }

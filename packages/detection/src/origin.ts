@@ -13,20 +13,20 @@
 const issued = new WeakSet<object>();
 
 export interface UserOrigin {
-  readonly kind: "user";
+  readonly kind: 'user';
   /** Which UI surface the click came from, for the audit log. */
   readonly via: string;
   readonly at: number;
 }
 
 export function mintUserOrigin(via: string, at = Date.now()): UserOrigin {
-  const o = Object.freeze({ kind: "user" as const, via, at });
+  const o = Object.freeze({ kind: 'user' as const, via, at });
   issued.add(o);
   return o;
 }
 
 export function assertUserOrigin(o: unknown): asserts o is UserOrigin {
-  if (typeof o !== "object" || o === null || !issued.has(o)) {
+  if (typeof o !== 'object' || o === null || !issued.has(o)) {
     throw new Error("This action needs the user's own approval.");
   }
 }

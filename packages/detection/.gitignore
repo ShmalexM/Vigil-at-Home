@@ -1,4 +1,0 @@
-node_modules/
-dist/
-# The workspace lockfile lives at the repo root once the App shell setup lands.
-package-lock.json

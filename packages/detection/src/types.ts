@@ -1,183 +1,188 @@
-/**
- * Local copies of the event and detection shapes.
- *
- * The App shell thread owns the shared types package. Until it lands, these
- * mirror the shapes proposed to it; once it exists, this file re-exports
- * from there and the rest of the package does not change.
- */
-
-export const EVENT_KINDS = [
-  "process_exec",
-  "file_open",
-  "file_write",
-  "file_rename",
-  "network_connect",
-  "listening_port",
-  "persistence_added",
-  "browser_extension_added",
-  "santa_block",
-] as const;
-export type EventKind = (typeof EVENT_KINDS)[number];
-
-export type SigningStatus =
-  | "apple" // Apple platform binary
-  | "app_store"
-  | "developer_id"
-  | "adhoc"
-  | "unsigned"
-  | "invalid";
-
-export interface ProcessInfo {
-  pid: number;
-  ppid?: number;
-  path: string;
-  args?: string[];
-  sha256?: string;
-  cdhash?: string;
-  user?: string;
-  parentPath?: string;
-  signing?: {
-    status: SigningStatus;
-    teamId?: string;
-    signingId?: string;
-    notarized?: boolean;
-  };
-  /** Present when the executable carries the com.apple.quarantine xattr. */
-  quarantine?: {
-    originUrl?: string;
-    agent?: string;
-  };
-}
-
-export interface FileInfo {
-  path: string;
-  /** Destination of a rename. */
-  targetPath?: string;
-}
-
-export interface NetworkInfo {
-  remoteAddress?: string;
-  remotePort?: number;
-  localAddress?: string;
-  localPort?: number;
-  protocol?: "tcp" | "udp";
-  domain?: string;
-}
-
-export interface PersistenceInfo {
-  type: "launch_agent" | "launch_daemon" | "login_item" | "cron" | "other";
-  itemPath: string;
-  label?: string;
-  programPath?: string;
-  programArgs?: string[];
-}
-
-export interface ExtensionInfo {
-  browser: string;
-  id: string;
-  name?: string;
-  permissions?: string[];
-}
-
-export interface SantaBlockInfo {
-  reason?: string;
-  ruleType?: string;
-}
-
-export interface SensorEvent {
-  id: string;
-  /** Milliseconds since the Unix epoch. */
-  ts: number;
-  kind: EventKind;
-  source: "osquery" | "santa" | "vigil";
-  process?: ProcessInfo;
-  file?: FileInfo;
-  network?: NetworkInfo;
-  persistence?: PersistenceInfo;
-  extension?: ExtensionInfo;
-  santa?: SantaBlockInfo;
-}
-
-export const SEVERITIES = ["info", "low", "medium", "high", "critical"] as const;
-export type Severity = (typeof SEVERITIES)[number];
+import type { Alert } from '@vigil/core';
+import {
+  EventKind as CoreEventKind,
+  FieldTest as CoreFieldTest,
+  Id,
+  ProcessRef,
+  Rule as CoreRule,
+  SantaRuleType,
+  Timestamp,
+  type Action,
+  type RuleMatch,
+  type RuleMode,
+  type SensorEvent,
+} from '@vigil/core';
+import { z } from 'zod';
 
 /**
- * What a detection asks the app to do, weakest to strongest.
- * record: store only. alert: popup or notification, nothing touched.
- * suspend: pause the process tree and pop up. block: kill the process,
- * firewall its remote address when there is one, and pop up.
+ * Detection's additions to @vigil/core. Each one is an `.extend()` of a core
+ * schema and has been proposed for core; once core carries it, the local copy
+ * here is deleted and nothing else changes.
  */
-export const ACTIONS = ["record", "alert", "suspend", "block"] as const;
-export type Action = (typeof ACTIONS)[number];
 
-/**
- * How far a rule is trusted. Only the user moves a rule up; the engine may
- * move it down when the user keeps dismissing it.
- * shadow: records what it would have done. alert: may pop up, never touches
- * a process. enforce: may suspend or block.
- */
-export const STAGES = ["shadow", "alert", "enforce"] as const;
-export type Stage = (typeof STAGES)[number];
+// ---------------------------------------------------------------- events
 
-export type SantaRuleType = "BINARY" | "CERTIFICATE" | "TEAMID" | "SIGNINGID" | "CDHASH";
+/** Set when the executable carries the com.apple.quarantine attribute (it came from the internet). */
+export const Quarantine = z.object({
+  originUrl: z.string().optional(),
+  agent: z.string().optional(),
+});
 
-export interface SantaSuggestion {
-  policy: "BLOCKLIST";
-  ruleType: SantaRuleType;
-  identifier: string;
-  customMsg: string;
+export const DetectionProcessRef = ProcessRef.extend({ quarantine: Quarantine.optional() });
+export type DetectionProcessRef = z.infer<typeof DetectionProcessRef>;
+
+const extraBase = {
+  id: Id,
+  ts: Timestamp,
+  source: z.enum(['osquery', 'santa', 'vigil', 'test']),
+  raw: z.unknown().optional(),
+};
+
+/** A program started accepting connections. */
+export const NetworkListenEvent = z.object({
+  ...extraBase,
+  kind: z.literal('network.listen'),
+  protocol: z.enum(['tcp', 'udp', 'other']),
+  localAddress: z.string(),
+  localPort: z.number().int(),
+  process: DetectionProcessRef.optional(),
+});
+export type NetworkListenEvent = z.infer<typeof NetworkListenEvent>;
+
+export const BrowserExtensionEvent = z.object({
+  ...extraBase,
+  kind: z.literal('browser.extension'),
+  change: z.enum(['added', 'modified', 'removed']),
+  browser: z.string(),
+  extensionId: z.string(),
+  name: z.string().optional(),
+  permissions: z.array(z.string()).optional(),
+});
+export type BrowserExtensionEvent = z.infer<typeof BrowserExtensionEvent>;
+
+/** Everything the engine can evaluate: core events (whose process may carry `quarantine`) plus the two above. */
+export type DetectionEvent = SensorEvent | NetworkListenEvent | BrowserExtensionEvent;
+
+export const DetectionEventKind = z.enum([
+  ...CoreEventKind.options,
+  'network.listen',
+  'browser.extension',
+]);
+export type DetectionEventKind = z.infer<typeof DetectionEventKind>;
+
+// ---------------------------------------------------------------- rules
+
+export const MATCH_OPS = [...CoreFieldTest.shape.op.options, 'notIn'] as const;
+export type MatchOp = (typeof MATCH_OPS)[number];
+
+export const FieldPath = z
+  .string()
+  .regex(
+    /^[a-z][A-Za-z0-9]*(\.[a-z][A-Za-z0-9]*)*$/,
+    'field paths look like process.teamId or remoteHost',
+  );
+
+export const FieldTest = CoreFieldTest.extend({
+  field: FieldPath,
+  op: z.enum(MATCH_OPS),
+  value: z
+    .union([
+      z.string().max(1024),
+      z.number(),
+      z.boolean(),
+      z.array(z.union([z.string().max(1024), z.number()])).max(500),
+    ])
+    .optional(),
+}).strict();
+export type FieldTest = z.infer<typeof FieldTest>;
+
+/** True when this combination of values was never seen on this Mac for this rule's event kinds. */
+export interface FirstSeenCondition {
+  firstSeen: { key: string[] };
 }
-
-/**
- * What a suspend or block acts on.
- * process: pause or kill the process tree.
- * network: firewall the remote address or domain; the process is left alone
- *   (a browser that loaded a bad page should not be killed).
- * persistence: disable the launch item.
- */
-export const TARGETS = ["process", "network", "persistence"] as const;
-export type ResponseTarget = (typeof TARGETS)[number];
-
-/** The concrete things a response would touch, copied from the event. */
-export interface ResponseSubject {
-  pid?: number;
-  processPath?: string;
-  sha256?: string;
-  remoteAddress?: string;
-  domain?: string;
-  itemPath?: string;
-  label?: string;
+/** True when the field's value is on a named local list. IPs match by CIDR, domains by parent domain. */
+export interface InListCondition {
+  inList: { list: string; field: string };
 }
+export type Condition =
+  | FieldTest
+  | { all: Condition[] }
+  | { any: Condition[] }
+  | { not: Condition }
+  | FirstSeenCondition
+  | InListCondition;
 
+export const Condition: z.ZodType<Condition> = z.lazy(() =>
+  z.union([
+    FieldTest,
+    z.object({ all: z.array(Condition).min(1).max(50) }).strict(),
+    z.object({ any: z.array(Condition).min(1).max(50) }).strict(),
+    z.object({ not: Condition }).strict(),
+    z.object({ firstSeen: z.object({ key: z.array(FieldPath).min(1).max(4) }).strict() }).strict(),
+    z
+      .object({
+        inList: z
+          .object({ list: z.string().regex(/^[a-z][a-z0-9_]{1,63}$/), field: FieldPath })
+          .strict(),
+      })
+      .strict(),
+  ]),
+) as z.ZodType<Condition>;
+
+/** A core Rule with the fields detection needs: first-seen and list conditions, exclusions, popup text, dedupe. */
+export const DetectionRule = CoreRule.extend({
+  eventKinds: z.array(DetectionEventKind).min(1),
+  condition: Condition,
+  /** Any exclusion matching stops the rule firing. AI tuning adds these. */
+  exclusions: z.array(Condition).max(50).default([]),
+  /** Plain-language reasons for the popup, rendered locally with no AI. `{{field.path}}` is filled from the event. */
+  reasons: z.array(z.string().min(3).max(300)).min(1).max(6),
+  /** The same rule and key raise one alert per window (default 1 hour). Containment still runs every time. */
+  dedupe: z
+    .object({
+      key: z.array(FieldPath).min(1).max(4),
+      windowSec: z
+        .number()
+        .int()
+        .min(0)
+        .max(7 * 86_400),
+    })
+    .strict()
+    .optional(),
+  /** The Santa rule to install when the user confirms a detection as malicious. */
+  santa: z.object({ ruleType: SantaRuleType, from: FieldPath }).strict().optional(),
+});
+export type DetectionRule = z.infer<typeof DetectionRule>;
+export type DetectionRuleInput = z.input<typeof DetectionRule>;
+
+// ---------------------------------------------------------------- output
+
+/** What one rule firing on one event means for the app. */
 export interface Detection {
-  id: string;
-  ts: number;
-  ruleId: string;
-  ruleVersion: number;
-  title: string;
-  severity: Severity;
-  /** What the rule asks for. */
-  requestedAction: Action;
-  /** What the app should do after stage, learning, dedupe and the safety floor. */
-  action: Action;
-  stage: Stage;
-  target: ResponseTarget;
-  subject: ResponseSubject;
-  /** Plain-language reasons, rendered locally, shown in the popup before any AI runs. */
+  /** Always present. Shadow statistics and replay are built from these. */
+  match: RuleMatch;
+  /**
+   * Present when the rule's effective mode is alert or block and this is not a
+   * repeat inside the dedupe window. The app stores it and shows the popup.
+   */
+  alert?: Alert;
+  /** Mode block: run these now as actor "rule", after the safety floor. */
+  execute: Action[];
+  /** Mode alert: offer these in the popup for the user to approve. */
+  propose: Action[];
+  /** Plain-language reasons (also the alert summary). */
   reasons: string[];
-  /** Why `action` is weaker than `requestedAction`, if it is. */
+  /** Why the effective mode or actions are weaker than the rule asks for. */
   downgrades: string[];
-  eventIds: string[];
-  dedupeKey: string;
-  /** True when the same rule already fired for this key inside its dedupe window. */
+  /** The rule's own mode and the one actually applied. */
+  ruleMode: RuleMode;
+  mode: RuleMode;
+  /** True when the rule already alerted for this key inside its dedupe window. */
   deduped: boolean;
-  /** The Santa rule to install if the user confirms this as malicious. */
-  santaSuggestion?: SantaSuggestion;
-  tags: string[];
+  /** The Santa rule to add if the user confirms this as malicious. */
+  santa?: Extract<Action, { kind: 'santa.rule.set' }>;
+  /** The event, for the app's own records. */
+  event: DetectionEvent;
 }
 
-export const ACTION_RANK: Record<Action, number> = { record: 0, alert: 1, suspend: 2, block: 3 };
-
-export function minAction(a: Action, b: Action): Action {
-  return ACTION_RANK[a] <= ACTION_RANK[b] ? a : b;
-}
+export type { Action, Alert, RuleMatch, RuleMode, SensorEvent };

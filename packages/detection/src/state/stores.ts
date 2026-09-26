@@ -1,5 +1,6 @@
-import { BlockList, isIP } from "node:net";
-import type { SensorEvent, Stage } from "../types.js";
+import type { RuleMode } from '@vigil/core';
+import { BlockList, isIP } from 'node:net';
+import type { DetectionEvent } from '../types.js';
 
 /**
  * Storage the engine needs. All calls are synchronous so the inline path never
@@ -31,13 +32,16 @@ export interface ListStore {
   size(list: string): number;
 }
 
-/** A user decision that a rule should not fire for a specific thing. */
+/**
+ * A user decision that a rule should not fire for a specific thing. Every
+ * field in `match` must equal (case-insensitively) for the exception to apply,
+ * so "this signer" can require both team ID and signing ID.
+ */
 export interface RuleException {
   id: string;
   /** A rule id, or "*" to exempt the thing from every rule. */
   ruleId: string;
-  field: string;
-  value: string;
+  match: Record<string, string>;
   createdAt: number;
   note?: string;
 }
@@ -49,7 +53,7 @@ export interface ExceptionStore {
   all(): RuleException[];
 }
 
-export type Verdict = "malicious" | "benign";
+export type Verdict = 'malicious' | 'benign' | 'expected';
 
 export interface VerdictRecord {
   detectionId: string;
@@ -60,8 +64,8 @@ export interface VerdictRecord {
 
 export interface RuleState {
   ruleId: string;
-  /** Overrides the rule's own stage once the user or the engine has moved it. */
-  stage?: Stage;
+  /** Overrides the rule's own mode once the user or the engine has moved it. */
+  mode?: RuleMode;
   fired: number;
   lastFiredAt?: number;
 }
@@ -75,8 +79,8 @@ export interface RuleStateStore {
 
 /** Raw event history, kept for a short window so proposed rules can be replayed. */
 export interface EventHistory {
-  append(e: SensorEvent): void;
-  range(fromTs: number, toTs: number): Iterable<SensorEvent>;
+  append(e: DetectionEvent): void;
+  range(fromTs: number, toTs: number): Iterable<DetectionEvent>;
   prune(beforeTs: number): number;
 }
 
@@ -107,11 +111,11 @@ class IndicatorList {
 
   add(raw: string): void {
     const entry = raw.trim().toLowerCase();
-    if (!entry || entry.startsWith("#")) return;
-    const [addr, prefix] = entry.split("/");
+    if (!entry || entry.startsWith('#')) return;
+    const [addr, prefix] = entry.split('/');
     if (prefix !== undefined && addr && isIP(addr)) {
       this.blocks ??= new BlockList();
-      this.blocks.addSubnet(addr, Number(prefix), isIP(addr) === 4 ? "ipv4" : "ipv6");
+      this.blocks.addSubnet(addr, Number(prefix), isIP(addr) === 4 ? 'ipv4' : 'ipv6');
       this.cidrCount++;
       return;
     }
@@ -122,14 +126,14 @@ class IndicatorList {
     const v = raw.trim().toLowerCase();
     if (this.exact.has(v)) return true;
     const fam = isIP(v);
-    if (fam !== 0) return this.blocks?.check(v, fam === 4 ? "ipv4" : "ipv6") ?? false;
+    if (fam !== 0) return this.blocks?.check(v, fam === 4 ? 'ipv4' : 'ipv6') ?? false;
     // Domain: walk up parent labels, stopping before the bare TLD.
-    let dot = v.indexOf(".");
+    let dot = v.indexOf('.');
     while (dot !== -1) {
       const parent = v.slice(dot + 1);
-      if (!parent.includes(".")) break;
+      if (!parent.includes('.')) break;
       if (this.exact.has(parent)) return true;
-      dot = v.indexOf(".", dot + 1);
+      dot = v.indexOf('.', dot + 1);
     }
     return false;
   }
@@ -166,7 +170,8 @@ export class MemoryExceptionStore implements ExceptionStore {
   private readonly byId = new Map<string, RuleException>();
   forRule(ruleId: string): RuleException[] {
     const out: RuleException[] = [];
-    for (const ex of this.byId.values()) if (ex.ruleId === ruleId || ex.ruleId === "*") out.push(ex);
+    for (const ex of this.byId.values())
+      if (ex.ruleId === ruleId || ex.ruleId === '*') out.push(ex);
     return out;
   }
   add(ex: RuleException): void {
@@ -198,8 +203,8 @@ export class MemoryRuleStateStore implements RuleStateStore {
 }
 
 export class MemoryEventHistory implements EventHistory {
-  private events: SensorEvent[] = [];
-  append(e: SensorEvent): void {
+  private events: DetectionEvent[] = [];
+  append(e: DetectionEvent): void {
     // Sensors deliver in near order; keep the array sorted for range scans.
     const last = this.events[this.events.length - 1];
     if (!last || last.ts <= e.ts) this.events.push(e);
@@ -209,7 +214,7 @@ export class MemoryEventHistory implements EventHistory {
       this.events.splice(i, 0, e);
     }
   }
-  *range(fromTs: number, toTs: number): Iterable<SensorEvent> {
+  *range(fromTs: number, toTs: number): Iterable<DetectionEvent> {
     for (const e of this.events) {
       if (e.ts < fromTs) continue;
       if (e.ts > toTs) break;
