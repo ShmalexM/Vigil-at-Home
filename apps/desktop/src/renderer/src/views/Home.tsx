@@ -1,0 +1,133 @@
+import { CircleCheck, TriangleAlert } from 'lucide-react';
+import { useLive, vigil } from '../api';
+import { Card, Chip, LevelPill, SectionHead, SeverityMark, StatusMark } from '../components/ui';
+import { actorLabel, describeRecord, timeAgo } from '../format';
+import { PageHead } from './AppShell';
+
+const levelSentence = {
+  good: 'Nothing needs you. Vigil is watching.',
+  fair: 'Something needs a look.',
+  poor: 'Something needs you now.',
+};
+
+export function HomeView({ go }: { go: (r: string) => void }) {
+  const [status] = useLive(() => vigil.getStatus());
+  const [alerts] = useLive(() => vigil.listAlerts('open'));
+  const [actions] = useLive(() => vigil.listActions());
+  const needs = (alerts ?? []).filter((a) => !a.decision);
+
+  return (
+    <div className="page">
+      <PageHead
+        title="Home"
+        purpose="How your Mac is doing, and anything that needs your decision."
+      />
+
+      {status && (
+        <Card>
+          <div className="row" style={{ gap: 12 }}>
+            <LevelPill level={status.level} />
+            <span className="t-h2">{levelSentence[status.level]}</span>
+          </div>
+          {status.reasons.length > 0 && (
+            <ul className="reasons">
+              {status.reasons.map((r) => (
+                <li key={r}>{r}</li>
+              ))}
+            </ul>
+          )}
+          {status.dryRun && (
+            <div className="attn fair">
+              <TriangleAlert size={17} />
+              <span>
+                Blocks are simulated until the Vigil helper is installed. Vigil logs what it would
+                have done.
+              </span>
+            </div>
+          )}
+        </Card>
+      )}
+
+      <div className="grid-2">
+        <Card>
+          <SectionHead title="Needs you" sub="Alerts waiting on your decision, newest first" />
+          {needs.length === 0 ? (
+            <div className="row t-small">
+              <CircleCheck size={16} color="var(--good)" /> Nothing right now.
+            </div>
+          ) : (
+            <div className="list">
+              {needs.slice(0, 6).map((a) => (
+                <button
+                  key={a.id}
+                  type="button"
+                  className="list-row"
+                  onClick={() => go(`alerts/${a.id}`)}
+                >
+                  <SeverityMark severity={a.severity} />
+                  <span className="grow ellipsis t-h3">{a.title}</span>
+                  {a.containment === 'active' && <Chip tone="good">Blocked</Chip>}
+                  <span className="t-small nowrap">{timeAgo(a.createdAt)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </Card>
+
+        <Card>
+          <SectionHead title="Protection" sub="The layers that watch and block" />
+          <div className="col">
+            {status?.sensors.map((s) => (
+              <div key={s.id} className="row">
+                <StatusMark
+                  state={s.state === 'ok' ? 'done' : s.state === 'down' ? 'failed' : 'warn'}
+                  label={s.state.replace('_', ' ')}
+                />
+                <div className="col grow" style={{ gap: 0 }}>
+                  <span className="t-h3">{s.name}</span>
+                  <span className="t-small">{s.detail}</span>
+                </div>
+                <span className="t-small">
+                  {
+                    {
+                      ok: 'Running',
+                      degraded: 'Degraded',
+                      down: 'Stopped',
+                      not_installed: 'Not installed',
+                    }[s.state]
+                  }
+                </span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
+
+      <Card>
+        <SectionHead
+          title="Recent actions"
+          sub="What Vigil and you did"
+          right={
+            <button type="button" className="btn sm ghost" onClick={() => go('activity')}>
+              All activity
+            </button>
+          }
+        />
+        {(actions ?? []).length === 0 ? (
+          <span className="t-small">No actions yet.</span>
+        ) : (
+          <div className="col">
+            {(actions ?? []).slice(0, 5).map((r) => (
+              <div key={r.id} className="row">
+                <span className="grow ellipsis">{describeRecord(r)}</span>
+                <span className="t-small">
+                  {actorLabel(r.actor)} · {timeAgo(r.requestedAt)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
