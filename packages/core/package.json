@@ -1,0 +1,17 @@
+{
+  "name": "@vigil/core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shared types and schemas for Vigil at Home: events, alerts, rules and actions",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "zod": "^4.1.0"
+  }
+}
