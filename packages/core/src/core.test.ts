@@ -156,3 +156,50 @@ describe('alerts', () => {
     expect(compareSeverity('critical', 'low')).toBeGreaterThan(0);
   });
 });
+
+describe('additions for detection and sensors', () => {
+  it('parses the new event kinds', () => {
+    for (const ev of [
+      { kind: 'network.listen', protocol: 'tcp', localPort: 4444 },
+      { kind: 'browser.extension', change: 'added', browser: 'chrome', extensionId: 'abc' },
+      { kind: 'system.alert', subtype: 'xprotect_detected', details: { malware: 'MACOS.ADLOAD' } },
+    ]) {
+      expect(SensorEvent.safeParse({ id: 'e', ts: 1, source: 'santa', ...ev }).success).toBe(true);
+    }
+  });
+
+  it('parses firstSeen, inList, exclusions and dedupe on rules', () => {
+    const r = Rule.parse({
+      id: 'x',
+      version: 1,
+      name: 'n',
+      description: 'd',
+      origin: 'builtin',
+      mode: 'shadow',
+      severity: 'low',
+      fidelity: 'low',
+      eventKinds: ['process.exec'],
+      condition: {
+        all: [
+          { firstSeen: { key: ['process.sha256'] } },
+          { not: { inList: { list: 'known_bad_sha256', field: 'process.sha256' } } },
+          { field: 'process.teamId', op: 'notIn', value: ['EQHXZ8M8AV'] },
+        ],
+      },
+      exclusions: [{ field: 'process.path', op: 'startsWith', value: '/Applications/' }],
+      dedupe: { key: ['process.sha256'], windowSec: 3600 },
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    expect(r.reasons).toEqual([]);
+    expect(r.exclusions).toHaveLength(1);
+  });
+
+  it('keeps the expected path through undo', () => {
+    expect(undoOf({ kind: 'process.suspend', pid: 9, path: '/tmp/x' })).toEqual({
+      kind: 'process.resume',
+      pid: 9,
+      path: '/tmp/x',
+    });
+  });
+});
