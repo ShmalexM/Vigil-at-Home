@@ -69,6 +69,8 @@ export const PersistenceEvent = z.object({
     'other',
   ]),
   path: z.string(),
+  /** launchd label, when the item has one. */
+  label: z.string().optional(),
   /** Program the item runs, when known. */
   program: z.string().optional(),
   programArgs: z.array(z.string()).optional(),
@@ -88,6 +90,39 @@ export const SantaDecisionEvent = z.object({
   process: ProcessRef,
 });
 
+/** A process started listening on a port (a backdoor opening a door). */
+export const NetworkListenEvent = z.object({
+  ...base,
+  kind: z.literal('network.listen'),
+  protocol: z.enum(['tcp', 'udp', 'other']),
+  localAddress: z.string().optional(),
+  localPort: z.number().int(),
+  process: ProcessRef.optional(),
+});
+
+/** A browser extension was installed, updated or removed. */
+export const BrowserExtensionEvent = z.object({
+  ...base,
+  kind: z.literal('browser.extension'),
+  change: z.enum(['added', 'modified', 'removed']),
+  browser: z.string(),
+  extensionId: z.string(),
+  name: z.string().optional(),
+  permissions: z.array(z.string()).optional(),
+});
+
+/** macOS's own security notices: XProtect hits, TCC permission changes, Gatekeeper overrides. */
+export const SystemAlertEvent = z.object({
+  ...base,
+  kind: z.literal('system.alert'),
+  subtype: z.enum(['xprotect_detected', 'tcc_modified', 'gatekeeper_override']),
+  path: z.string().optional(),
+  sha256: z.string().optional(),
+  process: ProcessRef.optional(),
+  /** Subtype-specific fields, e.g. malware name, TCC service and right. */
+  details: z.record(z.string(), z.string()).default({}),
+});
+
 export const SensorEvent = z.discriminatedUnion('kind', [
   ProcessExecEvent,
   ProcessExitEvent,
@@ -95,6 +130,9 @@ export const SensorEvent = z.discriminatedUnion('kind', [
   NetworkConnectionEvent,
   PersistenceEvent,
   SantaDecisionEvent,
+  NetworkListenEvent,
+  BrowserExtensionEvent,
+  SystemAlertEvent,
 ]);
 export type SensorEvent = z.infer<typeof SensorEvent>;
 export type EventKind = SensorEvent['kind'];
@@ -105,6 +143,9 @@ export const EventKind = z.enum([
   'network.connection',
   'persistence',
   'santa.decision',
+  'network.listen',
+  'browser.extension',
+  'system.alert',
 ]);
 
 export type EventOfKind<K extends EventKind> = Extract<SensorEvent, { kind: K }>;
