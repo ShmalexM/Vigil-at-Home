@@ -1,0 +1,29 @@
+# Temporary: runs the real-Mac checks while the permanent macOS job is added.
+name: Mac checks (scratch)
+on: push
+permissions:
+  contents: read
+jobs:
+  mac:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: brew install --cask osquery
+      - run: pnpm install --frozen-lockfile
+      - name: Environment
+        run: |
+          sw_vers; id; stat -f '%u %Su' /dev/console
+          sudo pfctl -s info | head -3 || true
+          sudo pfctl -sr || true
+          ls -la /usr/local/bin/osquery* || true
+      - name: osquery checks
+        run: sudo -E env "PATH=$PATH" VIGIL_MAC_INTEGRATION=1 pnpm --filter @vigil/sensors test:mac
+      - name: helper checks
+        if: always()
+        run: sudo -E env "PATH=$PATH" VIGIL_MAC_INTEGRATION=1 pnpm --filter @vigil/helper test:mac
