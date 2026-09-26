@@ -1,0 +1,29 @@
+{
+  "name": "vigil-at-home",
+  "private": true,
+  "description": "Vigil at Home: an open-source personal SOC for your Mac",
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "typecheck": "pnpm -r --parallel typecheck",
+    "test": "vitest run",
+    "check:naming": "node scripts/check-naming.mjs",
+    "check": "pnpm check:naming && pnpm lint && pnpm typecheck && pnpm test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.19.0",
+    "eslint": "^10.11.0",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.0",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^5.0.2"
+  }
+}
