@@ -50,6 +50,9 @@ export const PROTECTED_PREFIXES = [
   '/Library/Apple/',
   '/Applications/Santa.app',
   '/Library/PrivilegedHelperTools/vigil-helper',
+  // The helper's Node runtime and code, and the app itself.
+  '/Library/PrivilegedHelperTools/vigil-helper.d/',
+  '/Applications/Vigil at Home.app/',
 ];
 
 /** Exact paths that must never be moved (moving a parent of everything). */
