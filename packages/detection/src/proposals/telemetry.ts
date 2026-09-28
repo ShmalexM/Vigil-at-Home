@@ -101,6 +101,16 @@ const LIVING_OFF_THE_LAND = new Set([
   'funzip',
 ]);
 const RARE_MAX_COUNT = 2;
+/** macOS's own tool folders, protected by SIP. Some sensors don't report signing on launches. */
+const SYSTEM_TOOL_DIRS = [
+  '/bin/',
+  '/usr/bin/',
+  '/sbin/',
+  '/usr/sbin/',
+  '/usr/libexec/',
+  '/System/',
+];
+const isSystemTool = (p: string) => SYSTEM_TOOL_DIRS.some((d) => p.startsWith(d));
 const RARE_MAX_KEYS = 5000;
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 const HOME_ANYWHERE = /\/Users\/[^/\s'"]+/g;
@@ -170,7 +180,7 @@ export function summarizeTelemetry(opts: {
       }
       case 'process.exec': {
         const base = proc?.path.slice(proc.path.lastIndexOf('/') + 1) ?? '';
-        if (proc?.args?.length && signing === 'apple' && LIVING_OFF_THE_LAND.has(base)) {
+        if (proc?.args?.length && isSystemTool(proc.path) && LIVING_OFF_THE_LAND.has(base)) {
           const example = redactCommandLine(proc.args.join(' '));
           const c = toolCmds.get(example);
           if (c) {

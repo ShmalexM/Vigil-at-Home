@@ -221,7 +221,7 @@ describe('rare built-in tool commands in the telemetry summary', () => {
         ts,
         source: 'test',
         kind: 'process.exec',
-        process: { pid: 1, path, args, signing: 'apple' },
+        process: { pid: 1, path, args },
       } as never);
     exec(
       's1',
