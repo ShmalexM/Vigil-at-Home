@@ -3,6 +3,7 @@ import type { z } from 'zod';
 import { calls, type CallName, type CallResults } from '../shared/ipc.js';
 import type { HelperInstallResult } from '../shared/ipc.js';
 import type { AiBridge } from './ai.js';
+import type { UpdateChecker } from './updates.js';
 import { onboardingHandlers } from './onboarding/ipc.js';
 import type { OnboardingService } from './onboarding/service.js';
 import type { VigilCore } from './service.js';
@@ -31,6 +32,7 @@ export function registerIpc(
   windows: Windows,
   setup: OnboardingService,
   ai: AiBridge,
+  updates: UpdateChecker,
   helper: HelperControl = noHelper,
 ): void {
   const h: Handlers = {
@@ -80,6 +82,11 @@ export function registerIpc(
     uninstallHelper: () => helper.uninstall(),
     getUsage: (days) => core.usage.report(days),
     getUsageLimits: (refresh) => core.usage.limits(refresh ?? false),
+    getUpdates: () => updates.view(),
+    checkUpdates: () => updates.check(),
+    setUpdateAuto: (auto) => updates.setAuto(auto),
+    dismissUpdate: () => updates.dismiss(),
+    downloadUpdate: () => updates.download(),
     getAi: () => ai.view(),
     setAiPrefs: (patch) => ai.setPrefs(patch),
     signInAi: (provider) => ai.signIn(provider),

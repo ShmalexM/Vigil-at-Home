@@ -2,6 +2,7 @@ import {
   Activity,
   Bell,
   ChartSpline,
+  Download,
   House,
   ListChecks,
   Settings as SettingsIcon,
@@ -52,6 +53,7 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
 
   const [status] = useLive(() => vigil.getStatus());
   const [setup] = useLive(() => vigil.getSetup());
+  const [updates] = useLive(() => vigil.getUpdates());
   const [section = 'home', param] = route.split('/');
 
   if (section === 'setup') return <SetupWizard onDone={() => go('home')} />;
@@ -110,6 +112,20 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
             <span className="grow">Setup isn’t finished, so some protection is missing.</span>
             <Button size="sm" kind="primary" onClick={() => go('setup')}>
               Continue setup
+            </Button>
+          </div>
+        )}
+        {updates?.available && !updates.dismissed && (
+          <div className="attn accent setup-banner">
+            <Download size={16} />
+            <span className="grow">
+              Vigil at Home {updates.available.version} is available. You have {updates.current}.
+            </span>
+            <Button size="sm" kind="ghost" onClick={() => void vigil.dismissUpdate()}>
+              Later
+            </Button>
+            <Button size="sm" kind="primary" onClick={() => void vigil.downloadUpdate()}>
+              Download
             </Button>
           </div>
         )}
