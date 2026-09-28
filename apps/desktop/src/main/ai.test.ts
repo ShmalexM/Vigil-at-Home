@@ -227,3 +227,114 @@ describe('AiBridge view', () => {
     });
   });
 });
+
+describe('AiBridge event labels', () => {
+  const unmatched = { checked: 21, matches: [] };
+
+  function labelling(answer: (ids: string[]) => { labels: string[]; deferred: string[] }) {
+    const store = memoryStore();
+    const core = new VigilCore(store, new DryRunExecutor(), true, () => NOW);
+    const sent: string[][] = [];
+    const ai = new AiBridge({
+      store,
+      usage: core.usage,
+      keys: keys(),
+      mode: () => 'local',
+      dataDir: '/tmp/vigil-test',
+      openExternal: async () => {},
+      create: (opts) =>
+        Object.assign(fakeAi(opts, []), {
+          ...(opts.settings.classifier.enabled
+            ? {
+                classifier: {
+                  classify: async (events: readonly { id: string }[]) => {
+                    const ids = events.map((e) => e.id);
+                    sent.push(ids);
+                    const r = answer(ids);
+                    return {
+                      ok: true as const,
+                      labels: r.labels.map((id) => ({
+                        eventId: id,
+                        label: 'unusual' as const,
+                        score: 0,
+                        reason: 'Local model hint: unusual',
+                        by: 'model' as const,
+                      })),
+                      deferred: r.deferred,
+                    };
+                  },
+                },
+              }
+            : {}),
+        }),
+      now: () => NOW,
+    });
+    return { store, core, ai, sent };
+  }
+
+  it('sends only unmatched, non-Apple events, once per program an hour', async () => {
+    const { core, ai, sent } = labelling((ids) => ({ labels: ids, deferred: [] }));
+    ai.labelEventsFrom(core);
+    const a = makeExec('/tmp/a');
+    core.ingest(a, unmatched);
+    core.ingest(makeExec('/tmp/a'), unmatched); // same program again
+    core.ingest(makeExec('/tmp/b'), {
+      checked: 21,
+      matches: [{ ruleId: 'r', ruleName: 'R', mode: 'alert' }],
+    });
+    const apple = makeExec('/usr/bin/true');
+    if (apple.kind === 'process.exec') apple.process.signing = 'apple';
+    core.ingest(apple, unmatched);
+    core.events.flush();
+    expect(await ai.labelBatch(core.store)).toBe(1);
+    expect(sent).toEqual([[a.id]]);
+    const [view] = core.store.listEventViews({}).filter((v) => v.event.id === a.id);
+    expect(view!.label).toMatchObject({ label: 'unusual', by: 'model' });
+  });
+
+  it('puts events the model skipped back in the queue', async () => {
+    let round = 0;
+    const { core, ai, sent } = labelling((ids) =>
+      round++ === 0
+        ? { labels: ids.slice(0, 1), deferred: ids.slice(1) }
+        : { labels: ids, deferred: [] },
+    );
+    ai.labelEventsFrom(core);
+    const events = [makeExec('/tmp/x'), makeExec('/tmp/y')];
+    for (const e of events) core.ingest(e, unmatched);
+    core.events.flush();
+    await ai.labelBatch(core.store);
+    await ai.labelBatch(core.store);
+    expect(sent).toEqual([events.map((e) => e.id), [events[1]!.id]]);
+  });
+
+  it('sends nothing when labelling is off', async () => {
+    const { core, ai, sent } = labelling((ids) => ({ labels: ids, deferred: [] }));
+    ai.labelEventsFrom(core);
+    ai.setPrefs({ labelling: false });
+    core.ingest(makeExec('/tmp/z'), unmatched);
+    expect(await ai.labelBatch(core.store)).toBe(0);
+    expect(sent).toEqual([]);
+  });
+
+  it('keeps prefs saved before labelling existed', () => {
+    const store = memoryStore();
+    store.setSetting('ai.prefs', {
+      claude: false,
+      codex: true,
+      api: true,
+      ollama: true,
+      jev: true,
+      claudeUses: 'subscription',
+    });
+    const ai = new AiBridge({
+      store,
+      usage: new VigilCore(store, new DryRunExecutor(), true).usage,
+      keys: keys(),
+      mode: () => undefined,
+      dataDir: '/tmp/vigil-test',
+      openExternal: async () => {},
+    });
+    expect(ai.prefs()).toMatchObject({ claude: false, labelling: true });
+  });
+});

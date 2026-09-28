@@ -15,7 +15,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import type { EventGroup, EventOutcome, EventView } from '../../../shared/ipc';
+import type { EventGroup, EventLabel, EventOutcome, EventView } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
 import { useToast } from '../components/Toasts';
 import { Button, Card, Chip, Segmented, StatusMark } from '../components/ui';
@@ -272,7 +272,7 @@ const KIND_ICON: Record<EventKind, ReactNode> = {
 };
 
 function EventRow({
-  view: { event: e, outcome },
+  view: { event: e, outcome, label },
   open,
   onToggle,
 }: {
@@ -290,11 +290,25 @@ function EventRow({
           <span className="ellipsis">{describeEvent(e)}</span>
           {detail && <span className="t-small mono ellipsis">{detail}</span>}
         </span>
+        {label && label.label !== 'benign' && <LabelChip label={label} />}
         <OutcomeChip outcome={outcome} />
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
       </button>
       {open && <EventFields event={e} outcome={outcome} />}
     </div>
+  );
+}
+
+/** A model's hint on an event no rule matched. Hints never act on anything. */
+function LabelChip({ label }: { label: EventLabel }) {
+  const who = label.by === 'jev' ? 'Jev' : 'AI';
+  return (
+    <Chip
+      tone={label.label === 'suspicious' ? 'fair' : 'ai'}
+      title={`${label.reason}\nA hint only: nothing was blocked or allowed because of it.`}
+    >
+      {who}: {label.label === 'suspicious' ? 'looks suspicious' : 'unusual'}
+    </Chip>
   );
 }
 

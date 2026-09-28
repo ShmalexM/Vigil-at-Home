@@ -263,9 +263,24 @@ export interface RuleCheck {
   replay?: ReplayPreview;
 }
 
+/**
+ * What a model made of an event no rule matched. A hint for the person
+ * reading the feed; it never blocks, allows or raises anything.
+ */
+export const EventLabel = z.object({
+  label: z.enum(['benign', 'unusual', 'suspicious']),
+  /** 0 to 1: how much a person should look at it. 0 for the local model's hints. */
+  score: z.number().min(0).max(1),
+  reason: z.string().max(300),
+  by: z.enum(['model', 'jev']),
+  at: z.number().int(),
+});
+export type EventLabel = z.infer<typeof EventLabel>;
+
 export interface EventView {
   event: SensorEvent;
   outcome: EventOutcome | null;
+  label?: EventLabel;
 }
 
 export interface EventStats {

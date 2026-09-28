@@ -121,6 +121,7 @@ function start(): void {
   if (!demo) core.usage.setLimitsSource(() => ai.limits());
   ai.on('changed', () => windows.broadcast('changed'));
   ai.explainAlertsFrom(core);
+  ai.labelEventsFrom(core);
 
   registerIpc(core, windows, setup, ai, {
     install: async () => afterHelperScript(await runHelperScript('install', helperDir())),

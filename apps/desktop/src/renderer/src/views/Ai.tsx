@@ -173,6 +173,30 @@ export function AiSection() {
         </ul>
       )}
       {view && (
+        <div className="ai-option">
+          <div className="ai-main">
+            <div className="ai-name">Label events no rule matched</div>
+            <div className="ai-sub">
+              {view.mode === 'local'
+                ? 'A small model on this Mac marks unusual programs and connections in Activity.'
+                : view.jevVia
+                  ? 'Jev marks unusual programs and connections in Activity, with the model on this Mac as a fallback.'
+                  : 'A small model on this Mac marks unusual programs and connections in Activity.'}{' '}
+              Hints only: nothing is blocked or allowed because of a label.
+            </div>
+          </div>
+          <Segmented
+            label="Label events no rule matched"
+            value={view.prefs.labelling ? 'on' : 'off'}
+            options={[
+              { value: 'on', label: 'On' },
+              { value: 'off', label: 'Off' },
+            ]}
+            onChange={(v) => void setPref({ labelling: v === 'on' })}
+          />
+        </div>
+      )}
+      {view && (
         <CapField cap={view.prefs.monthlyCapUsd} onSave={(c) => setPref({ monthlyCapUsd: c })} />
       )}
     </>

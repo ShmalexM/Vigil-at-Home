@@ -66,8 +66,12 @@ to `OnboardingService` and those two steps turn on.
   at most three quieter ones queued; never the test alert), hands every prompt
   log entry to `core.usage.record`, and feeds the Usage page's plan limits and
   key caps. Codex sign-in sharing: `codexStatus()`, `shareCodexSignIn()` and
-  `stopSharingCodexSignIn()`, and the IPC calls of the same names. Event
-  labelling (`classifier`) is still off here.
+  `stopSharingCodexSignIn()`, and the IPC calls of the same names. With
+  `labelEventsFrom(core)` it also queues events no rule matched (not Apple's
+  own programs, each program or destination once an hour) and sends a batch a
+  minute to the classifier (Jev or the local model, within its budgets). The
+  labels land in the events table and show as hints in Activity; they never
+  act on anything.
 
 ## Package it
 

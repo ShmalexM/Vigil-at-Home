@@ -96,4 +96,8 @@ export const migrations: string[] = [
   );
   CREATE INDEX ai_runs_ts ON ai_runs (ts);
   `,
+  // A model's label on an event no rule matched (hint only; never acts).
+  `
+  ALTER TABLE events ADD COLUMN label TEXT;
+  `,
 ];
