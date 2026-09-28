@@ -18,7 +18,20 @@ mac:
       arch: [arm64, x64]
     - target: zip
       arch: [arm64, x64]
+  # One name pattern for both chips: ...-arm64.dmg (Apple silicon), ...-x64.dmg (Intel).
+  artifactName: Vigil-at-Home-${version}-${arch}.${ext}
   hardenedRuntime: true
+  # The Vigil helper, installed as root through the macOS password dialog. Built by
+  # scripts/build-helper.mjs: the bundled helper plus Node.js for this chip.
+  extraResources:
+    - from: build/helper/common
+      to: helper
+    - from: build/helper/darwin-${arch}
+      to: helper
+      filter: [node]
+  # Keep Node.js's own Developer ID signature and notarization on the helper runtime.
+  signIgnore:
+    - Resources/helper/node$
   extendInfo:
     # Menu-bar app: no Dock icon until the main window opens.
     LSUIElement: true

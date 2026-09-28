@@ -1,11 +1,13 @@
-import { Activity, Bell, House, ListChecks, Settings as SettingsIcon } from 'lucide-react';
+import { Activity, Bell, House, ListChecks, Settings as SettingsIcon, Wrench } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
+import { LEVEL_MEANING, LEVEL_RULES } from '../../../shared/levels';
 import { useLive, vigil } from '../api';
 import { Shield } from '../components/Shield';
-import { LevelPill } from '../components/ui';
+import { Button, LevelPill } from '../components/ui';
 import { ActivityView } from './Activity';
 import { AlertsView } from './Alerts';
 import { HomeView } from './Home';
+import { SetupWizard } from './onboarding/SetupWizard';
 import { RulesView } from './Rules';
 import { SettingsView } from './Settings';
 
@@ -19,7 +21,15 @@ const NAV: { id: string; label: string; icon: ReactNode }[] = [
 
 export function AppShell({ initialRoute }: { initialRoute: string }) {
   const [route, setRoute] = useState(initialRoute);
-  useEffect(() => vigil.on('navigate', setRoute), []);
+  // Keep the hash in step with pushed navigation, so the window's URL always names its page.
+  useEffect(
+    () =>
+      vigil.on('navigate', (r) => {
+        location.hash = r;
+        setRoute(r);
+      }),
+    [],
+  );
   useEffect(() => {
     const onHash = () => setRoute(location.hash.slice(1) || 'home');
     window.addEventListener('hashchange', onHash);
@@ -31,7 +41,10 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
   };
 
   const [status] = useLive(() => vigil.getStatus());
+  const [setup] = useLive(() => vigil.getSetup());
   const [section = 'home', param] = route.split('/');
+
+  if (section === 'setup') return <SetupWizard onDone={() => go('home')} />;
 
   return (
     <div className="shell">
@@ -60,17 +73,39 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
         </nav>
         <div className="grow" />
         {status && (
-          <button type="button" className="sidebar-status" onClick={() => go('home')}>
-            <LevelPill level={status.level} small />
-            <span className="t-small ellipsis">{status.reasons[0] ?? 'All quiet'}</span>
+          <button
+            type="button"
+            className="sidebar-status"
+            onClick={() => go('home')}
+            title={[LEVEL_RULES[status.level], '', ...status.reasons].join('\n')}
+          >
+            <span className="row spread" style={{ width: '100%' }}>
+              <span className="t-small muted">Mac health</span>
+              <LevelPill level={status.level} small />
+            </span>
+            <span className="t-small sidebar-status-why">
+              {status.reasons[0] ?? LEVEL_MEANING.good}
+            </span>
+            {status.reasons.length > 1 && (
+              <span className="t-small muted">and {status.reasons.length - 1} more · see Home</span>
+            )}
           </button>
         )}
       </aside>
       <main className="content scroll">
         <div className="drag" />
+        {setup && !setup.finished && (
+          <div className="attn accent setup-banner">
+            <Wrench size={16} />
+            <span className="grow">Setup isn’t finished, so some protection is missing.</span>
+            <Button size="sm" kind="primary" onClick={() => go('setup')}>
+              Continue setup
+            </Button>
+          </div>
+        )}
         {section === 'home' && <HomeView go={go} />}
         {section === 'alerts' && <AlertsView selected={param} go={go} />}
-        {section === 'rules' && <RulesView />}
+        {section === 'rules' && <RulesView selected={param} go={go} />}
         {section === 'activity' && <ActivityView />}
         {section === 'settings' && <SettingsView />}
       </main>

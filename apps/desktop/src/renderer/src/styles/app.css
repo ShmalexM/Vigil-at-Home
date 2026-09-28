@@ -134,6 +134,15 @@ select {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Up to two lines, then an ellipsis: for titles that must stay readable. */
+.clamp-2 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  min-width: 0;
+}
 
 /* ---------------------------------------------------------------- buttons */
 .btn {

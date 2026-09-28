@@ -1,0 +1,74 @@
+/* ---------------------------------------------------------------- settings › appearance */
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.theme-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--ln0);
+  border-radius: var(--radius);
+  background: var(--bg2);
+}
+.theme-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 44px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--ln1);
+  font-weight: 600;
+}
+.theme-preview-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+.theme-preview-bar {
+  margin-left: auto;
+  width: 56px;
+  height: 8px;
+  border-radius: 999px;
+}
+.color-field input[type='color'] {
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--ln1);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+.hex-field {
+  width: 86px;
+}
+.font-field,
+.import-field {
+  width: 220px;
+}
+.appearance-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 4px;
+}
+.appearance-rows input[type='range'] {
+  width: 180px;
+  accent-color: var(--ac);
+}
+.range-value {
+  width: 36px;
+  text-align: right;
+}
+.field[aria-invalid='true'] {
+  border-color: var(--poor-ln);
+}
+@media (max-width: 1000px) {
+  .theme-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

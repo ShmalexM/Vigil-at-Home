@@ -1,0 +1,18 @@
+{
+  "name": "@vigil/sensors",
+  "version": "0.0.0",
+  "private": true,
+  "description": "macOS sensors for Vigil at Home: Santa's event log and sync server, osquery results",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test:mac": "vitest run --config vitest.mac.config.ts"
+  },
+  "dependencies": {
+    "@vigil/core": "workspace:*"
+  }
+}
