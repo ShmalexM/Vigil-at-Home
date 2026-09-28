@@ -18,6 +18,8 @@ mac:
       arch: [arm64, x64]
     - target: zip
       arch: [arm64, x64]
+  # One name pattern for both chips: ...-arm64.dmg (Apple silicon), ...-x64.dmg (Intel).
+  artifactName: Vigil-at-Home-${version}-${arch}.${ext}
   hardenedRuntime: true
   extendInfo:
     # Menu-bar app: no Dock icon until the main window opens.
