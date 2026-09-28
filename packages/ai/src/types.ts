@@ -112,6 +112,8 @@ export interface RunUsage {
    * where there is no per-token price: a ChatGPT plan, or a local model.
    */
   readonly costUsd: number | null;
+  /** The model that answered, as the vendor names it, when the adapter knows it. */
+  readonly model?: string;
 }
 
 export type AdapterRunOutput = (
@@ -171,4 +173,6 @@ export interface PromptLogEntry {
   readonly audit?: ToolAudit;
   readonly detail?: string;
   readonly usage?: RunUsage;
+  /** Same as usage.model, kept at the top so the usage page can group runs by model. */
+  readonly model?: string;
 }

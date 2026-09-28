@@ -141,6 +141,7 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
         cachedInputTokens: 0,
         outputTokens,
         costUsd: 0,
+        model,
       });
       const messages: ChatMessage[] = [
         { role: 'system', content: input.systemPrompt },

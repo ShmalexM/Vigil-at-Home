@@ -175,7 +175,9 @@ export function createJevClient(options: JevOptions) {
                   outputTokens: usage.output_tokens ?? 0,
                   costUsd:
                     typeof usage.cost === 'number' ? usage.cost : input * JEV_USD_PER_INPUT_TOKEN,
+                  model: route.model,
                 },
+                model: route.model,
               }
             : {}),
         });

@@ -150,7 +150,13 @@ export function createApiAdapter(options: ApiAdapterOptions): ProviderAdapter & 
       let cachedInputTokens = 0;
       let outputTokens = 0;
       let costUsd: number | null = null;
-      const usage = (): RunUsage => ({ inputTokens, cachedInputTokens, outputTokens, costUsd });
+      const usage = (): RunUsage => ({
+        inputTokens,
+        cachedInputTokens,
+        outputTokens,
+        costUsd,
+        model: options.model!,
+      });
 
       try {
         for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {

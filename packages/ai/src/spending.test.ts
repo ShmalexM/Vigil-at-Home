@@ -189,13 +189,22 @@ describe('spending', () => {
           outputTokens: 20,
           costUSD: 0.02,
         },
+        // A small housekeeping model that wrote less; the run is named after the main one.
+        b: {
+          inputTokens: 1,
+          cacheCreationInputTokens: 0,
+          cacheReadInputTokens: 0,
+          outputTokens: 2,
+          costUSD: 0,
+        },
       },
     } as unknown as Parameters<typeof runUsageFromResult>[0]);
     expect(usage).toEqual({
-      inputTokens: 15,
+      inputTokens: 16,
       cachedInputTokens: 100,
-      outputTokens: 20,
+      outputTokens: 22,
       costUsd: 0.02,
+      model: 'a',
     });
 
     const plan = planUsageFromClaude({

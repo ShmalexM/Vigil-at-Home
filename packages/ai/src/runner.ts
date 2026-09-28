@@ -214,6 +214,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
           ...(audit ? { audit } : {}),
           ...(detail ? { detail } : {}),
           ...(usage ? { usage } : {}),
+          ...(usage?.model ? { model: usage.model } : {}),
         });
 
       let lastReason: RunFailureReason = 'no_provider';
