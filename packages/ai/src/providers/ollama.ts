@@ -65,6 +65,9 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
     // Vigil only asks for short structured answers; a low temperature keeps
     // small models from wandering into loops.
     temperature: 0.2,
+    // Small models can repeat one phrase until the output cap; a mild
+    // penalty breaks the loop without changing short answers.
+    repeat_penalty: 1.15,
     ...(rt?.numCtx !== undefined ? { num_ctx: rt.numCtx } : {}),
     ...(rt?.numThread !== undefined ? { num_thread: rt.numThread } : {}),
   };

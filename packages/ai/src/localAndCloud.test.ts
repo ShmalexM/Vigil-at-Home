@@ -106,10 +106,11 @@ describe('a local model', () => {
         if (url.endsWith('/api/show')) return Response.json({ capabilities: ['tools'] });
         const body = JSON.parse(String(init.body)) as {
           messages: Array<{ content: string }>;
-          options: { temperature: number };
+          options: { temperature: number; repeat_penalty: number };
         };
         prompts.push(body.messages.at(-1)!.content);
         expect(body.options.temperature).toBe(0.2);
+        expect(body.options.repeat_penalty).toBe(1.15);
         return Response.json({ message: { role: 'assistant', content: replies.shift() } });
       }) as unknown as typeof fetch,
     });
@@ -121,7 +122,8 @@ describe('a local model', () => {
     });
     expect(await runner.run(ask)).toMatchObject({ ok: true, value: { ok: true } });
     expect(log.map((e) => e.outcome)).toEqual(['invalid_output', 'ok']);
-    expect(prompts[1]).toContain('did not match the required format');
+    expect(log[0]!.detail).toContain('not complete JSON');
+    expect(prompts[1]).toContain('was cut off');
   });
 });
 
