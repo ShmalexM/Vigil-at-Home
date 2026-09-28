@@ -1,0 +1,33 @@
+name: Live threat feeds
+
+# Checks that the default threat feeds still download and parse. Kept out of
+# the main CI job because it depends on third-party sites being up.
+on:
+  pull_request:
+    paths:
+      - 'packages/detection/src/feeds/**'
+      - 'packages/detection/src/__tests__/feeds.live.test.ts'
+      - '.github/workflows/live-feeds.yml'
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  feeds:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - run: pnpm exec vitest run packages/detection/src/__tests__/feeds.live.test.ts
+        env:
+          VIGIL_LIVE_FEEDS: '1'
