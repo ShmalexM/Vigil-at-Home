@@ -42,6 +42,14 @@ export function vetPath(path: string, opts: QuarantineOptions): string {
   const exact = opts.protectedExact ?? PROTECTED_EXACT;
   const prefixes = opts.protectedPrefixes ?? PROTECTED_PREFIXES;
   const quarantineRoot = opts.quarantineDir.replace(/\/$/, '');
+  // Compare against the quarantine folder's real location too, so a path that
+  // reaches it through a symlink (like /var -> /private/var on macOS) is caught.
+  const quarantineRoots = [quarantineRoot];
+  try {
+    quarantineRoots.push(realpathSync(quarantineRoot));
+  } catch {
+    // Not created yet: nothing can be inside it.
+  }
   if (
     exact.has(path) ||
     prefixes.some(
@@ -50,15 +58,24 @@ export function vetPath(path: string, opts: QuarantineOptions): string {
         path.startsWith(p.endsWith('/') ? p : p + '/') ||
         path === p,
     ) ||
-    path === quarantineRoot ||
-    path.startsWith(quarantineRoot + '/') ||
-    quarantineRoot.startsWith(path + '/') ||
+    quarantineRoots.some(
+      (q) => path === q || path.startsWith(q + '/') || q.startsWith(path + '/'),
+    ) ||
     /^\/Users\/[^/]+$/.test(path) ||
     /^\/Users\/[^/]+\/(Library|Desktop|Documents|Downloads)$/.test(path)
   ) {
     throw new ActionError('refused', `${path} is protected`);
   }
   return path;
+}
+
+/** The path with symlinks in its parent folders resolved, or the path itself when they don't exist. */
+export function realParentPath(path: string): string {
+  try {
+    return join(realpathSync(dirname(path)), basename(path));
+  } catch {
+    return path;
+  }
 }
 
 /**

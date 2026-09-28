@@ -4,8 +4,9 @@
 //                                i.e. after macOS's admin password dialog
 // vigil-helper santa-profile     print the Santa configuration profile
 // vigil-helper osquery-config    print the osquery configuration
+// vigil-helper osquery-flags     print osquery's startup flags (osquery.flags)
 
-import { osqueryConfig, santaProfile } from '@vigil/sensors';
+import { osqueryConfig, osqueryFlags, santaProfile } from '@vigil/sensors';
 import { Approvals } from './approval.js';
 import { defaultPaths, SANTA_SYNC_PORT } from './config.js';
 import { runDaemon } from './daemon.js';
@@ -40,9 +41,12 @@ async function main(argv: string[]): Promise<number> {
     case 'osquery-config':
       process.stdout.write(osqueryConfig());
       return 0;
+    case 'osquery-flags':
+      process.stdout.write(osqueryFlags());
+      return 0;
     default:
       console.error(
-        'usage: vigil-helper daemon | approve <nonce> | santa-profile | osquery-config',
+        'usage: vigil-helper daemon | approve <nonce> | santa-profile | osquery-config | osquery-flags',
       );
       return 2;
   }
