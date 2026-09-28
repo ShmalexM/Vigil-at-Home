@@ -42,4 +42,14 @@ changes. Settings → Send a test alert shows the popup without any action.
   `core.alerts.propose('ai', action, alertId, rationale)`. Queue AI work with
   `core.scheduler.enqueue(name, fn, 'urgent')`.
 
-Dev builds are unsigned.
+## Package it
+
+```bash
+pnpm --filter @vigil/desktop dist   # on a Mac: dmg and zip in apps/desktop/dist
+```
+
+Releases come from `.github/workflows/release.yml` (push a `v*` tag, or run it
+by hand). Until Apple signing secrets are added they are ad hoc signed, so macOS
+asks the user to approve the app once under System Settings › Privacy &
+Security › Open Anyway. The workflow signs and notarizes automatically once the
+secrets exist; nothing else changes.
