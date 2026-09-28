@@ -12,6 +12,7 @@ import { createServer as createHttpsServer, type Server as HttpsServer } from 'n
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
+  OSQUERYD_PATH,
   RuleStore,
   SantaSyncServer,
   SensorHub,
@@ -24,7 +25,7 @@ import { defaultPaths, SANTA_SYNC_PORT, type HelperPaths } from './config.js';
 import { Executor } from './executor.js';
 import { Journal } from './journal.js';
 import { HelperServer } from './server.js';
-import { realSystem, type System } from './system.js';
+import { BINARIES, realSystem, type System } from './system.js';
 
 export interface DaemonOptions {
   paths?: HelperPaths;
@@ -34,6 +35,14 @@ export interface DaemonOptions {
   /** Owner required on approval files; only tests change this from root. */
   approvalOwnerUid?: number;
   opensslBin?: string;
+  /** Files whose presence means Santa and osquery are installed; tests point these elsewhere. */
+  sensorBinaries?: { santa: string; osquery: string };
+}
+
+/** What helper.status reports about each sensor. The app decides what counts as stale. */
+export interface SensorHealth {
+  santa: { installed: boolean; lastEventAt: number | null; lastSyncAt: number | null };
+  osquery: { installed: boolean; lastEventAt: number | null };
 }
 
 export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise<void>> {
@@ -62,6 +71,21 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     dir: paths.approvalsDir,
     requiredOwnerUid: opts.approvalOwnerUid ?? 0,
   });
+  const bins = opts.sensorBinaries ?? { santa: BINARIES.santactl, osquery: OSQUERYD_PATH };
+  // Created below, after the socket is up; status calls before then report no activity.
+  const live: { hub?: SensorHub; sync?: SantaSyncServer } = {};
+  const sensors = (): SensorHealth => {
+    const seen = live.hub?.lastEventAt();
+    return {
+      santa: {
+        installed: existsSync(bins.santa),
+        lastEventAt: seen?.santa ?? null,
+        lastSyncAt: live.sync?.lastSyncAt ?? null,
+      },
+      osquery: { installed: existsSync(bins.osquery), lastEventAt: seen?.osquery ?? null },
+    };
+  };
+
   const executor = new Executor({
     sys,
     journal,
@@ -72,6 +96,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     triggerSantaSync: async () => {
       await sys.run('santactl', ['sync'], { timeoutMs: 60_000 });
     },
+    statusExtra: () => ({ sensors: sensors() }),
   });
 
   const server = new HelperServer({
@@ -89,6 +114,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     onError: (source, err) => log(`${source} sensor: ${err.message}`),
   });
   await hub.start();
+  live.hub = hub;
 
   const sync = new SantaSyncServer({
     store: rules,
@@ -97,6 +123,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     eventDetailUrl: 'vigil://santa/event?sha256=%file_sha%',
     eventDetailText: 'Open Vigil',
   });
+  live.sync = sync;
   const https: HttpsServer = createHttpsServer(
     { key: readFileSync(tls.serverKey), cert: readFileSync(tls.serverCert), minVersion: 'TLSv1.2' },
     sync.handler,

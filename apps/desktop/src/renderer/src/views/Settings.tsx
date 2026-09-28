@@ -1,4 +1,4 @@
-import { BellRing } from 'lucide-react';
+import { BellRing, Wrench } from 'lucide-react';
 import type { ThemePref } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
 import { useToast } from '../components/Toasts';
@@ -45,6 +45,23 @@ export function SettingsView() {
               }}
             >
               Send a test alert
+            </Button>
+          }
+        />
+      </Card>
+      <Card>
+        <SectionHead
+          title="Setup"
+          sub="Walk through installing protection and connecting AI again, or switch between local, cloud and both. Saved keys are kept."
+          right={
+            <Button
+              icon={<Wrench size={15} />}
+              onClick={async () => {
+                await vigil.restartSetup();
+                location.hash = 'setup';
+              }}
+            >
+              Run setup again
             </Button>
           }
         />
