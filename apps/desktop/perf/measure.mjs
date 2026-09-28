@@ -202,7 +202,12 @@ async function measure(rootPid, seconds, during) {
     cpuPct: round((cpu / wall) * 100, 2),
     memMb: round(sum(after, 'memMb')),
     writtenMb: round(written, 2),
-    processes: [...after.values()].map((r) => ({ name: r.name, memMb: round(r.memMb) })),
+    processes: [...after.values()].map((r) => ({
+      pid: r.pid,
+      name: r.name,
+      memMb: round(r.memMb),
+      cpuPct: round(((r.cpuS - (before.get(r.pid)?.cpuS ?? 0)) / wall) * 100, 2),
+    })),
     ...(pm
       ? { wakeupsPerS: round(pm.wakeupsPerS, 1), energyImpact: round(pm.energyImpact, 2) }
       : {}),
@@ -241,7 +246,39 @@ try {
     if (Date.now() - t0 > 30000) throw new Error('App did not start in 30 s');
     await sleep(50);
   }
-  // Let first-run work (migrations, the first scheduled jobs) settle.
+  // A fresh install downloads the threat lists first. That is a one-off, so
+  // it is measured on its own rather than counted as idle.
+  const feedsT0 = Date.now();
+  const feedsBefore = tree(pid);
+  for (;;) {
+    const done = await app.evaluate(() => {
+      const feeds = globalThis.vigil.core.detector?.feeds;
+      if (!feeds) return null;
+      const st = feeds.status();
+      return st.every((s) => s.fetchedAt !== undefined || s.lastError !== undefined)
+        ? st.map((s) => ({ source: s.sourceId, entries: s.entries, error: s.lastError }))
+        : false;
+    });
+    if (done !== false) {
+      if (done) {
+        const after = tree(pid);
+        let cpu = 0;
+        for (const [p, r] of after) cpu += r.cpuS - (feedsBefore.get(p)?.cpuS ?? 0);
+        results.feeds = {
+          seconds: round((Date.now() - feedsT0) / 1000, 1),
+          cpuS: round(cpu, 1),
+          sources: done,
+        };
+      }
+      break;
+    }
+    if (Date.now() - feedsT0 > 180000) {
+      results.feeds = { timedOut: true };
+      break;
+    }
+    await sleep(500);
+  }
+  // Let the rest of first-run work (migrations, the first scheduled jobs) settle.
   await sleep(5000);
 
   results.idle = await measure(pid, IDLE_S);
@@ -401,5 +438,18 @@ function report(r, checks) {
     '| Measure | Value | Budget | |',
     '|---|---|---|---|',
     ...rows,
+    '',
+    r.feeds?.cpuS !== undefined
+      ? `First threat-list download: ${r.feeds.seconds} s, ${r.feeds.cpuS} CPU-s (${r.feeds.sources
+          .map((f) => `${f.source} ${f.error ? 'failed' : f.entries}`)
+          .join(', ')})`
+      : `First threat-list download: ${r.feeds?.timedOut ? 'not done after 180 s' : 'no feeds'}`,
+    '',
+    '| Process | Idle CPU | Load CPU | Idle memory |',
+    '|---|---|---|---|',
+    ...(r.idle?.processes ?? []).map((p) => {
+      const l = r.load?.processes?.find((q) => q.pid === p.pid);
+      return `| ${p.name} | ${p.cpuPct} % | ${l ? `${l.cpuPct} %` : 'gone'} | ${p.memMb} MB |`;
+    }),
   ].join('\n');
 }
