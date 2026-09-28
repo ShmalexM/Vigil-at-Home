@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -269,6 +270,8 @@ describe('helper over its socket', () => {
     const plist = join(launchDir, 'com.evil.agent.plist');
     writeFileSync(plist, '<plist/>');
     sys.labels.set(plist, 'com.evil.agent');
+    // The helper works on the resolved path (tmpdir is a symlink on macOS).
+    sys.labels.set(realpathSync(plist), 'com.evil.agent');
     const target = `gui/${statSync(plist).uid}/com.evil.agent`;
     sys.loaded.add(target);
     const out = await client.call<ActionOutcome>({ kind: 'persistence.disable', path: plist });

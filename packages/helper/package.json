@@ -10,7 +10,8 @@
     "./client": "./src/client.ts"
   },
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "test:mac": "vitest run --config vitest.mac.config.ts"
   },
   "dependencies": {
     "@vigil/core": "workspace:*",
