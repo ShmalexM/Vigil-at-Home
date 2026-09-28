@@ -31,6 +31,17 @@ Malware running as you can send the app's requests too. So every release (core's
 A process running as you cannot create a root-owned file. Releases also only reverse
 what the helper itself did: resume needs a pause in the journal, unblock needs a block.
 
+## Starting osquery
+
+Installing osquery (`brew install --cask osquery` or its pkg) puts `osqueryd` on disk but
+starts nothing. When `osqueryd` is present, the helper writes Vigil's
+`/var/osquery/osquery.conf` and `osquery.flags`, installs osquery's launchd job
+(`io.osquery.agent`: background priority, restarted if it exits) and loads it. It checks
+again every 5 minutes, and restarts osquery if the config has drifted. A config, flags
+or job that was there before Vigil is kept as `*.before-vigil`.
+`vigil-helper osquery-remove` (run by the uninstaller) stops Vigil's job and puts those
+back; `vigil-helper osquery-setup` does the setup by hand.
+
 ## Sensor health
 
 `helper.status` includes `sensors`: whether Santa and osquery are installed, when each
