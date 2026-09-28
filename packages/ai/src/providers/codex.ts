@@ -62,6 +62,14 @@ export const CODEX_DISABLED_FEATURES = [
   'workspace_dependencies',
 ] as const;
 
+/**
+ * The model Vigil asks Codex for. Codex runs its newer models (GPT-6, GPT-5.6) in "code mode":
+ * every tool, Vigil's included, sits behind a JavaScript runner alongside agent and question
+ * tools, and in Vigil's runs the model answered without calling any of them. This model gets
+ * Vigil's tools directly and nothing else. Recheck on Codex upgrades.
+ */
+export const CODEX_MODEL = 'gpt-5.5';
+
 export function codexAppServerArgs(): string[] {
   const args = [
     'app-server',
@@ -84,6 +92,7 @@ export function codexThreadStartParams(params: {
 }): Record<string, unknown> {
   return {
     cwd: params.cwd,
+    model: CODEX_MODEL,
     approvalPolicy: 'untrusted',
     sandbox: 'read-only',
     ephemeral: true,
