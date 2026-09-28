@@ -5,11 +5,15 @@
 // vigil-helper santa-profile     print the Santa configuration profile
 // vigil-helper osquery-config    print the osquery configuration
 // vigil-helper osquery-flags     print osquery's startup flags (osquery.flags)
+// vigil-helper osquery-setup     (root) write Vigil's osquery config and start osquery
+// vigil-helper osquery-remove    (root) stop Vigil's osquery job, restore osquery's old config
 
 import { osqueryConfig, osqueryFlags, santaProfile } from '@vigil/sensors';
 import { Approvals } from './approval.js';
 import { defaultPaths, SANTA_SYNC_PORT } from './config.js';
 import { runDaemon } from './daemon.js';
+import { ensureOsquery, removeOsquery } from './osquery.js';
+import { realSystem } from './system.js';
 
 async function main(argv: string[]): Promise<number> {
   const [cmd, arg] = argv;
@@ -44,9 +48,20 @@ async function main(argv: string[]): Promise<number> {
     case 'osquery-flags':
       process.stdout.write(osqueryFlags());
       return 0;
+    case 'osquery-setup':
+    case 'osquery-remove': {
+      if (process.getuid?.() !== 0) {
+        console.error(`${cmd} must run as root`);
+        return 1;
+      }
+      if (cmd === 'osquery-remove') await removeOsquery(realSystem());
+      else console.log(`osquery: ${await ensureOsquery(realSystem())}`);
+      return 0;
+    }
     default:
       console.error(
-        'usage: vigil-helper daemon | approve <nonce> | santa-profile | osquery-config | osquery-flags',
+        'usage: vigil-helper daemon | approve <nonce> | santa-profile | osquery-config | ' +
+          'osquery-flags | osquery-setup | osquery-remove',
       );
       return 2;
   }

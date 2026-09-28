@@ -244,15 +244,21 @@ export interface KeyDef {
   prefix?: string;
   /** The provider needs a base URL too (any OpenAI-compatible gateway). */
   needsBaseUrl?: boolean;
+  /** Shown under "More options": OpenRouter is the one key most people need. */
+  more?: boolean;
 }
 
-/** API keys the cloud setup asks for. All optional: a signed-in Claude Code or Codex needs none. */
+/**
+ * API keys the cloud setup asks for. All optional: a signed-in Claude Code or
+ * Codex needs none. OpenRouter is the main path, since it also carries Jev;
+ * the rest sit under "More options".
+ */
 export const API_KEYS: readonly KeyDef[] = [
   {
     provider: 'openrouter',
     name: 'OpenRouter',
     url: 'https://openrouter.ai/settings/keys',
-    use: 'One key for many models, billed per use. Good if you have no Claude or ChatGPT plan.',
+    use: 'One key for many models, billed per use, including TypeSafe’s Jev for fast event labelling. Good if you have no Claude or ChatGPT plan.',
     prefix: 'sk-or-',
   },
   {
@@ -261,6 +267,7 @@ export const API_KEYS: readonly KeyDef[] = [
     url: 'https://console.anthropic.com/settings/keys',
     use: 'Claude billed per use, instead of your Claude plan.',
     prefix: 'sk-ant-',
+    more: true,
   },
   {
     provider: 'openai',
@@ -268,18 +275,21 @@ export const API_KEYS: readonly KeyDef[] = [
     url: 'https://platform.openai.com/api-keys',
     use: 'OpenAI models billed per use, instead of your ChatGPT plan.',
     prefix: 'sk-',
+    more: true,
   },
   {
     provider: 'typesafe',
-    name: 'TypeSafe key for fast event labelling',
+    name: 'TypeSafe key for Jev',
     url: 'https://typesafe.ai',
-    use: 'Optional. TypeSafe’s Jev labels events as benign, unusual or suspicious in under a second, and Vigil uses the local model when there’s no key. Vigil sends it event lines, which include file paths and host names. TypeSafe doesn’t train on API data, but it keeps what it receives under its normal retention policy (zero retention is enterprise-only).',
+    more: true,
+    use: 'Not needed if you use OpenRouter. Only for calling TypeSafe’s Jev directly. Jev labels events as benign, unusual or suspicious in under a second, and Vigil uses the local model when there’s no key. Vigil sends it event lines, which include file paths and host names. TypeSafe doesn’t train on API data, but it keeps what it receives under its normal retention policy (zero retention is enterprise-only).',
   },
   {
     provider: 'custom',
     name: 'Other OpenAI-compatible gateway',
     use: 'Any gateway that speaks the OpenAI API, such as a company proxy. Needs its address too.',
     needsBaseUrl: true,
+    more: true,
   },
 ];
 
