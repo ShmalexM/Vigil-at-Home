@@ -1,0 +1,88 @@
+name: macOS checks
+
+# Checks that need real macOS, on GitHub's hosted Mac runners. Each area owns
+# one job, so a failure points at the right package:
+#   test      full test suite on macOS                  (repo)
+#   app       launches the app and checks the popup     (apps/desktop)
+#   sensors   pf, osquery and Santa checks              (packages/sensors, packages/helper)
+# Add a job here rather than a new workflow. Screenshots and logs go to the
+# run's artifacts. Checks that don't need macOS (the AI escape test, live
+# threat feeds) have their own Linux workflows.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - run: pnpm check
+
+  app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # pnpm can skip Electron's postinstall when the store is restored from
+      # cache, so fetch the binary explicitly.
+      - name: Download Electron
+        working-directory: apps/desktop
+        run: node node_modules/electron/install.js
+      - run: pnpm --filter @vigil/desktop build
+      - name: Check the detection popup
+        working-directory: apps/desktop
+        run: node e2e/popup.e2e.mjs e2e-results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: app-popup-screenshots
+          path: apps/desktop/e2e-results
+
+  sensors:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      # The Mac tests land with the sensors package; skip until they exist.
+      - id: present
+        run: echo "yes=${{ hashFiles('packages/helper/src/helper.mac.test.ts') != '' }}" >> "$GITHUB_OUTPUT"
+      - if: steps.present.outputs.yes == 'true'
+        run: brew install --cask osquery
+      - name: osquery checks
+        if: steps.present.outputs.yes == 'true'
+        run: sudo -E env "PATH=$PATH" VIGIL_MAC_INTEGRATION=1 pnpm --filter @vigil/sensors test:mac
+      - name: helper checks
+        if: always() && steps.present.outputs.yes == 'true'
+        run: sudo -E env "PATH=$PATH" VIGIL_MAC_INTEGRATION=1 pnpm --filter @vigil/helper test:mac
