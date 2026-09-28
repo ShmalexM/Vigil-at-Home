@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd job for the Vigil helper. Installed to /Library/LaunchDaemons by the
+  app (SMAppService.daemon in the signed build). The helper and its Node
+  runtime live in /Library/PrivilegedHelperTools, owned by root, so nothing
+  running as the user can replace what runs as root.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.vigilathome.helper</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Library/PrivilegedHelperTools/vigil-helper</string>
+		<string>daemon</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>StandardErrorPath</key>
+	<string>/Library/Logs/Vigil/helper.log</string>
+	<key>UserName</key>
+	<string>root</string>
+</dict>
+</plist>
