@@ -156,6 +156,28 @@ export class Store {
     };
   }
 
+  /** Oldest first, for replaying rules over history. */
+  *eventsBetween(from: number, to: number): Iterable<SensorEvent> {
+    const rows = this.db
+      .prepare('SELECT body FROM events WHERE ts >= ? AND ts <= ? ORDER BY ts, id')
+      .iterate(from, to) as Iterable<Row>;
+    for (const r of rows) yield SensorEvent.parse(JSON.parse(r.body));
+  }
+
+  /** Opaque JSON kept next to an alert (the detection that raised it). */
+  saveAlertDetection(alertId: string, body: unknown): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO alert_detections (alert_id, body) VALUES (?, ?)')
+      .run(alertId, JSON.stringify(body));
+  }
+
+  getAlertDetection(alertId: string): unknown {
+    const row = this.db
+      .prepare('SELECT body FROM alert_detections WHERE alert_id = ?')
+      .get(alertId) as Row | undefined;
+    return row ? (JSON.parse(row.body) as unknown) : undefined;
+  }
+
   getEvent(id: string): SensorEvent | undefined {
     return this.one(SensorEvent, 'SELECT body FROM events WHERE id = ?', id);
   }

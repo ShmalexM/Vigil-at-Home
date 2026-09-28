@@ -17,7 +17,7 @@ export function registerIpc(core: VigilCore, windows: Windows): void {
     getStatus: () => core.status(),
     listAlerts: (status) => core.store.listAlerts(status ? { status } : {}),
     getAlertDetail: (id) => core.alertDetail(id),
-    decide: (id, input) => core.alerts.decide(id, stripUndefined(input)),
+    decide: (id, input) => core.decide(id, stripUndefined(input)),
     reopen: (id) => core.alerts.reopen(id),
     undoAction: (id) => core.alerts.undo(id),
     approveProposal: (id) => core.alerts.approveProposal(id),
