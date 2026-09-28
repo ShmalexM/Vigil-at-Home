@@ -103,6 +103,23 @@ jobs:
           h="mac-arm64/Vigil at Home.app/Contents/Resources/helper"
           "$h/node" "$h/helper.mjs" santa-profile | grep -q PayloadContent
 
+      # A menu-bar app that fails at startup shows nothing, so launch the packaged
+      # app and check it is still running without errors (alpha.2 lost its tray icon).
+      - name: Check the packaged app starts
+        working-directory: apps/desktop/dist
+        run: |
+          log="$RUNNER_TEMP/launch.log"
+          "mac-arm64/Vigil at Home.app/Contents/MacOS/Vigil at Home" > "$log" 2>&1 &
+          pid=$!
+          sleep 30
+          alive=yes; kill -0 "$pid" 2>/dev/null || alive=no
+          kill "$pid" 2>/dev/null || true
+          cat "$log"
+          test "$alive" = yes || { echo "The app quit during startup"; exit 1; }
+          if grep -Eq 'could not start|UnhandledPromiseRejection|Failed to load image' "$log"; then
+            echo "The app reported a startup error"; exit 1
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: vigil-at-home-mac

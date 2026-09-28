@@ -9,6 +9,8 @@ directories:
 files:
   - out/**
   - package.json
+  # Tray icons, loaded from out/main through `?asset` imports (../../resources/...).
+  - resources/tray*.png
 asar: true
 mac:
   category: public.app-category.utilities

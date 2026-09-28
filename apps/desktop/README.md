@@ -26,6 +26,9 @@ pnpm --filter @vigil/desktop dev                 # empty database
 VIGIL_DEMO=1 pnpm --filter @vigil/desktop dev    # sample rules and one blocked detection
 ```
 
+Development runs keep their data in `~/Library/Application Support/Vigil at Home Dev`,
+apart from the installed app's `Vigil at Home` folder, so demo data never reaches it.
+
 Until the privileged helper is installed, every block runs through
 `DryRunExecutor`: it is logged, shown as "Simulated", and nothing on the Mac
 changes. Settings → Send a test alert shows the popup without any action.
