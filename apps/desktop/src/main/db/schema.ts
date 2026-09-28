@@ -69,4 +69,15 @@ export const migrations: string[] = [
     value TEXT NOT NULL
   );
   `,
+  // What detection made of each event, for the "What Vigil sees" feed.
+  `
+  ALTER TABLE events ADD COLUMN outcome TEXT;
+  `,
+  // The detection behind each alert, so the user's verdict can teach the engine.
+  `
+  CREATE TABLE alert_detections (
+    alert_id TEXT PRIMARY KEY,
+    body TEXT NOT NULL
+  );
+  `,
 ];

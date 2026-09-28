@@ -1,4 +1,5 @@
 import { CircleCheck, TriangleAlert } from 'lucide-react';
+import { useState } from 'react';
 import { useLive, vigil } from '../api';
 import { Card, Chip, LevelPill, SectionHead, SeverityMark, StatusMark } from '../components/ui';
 import { actorLabel, describeRecord, timeAgo } from '../format';
@@ -65,7 +66,9 @@ export function HomeView({ go }: { go: (r: string) => void }) {
                   onClick={() => go(`alerts/${a.id}`)}
                 >
                   <SeverityMark severity={a.severity} />
-                  <span className="grow ellipsis t-h3">{a.title}</span>
+                  <span className="grow clamp-2 t-h3" title={a.title}>
+                    {a.title}
+                  </span>
                   {a.containment === 'active' && <Chip tone="good">Blocked</Chip>}
                   <span className="t-small nowrap">{timeAgo(a.createdAt)}</span>
                 </button>
@@ -87,15 +90,25 @@ export function HomeView({ go }: { go: (r: string) => void }) {
                   <span className="t-h3">{s.name}</span>
                   <span className="t-small">{s.detail}</span>
                 </div>
-                <span className="t-small">
-                  {
+                <span className="col" style={{ gap: 0, alignItems: 'flex-end' }}>
+                  <span className="t-small">
                     {
-                      ok: 'Running',
-                      degraded: 'Degraded',
-                      down: 'Stopped',
-                      not_installed: 'Not installed',
-                    }[s.state]
-                  }
+                      {
+                        ok: 'Running',
+                        degraded: 'Needs attention',
+                        down: 'Stopped',
+                        not_installed: 'Not installed',
+                      }[s.state]
+                    }
+                  </span>
+                  {s.note && (
+                    <span className="t-small" style={{ color: 'var(--tx3)', textAlign: 'right' }}>
+                      {s.note}
+                    </span>
+                  )}
+                  {s.id === 'helper' && s.state !== 'ok' && status.helperInstallable && (
+                    <InstallHelper reinstall={s.state === 'down'} />
+                  )}
                 </span>
               </div>
             ))}
@@ -129,5 +142,36 @@ export function HomeView({ go }: { go: (r: string) => void }) {
         )}
       </Card>
     </div>
+  );
+}
+
+/** Installs the helper through macOS's own password dialog. */
+function InstallHelper({ reinstall }: { reinstall: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    const r = await vigil.installHelper();
+    setBusy(false);
+    if (!r.ok && r.error !== 'cancelled') setError(r.error ?? 'Install failed');
+  };
+  return (
+    <>
+      <button
+        type="button"
+        className="btn sm"
+        disabled={busy}
+        title="macOS asks for your password once"
+        onClick={() => void run()}
+      >
+        {busy ? 'Installing…' : reinstall ? 'Reinstall helper' : 'Install helper'}
+      </button>
+      {error && (
+        <span className="t-small" style={{ color: 'var(--poor)', textAlign: 'right' }}>
+          {error}
+        </span>
+      )}
+    </>
   );
 }

@@ -1,6 +1,7 @@
 import { app, ipcMain, type IpcMainInvokeEvent } from 'electron';
 import type { z } from 'zod';
 import { calls, type CallName, type CallResults } from '../shared/ipc.js';
+import type { HelperInstallResult } from '../shared/ipc.js';
 import type { VigilCore } from './service.js';
 import { sendTestAlert } from './test-alert.js';
 import { rendererOrigin, type Windows } from './windows.js';
@@ -11,13 +12,27 @@ type Handlers = {
   ) => CallResults[K] | Promise<CallResults[K]>;
 };
 
+export interface HelperControl {
+  install(): Promise<HelperInstallResult>;
+  uninstall(): Promise<HelperInstallResult>;
+}
+
+const noHelper: HelperControl = {
+  install: async () => ({ ok: false, error: 'The helper only runs on macOS' }),
+  uninstall: async () => ({ ok: false, error: 'The helper only runs on macOS' }),
+};
+
 /** Register one validated handler per call. Arguments are parsed with zod before use. */
-export function registerIpc(core: VigilCore, windows: Windows): void {
+export function registerIpc(
+  core: VigilCore,
+  windows: Windows,
+  helper: HelperControl = noHelper,
+): void {
   const h: Handlers = {
     getStatus: () => core.status(),
     listAlerts: (status) => core.store.listAlerts(status ? { status } : {}),
     getAlertDetail: (id) => core.alertDetail(id),
-    decide: (id, input) => core.alerts.decide(id, stripUndefined(input)),
+    decide: (id, input) => core.decide(id, stripUndefined(input)),
     reopen: (id) => core.alerts.reopen(id),
     undoAction: (id) => core.alerts.undo(id),
     approveProposal: (id) => core.alerts.approveProposal(id),
@@ -25,6 +40,8 @@ export function registerIpc(core: VigilCore, windows: Windows): void {
     listRules: () => core.rules(),
     setRuleMode: (id: string, mode) => core.setRuleMode(id, mode),
     listActions: () => core.store.listActions({ limit: 300 }),
+    listEvents: (q) => core.store.listEventViews(stripUndefined(q)),
+    eventStats: () => core.eventStats(),
     getSettings: () => ({
       theme: core.theme(),
       dataDir: app.getPath('userData'),
@@ -39,6 +56,8 @@ export function registerIpc(core: VigilCore, windows: Windows): void {
     closePopup: () => windows.hidePopup(),
     fitPopup: (height) => windows.fitPopup(height),
     quit: () => app.quit(),
+    installHelper: () => helper.install(),
+    uninstallHelper: () => helper.uninstall(),
   };
 
   for (const name of Object.keys(calls) as CallName[]) {

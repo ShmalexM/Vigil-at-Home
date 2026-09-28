@@ -23,24 +23,24 @@ check reports anything over budget and fails only on a clear overrun (the
 Activity Monitor shows (physical footprint), summed over all of Vigil's
 processes.
 
-| Part                                            | Measure                       | Budget                                                        |
-| ----------------------------------------------- | ----------------------------- | ------------------------------------------------------------- |
-| App, nothing open                               | CPU                           | ≤ 0.5%                                                        |
-|                                                 | Wakeups                       | ≤ 5 per second                                                |
-|                                                 | Memory                        | ≤ 180 MB                                                      |
-| App, main window open                           | Memory                        | ≤ 400 MB                                                      |
-| App, after windows close                        | Memory                        | ≤ 200 MB (closed windows are released)                        |
-| App, storing a burst of 50 events/s (compiling) | CPU                           | ≤ 3%                                                          |
-|                                                 | Disk written per 1,000 events | ≤ 2 MB                                                        |
-|                                                 | Disk used per 1,000 events    | ≤ 700 KB                                                      |
-| Start-up                                        | Launch to menu-bar item       | ≤ 3 s                                                         |
-| Menu-bar popover                                | First open / reopen           | ≤ 800 ms / ≤ 150 ms                                           |
-| osquery (Vigil's schedule)                      | CPU                           | ≤ 1.5% (its watchdog stops it at 10%)                         |
-|                                                 | Memory                        | ≤ 80 MB (watchdog: 200 MB)                                    |
-| Reading the sensor logs                         | CPU / wakeups                 | ≤ 0.1% / ≤ 2 per second                                       |
-| Local classifier (optional)                     | CPU, averaged over an hour    | ≤ 2%, only on mains power and when the Mac is not busy        |
-|                                                 | Memory while loaded           | ≤ 0.6 GB on 8 GB Macs, ≤ 1.2 GB otherwise; unloaded when idle |
-| Database                                        | Size on disk                  | ≤ 1 GB, oldest unreferenced events dropped first              |
+| Part                                        | Measure                       | Budget                                                        |
+| ------------------------------------------- | ----------------------------- | ------------------------------------------------------------- |
+| App, nothing open                           | CPU                           | ≤ 0.5%                                                        |
+|                                             | Wakeups                       | ≤ 5 per second                                                |
+|                                             | Memory                        | ≤ 180 MB                                                      |
+| App, main window open                       | Memory                        | ≤ 400 MB                                                      |
+| App, after windows close                    | Memory                        | ≤ 200 MB (closed windows are released)                        |
+| App, handling 50 events/s (rules + storage) | CPU                           | ≤ 3%                                                          |
+|                                             | Disk written per 1,000 events | ≤ 2 MB                                                        |
+|                                             | Disk used per 1,000 events    | ≤ 700 KB                                                      |
+| Start-up                                    | Launch to menu-bar item       | ≤ 3 s                                                         |
+| Menu-bar popover                            | First open / reopen           | ≤ 800 ms / ≤ 150 ms                                           |
+| osquery (Vigil's schedule)                  | CPU                           | ≤ 1.5% (its watchdog stops it at 10%)                         |
+|                                             | Memory                        | ≤ 80 MB (watchdog: 200 MB)                                    |
+| Reading the sensor logs                     | CPU / wakeups                 | ≤ 0.1% / ≤ 2 per second                                       |
+| Local classifier (optional)                 | CPU, averaged over an hour    | ≤ 2%, only on mains power and when the Mac is not busy        |
+|                                             | Memory while loaded           | ≤ 0.6 GB on 8 GB Macs, ≤ 1.2 GB otherwise; unloaded when idle |
+| Database                                    | Size on disk                  | ≤ 1 GB, oldest unreferenced events dropped first              |
 
 Blocking is outside the budget on purpose: a block never waits for anything on
 this page, and nothing here ever slows or pauses it.
@@ -131,7 +131,7 @@ before the popover was kept loaded.
 | Memory, main window open             | 150 MB        | 122 MB        | 400 MB         |
 | Memory after windows close           | 65 MB         | 59 MB         | 200 MB         |
 | Popover, first open / reopen         | 1,864 / 11 ms | 1,064 / 55 ms | 800 / 150 ms   |
-| CPU storing 50 events/s              | 1.15%         | 1.22%         | 3%             |
+| CPU handling 50 events/s             | 1.15%         | 1.22%         | 3%             |
 | Disk used / written per 1,000 events | 560 / 696 KB  | 557 / 672 KB  | 700 / 2,000 KB |
 
 The first popover open was over budget, so the popover is now loaded two

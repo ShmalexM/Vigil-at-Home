@@ -280,7 +280,7 @@ try {
   results.closed = await measure(pid, 20);
 
   // Steady event stream, as while compiling or running tests: every event
-  // goes into the event history.
+  // goes through the rules and into the event history.
   const dbBefore = dbMb(userData);
   results.load = {
     eventsPerSecond: LOAD_RATE,
@@ -288,8 +288,12 @@ try {
       app.evaluate(
         async (_e, { rate, seconds }) => {
           const { core } = globalThis.vigil;
-          // Before the batched event log existed, every event was its own commit.
-          const add = core.events ? (e) => core.events.add(e) : (e) => core.store.insertEvent(e);
+          // The whole path a sensor event takes: detection, then storage.
+          const add = core.handleEvent
+            ? (e) => void core.handleEvent(e)
+            : core.events
+              ? (e) => core.events.add(e)
+              : (e) => core.store.insertEvent(e);
           const end = Date.now() + seconds * 1000;
           let n = 0;
           while (Date.now() < end) {

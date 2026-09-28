@@ -10,6 +10,14 @@ import {
   type RuleMode,
 } from '@vigil/core';
 import type { z } from 'zod';
+import {
+  EVENT_GROUPS,
+  EventOutcome,
+  type EventGroup,
+  type EventQuery,
+  type EventStats,
+  type EventView,
+} from '../../shared/ipc.js';
 import { migrations } from './schema.js';
 
 type Row = { body: string };
@@ -81,8 +89,8 @@ export class Store {
 
   // ---------------------------------------------------------------- events
 
-  insertEvent(event: SensorEvent): void {
-    this.writeEvent(SensorEvent.parse(event));
+  insertEvent(event: SensorEvent, outcome?: EventOutcome): void {
+    this.writeEvent(SensorEvent.parse(event), outcome && EventOutcome.parse(outcome));
   }
 
   /**
@@ -90,22 +98,132 @@ export class Store {
    * Invalid events are skipped rather than failing the batch. Returns how
    * many were skipped.
    */
-  insertEvents(events: readonly SensorEvent[]): number {
+  insertEvents(entries: readonly { event: SensorEvent; outcome?: EventOutcome }[]): number {
     let skipped = 0;
     this.tx(() => {
-      for (const event of events) {
-        const e = SensorEvent.safeParse(event);
-        if (e.success) this.writeEvent(e.data);
+      for (const entry of entries) {
+        const e = SensorEvent.safeParse(entry.event);
+        const o = entry.outcome ? EventOutcome.safeParse(entry.outcome) : undefined;
+        if (e.success && (!o || o.success)) this.writeEvent(e.data, o?.data);
         else skipped++;
       }
     });
     return skipped;
   }
 
-  private writeEvent(e: SensorEvent): void {
+  /**
+   * An event may already be stored (an alert saves its events at once, with
+   * the sensor's raw record); then only its outcome is filled in.
+   */
+  private writeEvent(e: SensorEvent, outcome?: EventOutcome): void {
     this.stmt(
-      'INSERT OR IGNORE INTO events (id, ts, kind, source, body) VALUES (?, ?, ?, ?, ?)',
-    ).run(e.id, e.ts, e.kind, e.source, JSON.stringify(e));
+      `INSERT INTO events (id, ts, kind, source, body, outcome) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET outcome = COALESCE(excluded.outcome, outcome)`,
+    ).run(
+      e.id,
+      e.ts,
+      e.kind,
+      e.source,
+      JSON.stringify(e),
+      outcome ? JSON.stringify(outcome) : null,
+    );
+  }
+
+  /** Newest first, for the feed. */
+  listEventViews(q: EventQuery = {}): EventView[] {
+    const where: string[] = [];
+    const args: SQLInputValue[] = [];
+    if (q.group) {
+      const kinds = EVENT_GROUPS[q.group];
+      where.push(`kind IN (${kinds.map(() => '?').join(',')})`);
+      args.push(...kinds);
+    }
+    if (q.matchedOnly) where.push(`json_array_length(outcome, '$.matches') > 0`);
+    if (q.before !== undefined) {
+      where.push('ts < ?');
+      args.push(q.before);
+    }
+    if (q.text) {
+      where.push(`body LIKE ? ESCAPE '\\'`);
+      args.push(`%${q.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+    }
+    const sql = `SELECT body, outcome FROM events ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+      ORDER BY ts DESC, id DESC LIMIT ?`;
+    args.push(q.limit ?? 200);
+    const rows = this.db.prepare(sql).all(...args) as { body: string; outcome: string | null }[];
+    return rows.map((r) => ({
+      event: SensorEvent.parse(JSON.parse(r.body)),
+      outcome: r.outcome ? EventOutcome.parse(JSON.parse(r.outcome)) : null,
+    }));
+  }
+
+  eventStats(since: number): Omit<EventStats, 'retentionDays'> {
+    const byKind = this.db
+      .prepare(
+        `SELECT kind, COUNT(*) AS n,
+           SUM(CASE WHEN json_array_length(outcome, '$.matches') > 0 THEN 1 ELSE 0 END) AS matched
+         FROM events WHERE ts >= ? GROUP BY kind`,
+      )
+      .all(since) as { kind: string; n: number; matched: number }[];
+    const byGroup = Object.fromEntries(
+      Object.keys(EVENT_GROUPS).map((g) => [g, 0]),
+    ) as EventStats['byGroup'];
+    let lastHour = 0;
+    let matchedLastHour = 0;
+    for (const row of byKind) {
+      lastHour += row.n;
+      matchedLastHour += row.matched;
+      const group = (Object.keys(EVENT_GROUPS) as EventGroup[]).find((g) =>
+        (EVENT_GROUPS[g] as string[]).includes(row.kind),
+      );
+      if (group) byGroup[group] += row.n;
+    }
+    const programs = this.db
+      .prepare(
+        `SELECT COUNT(DISTINCT json_extract(body, '$.process.path')) AS n
+         FROM events WHERE kind = 'process.exec' AND ts >= ?`,
+      )
+      .get(since) as { n: number };
+    const newest = this.db.prepare('SELECT MAX(ts) AS ts FROM events').get() as {
+      ts: number | null;
+    };
+    return {
+      lastHour,
+      matchedLastHour,
+      programsLastHour: programs.n,
+      byGroup,
+      newest: newest.ts,
+    };
+  }
+
+  /** When this sensor last reported anything, or null if never. */
+  lastEventAt(source: string): number | null {
+    const row = this.stmt('SELECT MAX(ts) AS ts FROM events WHERE source = ?').get(source) as {
+      ts: number | null;
+    };
+    return row.ts;
+  }
+
+  /** Oldest first, for replaying rules over history. */
+  *eventsBetween(from: number, to: number): Iterable<SensorEvent> {
+    const rows = this.db
+      .prepare('SELECT body FROM events WHERE ts >= ? AND ts <= ? ORDER BY ts, id')
+      .iterate(from, to) as Iterable<Row>;
+    for (const r of rows) yield SensorEvent.parse(JSON.parse(r.body));
+  }
+
+  /** Opaque JSON kept next to an alert (the detection that raised it). */
+  saveAlertDetection(alertId: string, body: unknown): void {
+    this.db
+      .prepare('INSERT OR REPLACE INTO alert_detections (alert_id, body) VALUES (?, ?)')
+      .run(alertId, JSON.stringify(body));
+  }
+
+  getAlertDetection(alertId: string): unknown {
+    const row = this.db
+      .prepare('SELECT body FROM alert_detections WHERE alert_id = ?')
+      .get(alertId) as Row | undefined;
+    return row ? (JSON.parse(row.body) as unknown) : undefined;
   }
 
   getEvent(id: string): SensorEvent | undefined {

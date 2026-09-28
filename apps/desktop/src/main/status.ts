@@ -7,7 +7,10 @@ export interface SensorHealth {
   id: string;
   name: string;
   state: 'ok' | 'degraded' | 'down' | 'not_installed';
+  /** What the layer does, e.g. "Blocks programs before they run". */
   detail?: string;
+  /** Why it is in this state, when that isn't obvious, e.g. "No events for 12 minutes". */
+  note?: string;
 }
 
 export interface Status {
@@ -54,7 +57,7 @@ export function computeStatus(
       reasons.push(`${s.name} is not installed`);
     } else if (s.state === 'degraded') {
       raise('fair');
-      reasons.push(s.detail ?? `${s.name} is degraded`);
+      reasons.push(s.note ? `${s.name}: ${s.note}` : `${s.name} is degraded`);
     }
   }
   return { level, needsYou, reasons };

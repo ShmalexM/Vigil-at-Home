@@ -95,7 +95,7 @@ describe('Store', () => {
       ...makeExec(`/usr/bin/tool${i}`),
       process: { pid: i, path: `/usr/bin/tool${i}`, args: ['x'.repeat(200)] },
     }));
-    expect(s.insertEvents(many)).toBe(0);
+    expect(s.insertEvents(many.map((event) => ({ event })))).toBe(0);
     const full = s.usedBytes();
     const removed = s.pruneEventsToSize(full / 2);
     expect(removed).toBeGreaterThan(0);
@@ -103,5 +103,53 @@ describe('Store', () => {
     expect(s.getEvent(kept.id)).toBeDefined();
     // The newest events stay.
     expect(s.getEvent(many.at(-1)!.id)).toBeDefined();
+  });
+
+  it('lists the event feed with filters, paging and outcomes', () => {
+    const s = memoryStore();
+    const a = { ...makeExec('/Applications/Safari.app/Contents/MacOS/Safari'), ts: 1000 };
+    const b = { ...makeExec('/tmp/100%_evil'), ts: 2000 };
+    s.insertEvent(a, { checked: 3, matches: [] });
+    s.insertEvent(b, {
+      checked: 3,
+      matches: [{ ruleId: 'r1', ruleName: 'Rule one', mode: 'alert' }],
+    });
+    s.insertEvent({
+      id: 'net1',
+      ts: 3000,
+      source: 'osquery',
+      kind: 'network.connection',
+      direction: 'outbound',
+      protocol: 'tcp',
+      remoteAddress: '1.2.3.4',
+    });
+
+    expect(s.listEventViews().map((v) => v.event.ts)).toEqual([3000, 2000, 1000]);
+    expect(s.listEventViews({ group: 'network' })).toHaveLength(1);
+    expect(s.listEventViews({ matchedOnly: true }).map((v) => v.event.id)).toEqual([b.id]);
+    expect(s.listEventViews({ text: 'safari' }).map((v) => v.event.id)).toEqual([a.id]);
+    // % and _ are literal, not wildcards.
+    expect(s.listEventViews({ text: '100%_' }).map((v) => v.event.id)).toEqual([b.id]);
+    expect(s.listEventViews({ text: '%' }).map((v) => v.event.id)).toEqual([b.id]);
+    expect(s.listEventViews({ before: 2000, limit: 5 }).map((v) => v.event.id)).toEqual([a.id]);
+    expect(s.listEventViews({ group: 'network' })[0]?.outcome).toBeNull();
+
+    const stats = s.eventStats(1500);
+    expect(stats).toMatchObject({
+      lastHour: 2,
+      matchedLastHour: 1,
+      programsLastHour: 1,
+      newest: 3000,
+    });
+    expect(stats.byGroup).toMatchObject({ programs: 1, network: 1, files: 0 });
+  });
+
+  it('fills in the outcome of an event an alert already stored, keeping its raw record', () => {
+    const s = memoryStore();
+    const e = { ...makeExec(), raw: { line: 'santa' } };
+    s.insertEvent(e);
+    s.insertEvents([{ event: { ...e, raw: undefined }, outcome: { checked: 2, matches: [] } }]);
+    expect(s.getEvent(e.id)).toMatchObject({ raw: { line: 'santa' } });
+    expect(s.listEventViews()[0]?.outcome).toEqual({ checked: 2, matches: [] });
   });
 });

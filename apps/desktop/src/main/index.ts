@@ -2,11 +2,15 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { app, powerMonitor } from 'electron';
+import type { HelperInstallResult } from '../shared/ipc.js';
 import { Store } from './db/store.js';
-import { seedDemo } from './demo.js';
-import { DryRunExecutor } from './executor.js';
+import { seedDemo, startDemoFeed } from './demo.js';
+import { Detector } from './detection.js';
+import { runHelperScript, helperBundleDir } from './helper-install.js';
+import { HelperLink } from './helper.js';
 import { registerIpc } from './ipc.js';
 import { PowerPolicy } from './power.js';
+import { HEALTH_CHECK_MS, macProbe, reportHealth, type HelperSensors } from './sensor-health.js';
 import { VigilCore } from './service.js';
 import { Windows } from './windows.js';
 
@@ -29,13 +33,36 @@ function start(): void {
 
   const dataDir = app.getPath('userData');
   mkdirSync(dataDir, { recursive: true });
-  const store = new Store(new DatabaseSync(join(dataDir, 'vigil.db')));
+  const db = new DatabaseSync(join(dataDir, 'vigil.db'));
+  const store = new Store(db);
 
-  // Until the privileged helper is installed, blocks are simulated and the UI says so.
-  const core = new VigilCore(store, new DryRunExecutor(), true);
+  // Actions go to the privileged helper. Until it is installed and answering,
+  // they are simulated and the UI says so.
+  const helper = new HelperLink();
+  const core = new VigilCore(store, helper, true);
+  core.detector = new Detector(db, store, core.alerts, (e, o) => core.ingest(e, o), {
+    installedAt: core.installedAt(),
+    // The .app bundle when packaged; the Electron binary in development.
+    selfPaths: [app.isPackaged ? join(process.execPath, '../../..') : process.execPath],
+  });
   const windows = new Windows();
+  const probe = macProbe(
+    (source) => store.lastEventAt(source),
+    () => helper.state,
+    async () => (await helper.query<{ sensors?: HelperSensors }>('helper.status'))?.sensors ?? null,
+  );
 
-  registerIpc(core, windows);
+  core.helperInstallable = process.platform === 'darwin' && helperBundleDir() !== null;
+  // Installing or removing the helper shows macOS's own password dialog.
+  const afterHelperScript = async (r: HelperInstallResult) => {
+    await helper.reconnect();
+    await reportHealth(core.sensors, probe);
+    return r;
+  };
+  registerIpc(core, windows, {
+    install: async () => afterHelperScript(await runHelperScript('install')),
+    uninstall: async () => afterHelperScript(await runHelperScript('uninstall')),
+  });
   windows.createTray();
   windows.applyTheme(core.theme());
   // After start-up settles, so the menu-bar item appears first.
@@ -48,6 +75,7 @@ function start(): void {
   core.alerts.on('changed', refresh);
   core.sensors.on('changed', refresh);
   core.alerts.on('popup', (alert) => windows.showPopup(alert.id));
+  core.feed.on('events', (n) => windows.broadcast('events', n));
   refresh();
 
   // Routine work slows on battery and waits while the Mac is hot or asleep;
@@ -57,16 +85,39 @@ function start(): void {
   power.on('change', (mode) => core.applyPower(mode));
   core.start();
 
+  // Sensor events arrive through the helper, which reads Santa's and osquery's logs as root.
+  helper.on('event', (e) => void core.handleEvent(e));
+  const checkHealth = () => reportHealth(core.sensors, probe);
+  helper.on('state', () => void checkHealth());
+  if (process.platform === 'darwin') {
+    helper.start();
+    core.scheduler.every(
+      'sensor-health',
+      HEALTH_CHECK_MS,
+      async () => {
+        await helper.ping();
+        await checkHealth();
+      },
+      true,
+    );
+  }
+
   app.on('second-instance', () => windows.openMain());
   app.on('activate', () => windows.openMain());
   // Keep running in the menu bar when windows close.
   app.on('window-all-closed', () => {});
   app.on('before-quit', () => {
+    helper.stop();
     core.stop();
     store.close();
   });
 
-  if (!app.isPackaged && process.env['VIGIL_DEMO']) void seedDemo(core);
+  if (!app.isPackaged && process.env['VIGIL_DEMO']) {
+    void seedDemo(core).then(() => {
+      const stop = startDemoFeed(core);
+      app.on('before-quit', stop);
+    });
+  }
   if (perf) Object.assign(globalThis, { vigil: { core, windows, power, readyAt: Date.now() } });
   else if (!app.isPackaged) windows.openMain();
 }

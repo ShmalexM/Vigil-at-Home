@@ -1,4 +1,5 @@
 import type { SensorEvent } from '@vigil/core';
+import type { EventOutcome } from '../shared/ipc.js';
 import type { Store } from './db/store.js';
 
 export interface EventLogOptions {
@@ -22,7 +23,7 @@ export interface EventLogOptions {
  * Events an alert refers to are written straight away by AlertService.
  */
 export class EventLog {
-  private pending: SensorEvent[] = [];
+  private pending: { event: SensorEvent; outcome?: EventOutcome }[] = [];
   private timer: ReturnType<typeof setTimeout> | undefined;
   private dropped = 0;
   private invalid = 0;
@@ -39,7 +40,7 @@ export class EventLog {
     this.maxPending = opts.maxPending ?? 20_000;
   }
 
-  add(event: SensorEvent): void {
+  add(event: SensorEvent, outcome?: EventOutcome): void {
     if (this.pending.length >= this.maxPending) {
       this.dropped++;
       return;
@@ -47,7 +48,7 @@ export class EventLog {
     // The sensor's raw record roughly doubles an event's size and no rule
     // reads it. It is kept only on events an alert refers to.
     const { raw: _raw, ...slim } = event;
-    this.pending.push(slim as SensorEvent);
+    this.pending.push({ event: slim as SensorEvent, ...(outcome ? { outcome } : {}) });
     if (this.pending.length >= this.maxBatch) this.flush();
     else this.timer ??= setTimeout(() => this.flush(), this.flushMs);
   }

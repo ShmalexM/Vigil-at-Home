@@ -15,7 +15,7 @@ const LIMITS = {
   'popover.warmMs': { target: 150, hard: 600, label: 'Popover, reopen', unit: 'ms' },
   'window.memMb': { target: 400, hard: 700, label: 'Memory, main window open', unit: 'MB' },
   'closed.memMb': { target: 200, hard: 400, label: 'Memory after windows close', unit: 'MB' },
-  'load.cpuPct': { target: 3, hard: 12, label: 'CPU storing 50 events/s', unit: '%' },
+  'load.cpuPct': { target: 3, hard: 12, label: 'CPU handling 50 events/s', unit: '%' },
   'load.storedKbPerThousandEvents': {
     target: 700,
     hard: 2000,

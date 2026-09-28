@@ -11,6 +11,8 @@ export const CALL_NAMES = [
   'listRules',
   'setRuleMode',
   'listActions',
+  'listEvents',
+  'eventStats',
   'getSettings',
   'setTheme',
   'sendTestAlert',
@@ -18,6 +20,8 @@ export const CALL_NAMES = [
   'closePopup',
   'fitPopup',
   'quit',
+  'installHelper',
+  'uninstallHelper',
 ] as const;
 
-export const PUSH_NAMES = ['changed', 'popup', 'navigate', 'theme'] as const;
+export const PUSH_NAMES = ['changed', 'popup', 'navigate', 'theme', 'events'] as const;
