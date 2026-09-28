@@ -6,6 +6,8 @@
 // serverAuth EKU plus a subjectAltName, so the leaf gets 397 days and is
 // renewed by the helper well before it expires. Keys are written 0600 and
 // the helper runs as root, so nothing running as the user can read them.
+// The folder and the certificates stay world-readable: santasyncservice runs
+// as nobody and must read ca.pem, or every sync fails with a TLS error.
 //
 // Uses /usr/bin/openssl (LibreSSL on macOS), driven only with config files so
 // it works on LibreSSL versions without -addext.
@@ -71,8 +73,8 @@ export async function ensureSyncTls(
   paths: SyncTlsPaths,
   opensslBin = '/usr/bin/openssl',
 ): Promise<boolean> {
-  mkdirSync(paths.dir, { recursive: true, mode: 0o700 });
-  chmodSync(paths.dir, 0o700);
+  mkdirSync(paths.dir, { recursive: true, mode: 0o755 });
+  chmodSync(paths.dir, 0o755);
   let changed = false;
   const work = mkdtempSync(join(tmpdir(), 'vigil-tls-'));
   try {
@@ -194,5 +196,10 @@ export async function ensureSyncTls(
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
+  // Also repairs folders written by earlier versions, which were 0700.
+  chmodSync(paths.caCert, 0o644);
+  chmodSync(paths.serverCert, 0o644);
+  chmodSync(paths.caKey, 0o600);
+  chmodSync(paths.serverKey, 0o600);
   return changed;
 }
