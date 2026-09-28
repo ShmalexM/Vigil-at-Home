@@ -43,6 +43,13 @@ export const CODEX_DISABLED_FEATURES = [
   'in_app_browser',
   'computer_use',
   'multi_agent',
+  'multi_agent_v2',
+  'code_mode',
+  'code_mode_only',
+  'default_mode_request_user_input',
+  'request_permissions_tool',
+  'sleep_tool',
+  'realtime_conversation',
   'hooks',
   'image_generation',
   'view_image',
@@ -56,7 +63,16 @@ export const CODEX_DISABLED_FEATURES = [
 ] as const;
 
 export function codexAppServerArgs(): string[] {
-  const args = ['app-server', '-c', 'web_search="disabled"', '-c', 'history.persistence="none"'];
+  const args = [
+    'app-server',
+    '-c',
+    'web_search="disabled"',
+    '-c',
+    'history.persistence="none"',
+    // Otherwise the model is offered a tool to ask the user questions mid-run.
+    '-c',
+    'tools.experimental_request_user_input.enabled=false',
+  ];
   for (const feature of CODEX_DISABLED_FEATURES) args.push('--disable', feature);
   return args;
 }
