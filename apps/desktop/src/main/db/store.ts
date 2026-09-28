@@ -1,4 +1,4 @@
-import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
+import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 import {
   ActionProposal,
   ActionRecord,
@@ -19,9 +19,27 @@ type Row = { body: string };
  * so it runs in tests and in any worker. Every read is validated with zod.
  */
 export class Store {
+  private readonly statements = new Map<string, StatementSync>();
+
   constructor(private readonly db: DatabaseSync) {
-    db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 3000;');
+    db.exec(`
+      PRAGMA journal_mode = WAL;
+      -- In WAL mode NORMAL is still crash-safe for the database; it only skips
+      -- the fsync per commit (a power cut can lose the last second of events).
+      PRAGMA synchronous = NORMAL;
+      -- Keep the WAL from staying large after a burst.
+      PRAGMA journal_size_limit = ${4 * 1024 * 1024};
+      PRAGMA foreign_keys = ON;
+      PRAGMA busy_timeout = 3000;
+    `);
     this.migrate();
+  }
+
+  /** Prepared once and reused: preparing costs more than most of these queries. */
+  private stmt(sql: string): StatementSync {
+    let s = this.statements.get(sql);
+    if (!s) this.statements.set(sql, (s = this.db.prepare(sql)));
+    return s;
   }
 
   private migrate(): void {
@@ -49,9 +67,7 @@ export class Store {
   }
 
   private all<S extends z.ZodType>(schema: S, sql: string, ...args: SQLInputValue[]): z.infer<S>[] {
-    return (this.db.prepare(sql).all(...args) as Row[]).map((r) =>
-      schema.parse(JSON.parse(r.body)),
-    );
+    return (this.stmt(sql).all(...args) as Row[]).map((r) => schema.parse(JSON.parse(r.body)));
   }
 
   private one<S extends z.ZodType>(
@@ -59,17 +75,37 @@ export class Store {
     sql: string,
     ...args: SQLInputValue[]
   ): z.infer<S> | undefined {
-    const row = this.db.prepare(sql).get(...args) as Row | undefined;
+    const row = this.stmt(sql).get(...args) as Row | undefined;
     return row ? schema.parse(JSON.parse(row.body)) : undefined;
   }
 
   // ---------------------------------------------------------------- events
 
   insertEvent(event: SensorEvent): void {
-    const e = SensorEvent.parse(event);
-    this.db
-      .prepare('INSERT OR IGNORE INTO events (id, ts, kind, source, body) VALUES (?, ?, ?, ?, ?)')
-      .run(e.id, e.ts, e.kind, e.source, JSON.stringify(e));
+    this.writeEvent(SensorEvent.parse(event));
+  }
+
+  /**
+   * Many events in one transaction: one disk flush instead of one per event.
+   * Invalid events are skipped rather than failing the batch. Returns how
+   * many were skipped.
+   */
+  insertEvents(events: readonly SensorEvent[]): number {
+    let skipped = 0;
+    this.tx(() => {
+      for (const event of events) {
+        const e = SensorEvent.safeParse(event);
+        if (e.success) this.writeEvent(e.data);
+        else skipped++;
+      }
+    });
+    return skipped;
+  }
+
+  private writeEvent(e: SensorEvent): void {
+    this.stmt(
+      'INSERT OR IGNORE INTO events (id, ts, kind, source, body) VALUES (?, ?, ?, ?, ?)',
+    ).run(e.id, e.ts, e.kind, e.source, JSON.stringify(e));
   }
 
   getEvent(id: string): SensorEvent | undefined {
@@ -78,11 +114,11 @@ export class Store {
 
   getEvents(ids: readonly string[]): SensorEvent[] {
     if (ids.length === 0) return [];
-    const marks = ids.map(() => '?').join(',');
+    // One statement for any number of ids, so the statement cache stays small.
     return this.all(
       SensorEvent,
-      `SELECT body FROM events WHERE id IN (${marks}) ORDER BY ts`,
-      ...ids,
+      'SELECT body FROM events WHERE id IN (SELECT value FROM json_each(?)) ORDER BY ts',
+      JSON.stringify(ids),
     );
   }
 
@@ -107,26 +143,49 @@ export class Store {
 
   /** Delete events older than `before` that no alert references. Returns rows removed. */
   pruneEvents(before: number): number {
-    const res = this.db
-      .prepare(
-        `DELETE FROM events WHERE ts < ? AND id NOT IN (
-           SELECT j.value FROM alerts, json_each(alerts.body, '$.eventIds') AS j)`,
-      )
-      .run(before);
+    const res = this.stmt(
+      `DELETE FROM events WHERE ts < ? AND id NOT IN (
+         SELECT j.value FROM alerts, json_each(alerts.body, '$.eventIds') AS j)`,
+    ).run(before);
     return Number(res.changes);
+  }
+
+  /** Bytes the database holds, not counting free pages SQLite will reuse. */
+  usedBytes(): number {
+    const n = (sql: string) => Number(Object.values(this.db.prepare(sql).get() ?? {})[0] ?? 0);
+    return (n('PRAGMA page_count') - n('PRAGMA freelist_count')) * n('PRAGMA page_size');
+  }
+
+  /**
+   * Keep the database under `maxBytes` by deleting the oldest events no alert
+   * references, a slice at a time. Freed pages are reused by new events, so
+   * the file stops growing at about the cap. Returns rows removed.
+   */
+  pruneEventsToSize(maxBytes: number): number {
+    let removed = 0;
+    while (this.usedBytes() > maxBytes) {
+      const { n } = this.stmt('SELECT COUNT(*) AS n FROM events').get() as { n: number };
+      if (Number(n) === 0) break;
+      const cutoff = this.stmt('SELECT ts FROM events ORDER BY ts LIMIT 1 OFFSET ?').get(
+        Math.max(1, Math.floor(Number(n) / 20)),
+      ) as { ts: number } | undefined;
+      const gone = this.pruneEvents((cutoff?.ts ?? Number.MAX_SAFE_INTEGER) + 1);
+      removed += gone;
+      if (gone === 0) break;
+    }
+    if (removed > 0) this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    return removed;
   }
 
   // ---------------------------------------------------------------- rules
 
   upsertRule(rule: Rule): void {
     const r = Rule.parse(rule);
-    this.db
-      .prepare(
-        `INSERT INTO rules (id, version, mode, origin, updated_at, body) VALUES (?, ?, ?, ?, ?, ?)
+    this.stmt(
+      `INSERT INTO rules (id, version, mode, origin, updated_at, body) VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET version = excluded.version, mode = excluded.mode,
            origin = excluded.origin, updated_at = excluded.updated_at, body = excluded.body`,
-      )
-      .run(r.id, r.version, r.mode, r.origin, r.updatedAt, JSON.stringify(r));
+    ).run(r.id, r.version, r.mode, r.origin, r.updatedAt, JSON.stringify(r));
   }
 
   getRule(id: string): Rule | undefined {
@@ -141,18 +200,16 @@ export class Store {
 
   insertRuleMatch(match: RuleMatch): void {
     const m = RuleMatch.parse(match);
-    this.db
-      .prepare(
-        'INSERT INTO rule_matches (id, rule_id, mode, ts, alert_id, body) VALUES (?, ?, ?, ?, ?, ?)',
-      )
-      .run(m.id, m.ruleId, m.mode, m.ts, m.alertId ?? null, JSON.stringify(m));
+    this.stmt(
+      'INSERT INTO rule_matches (id, rule_id, mode, ts, alert_id, body) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run(m.id, m.ruleId, m.mode, m.ts, m.alertId ?? null, JSON.stringify(m));
   }
 
   /** Match counts per rule since `since`, for the shadow review screen. */
   ruleMatchCounts(since: number): Map<string, number> {
-    const rows = this.db
-      .prepare('SELECT rule_id, COUNT(*) AS n FROM rule_matches WHERE ts >= ? GROUP BY rule_id')
-      .all(since) as { rule_id: string; n: number }[];
+    const rows = this.stmt(
+      'SELECT rule_id, COUNT(*) AS n FROM rule_matches WHERE ts >= ? GROUP BY rule_id',
+    ).all(since) as { rule_id: string; n: number }[];
     return new Map(rows.map((r) => [r.rule_id, Number(r.n)]));
   }
 
@@ -160,14 +217,12 @@ export class Store {
 
   saveAlert(alert: Alert): Alert {
     const a = Alert.parse(alert);
-    this.db
-      .prepare(
-        `INSERT INTO alerts (id, created_at, updated_at, status, severity, rule_id, body)
+    this.stmt(
+      `INSERT INTO alerts (id, created_at, updated_at, status, severity, rule_id, body)
          VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET updated_at = excluded.updated_at, status = excluded.status,
            severity = excluded.severity, body = excluded.body`,
-      )
-      .run(a.id, a.createdAt, a.updatedAt, a.status, a.severity, a.ruleId, JSON.stringify(a));
+    ).run(a.id, a.createdAt, a.updatedAt, a.status, a.severity, a.ruleId, JSON.stringify(a));
     return a;
   }
 
@@ -191,12 +246,10 @@ export class Store {
 
   saveAction(record: ActionRecord): ActionRecord {
     const r = ActionRecord.parse(record);
-    this.db
-      .prepare(
-        `INSERT INTO actions (id, requested_at, status, alert_id, body) VALUES (?, ?, ?, ?, ?)
+    this.stmt(
+      `INSERT INTO actions (id, requested_at, status, alert_id, body) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET status = excluded.status, body = excluded.body`,
-      )
-      .run(r.id, r.requestedAt, r.status, r.alertId ?? null, JSON.stringify(r));
+    ).run(r.id, r.requestedAt, r.status, r.alertId ?? null, JSON.stringify(r));
     return r;
   }
 
@@ -223,12 +276,10 @@ export class Store {
 
   saveProposal(proposal: ActionProposal): ActionProposal {
     const p = ActionProposal.parse(proposal);
-    this.db
-      .prepare(
-        `INSERT INTO proposals (id, created_at, status, alert_id, body) VALUES (?, ?, ?, ?, ?)
+    this.stmt(
+      `INSERT INTO proposals (id, created_at, status, alert_id, body) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET status = excluded.status, body = excluded.body`,
-      )
-      .run(p.id, p.createdAt, p.status, p.alertId ?? null, JSON.stringify(p));
+    ).run(p.id, p.createdAt, p.status, p.alertId ?? null, JSON.stringify(p));
     return p;
   }
 
@@ -256,7 +307,7 @@ export class Store {
   // ---------------------------------------------------------------- settings
 
   getSetting<S extends z.ZodType>(key: string, schema: S, fallback: z.infer<S>): z.infer<S> {
-    const row = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as
+    const row = this.stmt('SELECT value FROM settings WHERE key = ?').get(key) as
       { value: string } | undefined;
     if (!row) return fallback;
     const parsed = schema.safeParse(JSON.parse(row.value));
@@ -264,11 +315,9 @@ export class Store {
   }
 
   setSetting(key: string, value: unknown): void {
-    this.db
-      .prepare(
-        'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value',
-      )
-      .run(key, JSON.stringify(value));
+    this.stmt(
+      'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value',
+    ).run(key, JSON.stringify(value));
   }
 
   close(): void {

@@ -70,4 +70,38 @@ describe('Store', () => {
     }
     expect(s.ruleMatchCounts(15).get('r')).toBe(2);
   });
+
+  it('keeps the database under a size cap by dropping the oldest events', () => {
+    const s = memoryStore();
+    const kept = makeExec();
+    s.insertEvent(kept);
+    s.saveAlert({
+      id: 'a-cap',
+      createdAt: 1,
+      updatedAt: 1,
+      ruleId: 'test.rule',
+      ruleVersion: 1,
+      title: 't',
+      summary: 's',
+      severity: 'high',
+      fidelity: 'high',
+      notify: 'popup',
+      status: 'open',
+      containment: 'none',
+      eventIds: [kept.id],
+      actionIds: [],
+    });
+    const many = Array.from({ length: 3000 }, (_, i) => ({
+      ...makeExec(`/usr/bin/tool${i}`),
+      process: { pid: i, path: `/usr/bin/tool${i}`, args: ['x'.repeat(200)] },
+    }));
+    expect(s.insertEvents(many)).toBe(0);
+    const full = s.usedBytes();
+    const removed = s.pruneEventsToSize(full / 2);
+    expect(removed).toBeGreaterThan(0);
+    expect(s.usedBytes()).toBeLessThanOrEqual(full / 2);
+    expect(s.getEvent(kept.id)).toBeDefined();
+    // The newest events stay.
+    expect(s.getEvent(many.at(-1)!.id)).toBeDefined();
+  });
 });

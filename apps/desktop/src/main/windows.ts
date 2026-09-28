@@ -6,6 +6,14 @@ import type { Pushes, ThemePref } from '../shared/ipc.js';
 
 const POPOVER = { width: 380, height: 540 };
 const POPUP = { width: 420, height: 400 };
+/**
+ * Each window's page is a renderer process (60 to 120 MB). Hidden ones are
+ * closed after this long, so a menu-bar app that sits idle all day holds
+ * only the main process. Reopening then takes a few hundred ms instead of a
+ * few ms, which is why the popover waits longer than the rare popup.
+ */
+const RELEASE_POPOVER_MS = 5 * 60 * 1000;
+const RELEASE_POPUP_MS = 60 * 1000;
 
 /** Where renderer pages are served from, for loading and for checking IPC senders. */
 export function rendererOrigin(): string {
@@ -47,6 +55,7 @@ export class Windows {
   private popover?: BrowserWindow;
   private main?: BrowserWindow;
   private popup?: BrowserWindow;
+  private readonly releaseTimers = new Map<BrowserWindow, ReturnType<typeof setTimeout>>();
 
   createTray(): void {
     this.tray = new Tray(trayIcon);
@@ -86,6 +95,7 @@ export class Windows {
         }),
       );
       this.popover.on('blur', () => this.popover?.hide());
+      this.releaseWhenHidden(this.popover, RELEASE_POPOVER_MS);
       load(this.popover, 'popover');
     }
     const pos = popoverPosition(this.tray?.getBounds());
@@ -149,6 +159,7 @@ export class Windows {
           webPreferences: webPreferences(),
         }),
       );
+      this.releaseWhenHidden(this.popup, RELEASE_POPUP_MS);
       this.popup.setAlwaysOnTop(true, 'screen-saver');
       this.popup.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
       load(this.popup, `popup/${alertId}`);
@@ -182,6 +193,28 @@ export class Windows {
 
   hidePopup(): void {
     this.popup?.hide();
+  }
+
+  /** Close `win` once it has been hidden for `ms`; showing it again cancels that. */
+  private releaseWhenHidden(win: BrowserWindow, ms: number): void {
+    const cancel = () => {
+      clearTimeout(this.releaseTimers.get(win));
+      this.releaseTimers.delete(win);
+    };
+    win.on('show', cancel);
+    win.on('closed', cancel);
+    win.on('hide', () => {
+      cancel();
+      const timer = setTimeout(() => win.isDestroyed() || win.isVisible() || win.close(), ms);
+      timer.unref();
+      this.releaseTimers.set(win, timer);
+    });
+  }
+
+  /** Close every hidden popover or popup now (what the timers do after a while). */
+  releaseHidden(): void {
+    for (const win of [this.popover, this.popup])
+      if (win && !win.isDestroyed() && !win.isVisible()) win.close();
   }
 
   broadcast<K extends keyof Pushes>(channel: K, ...args: Pushes[K]): void {
