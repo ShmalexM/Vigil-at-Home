@@ -53,6 +53,9 @@ importers:
       '@vigil/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@vigil/detection':
+        specifier: workspace:*
+        version: link:../../packages/detection
       '@vitejs/plugin-react':
         specifier: ^5.2.0
         version: 5.2.0(vite@7.3.6(@types/node@24.19.0)(jiti@2.7.0)(lightningcss@1.33.0))

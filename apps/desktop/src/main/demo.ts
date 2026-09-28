@@ -259,9 +259,8 @@ function seedFeed(core: VigilCore, now: number, checked: number, shadow: Rule): 
 /** Keep the demo feed moving: one ordinary event every couple of seconds. */
 export function startDemoFeed(core: VigilCore): () => void {
   let n = 0;
-  const checked = core.store.listRules().filter((r) => r.mode !== 'disabled').length - 1;
   const timer = setInterval(() => {
-    core.ingest(EVERYDAY[n++ % EVERYDAY.length]!(Date.now()), { checked, matches: [] });
+    void core.handleEvent(EVERYDAY[n++ % EVERYDAY.length]!(Date.now()));
   }, 2500);
   return () => clearInterval(timer);
 }

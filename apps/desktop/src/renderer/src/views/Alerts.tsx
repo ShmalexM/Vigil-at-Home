@@ -6,6 +6,7 @@ import { HoldButton } from '../components/HoldButton';
 import { useToast } from '../components/Toasts';
 import { Button, Card, Chip, SectionHead, SeverityMark, StatusMark } from '../components/ui';
 import { actorLabel, clock, describeAction, describeEvent, timeAgo } from '../format';
+import { ExcludeFromAlert } from '../components/ExcludeFromAlert';
 import { PageHead } from './AppShell';
 
 export function AlertsView({
@@ -66,7 +67,9 @@ export function AlertsView({
             />
           ))}
         </div>
-        <div className="split-detail">{current ? <AlertDetailView id={current} /> : null}</div>
+        <div className="split-detail">
+          {current ? <AlertDetailView id={current} go={go} /> : null}
+        </div>
       </div>
     </div>
   );
@@ -98,7 +101,7 @@ function AlertRow({
   );
 }
 
-function AlertDetailView({ id }: { id: string }) {
+function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
   const [detail] = useLive(() => vigil.getAlertDetail(id), id);
   const toast = useToast();
   if (!detail) return null;
@@ -286,6 +289,15 @@ function AlertDetailView({ id }: { id: string }) {
           </div>
           <span className="t-small">{rule.description}</span>
         </Card>
+      )}
+
+      {events[0] && (
+        <ExcludeFromAlert
+          alertId={alert.id}
+          ruleId={alert.ruleId}
+          event={events[0]}
+          onEditRule={() => go(`rules/${alert.ruleId}`)}
+        />
       )}
     </div>
   );

@@ -103,6 +103,8 @@ export const DetectionRule = CoreRule.extend({
     .optional(),
   /** The Santa rule to install when the user confirms a detection as malicious. */
   santa: z.object({ ruleType: SantaRuleType, from: FieldPath }).strict().optional(),
+  /** Set when the user edited a built-in rule: the built-in version the edit started from. */
+  editedFrom: z.number().int().positive().optional(),
 });
 export type DetectionRule = z.infer<typeof DetectionRule>;
 export type DetectionRuleInput = z.input<typeof DetectionRule>;

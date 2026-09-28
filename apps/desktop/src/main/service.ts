@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { z } from 'zod';
 import { canChangeMode, type Rule, type RuleMode, type SensorEvent } from '@vigil/core';
 import {
   ThemePref,
@@ -8,8 +9,10 @@ import {
   type RuleView,
   type StatusView,
 } from '../shared/ipc.js';
-import { AlertService } from './alerts.js';
+import { AlertService, type DecisionInput } from './alerts.js';
 import type { Store } from './db/store.js';
+import { FEED_CHECK_MS, type Detector } from './detection.js';
+import { RuleEditing } from './rule-editing.js';
 import type { ActionExecutor } from './executor.js';
 import { Scheduler } from './scheduler.js';
 import { SensorRegistry } from './sensors.js';
@@ -34,6 +37,9 @@ export class VigilCore {
   readonly sensors = new SensorRegistry();
   /** Emits `events` (count) at most once per FEED_BATCH_MS while events arrive. */
   readonly feed = new EventEmitter<{ events: [number] }>();
+  /** The rule engine, once attached. Without it events are stored unanalysed. */
+  detector: Detector | undefined;
+  private editing: RuleEditing | undefined;
   private feedPending = 0;
   private feedTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -51,6 +57,21 @@ export class VigilCore {
   }
 
   start(): void {
+    if (this.detector) {
+      const feeds = this.detector.feeds;
+      // Threat lists refresh in the background; the engine sees them on its next lookup.
+      this.scheduler.every(
+        'threat-feeds',
+        FEED_CHECK_MS,
+        async () => {
+          for (const r of await feeds.run()) {
+            if (r.status === 'failed')
+              console.warn(`[feeds] ${r.sourceId}: ${r.error ?? 'failed'}`);
+          }
+        },
+        true,
+      );
+    }
     this.scheduler.every(
       'prune-events',
       DAY,
@@ -81,6 +102,32 @@ export class VigilCore {
     }, FEED_BATCH_MS);
   }
 
+  /** Every sensor event enters here: rules first, then storage and alerts. */
+  async handleEvent(event: SensorEvent): Promise<void> {
+    if (this.detector) await this.detector.handle(event);
+    else this.ingest(event);
+  }
+
+  /**
+   * The user's verdict on an alert. Releases containment when asked, then
+   * teaches the rule engine. Confirming it malicious adds a Santa rule, as
+   * the user, so it can't run again.
+   */
+  async decide(alertId: string, input: DecisionInput) {
+    const alert = await this.alerts.decide(alertId, input);
+    if (this.detector && alert.decision) {
+      const learned = this.detector.learn(alertId, alert.decision);
+      if (learned.santa) {
+        await this.alerts.run('user', learned.santa, {
+          alertId,
+          reason: 'You confirmed it as malicious',
+        });
+      }
+      if (learned.demoted) console.info(`[detection] ${learned.demoted.message}`);
+    }
+    return this.store.getAlert(alertId) ?? alert;
+  }
+
   eventStats(): EventStats {
     return {
       ...this.store.eventStats(this.now() - HOUR),
@@ -108,20 +155,47 @@ export class VigilCore {
 
   rules(): RuleView[] {
     const counts = this.store.ruleMatchCounts(this.now() - RULE_REVIEW_DAYS * DAY);
-    return this.store
+    const engine = (this.detector?.rules() ?? []).map(({ rule, mode }) => ({
+      rule: { ...rule, mode },
+      matches: counts.get(rule.id) ?? 0,
+    }));
+    const own = this.store
       .listRules()
-      .filter((r) => r.id !== TEST_RULE.id)
+      .filter((r) => r.id !== TEST_RULE.id && !this.detector?.hasRule(r.id))
       .map((rule) => ({ rule, matches: counts.get(rule.id) ?? 0 }));
+    return [...engine, ...own];
+  }
+
+  /** The rule editor, once detection is running. */
+  ruleEditing(): RuleEditing | undefined {
+    if (!this.detector) return undefined;
+    this.editing ??= new RuleEditing(this.detector, this.store);
+    return this.editing;
   }
 
   /** From the UI, so the actor is the user. */
   setRuleMode(id: string, mode: RuleMode): Rule {
+    if (this.detector?.hasRule(id)) {
+      this.detector.setMode(id, mode);
+      const view = this.detector.rules().find((r) => r.rule.id === id);
+      if (!view) throw new Error(`No rule ${id}`);
+      return { ...view.rule, mode: view.mode };
+    }
     const rule = this.store.getRule(id);
     if (!rule) throw new Error(`No rule ${id}`);
     if (!canChangeMode('user', rule.mode, mode)) throw new Error('Not allowed');
     const next = { ...rule, mode, updatedAt: this.now() };
     this.store.upsertRule(next);
     return next;
+  }
+
+  /** First launch on this Mac, recorded once. "First seen" rules learn for a week after it. */
+  installedAt(): number {
+    const saved = this.store.getSetting('installedAt', z.number().int().positive(), 0);
+    if (saved) return saved;
+    const now = this.now();
+    this.store.setSetting('installedAt', now);
+    return now;
   }
 
   theme(): ThemePref {
