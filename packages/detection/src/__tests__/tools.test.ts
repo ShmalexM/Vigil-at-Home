@@ -106,9 +106,10 @@ describe('AI tool surface', () => {
             evidence: [],
           },
         ],
+        retirements: [],
         summary: 'Three ideas.',
       },
-      { newRules: [], tunings: [], summary: 'Dropped the broad one.' },
+      { newRules: [], tunings: [], retirements: [], summary: 'Dropped the broad one.' },
     ];
     const runner: AnalyzeRunner = {
       async run(req) {

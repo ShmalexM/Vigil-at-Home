@@ -35,8 +35,34 @@ export interface TelemetrySummary {
     markedSafe: number;
     confirmed: number;
   }>;
-  recentProposals: Array<{ id: string; ruleId: string; status: string; userNote?: string }>;
+  /**
+   * Activity no rule matched but the event classifier (a small local model or
+   * Jev) labelled unusual or suspicious. These are the gaps worth a rule.
+   */
+  flaggedByClassifier: Array<{
+    what: string;
+    kind: string;
+    label: 'unusual' | 'suspicious';
+    count: number;
+    reason?: string;
+  }>;
+  recentProposals: Array<{
+    id: string;
+    kind: string;
+    ruleId: string;
+    status: string;
+    userNote?: string;
+  }>;
   lists: Array<{ name: string; size: number }>;
+}
+
+/** One event the classifier flagged and no rule explained. The app supplies these. */
+export interface FlaggedEvent {
+  kind: string;
+  /** Program path, host or item the label is about. Redacted here. */
+  subject: string;
+  label: 'unusual' | 'suspicious';
+  reason?: string;
 }
 
 const HOME = /^\/Users\/[^/]+/;
@@ -55,6 +81,7 @@ export function summarizeTelemetry(opts: {
   history: EventHistory;
   engine: DetectionEngine;
   pipeline?: RulePipeline;
+  flagged?: Iterable<FlaggedEvent>;
   from: number;
   to: number;
 }): TelemetrySummary {
@@ -147,9 +174,31 @@ export function summarizeTelemetry(opts: {
     };
   });
 
+  const flagged = new Map<string, TelemetrySummary['flaggedByClassifier'][number]>();
+  for (const f of opts.flagged ?? []) {
+    const what = redactPath(f.subject).slice(0, 200);
+    const key = `${f.kind}|${what}|${f.label}`;
+    const cur = flagged.get(key);
+    if (cur) cur.count++;
+    else {
+      const entry: TelemetrySummary['flaggedByClassifier'][number] = {
+        what,
+        kind: f.kind,
+        label: f.label,
+        count: 1,
+      };
+      if (f.reason) entry.reason = f.reason.replace(EMAIL, '<email>').slice(0, 200);
+      flagged.set(key, entry);
+    }
+  }
+  const flaggedByClassifier = [...flagged.values()]
+    .sort((a, b) => (a.label === b.label ? b.count - a.count : a.label === 'suspicious' ? -1 : 1))
+    .slice(0, 25);
+
   const recentProposals = (opts.pipeline?.list() ?? []).slice(0, 10).map((p) => {
     const r: TelemetrySummary['recentProposals'][number] = {
       id: p.id,
+      kind: p.kind,
       ruleId: p.rule.id,
       status: p.status,
     };
@@ -179,6 +228,7 @@ export function summarizeTelemetry(opts: {
     listeners: [...listeners.values()].slice(0, 20),
     newExtensions: [...exts.values()].slice(0, 20),
     rules,
+    flaggedByClassifier,
     recentProposals,
     lists: opts.engine.stores.lists
       .names()

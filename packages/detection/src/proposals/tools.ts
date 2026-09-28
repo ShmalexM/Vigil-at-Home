@@ -5,7 +5,7 @@ import type { EventHistory } from '../state/stores.js';
 import { DetectionRule, MATCH_OPS } from '../types.js';
 import { type RulePipeline, type SubmitResult } from './pipeline.js';
 import { RULE_REVIEW_PROMPT } from './prompt.js';
-import { summarizeTelemetry } from './telemetry.js';
+import { summarizeTelemetry, type FlaggedEvent } from './telemetry.js';
 
 /**
  * How detection plugs into the AI layer (@vigil/ai). The agent gets two
@@ -20,6 +20,8 @@ export interface DetectionToolContext {
   engine: DetectionEngine;
   pipeline: RulePipeline;
   history: EventHistory;
+  /** Events the classifier flagged that no rule matched, for the review window. */
+  flagged?: (from: number, to: number) => Iterable<FlaggedEvent>;
   now?: () => number;
 }
 
@@ -56,7 +58,7 @@ export function detectionReadTools(ctx: DetectionToolContext): ReadToolLike[] {
   const telemetry: ReadToolLike<{ sinceHours: z.ZodDefault<z.ZodNumber> }> = {
     name: 'get_telemetry_summary',
     description:
-      "Read a redacted summary of recent activity on this Mac (top network talkers, unsigned programs, new login items, listeners, browser extensions), how each detection rule is doing, and the user's notes on proposals they rejected. Use it to find gaps and noisy rules.",
+      "Read a redacted summary of recent activity on this Mac (top network talkers, unsigned programs, new login items, listeners, browser extensions, activity the event classifier flagged that no rule matched), how each detection rule is doing, and the user's notes on proposals they rejected. Use it to find gaps and noisy rules.",
     input: {
       sinceHours: z
         .number()
@@ -67,11 +69,14 @@ export function detectionReadTools(ctx: DetectionToolContext): ReadToolLike[] {
     },
     run: async ({ sinceHours }) => {
       const to = now();
+      const from = to - sinceHours * 3_600_000;
+      const flagged = ctx.flagged?.(from, to);
       return summarizeTelemetry({
         history: ctx.history,
         engine: ctx.engine,
         pipeline: ctx.pipeline,
-        from: to - sinceHours * 3_600_000,
+        ...(flagged ? { flagged } : {}),
+        from,
         to,
       });
     },
@@ -114,6 +119,17 @@ export const RuleReviewOutput = z.strictObject({
       }),
     )
     .max(5),
+  retirements: z
+    .array(
+      z.strictObject({
+        ruleId: z.string().max(100),
+        /** shadow keeps recording without alerting; disabled turns it off. */
+        toMode: z.enum(['shadow', 'disabled']),
+        rationale: z.string().max(2000),
+        evidence: z.array(z.string().max(500)).max(20),
+      }),
+    )
+    .max(3),
   /** One or two sentences for the user on what was proposed and why. */
   summary: z.string().max(1000),
 });
@@ -130,7 +146,7 @@ function parseJson(text: string, what: string): { value?: unknown; error?: strin
 }
 
 export interface ReviewSubmission {
-  results: Array<{ kind: 'new_rule' | 'tuning'; ref: string; result: SubmitResult }>;
+  results: Array<{ kind: 'new_rule' | 'tuning' | 'retire'; ref: string; result: SubmitResult }>;
   accepted: number;
   rejected: number;
 }
@@ -163,6 +179,16 @@ export function submitReview(
           provider,
         );
     results.push({ kind: 'tuning', ref: t.ruleId, result });
+  }
+  for (const r of output.retirements) {
+    results.push({
+      kind: 'retire',
+      ref: r.ruleId,
+      result: pipeline.submitRetirement(
+        { ruleId: r.ruleId, toMode: r.toMode, rationale: r.rationale, evidence: r.evidence },
+        provider,
+      ),
+    });
   }
   const accepted = results.filter((r) => r.result.ok).length;
   return { results, accepted, rejected: results.length - accepted };
@@ -221,7 +247,9 @@ export async function runRuleReview(
     summary = res.value.summary;
     const sub = submitReview(res.value, ctx.pipeline, res.provider);
     submissions.push(sub);
-    const failed = sub.results.filter((r) => !r.result.ok && r.result.errors.length > 0);
+    const failed = sub.results.filter(
+      (r) => !r.result.ok && !r.result.final && r.result.errors.length > 0,
+    );
     if (failed.length === 0) break;
     data = {
       previousAttemptFailedChecks: failed.map((f) => ({

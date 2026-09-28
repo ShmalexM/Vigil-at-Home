@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import { z } from 'zod';
 import type { Rule, RuleMode, SensorEvent, UserDecision } from '@vigil/core';
 import {
   DEFAULT_FEEDS,
@@ -6,6 +7,8 @@ import {
   FeedImporter,
   Feedback,
   RuleEditor,
+  RulePipeline,
+  RuleReviewer,
   macosCoreRules,
   mergeRules,
   sqliteStores,
@@ -13,13 +16,18 @@ import {
   type DetectionRule,
   type EventHistory,
   type FeedImporterOptions,
+  type AnalyzeRunner,
   type FeedStatus,
+  type FlaggedEvent,
+  type ReviewState,
   type SqliteDetectionStores,
 } from '@vigil/detection';
 import { userOrigin } from '@vigil/detection/user';
 import type { EventOutcome } from '../shared/ipc.js';
 import type { AlertService } from './alerts.js';
 import type { Store } from './db/store.js';
+
+const KEY_REVIEW = 'detection.review';
 
 const DAY = 24 * 60 * 60 * 1000;
 /** "First seen" rules only record for this long after install: everything is new at first. */
@@ -48,11 +56,14 @@ export class Detector {
   readonly feeds: FeedImporter;
   /** The user's rule editor (Rules screen and "exclude" on alerts). */
   readonly editor: RuleEditor;
+  /** AI proposals: checked, replayed on 14 days, then waiting for the user. */
+  readonly pipeline: RulePipeline;
+  private reviewer: RuleReviewer | undefined;
   private checkedByKind = new Map<string, number>();
   private readonly now: () => number;
 
   constructor(
-    db: DatabaseSync,
+    private readonly db: DatabaseSync,
     private readonly store: Store,
     private readonly alerts: AlertService,
     private readonly ingest: (e: SensorEvent, outcome: EventOutcome) => void,
@@ -85,7 +96,84 @@ export class Detector {
         now: this.now,
       },
     );
+    this.pipeline = new RulePipeline(this.engine, this.stores.history, this.stores.proposals, {
+      now: this.now,
+      repository: this.stores.rules,
+    });
     this.recount();
+  }
+
+  /**
+   * Turn on the daily rule review. `runner` gives the signed-in AI, or
+   * undefined when none is set up. The scheduler calls `reviewRules` often;
+   * the reviewer decides when a run is due.
+   */
+  attachReviewer(runner: () => AnalyzeRunner | undefined, isBusy?: () => boolean): void {
+    this.reviewer = new RuleReviewer(
+      runner,
+      {
+        engine: this.engine,
+        pipeline: this.pipeline,
+        history: this.stores.history,
+        flagged: (from, to) => this.flagged(from, to),
+        now: this.now,
+      },
+      {
+        get: () => this.store.getSetting(KEY_REVIEW, ReviewStateSchema, {}) as ReviewState,
+        put: (s) => this.store.setSetting(KEY_REVIEW, s),
+      },
+      {
+        countEvents: (from, to) => this.countEvents(from, to),
+        ...(isBusy ? { isBusy } : {}),
+        now: this.now,
+      },
+    );
+  }
+
+  async reviewRules(opts: { force?: boolean } = {}) {
+    if (!this.reviewer) return { ran: false as const, reason: 'no_runner' as const };
+    const out = await this.reviewer.maybeRun(opts);
+    return out;
+  }
+
+  reviewStatus(): (ReviewState & { nextDueAt: number }) | undefined {
+    return this.reviewer?.status();
+  }
+
+  /** The user approves an AI proposal. New rules go live in alert mode unless they choose. */
+  approveProposal(id: string, mode?: RuleMode): void {
+    this.pipeline.approve(id, userOrigin('rules-screen'), mode ? { mode } : {});
+    this.recount();
+  }
+
+  rejectProposal(id: string, note?: string): void {
+    this.pipeline.reject(id, userOrigin('rules-screen'), note);
+  }
+
+  private countEvents(from: number, to: number): number {
+    const r = this.db
+      .prepare('SELECT COUNT(*) AS n FROM events WHERE ts >= ? AND ts <= ?')
+      .get(from, to) as { n: number };
+    return Number(r.n);
+  }
+
+  /** Events the classifier found unusual or suspicious that no rule matched. */
+  private *flagged(from: number, to: number): Iterable<FlaggedEvent> {
+    const rows = this.db
+      .prepare(
+        `SELECT body, label FROM events
+         WHERE ts >= ? AND ts <= ? AND matched = 0 AND label IS NOT NULL
+           AND json_extract(label, '$.label') IN ('unusual', 'suspicious')
+         ORDER BY ts DESC LIMIT 2000`,
+      )
+      .iterate(from, to) as Iterable<{ body: string; label: string }>;
+    for (const r of rows) {
+      const e = JSON.parse(r.body) as SensorEvent;
+      const l = JSON.parse(r.label) as { label: 'unusual' | 'suspicious'; reason?: string };
+      const f: FlaggedEvent = { kind: e.kind, subject: flaggedSubject(e), label: l.label };
+      if (l.reason) f.reason = l.reason;
+      yield f;
+    }
   }
 
   /** Call after the rule set changes outside setMode (the editor), so event counts stay right. */
@@ -182,6 +270,32 @@ export class Detector {
 function coreRule(r: DetectionRule): Rule {
   const { santa: _santa, ...rule } = r as DetectionRule & { santa?: unknown };
   return rule as Rule;
+}
+
+const ReviewStateSchema = z
+  .object({
+    lastRunAt: z.number(),
+    lastOkAt: z.number(),
+    lastError: z.string(),
+    lastSummary: z.string(),
+    lastProvider: z.string(),
+    lastQueued: z.number(),
+    lastRefused: z.number(),
+  })
+  .partial();
+
+/** What a classifier label is about, in a form the review can group by. */
+function flaggedSubject(e: SensorEvent): string {
+  const prog = 'process' in e && e.process ? e.process.path : undefined;
+  switch (e.kind) {
+    case 'network.connection':
+      return `${prog ?? 'unknown'} -> ${e.remoteHost ?? e.remoteAddress}`;
+    case 'persistence':
+    case 'file':
+      return e.path;
+    default:
+      return prog ?? e.kind;
+  }
 }
 
 function appHistory(store: Store): EventHistory {

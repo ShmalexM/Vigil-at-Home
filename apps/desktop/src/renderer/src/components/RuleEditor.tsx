@@ -1,6 +1,6 @@
 import { Check, Pencil, Plus, RotateCcw, Trash2, X } from 'lucide-react';
 import { useState } from 'react';
-import type { ExclusionInput, RuleCheck, RuleEditorView } from '../../../shared/ipc';
+import type { ExclusionInput, ReplayPreview, RuleCheck, RuleEditorView } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
 import { timeAgo } from '../format';
 import { HoldButton } from './HoldButton';
@@ -246,7 +246,7 @@ function JsonEditor({
         onChange={(e) => setText(e.target.value)}
       />
       {current && <Issues check={current} />}
-      {current?.replay && <ReplaySummary check={current} />}
+      {current?.replay && <ReplaySummary replay={current.replay} />}
       <div className="row" style={{ flexWrap: 'wrap' }}>
         <Button icon={<Check size={14} />} disabled={busy} onClick={() => void check()}>
           {busy ? 'Checking…' : 'Check'}
@@ -329,8 +329,7 @@ const VERDICT: Record<string, { label: string; tone?: 'good' | 'fair' | 'poor' }
   noisy: { label: 'Noisy', tone: 'poor' },
 };
 
-function ReplaySummary({ check }: { check: RuleCheck }) {
-  const r = check.replay!;
+export function ReplaySummary({ replay: r }: { replay: ReplayPreview }) {
   const v = VERDICT[r.verdict] ?? { label: r.verdict };
   return (
     <div className="col" style={{ gap: 6 }}>
