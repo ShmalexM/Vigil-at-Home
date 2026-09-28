@@ -210,6 +210,13 @@ describe('AiBridge view', () => {
     expect(local.jevVia).toBeNull();
   });
 
+  it('shows the cloud API as optional, not a problem, when there is no key', async () => {
+    const v = await setup({ saved: { typesafe: 'ts-aaaaaaaaaaaaaaaaaa9876' } }).ai.view();
+    expect(v.providers.find((p) => p.provider === 'api')).toMatchObject({ state: 'optional' });
+    expect(v.providers.find((p) => p.provider === 'jev')).toMatchObject({ state: 'ready' });
+    expect(v.jevVia).toBe('typesafe');
+  });
+
   it('opens the vendor sign-in page in the browser', async () => {
     const { ai, opened } = setup();
     expect(await ai.signIn('codex')).toEqual({ ok: true });
