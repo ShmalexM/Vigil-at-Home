@@ -73,4 +73,63 @@ describe('FileTailer', () => {
     await second.poll();
     expect(lines).toEqual(['c']);
   });
+
+  describe('while running', () => {
+    const until = async (check: () => boolean, ms = 2000) => {
+      const end = Date.now() + ms;
+      while (!check() && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+      return check();
+    };
+
+    it('picks up appends and rotation through the file watch, without waiting for the poll', async () => {
+      const { path, lines } = setup();
+      writeFileSync(path, '');
+      // A fallback poll this slow never fires during the test.
+      const t = new FileTailer({ path, intervalMs: 60_000, onLine: (l) => lines.push(l) });
+      await t.start();
+      try {
+        appendFileSync(path, 'one\n');
+        expect(await until(() => lines.includes('one'))).toBe(true);
+        renameSync(path, path + '.0');
+        writeFileSync(path, 'two\n');
+        expect(await until(() => lines.includes('two'))).toBe(true);
+        appendFileSync(path, 'three\n');
+        expect(await until(() => lines.includes('three'))).toBe(true);
+      } finally {
+        await t.stop();
+      }
+    });
+
+    it('finds a file that appears later through the fallback poll', async () => {
+      const { path, lines } = setup();
+      const t = new FileTailer({ path, intervalMs: 50, onLine: (l) => lines.push(l) });
+      await t.start();
+      try {
+        writeFileSync(path, 'first\n');
+        expect(await until(() => lines.includes('first'))).toBe(true);
+        appendFileSync(path, 'second\n');
+        expect(await until(() => lines.includes('second'))).toBe(true);
+      } finally {
+        await t.stop();
+      }
+    });
+
+    it('still works with the watch turned off', async () => {
+      const { path, lines } = setup();
+      writeFileSync(path, '');
+      const t = new FileTailer({
+        path,
+        watch: false,
+        intervalMs: 50,
+        onLine: (l) => lines.push(l),
+      });
+      await t.start();
+      try {
+        appendFileSync(path, 'polled\n');
+        expect(await until(() => lines.includes('polled'))).toBe(true);
+      } finally {
+        await t.stop();
+      }
+    });
+  });
 });
