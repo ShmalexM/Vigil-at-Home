@@ -1,13 +1,15 @@
 // Follows an append-only log file line by line, surviving rotation
 // (newsyslog renames santa.log and starts a new file) and truncation.
 //
-// It watches the file so new lines arrive at once without waking the CPU
-// when nothing happens, and also polls every couple of seconds, because a
-// watch follows the old file across a rename and can miss events. After a
-// rotation the watch moves to the new file.
+// It watches the file's folder so new lines arrive at once without waking
+// the CPU when nothing happens. A folder watch keeps working across rotation
+// (a watch on the file itself follows the old file, and on macOS did not
+// report appends at all). It also polls every couple of seconds in case the
+// watch misses something or the folder does not exist yet.
 
 import { watch, type FSWatcher } from 'node:fs';
 import { open, stat } from 'node:fs/promises';
+import { basename, dirname } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 
 export interface TailPosition {
@@ -38,8 +40,6 @@ export class FileTailer {
   private polling: Promise<void> | undefined;
   private pollAgain = false;
   private watcher: FSWatcher | undefined;
-  private watchedIno: number | undefined;
-  private retry: NodeJS.Timeout | undefined;
 
   constructor(private readonly opts: TailOptions) {}
 
@@ -70,7 +70,6 @@ export class FileTailer {
   async stop(): Promise<void> {
     this.running = false;
     if (this.timer) clearTimeout(this.timer);
-    if (this.retry) clearTimeout(this.retry);
     this.unwatch();
     await this.polling;
   }
@@ -160,34 +159,24 @@ export class FileTailer {
       });
   }
 
-  /** Watch the file being followed, moving the watch to a new file after rotation. */
+  /** Watch the file's folder; retried after each poll until the folder exists. */
   private arm(): void {
-    if (!this.running || this.opts.watch === false || !this.pos) return;
-    if (this.watcher && this.watchedIno === this.pos.ino) return;
-    this.unwatch();
+    if (!this.running || this.opts.watch === false || this.watcher) return;
+    const name = basename(this.opts.path);
     try {
-      const w = watch(this.opts.path, { persistent: false }, (event) => {
-        if (event === 'rename') {
-          // Rotated or deleted: the watch now follows the old file. Drop it
-          // and look again shortly, once the new file has been created.
-          this.unwatch();
-          if (this.retry) clearTimeout(this.retry);
-          this.retry = setTimeout(() => this.kick(), 250);
-        }
-        this.kick();
+      const w = watch(dirname(this.opts.path), { persistent: false }, (_event, file) => {
+        if (file == null || file.toString() === name) this.kick();
       });
       w.on('error', () => this.unwatch());
       this.watcher = w;
-      this.watchedIno = this.pos.ino;
     } catch {
-      // File gone between polls; the fallback poll will pick it up.
+      // Folder not there yet; the fallback poll keeps trying.
     }
   }
 
   private unwatch(): void {
     this.watcher?.close();
     this.watcher = undefined;
-    this.watchedIno = undefined;
   }
 
   private schedule(): void {
