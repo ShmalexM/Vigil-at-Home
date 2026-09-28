@@ -1,5 +1,6 @@
 import { Activity, Bell, House, ListChecks, Settings as SettingsIcon, Wrench } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
+import { LEVEL_MEANING, LEVEL_RULES } from '../../../shared/levels';
 import { useLive, vigil } from '../api';
 import { Shield } from '../components/Shield';
 import { Button, LevelPill } from '../components/ui';
@@ -72,9 +73,22 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
         </nav>
         <div className="grow" />
         {status && (
-          <button type="button" className="sidebar-status" onClick={() => go('home')}>
-            <LevelPill level={status.level} small />
-            <span className="t-small ellipsis">{status.reasons[0] ?? 'All quiet'}</span>
+          <button
+            type="button"
+            className="sidebar-status"
+            onClick={() => go('home')}
+            title={[LEVEL_RULES[status.level], '', ...status.reasons].join('\n')}
+          >
+            <span className="row spread" style={{ width: '100%' }}>
+              <span className="t-small muted">Mac health</span>
+              <LevelPill level={status.level} small />
+            </span>
+            <span className="t-small sidebar-status-why">
+              {status.reasons[0] ?? LEVEL_MEANING.good}
+            </span>
+            {status.reasons.length > 1 && (
+              <span className="t-small muted">and {status.reasons.length - 1} more · see Home</span>
+            )}
           </button>
         )}
       </aside>
