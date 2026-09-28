@@ -23,10 +23,21 @@ export function clock(ts: number): string {
   return new Date(ts).toLocaleString(undefined, {
     month: 'short',
     day: 'numeric',
-    hour: '2-digit',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+/** Time only, to the second, for the live feed. Adds the date when it isn't today. */
+export function timeOfDay(ts: number, now = Date.now()): string {
+  const d = new Date(ts);
+  const time = d.toLocaleTimeString(undefined, {
+    hour: 'numeric',
     minute: '2-digit',
     second: '2-digit',
   });
+  if (d.toDateString() === new Date(now).toDateString()) return time;
+  return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${time}`;
 }
 
 const base = (p: string) => p.split('/').filter(Boolean).pop() ?? p;
@@ -35,11 +46,11 @@ const base = (p: string) => p.split('/').filter(Boolean).pop() ?? p;
 export function describeAction(a: Action): string {
   switch (a.kind) {
     case 'process.suspend':
-      return `Pause process ${a.pid}`;
+      return `Pause ${proc(a)}`;
     case 'process.resume':
-      return `Resume process ${a.pid}`;
+      return `Resume ${proc(a)}`;
     case 'process.kill':
-      return `Stop process ${a.pid}`;
+      return `Stop ${proc(a)}`;
     case 'network.block':
       return `Block connections to ${a.address}${a.port ? `:${a.port}` : ''}`;
     case 'network.unblock':
@@ -57,6 +68,11 @@ export function describeAction(a: Action): string {
     case 'persistence.enable':
       return `Turn on startup item ${base(a.path)}`;
   }
+}
+
+/** A process by name when the action carries its path, else by process id. */
+function proc(a: { pid: number; path?: string | undefined }): string {
+  return a.path ? `${base(a.path)} (process ${a.pid})` : `process ${a.pid}`;
 }
 
 function santaNoun(t: string): string {

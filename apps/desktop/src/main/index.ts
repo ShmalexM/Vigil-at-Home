@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { app, powerMonitor } from 'electron';
 import { Store } from './db/store.js';
-import { seedDemo } from './demo.js';
+import { seedDemo, startDemoFeed } from './demo.js';
 import { DryRunExecutor } from './executor.js';
 import { registerIpc } from './ipc.js';
 import { VigilCore } from './service.js';
@@ -40,6 +40,7 @@ function start(): void {
   core.alerts.on('changed', refresh);
   core.sensors.on('changed', refresh);
   core.alerts.on('popup', (alert) => windows.showPopup(alert.id));
+  core.feed.on('events', (n) => windows.broadcast('events', n));
   refresh();
 
   // Routine work waits while the Mac sleeps or saves battery; blocking never does.
@@ -56,6 +57,11 @@ function start(): void {
     store.close();
   });
 
-  if (!app.isPackaged && process.env['VIGIL_DEMO']) void seedDemo(core);
+  if (!app.isPackaged && process.env['VIGIL_DEMO']) {
+    void seedDemo(core).then(() => {
+      const stop = startDemoFeed(core);
+      app.on('before-quit', stop);
+    });
+  }
   if (!app.isPackaged) windows.openMain();
 }

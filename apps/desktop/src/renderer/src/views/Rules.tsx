@@ -78,7 +78,9 @@ function RuleRow({ view }: { view: RuleView }) {
             {rule.origin === 'ai' && <Chip tone="ai">AI-drafted</Chip>}
             {rule.origin === 'user' && <Chip>Yours</Chip>}
           </div>
-          <span className="t-small ellipsis">{rule.description}</span>
+          <span className="t-small clamp-2" title={rule.description}>
+            {rule.description}
+          </span>
         </div>
         <SeverityMark severity={rule.severity} />
         <Chip title="How often this rule is expected to be right">{rule.fidelity} fidelity</Chip>
