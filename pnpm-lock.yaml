@@ -50,6 +50,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.0
         version: 19.3.0(@types/react@19.3.0)
+      '@vigil/ai':
+        specifier: workspace:*
+        version: link:../../packages/ai
       '@vigil/core':
         specifier: workspace:*
         version: link:../../packages/core

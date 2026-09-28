@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { app, powerMonitor, safeStorage } from 'electron';
+import { app, powerMonitor, safeStorage, shell } from 'electron';
 import type { HelperInstallResult } from '../shared/ipc.js';
+import { AiBridge } from './ai.js';
 import { Store } from './db/store.js';
 import { seedDemo, startDemoFeed } from './demo.js';
 import { seedUsageDemo } from './usage-demo.js';
@@ -83,14 +84,19 @@ function start(): void {
   };
 
   const demo = !app.isPackaged && !!process.env['VIGIL_DEMO'];
-  const setup = new OnboardingService({
+  const keys = new KeyStore(join(dataDir, 'api-keys.json'), {
+    available: () => safeStorage.isEncryptionAvailable(),
+    encrypt: (s) => safeStorage.encryptString(s),
+    decrypt: (b) => safeStorage.decryptString(b),
+  });
+  const setup: OnboardingService = new OnboardingService({
     store,
-    keys: new KeyStore(join(dataDir, 'api-keys.json'), {
-      available: () => safeStorage.isEncryptionAvailable(),
-      encrypt: (s) => safeStorage.encryptString(s),
-      decrypt: (b) => safeStorage.decryptString(b),
-    }),
+    keys,
     ...(demo ? { probe: demoProbe(), supported: true } : { probe: systemProbe() }),
+    // Setup's Codex step can use the user's own Codex sign-in (set up below).
+    ...(demo
+      ? {}
+      : { codex: { status: () => ai.codexStatus(), share: () => ai.shareCodexSignIn() } }),
     // The wizard's helper and Santa steps, once this build can install them.
     plan: () => {
       const command = helperInstallCommand(helperDir());
@@ -101,7 +107,26 @@ function start(): void {
     },
   });
 
-  registerIpc(core, windows, setup, {
+  // Routine work slows on battery and waits while the Mac is hot or asleep;
+  // blocking never does. `power.isBusy()` is what optional AI work checks.
+  const power = new PowerPolicy(powerMonitor);
+
+  // The AI explains alerts after their response has run. It never blocks,
+  // releases or allows anything.
+  const ai: AiBridge = new AiBridge({
+    store,
+    usage: core.usage,
+    keys,
+    mode: () => setup.mode(),
+    dataDir,
+    isBusy: () => power.isBusy(),
+    openExternal: (url) => shell.openExternal(url),
+  });
+  if (!demo) core.usage.setLimitsSource(() => ai.limits());
+  ai.on('changed', () => windows.broadcast('changed'));
+  ai.explainAlertsFrom(core);
+
+  registerIpc(core, windows, setup, ai, {
     install: async () => afterHelperScript(await runHelperScript('install', helperDir())),
     uninstall: async () => afterHelperScript(await runHelperScript('uninstall', helperDir())),
   });
@@ -121,9 +146,6 @@ function start(): void {
   core.feed.on('events', (n) => windows.broadcast('events', n));
   refresh();
 
-  // Routine work slows on battery and waits while the Mac is hot or asleep;
-  // blocking never does. `power.isBusy()` is what optional AI work checks.
-  const power = new PowerPolicy(powerMonitor);
   core.applyPower(power.mode);
   power.on('change', (mode) => core.applyPower(mode));
   core.start();

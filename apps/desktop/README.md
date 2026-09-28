@@ -59,12 +59,15 @@ to `OnboardingService` and those two steps turn on.
   `core.alerts.recordAssessment(id, assessment)` and
   `core.alerts.propose('ai', action, alertId, rationale)`. Queue AI work with
   `core.scheduler.enqueue(name, fn, 'urgent')`.
-- **Usage page** (`main/usage.ts`): hand every prompt log entry to
-  `core.usage.record(entry)` as well (a `PromptLogEntry` fits; add `model` when
-  known), and set `core.usage.setLimitsSource(async () => { const s = await
-ai.spending([]); return { plans: s.plans, backgroundSharePercent:
-s.limits.backgroundSharePercent, caps } })`, where `caps` holds any monthly
-  caps on the Jev and cloud API keys. `VIGIL_DEMO=1` seeds 90 days of runs.
+- **AI** (`main/ai.ts`): `AiBridge` builds @vigil/ai's runner from setup's
+  mode, the Settings › AI switches and the saved keys (an OpenRouter key is
+  both the cloud API and Jev's route; a TypeSafe key takes over for Jev). It
+  explains each new alert after its response ran (popups in the urgent lane,
+  at most three quieter ones queued; never the test alert), hands every prompt
+  log entry to `core.usage.record`, and feeds the Usage page's plan limits and
+  key caps. Codex sign-in sharing: `codexStatus()`, `shareCodexSignIn()` and
+  `stopSharingCodexSignIn()`, and the IPC calls of the same names. Event
+  labelling (`classifier`) is still off here.
 
 ## Package it
 
