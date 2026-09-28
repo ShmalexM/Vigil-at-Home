@@ -298,7 +298,7 @@ function periodIndex(starts: readonly number[], at: number): number {
   return lo;
 }
 
-function monthStart(now: number): number {
+export function monthStart(now: number): number {
   const d = new Date(now);
   return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
 }

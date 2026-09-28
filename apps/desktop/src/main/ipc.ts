@@ -2,6 +2,7 @@ import { app, ipcMain, type IpcMainInvokeEvent } from 'electron';
 import type { z } from 'zod';
 import { calls, type CallName, type CallResults } from '../shared/ipc.js';
 import type { HelperInstallResult } from '../shared/ipc.js';
+import type { AiBridge } from './ai.js';
 import { onboardingHandlers } from './onboarding/ipc.js';
 import type { OnboardingService } from './onboarding/service.js';
 import type { VigilCore } from './service.js';
@@ -29,6 +30,7 @@ export function registerIpc(
   core: VigilCore,
   windows: Windows,
   setup: OnboardingService,
+  ai: AiBridge,
   helper: HelperControl = noHelper,
 ): void {
   const h: Handlers = {
@@ -78,6 +80,19 @@ export function registerIpc(
     uninstallHelper: () => helper.uninstall(),
     getUsage: (days) => core.usage.report(days),
     getUsageLimits: (refresh) => core.usage.limits(refresh ?? false),
+    getAi: () => ai.view(),
+    setAiPrefs: (patch) => ai.setPrefs(patch),
+    signInAi: (provider) => ai.signIn(provider),
+    shareCodexSignIn: async () => {
+      const r = await ai.shareCodexSignIn();
+      return r.ok
+        ? { ok: true }
+        : {
+            ok: false,
+            error: 'Your Codex keeps its sign-in in the Keychain, so sign in from Vigil instead',
+          };
+    },
+    stopSharingCodexSignIn: () => ai.stopSharingCodexSignIn(),
   };
 
   for (const name of Object.keys(calls) as CallName[]) {

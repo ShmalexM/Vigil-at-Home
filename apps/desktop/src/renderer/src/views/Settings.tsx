@@ -3,6 +3,7 @@ import { BellRing, Wrench } from 'lucide-react';
 import { useLive, vigil } from '../api';
 import { useToast } from '../components/Toasts';
 import { Button, Card, SectionHead } from '../components/ui';
+import { AiSection } from './Ai';
 import { AppearanceSection } from './Appearance';
 import { PageHead } from './AppShell';
 
@@ -25,6 +26,9 @@ export function SettingsView() {
             reload();
           }}
         />
+      </Card>
+      <Card>
+        <AiSection />
       </Card>
       <Card>
         <SectionHead

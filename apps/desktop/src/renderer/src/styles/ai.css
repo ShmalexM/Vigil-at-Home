@@ -1,0 +1,61 @@
+/* ---------------------------------------------------------------- settings › ai */
+.ai-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ai-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--ln0);
+}
+.ai-row:first-child {
+  border-top: none;
+}
+.ai-row .mark {
+  margin-top: 1px;
+}
+.ai-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.ai-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+.ai-sub {
+  color: var(--tx2);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.ai-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.ai-cap {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ln0);
+}
+.ai-cap .field {
+  width: 110px;
+}
+.ai-cap .ai-sub {
+  flex-basis: 100%;
+}

@@ -35,6 +35,8 @@ export interface AlertEvents {
   changed: [Alert];
   /** Show the always-on-top popup for this alert now. */
   popup: [Alert];
+  /** A new alert, after its response ran. The AI explains it from here. */
+  raised: [Alert];
 }
 
 /** The user's answer from the popup or the app. */
@@ -129,6 +131,7 @@ export class AlertService extends EventEmitter<AlertEvents> {
 
     alert = this.refresh(alert.id);
     if (alert.notify === 'popup') this.emit('popup', alert);
+    this.emit('raised', alert);
     return alert;
   }
 

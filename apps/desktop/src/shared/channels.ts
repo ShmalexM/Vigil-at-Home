@@ -43,6 +43,11 @@ export const CALL_NAMES = [
   'uninstallHelper',
   'getUsage',
   'getUsageLimits',
+  'getAi',
+  'setAiPrefs',
+  'signInAi',
+  'shareCodexSignIn',
+  'stopSharingCodexSignIn',
 ] as const;
 
 export const PUSH_NAMES = ['changed', 'popup', 'navigate', 'theme', 'events'] as const;

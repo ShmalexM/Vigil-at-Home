@@ -11,6 +11,7 @@ import {
 } from '@vigil/core';
 import { z } from 'zod';
 import type { CALL_NAMES, PUSH_NAMES } from './channels.js';
+import { AiPrefsPatch, AiProvider, type AiActionResult, type AiView } from './ai.js';
 import type { AppearanceSettings } from './themes.js';
 import type { UsageLimitsView, UsageReport } from './usage.js';
 import { ApiKeyInput, ApiKeyProvider, SettingsPane, SetupMode, type SetupView } from './setup.js';
@@ -156,6 +157,12 @@ export const calls = {
   getUsage: z.tuple([z.union([z.literal(1), z.literal(7), z.literal(30), z.literal(90)])]),
   /** True to read the vendors' limits again now. */
   getUsageLimits: z.tuple([z.boolean().optional()]),
+  // AI (main/ai.ts).
+  getAi: z.tuple([]),
+  setAiPrefs: z.tuple([AiPrefsPatch]),
+  signInAi: z.tuple([AiProvider]),
+  shareCodexSignIn: z.tuple([]),
+  stopSharingCodexSignIn: z.tuple([]),
 } as const;
 export type CallName = keyof typeof calls;
 
@@ -328,6 +335,11 @@ export interface CallResults {
   uninstallHelper: HelperInstallResult;
   getUsage: UsageReport;
   getUsageLimits: UsageLimitsView;
+  getAi: AiView;
+  setAiPrefs: AiView['prefs'];
+  signInAi: AiActionResult;
+  shareCodexSignIn: AiActionResult;
+  stopSharingCodexSignIn: void;
 }
 
 /** Pushed from main to every window. */
