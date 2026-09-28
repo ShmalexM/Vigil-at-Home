@@ -1,3 +1,4 @@
+import { userInfo } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { buildChildEnv } from './env.js';
 import { buildUserPrompt } from './prompt.js';
@@ -63,6 +64,16 @@ describe('child environment', () => {
       },
     );
     expect(env).toEqual({ PATH: '/bin', HOME: '/h', CODEX_HOME: '/x' });
+  });
+
+  it("fills in USER when Vigil's own environment lacks it, so Claude Code finds its sign-in", () => {
+    const saved = process.env.USER;
+    delete process.env.USER;
+    try {
+      expect(buildChildEnv().USER).toBe(userInfo().username);
+    } finally {
+      if (saved !== undefined) process.env.USER = saved;
+    }
   });
 });
 
