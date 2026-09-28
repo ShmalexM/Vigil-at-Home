@@ -70,8 +70,10 @@ to `OnboardingService` and those two steps turn on.
   log entry to `core.usage.record`, and feeds the Usage page's plan limits and
   key caps. Codex sign-in sharing: `codexStatus()`, `shareCodexSignIn()` and
   `stopSharingCodexSignIn()`, and the IPC calls of the same names. With
-  `labelEventsFrom(core)` it also queues events no rule matched (not Apple's
-  own programs, each program or destination once an hour) and sends a batch a
+  `labelEventsFrom(core)` it also queues events no rule matched (`main/label-filter.ts`
+  decides which: not Apple's own programs, except shells, curl, osascript and
+  the other tools attackers borrow, capped at 30 command lines an hour; each
+  program or destination once an hour) and sends a batch a
   minute to the classifier (Jev or the local model, within its budgets). The
   labels land in the events table and show as hints in Activity; they never
   act on anything.
