@@ -5,6 +5,8 @@ name: macOS checks
 #   test      full test suite on macOS                  (repo)
 #   app       launches the app and checks the popup     (apps/desktop)
 #   sensors   pf, osquery and Santa checks              (packages/sensors, packages/helper)
+#   helper-install  installs the packaged helper for real (apps/desktop/helper)
+#   perf      what the app and sensors cost the Mac     (apps/desktop/perf)
 # Add a job here rather than a new workflow. Screenshots and logs go to the
 # run's artifacts. Checks that don't need macOS (the AI escape test, live
 # threat feeds) have their own Linux workflows.
@@ -86,3 +88,93 @@ jobs:
       - name: helper checks
         if: always() && steps.present.outputs.yes == 'true'
         run: sudo -E env "PATH=$PATH" VIGIL_MAC_INTEGRATION=1 pnpm --filter @vigil/helper test:mac
+
+  # Installs the helper exactly as the app does (the same script the password
+  # dialog runs), checks launchd starts it as root and it answers, then removes it.
+  helper-install:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - name: Build the helper bundle
+        working-directory: apps/desktop
+        run: |
+          node scripts/build-helper.mjs --arch arm64
+          mkdir -p "$RUNNER_TEMP/Vigil at Home.app/Contents/Resources/helper"
+          cp build/helper/common/* build/helper/darwin-arm64/node \
+            "$RUNNER_TEMP/Vigil at Home.app/Contents/Resources/helper/"
+      - name: Install, check, uninstall
+        run: |
+          h="$RUNNER_TEMP/Vigil at Home.app/Contents/Resources/helper"
+          sudo "$h/install.sh"
+          test -S /var/run/vigil-helper.sock
+          sudo launchctl print system/com.vigilathome.helper | grep -E 'state = running'
+          ls -l /Library/PrivilegedHelperTools/vigil-helper /Library/PrivilegedHelperTools/vigil-helper.d
+          test "$(stat -f %Su /Library/PrivilegedHelperTools/vigil-helper.d/node)" = root
+          # The app talks to it as the signed-in user.
+          ls -l /var/run/vigil-helper.sock
+          node -e "
+            const s = require('node:net').connect('/var/run/vigil-helper.sock');
+            setTimeout(() => process.exit(2), 10000);
+            s.on('data', (d) => {
+              const line = String(d).split('\\n')[0];
+              console.log(line);
+              process.exit(JSON.parse(line).ok ? 0 : 1);
+            });
+            s.write(JSON.stringify({ id: '1', command: { kind: 'helper.status' } }) + '\\n');
+          "
+          # Reinstalling over a running copy works.
+          sudo "$h/install.sh"
+          sudo "$h/uninstall.sh"
+          ! test -e /Library/PrivilegedHelperTools/vigil-helper
+          ! sudo launchctl print system/com.vigilathome.helper 2>/dev/null
+      - if: failure()
+        run: sudo cat /Library/Logs/Vigil/helper.log || true
+
+  # What Vigil costs the Mac (docs/performance.md): the app on an Intel and an
+  # Apple-silicon runner, and the sensors (osquery, log tailing) once
+  # packages/sensors exists. Numbers go to the job summary and artifacts; only
+  # a clear overrun of the budget fails, since runners are shared VMs.
+  perf:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Download Electron
+        working-directory: apps/desktop
+        run: node node_modules/electron/install.js
+      - run: pnpm --filter @vigil/desktop build
+      - name: Measure the app
+        working-directory: apps/desktop
+        run: node perf/measure.mjs perf-results
+      - id: sensors
+        run: echo "yes=${{ hashFiles('packages/sensors/src/osquery/config.ts') != '' }}" >> "$GITHUB_OUTPUT"
+      - if: always() && steps.sensors.outputs.yes == 'true'
+        run: brew install --cask osquery
+      - name: Measure the sensors
+        if: always() && steps.sensors.outputs.yes == 'true'
+        working-directory: apps/desktop
+        run: sudo -E env "PATH=$PATH" node perf/sensors.mjs perf-results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-${{ matrix.runner }}
+          path: apps/desktop/perf-results

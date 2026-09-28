@@ -3,9 +3,20 @@ import { app, BrowserWindow, nativeTheme, screen, shell, Tray, type Rectangle } 
 import trayIcon from '../../resources/trayTemplate.png?asset';
 import trayAlertIcon from '../../resources/trayAlertTemplate.png?asset';
 import type { Pushes, ThemePref } from '../shared/ipc.js';
+import { DEFAULT_APPEARANCE, windowBackground, type AppearanceSettings } from '../shared/themes.js';
 
 const POPOVER = { width: 380, height: 540 };
 const POPUP = { width: 420, height: 400 };
+/**
+ * Each window's page is a renderer process (30 to 80 MB on macOS). The main
+ * window's goes when it closes and a hidden popup's after a minute, so an
+ * idle menu-bar app holds little. The popover is the exception: it is loaded at start-up and kept,
+ * because a cold open measured 1 to 2 seconds on CI Macs and a warm one
+ * 10 to 60 ms (docs/performance.md).
+ */
+const RELEASE_POPUP_MS = 60 * 1000;
+/** How long the first popup waits for its first paint before showing anyway. */
+const POPUP_SHOW_FALLBACK_MS = 1500;
 
 /** Where renderer pages are served from, for loading and for checking IPC senders. */
 export function rendererOrigin(): string {
@@ -47,6 +58,8 @@ export class Windows {
   private popover?: BrowserWindow;
   private main?: BrowserWindow;
   private popup?: BrowserWindow;
+  private appearance: AppearanceSettings = DEFAULT_APPEARANCE;
+  private readonly releaseTimers = new Map<BrowserWindow, ReturnType<typeof setTimeout>>();
 
   createTray(): void {
     this.tray = new Tray(trayIcon);
@@ -68,6 +81,19 @@ export class Windows {
       this.popover.hide();
       return;
     }
+    this.popover = this.loadPopover();
+    const pos = popoverPosition(this.tray?.getBounds());
+    this.popover.setPosition(pos.x, pos.y, false);
+    this.popover.show();
+    this.popover.focus();
+  }
+
+  /** Load the popover without showing it, so the first click opens it at once. */
+  prewarmPopover(): void {
+    this.popover = this.loadPopover();
+  }
+
+  private loadPopover(): BrowserWindow {
     if (!this.popover || this.popover.isDestroyed()) {
       this.popover = secure(
         new BrowserWindow({
@@ -88,10 +114,7 @@ export class Windows {
       this.popover.on('blur', () => this.popover?.hide());
       load(this.popover, 'popover');
     }
-    const pos = popoverPosition(this.tray?.getBounds());
-    this.popover.setPosition(pos.x, pos.y, false);
-    this.popover.show();
-    this.popover.focus();
+    return this.popover;
   }
 
   openMain(route = 'home'): void {
@@ -112,7 +135,7 @@ export class Windows {
         title: 'Vigil at Home',
         titleBarStyle: 'hiddenInset',
         trafficLightPosition: { x: 16, y: 18 },
-        backgroundColor: nativeTheme.shouldUseDarkColors ? '#141414' : '#F2F4F8',
+        backgroundColor: this.background(),
         webPreferences: webPreferences(),
       }),
     );
@@ -149,10 +172,24 @@ export class Windows {
           webPreferences: webPreferences(),
         }),
       );
+      this.releaseWhenHidden(this.popup, RELEASE_POPUP_MS);
       this.popup.setAlwaysOnTop(true, 'screen-saver');
       this.popup.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
       load(this.popup, `popup/${alertId}`);
-      this.popup.once('ready-to-show', () => this.placeAndShowPopup());
+      // A hidden transparent panel may never paint, so on macOS 'ready-to-show'
+      // can fail to fire and the first popup would stay hidden. Show it on
+      // whichever comes first: first paint, the page finishing loading, or a
+      // short fallback.
+      const win = this.popup;
+      let shown = false;
+      const showOnce = () => {
+        if (shown || win.isDestroyed() || win !== this.popup) return;
+        shown = true;
+        this.placeAndShowPopup();
+      };
+      win.once('ready-to-show', showOnce);
+      win.webContents.once('did-finish-load', showOnce);
+      setTimeout(showOnce, POPUP_SHOW_FALLBACK_MS);
       return;
     }
     this.send(this.popup, 'popup', alertId);
@@ -184,13 +221,40 @@ export class Windows {
     this.popup?.hide();
   }
 
+  /** Close `win` once it has been hidden for `ms`; showing it again cancels that. */
+  private releaseWhenHidden(win: BrowserWindow, ms: number): void {
+    const cancel = () => {
+      clearTimeout(this.releaseTimers.get(win));
+      this.releaseTimers.delete(win);
+    };
+    win.on('show', cancel);
+    win.on('closed', cancel);
+    win.on('hide', () => {
+      cancel();
+      const timer = setTimeout(() => win.isDestroyed() || win.isVisible() || win.close(), ms);
+      timer.unref();
+      this.releaseTimers.set(win, timer);
+    });
+  }
+
+  /** Close the popup now if hidden (what its timer does after a while). */
+  releaseHidden(): void {
+    for (const win of [this.popup]) if (win && !win.isDestroyed() && !win.isVisible()) win.close();
+  }
+
   broadcast<K extends keyof Pushes>(channel: K, ...args: Pushes[K]): void {
     for (const win of BrowserWindow.getAllWindows()) this.send(win, channel, ...args);
   }
 
-  applyTheme(pref: ThemePref): void {
+  applyTheme(pref: ThemePref, appearance: AppearanceSettings = DEFAULT_APPEARANCE): void {
     nativeTheme.themeSource = pref;
+    this.appearance = appearance;
     this.broadcast('theme', pref);
+  }
+
+  /** The theme's window colour, so the main window doesn't flash before it paints. */
+  private background(): string {
+    return windowBackground(this.appearance, nativeTheme.shouldUseDarkColors ? 'dark' : 'light');
   }
 
   private send<K extends keyof Pushes>(win: BrowserWindow, channel: K, ...args: Pushes[K]): void {

@@ -1,7 +1,10 @@
 name: Release
 
-# Builds the Mac app. Pushing a tag like v0.1.0 publishes a draft GitHub
-# release; running it by hand only uploads the build as a workflow artifact.
+# Builds the Mac app for Apple silicon and Intel. Pushing a tag like v0.1.0, or
+# running it by hand with a version, creates a draft GitHub release with the
+# DMGs attached; a maintainer publishes it. Versions with a hyphen
+# (0.1.0-alpha.1) are marked as pre-releases. Running it by hand without a
+# version only uploads the build as a workflow artifact.
 #
 # Signing is optional. With no Apple secrets the app is ad hoc signed: it runs,
 # but macOS asks the user to approve it once in System Settings > Privacy &
@@ -14,12 +17,18 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, like 0.1.0 or 0.1.0-alpha.1 (leave empty to only build)
+        required: false
   # Also check packaging whenever the packaging setup changes.
   pull_request:
     paths:
       - .github/workflows/release.yml
       - apps/desktop/electron-builder.yml
       - apps/desktop/package.json
+      - apps/desktop/helper/**
+      - apps/desktop/scripts/build-helper.mjs
 
 permissions:
   contents: write
@@ -37,10 +46,21 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
 
-      - name: Set the app version from the tag
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Pick the release version
+        id: version
+        env:
+          INPUT: ${{ inputs.version }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF_NAME#v}"; else v="${INPUT#v}"; fi
+          if [[ -n "$v" && ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "Not a version: $v" >&2; exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Set the app version
+        if: steps.version.outputs.version != ''
         working-directory: apps/desktop
-        run: npm pkg set version="${GITHUB_REF_NAME#v}"
+        run: npm pkg set version="${{ steps.version.outputs.version }}"
 
       - name: Build and package
         working-directory: apps/desktop
@@ -52,6 +72,7 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
           pnpm build
+          pnpm build:helper
           if [[ -n "$CSC_LINK" && -n "$CSC_KEY_PASSWORD" && -n "$APPLE_API_KEY_CONTENT" && -n "$APPLE_API_KEY_ID" && -n "$APPLE_API_ISSUER" ]]; then
             echo "Signing with Developer ID and notarizing."
             export APPLE_API_KEY="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
@@ -64,6 +85,24 @@ jobs:
               -c.mac.identity=- -c.mac.notarize=false
           fi
 
+      - name: Check both apps carry the helper
+        working-directory: apps/desktop/dist
+        run: |
+          for app in mac-arm64/*.app mac/*.app; do
+            h="$app/Contents/Resources/helper"
+            for f in node helper.mjs install.sh uninstall.sh vigil-helper com.vigilathome.helper.plist; do
+              test -f "$h/$f" || { echo "Missing $h/$f"; exit 1; }
+            done
+            echo "$app: helper runtime $(lipo -archs "$h/node")"
+            # electron-builder must leave Node.js's own signature in place
+            # (HX7739G8FX is the Node.js Foundation's Apple team).
+            codesign --verify --strict "$h/node"
+            codesign -dv "$h/node" 2>&1 | grep -q '^TeamIdentifier=HX7739G8FX$' \
+              || { codesign -dv "$h/node"; exit 1; }
+          done
+          h="mac-arm64/Vigil at Home.app/Contents/Resources/helper"
+          "$h/node" "$h/helper.mjs" santa-profile | grep -q PayloadContent
+
       - uses: actions/upload-artifact@v4
         with:
           name: vigil-at-home-mac
@@ -72,10 +111,11 @@ jobs:
             apps/desktop/dist/*.zip
 
       - name: Draft a GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.version.outputs.version != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --draft --title "Vigil at Home $GITHUB_REF_NAME" \
-            --notes "Unsigned builds: on first launch, open System Settings > Privacy & Security and choose Open Anyway." \
-            apps/desktop/dist/*.dmg apps/desktop/dist/*.zip
+          flags=(--draft --target "$GITHUB_SHA" --title "Vigil at Home $VERSION" --notes-file .github/release-notes.md)
+          [[ "$VERSION" == *-* ]] && flags+=(--prerelease)
+          gh release create "v$VERSION" "${flags[@]}" apps/desktop/dist/*.dmg apps/desktop/dist/*.zip

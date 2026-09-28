@@ -7,11 +7,14 @@ import type { Action, ActionResult } from '@vigil/core';
  */
 export interface ActionExecutor {
   execute(action: Action): Promise<ActionResult>;
+  /** True while actions are only simulated (no helper yet). */
+  readonly simulated?: boolean;
 }
 
 /** Records what would happen without touching the system. Used until the helper is installed. */
 export class DryRunExecutor implements ActionExecutor {
   readonly log: Action[] = [];
+  readonly simulated = true;
 
   async execute(action: Action): Promise<ActionResult> {
     this.log.push(action);

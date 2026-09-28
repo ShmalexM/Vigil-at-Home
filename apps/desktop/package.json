@@ -14,11 +14,13 @@
   "main": "out/main/index.js",
   "scripts": {
     "e2e": "node e2e/popup.e2e.mjs",
+    "predev": "node scripts/build-helper.mjs --dev",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
     "typecheck": "tsc -p tsconfig.node.json && tsc -p tsconfig.web.json",
-    "dist": "electron-vite build && electron-builder --publish never"
+    "build:helper": "node scripts/build-helper.mjs",
+    "dist": "electron-vite build && node scripts/build-helper.mjs && electron-builder --publish never"
   },
   "devDependencies": {
     "@fontsource/plus-jakarta-sans": "^5.3.0",
@@ -26,10 +28,14 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vigil/core": "workspace:*",
+    "@vigil/detection": "workspace:*",
+    "@vigil/helper": "workspace:*",
+    "@vigil/sensors": "workspace:*",
     "@vitejs/plugin-react": "^5.2.0",
     "electron": "^44.0.0",
     "electron-builder": "^26.15.0",
     "electron-vite": "^5.0.0",
+    "esbuild": "^0.25.12",
     "lucide-react": "^1.48.0",
     "playwright-core": "^1.63.0",
     "react": "^19.2.0",

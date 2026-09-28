@@ -69,4 +69,20 @@ describe('Scheduler', () => {
     s.stop();
     await expect(waiting).rejects.toThrow('stopped');
   });
+
+  it('runs periodic jobs less often while slowed down', async () => {
+    vi.useFakeTimers();
+    const s = new Scheduler();
+    let calls = 0;
+    s.every('poll', 100, () => void calls++);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(calls).toBe(4);
+    s.setSlowdown(4);
+    await vi.advanceTimersByTimeAsync(800);
+    expect(calls).toBe(6);
+    s.setSlowdown(1);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(calls).toBe(9);
+    s.stop();
+  });
 });

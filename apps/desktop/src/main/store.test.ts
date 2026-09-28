@@ -1,3 +1,4 @@
+import { TEXT_SEARCH_WINDOW_MS } from '../shared/ipc.js';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { makeExec, makeRule, memoryStore } from './testing.js';
@@ -69,5 +70,104 @@ describe('Store', () => {
       });
     }
     expect(s.ruleMatchCounts(15).get('r')).toBe(2);
+  });
+
+  it('keeps the database under a size cap by dropping the oldest events', () => {
+    const s = memoryStore();
+    const kept = makeExec();
+    s.insertEvent(kept);
+    s.saveAlert({
+      id: 'a-cap',
+      createdAt: 1,
+      updatedAt: 1,
+      ruleId: 'test.rule',
+      ruleVersion: 1,
+      title: 't',
+      summary: 's',
+      severity: 'high',
+      fidelity: 'high',
+      notify: 'popup',
+      status: 'open',
+      containment: 'none',
+      eventIds: [kept.id],
+      actionIds: [],
+    });
+    const many = Array.from({ length: 3000 }, (_, i) => ({
+      ...makeExec(`/usr/bin/tool${i}`),
+      process: { pid: i, path: `/usr/bin/tool${i}`, args: ['x'.repeat(200)] },
+    }));
+    expect(s.insertEvents(many.map((event) => ({ event })))).toBe(0);
+    const full = s.usedBytes();
+    const removed = s.pruneEventsToSize(full / 2);
+    expect(removed).toBeGreaterThan(0);
+    expect(s.usedBytes()).toBeLessThanOrEqual(full / 2);
+    expect(s.getEvent(kept.id)).toBeDefined();
+    // The newest events stay.
+    expect(s.getEvent(many.at(-1)!.id)).toBeDefined();
+  });
+
+  it('lists the event feed with filters, paging and outcomes', () => {
+    const s = memoryStore();
+    const a = { ...makeExec('/Applications/Safari.app/Contents/MacOS/Safari'), ts: 1000 };
+    const b = { ...makeExec('/tmp/100%_evil'), ts: 2000 };
+    s.insertEvent(a, { checked: 3, matches: [] });
+    s.insertEvent(b, {
+      checked: 3,
+      matches: [{ ruleId: 'r1', ruleName: 'Rule one', mode: 'alert' }],
+    });
+    s.insertEvent({
+      id: 'net1',
+      ts: 3000,
+      source: 'osquery',
+      kind: 'network.connection',
+      direction: 'outbound',
+      protocol: 'tcp',
+      remoteAddress: '1.2.3.4',
+    });
+
+    expect(s.listEventViews().map((v) => v.event.ts)).toEqual([3000, 2000, 1000]);
+    expect(s.listEventViews({ group: 'network' })).toHaveLength(1);
+    expect(s.listEventViews({ matchedOnly: true }).map((v) => v.event.id)).toEqual([b.id]);
+    expect(s.listEventViews({ text: 'safari' }, 5000).map((v) => v.event.id)).toEqual([a.id]);
+    // % and _ are literal, not wildcards.
+    expect(s.listEventViews({ text: '100%_' }, 5000).map((v) => v.event.id)).toEqual([b.id]);
+    expect(s.listEventViews({ text: '%' }, 5000).map((v) => v.event.id)).toEqual([b.id]);
+    expect(s.listEventViews({ before: 2000, limit: 5 }).map((v) => v.event.id)).toEqual([a.id]);
+    expect(s.listEventViews({ group: 'network' })[0]?.outcome).toBeNull();
+    // A search looks back one day from where the page starts.
+    const dayLater = 1000 + TEXT_SEARCH_WINDOW_MS + 1;
+    expect(s.listEventViews({ text: 'safari' }, dayLater)).toEqual([]);
+    expect(s.listEventViews({ text: 'safari', before: 1500 }, dayLater)).toHaveLength(1);
+
+    const stats = s.eventStats(1500);
+    expect(stats).toMatchObject({
+      lastHour: 2,
+      matchedLastHour: 1,
+      programsLastHour: 1,
+      newest: 3000,
+    });
+    expect(stats.byGroup).toMatchObject({ programs: 1, network: 1, files: 0 });
+  });
+
+  it('fills in the outcome of an event an alert already stored, keeping its raw record', () => {
+    const s = memoryStore();
+    const e = { ...makeExec(), raw: { line: 'santa' } };
+    s.insertEvent(e);
+    s.insertEvents([{ event: { ...e, raw: undefined }, outcome: { checked: 2, matches: [] } }]);
+    expect(s.getEvent(e.id)).toMatchObject({ raw: { line: 'santa' } });
+    expect(s.listEventViews()[0]?.outcome).toEqual({ checked: 2, matches: [] });
+  });
+
+  it('marks batched events that matched a rule, including ones an alert stored first', () => {
+    const s = memoryStore();
+    const hit = makeExec();
+    const plain = makeExec();
+    const matches = [{ ruleId: 'r', ruleName: 'R', mode: 'alert' as const }];
+    s.insertEvent(hit);
+    s.insertEvents([
+      { event: hit, outcome: { checked: 1, matches } },
+      { event: plain, outcome: { checked: 1, matches: [] } },
+    ]);
+    expect(s.listEventViews({ matchedOnly: true }).map((v) => v.event.id)).toEqual([hit.id]);
   });
 });

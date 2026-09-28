@@ -40,4 +40,20 @@ describe('computeStatus', () => {
     const s = computeStatus([], [{ id: 'santa', name: 'Santa', state: 'not_installed' }]);
     expect(s).toMatchObject({ level: 'fair', reasons: ['Santa is not installed'] });
   });
+
+  it('puts the reason that sets the level first', () => {
+    const s = computeStatus(
+      [alert({})],
+      [
+        { id: 'santa', name: 'Santa', state: 'not_installed' },
+        { id: 'osquery', name: 'osquery', state: 'down' },
+      ],
+    );
+    expect(s.level).toBe('poor');
+    expect(s.reasons).toEqual([
+      'osquery has stopped',
+      '1 alert waiting on you',
+      'Santa is not installed',
+    ]);
+  });
 });

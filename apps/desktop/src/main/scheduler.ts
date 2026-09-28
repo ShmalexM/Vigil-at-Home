@@ -6,6 +6,8 @@
  *   routine work is paused on battery or sleep.
  * - Periodic jobs never overlap themselves: a job still queued or running
  *   when its next tick comes skips that tick.
+ * - On battery the app slows periodic jobs down (`setSlowdown`): a job runs
+ *   at most once every `everyMs × factor`.
  *
  * Blocking never goes through here. Blocks run inline in the alert path.
  */
@@ -47,6 +49,7 @@ export class Scheduler {
   private running = 0;
   private paused = false;
   private stopped = false;
+  private slowdown = 1;
   private readonly concurrency: number;
   private readonly now: () => number;
   private readonly onError: (name: string, err: unknown) => void;
@@ -91,6 +94,10 @@ export class Scheduler {
 
   private tick(job: Job): void {
     if (job.busy || this.stopped) return;
+    // A little slack so a job due on this tick isn't pushed to the next one.
+    const gap = job.everyMs * this.slowdown - job.everyMs / 2;
+    if (this.slowdown > 1 && job.lastStart !== undefined && this.now() - job.lastStart < gap)
+      return;
     job.busy = true;
     this.enqueue(job.name, async () => {
       job.lastStart = this.now();
@@ -119,6 +126,11 @@ export class Scheduler {
   resume(): void {
     this.paused = false;
     this.pump();
+  }
+
+  /** Run periodic jobs `factor` times less often (1 = normal). Queued work is unaffected. */
+  setSlowdown(factor: number): void {
+    this.slowdown = Math.max(1, factor);
   }
 
   get isPaused(): boolean {

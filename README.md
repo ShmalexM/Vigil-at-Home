@@ -4,7 +4,40 @@ Your own security operations center, running on your Mac.
 
 Vigil at Home watches what runs on your laptop, blocks malicious activity as it happens, and pops up to tell you when it does. It uses the AI subscription you already have (Claude, ChatGPT/Codex or GitHub Copilot) to explain what it found and help you decide, but it never waits on the AI to block, and only you can allow or release something.
 
-> Status: early development. Nothing here is ready to install yet.
+> Status: early alpha. The app, popup and alert pipeline work, but the sensors, detection rules and AI connection are still being merged in. Until then the app has nothing real to watch, and blocks are simulated and labelled that way.
+
+## Install
+
+Download the latest DMG from [Releases](https://github.com/ShmalexM/Vigil-at-Home/releases): `-arm64.dmg` for Apple silicon (M1 and later), `-x64.dmg` for Intel Macs.
+
+1. Open the DMG and drag **Vigil at Home** into **Applications**.
+2. Open it. Releases aren't signed with an Apple Developer ID yet, so macOS refuses the first time. Choose **Done**.
+3. Open **System Settings > Privacy & Security**, scroll to Security and choose **Open Anyway** next to Vigil at Home.
+4. Vigil appears as a shield in the menu bar.
+
+Steps 2 and 3 happen once. To skip them, build it yourself (see below).
+
+### The Vigil helper
+
+Blocking needs a small helper that runs as root. Until it's installed, Vigil only simulates blocks and says so. On **Home > Protection**, choose **Install helper**. macOS asks for your password once. The same script also runs from Terminal:
+
+```bash
+sudo "/Applications/Vigil at Home.app/Contents/Resources/helper/install.sh"
+```
+
+It copies the helper and its own Node.js runtime into `/Library/PrivilegedHelperTools`, owned by root, and starts it with launchd. `uninstall.sh`, in the same folder, removes it. Uninstalling keeps `/Library/Application Support/Vigil`, so nothing Vigil quarantined is lost.
+
+### Build from source
+
+```bash
+git clone https://github.com/ShmalexM/Vigil-at-Home.git && cd Vigil-at-Home
+pnpm install
+pnpm --filter @vigil/desktop dist   # DMGs land in apps/desktop/dist
+```
+
+A build made on your own Mac isn't quarantined, so it opens without the prompt. `pnpm --filter @vigil/desktop dev` runs it without packaging.
+
+Maintainers: run the **Release** workflow by hand with a version (like `0.1.0-alpha.2`) to build both DMGs and create a draft release, then publish it.
 
 ## How it works
 
