@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { app, powerMonitor, safeStorage, shell } from 'electron';
+import { app, dialog, powerMonitor, safeStorage, shell } from 'electron';
 import type { HelperInstallResult } from '../shared/ipc.js';
 import { AiBridge } from './ai.js';
 import { Store } from './db/store.js';
@@ -22,6 +22,10 @@ import { Windows } from './windows.js';
 
 app.setName('Vigil at Home');
 
+// Development builds keep their own data, so demo data and test setups never
+// end up in the installed app's database.
+if (!app.isPackaged) app.setPath('userData', join(app.getPath('appData'), 'Vigil at Home Dev'));
+
 // The resource check (perf/measure.mjs) runs the app against a throwaway
 // profile and drives it from the main process.
 const perf = !app.isPackaged && !!process.env['VIGIL_PERF'];
@@ -30,7 +34,17 @@ if (perf && process.env['VIGIL_USER_DATA']) app.setPath('userData', process.env[
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  void app.whenReady().then(start);
+  void app.whenReady().then(start).catch(failedToStart);
+}
+
+/** A menu-bar app that fails to start has no window or icon, so say so and quit. */
+function failedToStart(err: unknown): void {
+  console.error('Vigil could not start:', err);
+  dialog.showErrorBox(
+    'Vigil at Home could not start',
+    `${err instanceof Error ? err.message : String(err)}\n\nPlease reinstall Vigil at Home or report this error.`,
+  );
+  app.exit(1);
 }
 
 function start(): void {
