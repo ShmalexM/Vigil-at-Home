@@ -1,4 +1,6 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -230,6 +232,60 @@ describe.skipIf(!bundledCodex())('Codex app-server as launched', () => {
       expect(started.thread.ephemeral).toBe(true);
     } finally {
       rpc.close();
+    }
+  }, 60_000);
+});
+
+describe.skipIf(!bundledCodex())('What Codex offers the model', () => {
+  it("sends only Vigil's own tools, with no exec, agents or questions to the user", async () => {
+    // A stand-in model server records the request Codex would send to OpenAI.
+    const requests: Array<{ url?: string; tools?: Array<{ name?: string; type: string }> }> = [];
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        requests.push({ ...(body ? JSON.parse(body) : {}), url: req.url });
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end('{"error":{"message":"test server"}}');
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const { port } = server.address() as AddressInfo;
+    const codexHome = await tempDir('vigil-codex-tools-');
+    await writeFile(
+      join(codexHome, 'config.toml'),
+      [
+        // A model Codex knows, so it builds the full tool list it would send.
+        'model = "gpt-5.5"',
+        'model_provider = "test"',
+        '[model_providers.test]',
+        'name = "test"',
+        `base_url = "http://127.0.0.1:${port}/v1"`,
+        'wire_api = "responses"',
+        'experimental_bearer_token = "x"',
+        'request_max_retries = 0',
+        'stream_max_retries = 0',
+      ].join('\n'),
+    );
+    try {
+      const out = await createCodexAdapter({
+        codexHome,
+        pins: memoryPinStore(),
+        executablePath: bundledCodex()!,
+      }).run({
+        systemPrompt: 's',
+        userPrompt: 'u',
+        jsonSchema: schema,
+        tools: [getFinding],
+        signal: AbortSignal.timeout(60_000),
+        onUsage: () => {},
+      });
+      expect(out.kind).toBe('error');
+      expect(requests.filter((r) => r.url === '/v1/responses').length).toBeGreaterThan(0);
+      for (const r of requests.filter((r) => r.url === '/v1/responses'))
+        expect((r.tools ?? []).map((t) => t.name ?? t.type)).toEqual(['get_finding']);
+    } finally {
+      server.close();
     }
   }, 60_000);
 });
