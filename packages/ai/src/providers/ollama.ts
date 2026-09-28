@@ -25,6 +25,8 @@ export interface OllamaAdapterOptions {
     readonly numCtx?: number;
     /** CPU threads Ollama may use for this model. */
     readonly numThread?: number;
+    /** Most tokens one reply may generate. Defaults to DEFAULT_MAX_OUTPUT_TOKENS. */
+    readonly numPredict?: number;
     /** How long Ollama keeps the model in memory after a request, e.g. "1m". */
     readonly keepAlive?: string;
   };
@@ -43,6 +45,13 @@ interface ChatMessage {
 const MAX_TOOL_ROUNDS = 6;
 
 /**
+ * Small models sometimes loop instead of closing their JSON. A cap turns that
+ * into a fast invalid answer (which the runner retries) instead of minutes of
+ * CPU until the deadline.
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 1024;
+
+/**
  * A local model through Ollama. There is no vendor agent here: Vigil runs the
  * small tool loop itself, so only Vigil's tools can ever be called.
  */
@@ -51,13 +60,11 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
   const base = options.baseUrl.replace(/\/$/, '');
   let chosen: string | undefined;
   const rt = options.runtime;
-  const runtimeOptions =
-    rt && (rt.numCtx !== undefined || rt.numThread !== undefined)
-      ? {
-          ...(rt.numCtx !== undefined ? { num_ctx: rt.numCtx } : {}),
-          ...(rt.numThread !== undefined ? { num_thread: rt.numThread } : {}),
-        }
-      : undefined;
+  const runtimeOptions = {
+    num_predict: rt?.numPredict ?? DEFAULT_MAX_OUTPUT_TOKENS,
+    ...(rt?.numCtx !== undefined ? { num_ctx: rt.numCtx } : {}),
+    ...(rt?.numThread !== undefined ? { num_thread: rt.numThread } : {}),
+  };
 
   async function supportsTools(model: string): Promise<boolean> {
     const res = await http(`${base}/api/show`, {
@@ -143,7 +150,7 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
               model,
               messages,
               stream: false,
-              ...(runtimeOptions ? { options: runtimeOptions } : {}),
+              options: runtimeOptions,
               ...(options.runtime?.keepAlive ? { keep_alive: options.runtime.keepAlive } : {}),
               format: input.jsonSchema,
               ...(tools.size > 0 && round < MAX_TOOL_ROUNDS

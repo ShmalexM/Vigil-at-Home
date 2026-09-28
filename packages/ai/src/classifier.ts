@@ -41,7 +41,13 @@ export function pickClassifierModel(
 
 /** Ollama settings that keep a small model light: short context, half the cores, unloaded soon. */
 export function classifierRuntime(cores: number = cpus().length) {
-  return { numCtx: 4096, numThread: Math.max(1, Math.floor(cores / 2)), keepAlive: '1m' } as const;
+  return {
+    numCtx: 4096,
+    // A batch of 20 labels is about 800 tokens of JSON.
+    numPredict: 2048,
+    numThread: Math.max(1, Math.floor(cores / 2)),
+    keepAlive: '1m',
+  } as const;
 }
 
 export type EventLabel = 'benign' | 'unusual' | 'suspicious';

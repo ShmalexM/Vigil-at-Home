@@ -343,6 +343,10 @@ describe('Ollama adapter', () => {
       json: { summary: 'done' },
       audit: { called: ['get_finding'], denied: ['tool: run_shell'] },
     });
+    // Every call caps output so a looping small model fails fast instead of running to the deadline.
+    expect(
+      bodies.map((b) => (b as { options?: { num_predict?: number } }).options?.num_predict),
+    ).toEqual([1024, 1024]);
     const toolMessages = bodies[1]!.messages.filter((m) => m.role === 'tool');
     expect(toolMessages[0]?.content).toBe('Not allowed.');
     expect(JSON.parse(toolMessages[1]?.content ?? '')).toEqual({

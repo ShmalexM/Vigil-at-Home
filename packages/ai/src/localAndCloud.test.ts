@@ -257,7 +257,12 @@ describe('event labelling with a small local model', () => {
     expect(pickClassifierModel(installed, 16 * GB)).toBe('qwen2.5:1.5b');
     expect(pickClassifierModel(installed, 8 * GB)).toBe('llama3.2:1b');
     expect(pickClassifierModel([{ name: 'gpt-oss:20b' }], 8 * GB)).toBeUndefined();
-    expect(classifierRuntime(8)).toEqual({ numCtx: 4096, numThread: 4, keepAlive: '1m' });
+    expect(classifierRuntime(8)).toEqual({
+      numCtx: 4096,
+      numPredict: 2048,
+      numThread: 4,
+      keepAlive: '1m',
+    });
     expect(classifierRuntime(1).numThread).toBe(1);
   });
 
