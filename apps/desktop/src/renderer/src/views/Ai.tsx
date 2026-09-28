@@ -117,6 +117,17 @@ export function AiSection() {
                     onChange={(v) => void setPref({ claudeUses: v })}
                   />
                 )}
+                {p.provider === 'codex' && view.prefs.codex && (
+                  <Segmented
+                    label="How Codex is paid for"
+                    value={view.prefs.codexUses}
+                    options={[
+                      { value: 'subscription', label: 'My ChatGPT plan' },
+                      { value: 'apiKey', label: 'OpenAI API key' },
+                    ]}
+                    onChange={(v) => void setPref({ codexUses: v })}
+                  />
+                )}
               </div>
               <div className="ai-actions">
                 {p.canShareSignIn && !p.signInShared && (

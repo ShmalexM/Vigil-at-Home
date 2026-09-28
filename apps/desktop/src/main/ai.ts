@@ -172,7 +172,7 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
       ...base,
       mode: this.o.mode() ?? base.mode,
       claude: { ...base.claude, enabled: prefs.claude, mode: prefs.claudeUses },
-      codex: { ...base.codex, enabled: prefs.codex },
+      codex: { ...base.codex, enabled: prefs.codex, mode: prefs.codexUses },
       ollama: { ...base.ollama, enabled: prefs.ollama },
       api: api
         ? {
@@ -200,6 +200,8 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
       log: { record: (entry) => this.record(entry) },
       pins: this.pins(),
       getAnthropicApiKey: keyOf('anthropic'),
+      // Codex sends this only to api.openai.com, so only an OpenAI key is offered.
+      getOpenAiApiKey: keyOf('openai'),
       ...(api ? { getApiKey: keyOf(api.provider) } : {}),
       ...(this.o.keys.list().typesafe ? { getJevApiKey: keyOf('typesafe') } : {}),
       spentThisMonthUsd: async (p) => this.spentThisMonthUsd(p),
@@ -270,7 +272,7 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
       // so to the user it's an optional extra, not a problem.
       s.provider === 'api' && !this.apiConnection() && this.prefs().api && settings.mode !== 'local'
         ? { ...providerView({ provider: 'api', state: 'disabled' }, shared), state: 'optional' }
-        : providerView(s, shared),
+        : providerView(s, shared, settings.codex.mode === 'apiKey'),
     );
     // Jev isn't a runner provider; it rides on the keys.
     const saved = this.o.keys.list();
@@ -479,8 +481,10 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
   }
 }
 
-function providerView(s: ProviderStatus, codexShared: boolean): AiProviderView {
+function providerView(s: ProviderStatus, codexShared: boolean, codexOnKey = false): AiProviderView {
   const provider = s.provider as Exclude<ProviderId, 'jev'>;
+  // On an OpenAI API key, Codex's sign-in buttons don't apply.
+  const noSignIn = provider === 'codex' && codexOnKey;
   return {
     provider,
     name: NAMES[provider],
@@ -489,9 +493,9 @@ function providerView(s: ProviderStatus, codexShared: boolean): AiProviderView {
     ...(s.version ? { version: s.version } : {}),
     ...(s.account ? { account: provider === 'claude' ? claudeAuth(s.account) : s.account } : {}),
     ...(s.detail ? { detail: s.detail } : {}),
-    canSignIn: s.canSignIn === true,
-    canShareSignIn: s.canShareSignIn === true,
-    signInShared: provider === 'codex' && codexShared,
+    canSignIn: !noSignIn && s.canSignIn === true,
+    canShareSignIn: !noSignIn && s.canShareSignIn === true,
+    signInShared: !noSignIn && provider === 'codex' && codexShared,
   };
 }
 
