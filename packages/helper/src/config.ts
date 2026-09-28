@@ -79,4 +79,5 @@ export const PROTECTED_PROCESS_PREFIXES = [
   '/Library/SystemExtensions/',
   '/Library/PrivilegedHelperTools/vigil-helper',
   '/Applications/Vigil.app/',
+  '/Applications/Vigil at Home.app/',
 ];

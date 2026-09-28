@@ -65,6 +65,15 @@ export class HelperLink
     void this.tryConnect();
   }
 
+  /** Drop any connection and look again now, e.g. right after installing or removing the helper. */
+  async reconnect(): Promise<void> {
+    const client = this.client;
+    this.client = undefined;
+    client?.close();
+    this.stopped = false;
+    await this.tryConnect();
+  }
+
   stop(): void {
     this.stopped = true;
     clearTimeout(this.timer);

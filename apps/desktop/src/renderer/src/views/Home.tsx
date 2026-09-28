@@ -1,4 +1,5 @@
 import { CircleCheck, TriangleAlert } from 'lucide-react';
+import { useState } from 'react';
 import { useLive, vigil } from '../api';
 import { Card, Chip, LevelPill, SectionHead, SeverityMark, StatusMark } from '../components/ui';
 import { actorLabel, describeRecord, timeAgo } from '../format';
@@ -105,6 +106,9 @@ export function HomeView({ go }: { go: (r: string) => void }) {
                       {s.note}
                     </span>
                   )}
+                  {s.id === 'helper' && s.state !== 'ok' && status.helperInstallable && (
+                    <InstallHelper reinstall={s.state === 'down'} />
+                  )}
                 </span>
               </div>
             ))}
@@ -138,5 +142,36 @@ export function HomeView({ go }: { go: (r: string) => void }) {
         )}
       </Card>
     </div>
+  );
+}
+
+/** Installs the helper through macOS's own password dialog. */
+function InstallHelper({ reinstall }: { reinstall: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    const r = await vigil.installHelper();
+    setBusy(false);
+    if (!r.ok && r.error !== 'cancelled') setError(r.error ?? 'Install failed');
+  };
+  return (
+    <>
+      <button
+        type="button"
+        className="btn sm"
+        disabled={busy}
+        title="macOS asks for your password once"
+        onClick={() => void run()}
+      >
+        {busy ? 'Installing…' : reinstall ? 'Reinstall helper' : 'Install helper'}
+      </button>
+      {error && (
+        <span className="t-small" style={{ color: 'var(--poor)', textAlign: 'right' }}>
+          {error}
+        </span>
+      )}
+    </>
   );
 }

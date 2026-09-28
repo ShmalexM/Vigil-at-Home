@@ -2,9 +2,11 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { app, powerMonitor } from 'electron';
+import type { HelperInstallResult } from '../shared/ipc.js';
 import { Store } from './db/store.js';
 import { seedDemo, startDemoFeed } from './demo.js';
 import { Detector } from './detection.js';
+import { runHelperScript, helperBundleDir } from './helper-install.js';
 import { HelperLink } from './helper.js';
 import { registerIpc } from './ipc.js';
 import { HEALTH_CHECK_MS, macProbe, reportHealth, type HelperSensors } from './sensor-health.js';
@@ -38,8 +40,23 @@ function start(): void {
     selfPaths: [app.isPackaged ? join(process.execPath, '../../..') : process.execPath],
   });
   const windows = new Windows();
+  const probe = macProbe(
+    (source) => store.lastEventAt(source),
+    () => helper.state,
+    async () => (await helper.query<{ sensors?: HelperSensors }>('helper.status'))?.sensors ?? null,
+  );
 
-  registerIpc(core, windows);
+  core.helperInstallable = process.platform === 'darwin' && helperBundleDir() !== null;
+  // Installing or removing the helper shows macOS's own password dialog.
+  const afterHelperScript = async (r: HelperInstallResult) => {
+    await helper.reconnect();
+    await reportHealth(core.sensors, probe);
+    return r;
+  };
+  registerIpc(core, windows, {
+    install: async () => afterHelperScript(await runHelperScript('install')),
+    uninstall: async () => afterHelperScript(await runHelperScript('uninstall')),
+  });
   windows.createTray();
   windows.applyTheme(core.theme());
 
@@ -60,11 +77,6 @@ function start(): void {
 
   // Sensor events arrive through the helper, which reads Santa's and osquery's logs as root.
   helper.on('event', (e) => void core.handleEvent(e));
-  const probe = macProbe(
-    (source) => store.lastEventAt(source),
-    () => helper.state,
-    async () => (await helper.query<{ sensors?: HelperSensors }>('helper.status'))?.sensors ?? null,
-  );
   const checkHealth = () => reportHealth(core.sensors, probe);
   helper.on('state', () => void checkHealth());
   if (process.platform === 'darwin') {

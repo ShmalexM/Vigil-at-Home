@@ -8,3 +8,4 @@ coverage/
 .env
 .env.*
 e2e-results/
+/apps/desktop/build/

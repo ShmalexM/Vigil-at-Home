@@ -27,6 +27,8 @@ on:
       - .github/workflows/release.yml
       - apps/desktop/electron-builder.yml
       - apps/desktop/package.json
+      - apps/desktop/helper/**
+      - apps/desktop/scripts/build-helper.mjs
 
 permissions:
   contents: write
@@ -70,6 +72,7 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
           pnpm build
+          pnpm build:helper
           if [[ -n "$CSC_LINK" && -n "$CSC_KEY_PASSWORD" && -n "$APPLE_API_KEY_CONTENT" && -n "$APPLE_API_KEY_ID" && -n "$APPLE_API_ISSUER" ]]; then
             echo "Signing with Developer ID and notarizing."
             export APPLE_API_KEY="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
@@ -81,6 +84,22 @@ jobs:
             CSC_IDENTITY_AUTO_DISCOVERY=false pnpm exec electron-builder --mac --publish never \
               -c.mac.identity=- -c.mac.notarize=false
           fi
+
+      - name: Check both apps carry the helper
+        working-directory: apps/desktop/dist
+        run: |
+          for app in mac-arm64/*.app mac/*.app; do
+            h="$app/Contents/Resources/helper"
+            for f in node helper.mjs install.sh uninstall.sh vigil-helper com.vigilathome.helper.plist; do
+              test -f "$h/$f" || { echo "Missing $h/$f"; exit 1; }
+            done
+            echo "$app: helper runtime $(lipo -archs "$h/node")"
+            # electron-builder must leave Node.js's own signature in place.
+            codesign -dv "$h/node" 2>&1 | grep -q 'Authority=Developer ID Application: Node.js Foundation' \
+              || { codesign -dv "$h/node"; exit 1; }
+          done
+          h="mac-arm64/Vigil at Home.app/Contents/Resources/helper"
+          "$h/node" "$h/helper.mjs" santa-profile | grep -q PayloadContent
 
       - uses: actions/upload-artifact@v4
         with:

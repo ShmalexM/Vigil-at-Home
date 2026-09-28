@@ -86,6 +86,8 @@ export const calls = {
   /** The popup's content height in CSS pixels, so the window hugs it. */
   fitPopup: z.tuple([z.number().int().min(80).max(1000)]),
   quit: z.tuple([]),
+  installHelper: z.tuple([]),
+  uninstallHelper: z.tuple([]),
 } as const;
 export type CallName = keyof typeof calls;
 
@@ -104,6 +106,14 @@ export interface StatusView {
   sensors: SensorView[];
   /** True while blocks are simulated because the privileged helper is missing. */
   dryRun: boolean;
+  /** True when this build carries the helper, so the app can install it. */
+  helperInstallable: boolean;
+}
+
+export interface HelperInstallResult {
+  ok: boolean;
+  /** Set when it failed; "cancelled" when the user closed the password dialog. */
+  error?: string;
 }
 
 export interface AlertDetail {
@@ -168,6 +178,8 @@ export interface CallResults {
   closePopup: void;
   fitPopup: void;
   quit: void;
+  installHelper: HelperInstallResult;
+  uninstallHelper: HelperInstallResult;
 }
 
 /** Pushed from main to every window. */
