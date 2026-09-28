@@ -134,6 +134,7 @@ export interface SensorView {
   name: string;
   state: 'ok' | 'degraded' | 'down' | 'not_installed';
   detail?: string;
+  note?: string;
 }
 
 export interface StatusView {

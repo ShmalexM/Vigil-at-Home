@@ -137,7 +137,11 @@ export class VigilCore {
 
   status(): StatusView {
     const s = computeStatus(this.store.listAlerts({ status: 'open' }), this.sensors.list());
-    return { ...s, sensors: this.sensors.list(), dryRun: this.dryRun };
+    return {
+      ...s,
+      sensors: this.sensors.list(),
+      dryRun: this.executor.simulated ?? this.dryRun,
+    };
   }
 
   alertDetail(id: string): AlertDetail | null {
