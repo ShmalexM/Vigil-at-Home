@@ -42,6 +42,15 @@ export function registerIpc(
     rejectProposal: (id) => core.alerts.rejectProposal(id),
     listRules: () => core.rules(),
     setRuleMode: (id: string, mode) => core.setRuleMode(id, mode),
+    getRuleEditor: (id) => core.ruleEditing()?.view(id) ?? null,
+    previewRule: (json) => editing(core).preview(json),
+    saveRule: (json) => editing(core).save(json),
+    revertRule: (id) => editing(core).revert(id),
+    deleteRule: (id) => editing(core).delete(id),
+    addExclusion: (id, input) => editing(core).addExclusion(id, input),
+    removeExclusion: (id, index) => editing(core).removeExclusion(id, index),
+    removeException: (id) => editing(core).removeException(id),
+    excludeFromAlert: (id, scope) => editing(core).excludeFromAlert(id, scope),
     listActions: () => core.store.listActions({ limit: 300 }),
     listEvents: (q) => core.store.listEventViews(stripUndefined(q)),
     eventStats: () => core.eventStats(),
@@ -73,6 +82,12 @@ export function registerIpc(
       return (h[name] as (...a: unknown[]) => unknown)(...args);
     });
   }
+}
+
+function editing(core: VigilCore) {
+  const e = core.ruleEditing();
+  if (!e) throw new Error('Detection is not running');
+  return e;
 }
 
 /** zod output has `key: undefined` where our types want the key absent. */
