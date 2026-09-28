@@ -26,6 +26,7 @@ import {
 } from './codex.js';
 import {
   canShareCodexSignIn,
+  isCodexSignInLinkBroken,
   isCodexSignInShared,
   shareCodexSignIn,
   stopSharingCodexSignIn,
@@ -433,8 +434,31 @@ describe('Sharing the Codex sign-in the user already has', () => {
       'cli_auth_credentials_store="file"',
     );
 
+    // If a Codex update ever saved by replacing the link with a copy, Vigil notices.
+    expect(await isCodexSignInLinkBroken(vigil)).toBe(false);
+    await rm(join(vigil, 'auth.json'));
+    await writeFile(join(vigil, 'auth.json'), '{"copy":true}');
+    expect(await isCodexSignInLinkBroken(vigil)).toBe(true);
+    expect(
+      await createCodexAdapter({
+        codexHome: vigil,
+        pins: memoryPinStore(),
+        executablePath: '/bin/true',
+      }).run({
+        systemPrompt: 's',
+        userPrompt: 'u',
+        jsonSchema: schema,
+        tools: [],
+        signal: AbortSignal.timeout(5000),
+        onUsage: () => {},
+      }),
+    ).toMatchObject({ kind: 'error', message: expect.stringContaining('replaced') });
+    await shareCodexSignIn(vigil, user);
+    expect(await isCodexSignInLinkBroken(vigil)).toBe(false);
+
     await stopSharingCodexSignIn(vigil);
     expect(await isCodexSignInShared(vigil)).toBe(false);
+    expect(await isCodexSignInLinkBroken(vigil)).toBe(false);
     expect(await readFile(join(user, 'auth.json'), 'utf8')).toBe('{}');
   });
 

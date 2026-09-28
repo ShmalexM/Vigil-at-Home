@@ -7,6 +7,7 @@ import { buildChildEnv } from '../env.js';
 import {
   canShareCodexSignIn,
   DEFAULT_USER_CODEX_HOME,
+  isCodexSignInLinkBroken,
   isCodexSignInShared,
 } from './codexSignIn.js';
 import type { PinStore } from '../executable.js';
@@ -31,6 +32,9 @@ const execFileAsync = promisify(execFile);
 export const CODEX_TESTED_VERSION = '0.157.1';
 
 const SIGN_IN_TIMEOUT_MS = 10 * 60_000;
+
+const LINK_BROKEN =
+  "Codex replaced Vigil's link to your Codex sign-in. Use your Codex sign-in again, or sign in from Vigil.";
 
 /**
  * Codex features that give the agent hands or pull in outside configuration.
@@ -229,6 +233,15 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
     async probe(): Promise<ProviderStatus> {
       const binary = await verifyBinary('codex', 'codex', options.pins, options.executablePath);
       if (binary.state !== 'ok') return { provider: 'codex', state: binary.state };
+      if (await isCodexSignInLinkBroken(options.codexHome))
+        return {
+          provider: 'codex',
+          state: 'needs_sign_in',
+          detail: LINK_BROKEN,
+          ...((await canShareCodexSignIn(options.userCodexHome ?? DEFAULT_USER_CODEX_HOME))
+            ? { canShareSignIn: true }
+            : {}),
+        };
       let rpc: JsonRpcStdio | undefined;
       try {
         const { stdout } = await execFileAsync(binary.path, ['--version'], {
@@ -352,6 +365,8 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
 
     async run(input: AdapterRunInput): Promise<AdapterRunOutput> {
       const audit: ToolAudit = { called: [], denied: [] };
+      if (await isCodexSignInLinkBroken(options.codexHome))
+        return { kind: 'error', message: LINK_BROKEN, audit };
       const binary = await verifyBinary('codex', 'codex', options.pins, options.executablePath);
       if (binary.state !== 'ok') return { kind: 'error', message: `Codex: ${binary.state}`, audit };
 

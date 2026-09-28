@@ -30,6 +30,7 @@ export { createCodexAdapter } from './providers/codex.js';
 export {
   canShareCodexSignIn,
   DEFAULT_USER_CODEX_HOME,
+  isCodexSignInLinkBroken,
   isCodexSignInShared,
   shareCodexSignIn,
   stopSharingCodexSignIn,

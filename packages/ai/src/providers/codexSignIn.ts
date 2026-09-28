@@ -1,4 +1,4 @@
-import { lstat, mkdir, symlink, unlink } from 'node:fs/promises';
+import { lstat, mkdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -16,6 +16,8 @@ import { join } from 'node:path';
 export const DEFAULT_USER_CODEX_HOME = join(homedir(), '.codex');
 
 const AUTH_FILE = 'auth.json';
+/** Records that the user chose to share, so a link that later vanishes is noticed. */
+const SHARED_MARKER = 'vigil-shared-sign-in';
 
 /** Whether the user's Codex has a sign-in file Vigil could link to. */
 export async function canShareCodexSignIn(
@@ -46,6 +48,7 @@ export async function shareCodexSignIn(
   const link = join(codexHome, AUTH_FILE);
   if ((await kind(link)) !== 'missing') await unlink(link);
   await symlink(target, link);
+  await writeFile(join(codexHome, SHARED_MARKER), '', { mode: 0o600 });
   return { ok: true };
 }
 
@@ -53,6 +56,19 @@ export async function shareCodexSignIn(
 export async function stopSharingCodexSignIn(codexHome: string): Promise<void> {
   const link = join(codexHome, AUTH_FILE);
   if ((await kind(link)) === 'link') await unlink(link);
+  await rm(join(codexHome, SHARED_MARKER), { force: true });
+}
+
+/**
+ * True when the user shared their sign-in but the link is no longer there.
+ * Codex 0.158.0 rewrites auth.json in place (open with truncate, no rename),
+ * which keeps the link; a future Codex that saved by renaming a new file over
+ * it would leave Vigil a copy of its own, and a refresh there could sign the
+ * user's own Codex out. Vigil then stops using that copy and asks again.
+ */
+export async function isCodexSignInLinkBroken(codexHome: string): Promise<boolean> {
+  if ((await kind(join(codexHome, SHARED_MARKER))) === 'missing') return false;
+  return (await kind(join(codexHome, AUTH_FILE))) !== 'link';
 }
 
 async function kind(path: string): Promise<'file' | 'link' | 'other' | 'missing'> {
