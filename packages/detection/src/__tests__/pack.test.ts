@@ -169,6 +169,101 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
       }),
     ],
   },
+  'santa-protected-file-access': {
+    bad: [
+      [
+        ev({
+          kind: 'santa.decision',
+          source: 'santa',
+          target: 'file_access',
+          decision: 'audit_only',
+          reason: 'Chrome passwords',
+          path: `${home}/Library/Application Support/Google/Chrome/Default/Login Data`,
+          process: unsignedStealer,
+        }),
+        { mode: 'alert', actions: ['process.suspend'] },
+      ],
+      [
+        ev({
+          kind: 'santa.decision',
+          source: 'santa',
+          target: 'file_access',
+          decision: 'block',
+          reason: 'SSH keys',
+          path: `${home}/.ssh/id_ed25519`,
+          process: devTool,
+        }),
+        { mode: 'alert', actions: ['process.suspend'] },
+      ],
+    ],
+    good: [
+      ev({
+        kind: 'santa.decision',
+        source: 'santa',
+        target: 'file_access',
+        decision: 'allow',
+        reason: 'Chrome passwords',
+        process: chrome,
+      }),
+      // Launch blocks belong to santa-blocked-launch, not this rule.
+      ev({
+        kind: 'santa.decision',
+        source: 'santa',
+        target: 'execution',
+        decision: 'audit_only',
+        reason: 'UNKNOWN',
+        process: devTool,
+      }),
+    ],
+  },
+  'xprotect-detected': {
+    bad: [
+      [
+        ev({
+          kind: 'system.alert',
+          source: 'santa',
+          subtype: 'xprotect_detected',
+          path: `${home}/Downloads/Installer.app`,
+          details: { malware: 'MACOS.ADLOAD' },
+        }),
+        { mode: 'alert' },
+      ],
+    ],
+    good: [
+      ev({
+        kind: 'system.alert',
+        source: 'santa',
+        subtype: 'gatekeeper_override',
+        details: {},
+      }),
+    ],
+  },
+  'tcc-changed-by-untrusted': {
+    bad: [
+      [
+        ev({
+          kind: 'system.alert',
+          source: 'santa',
+          subtype: 'tcc_modified',
+          process: unsignedStealer,
+          details: { service: 'kTCCServiceScreenCapture', identity: 'com.evil.helper' },
+        }),
+        { mode: 'alert', actions: ['process.suspend'] },
+      ],
+    ],
+    good: [
+      ev({
+        kind: 'system.alert',
+        source: 'santa',
+        subtype: 'tcc_modified',
+        process: proc({
+          path: '/System/Applications/System Settings.app/Contents/MacOS/System Settings',
+          signing: 'apple',
+        }),
+        details: { service: 'kTCCServiceMicrophone', identity: 'us.zoom.xos' },
+      }),
+    ],
+  },
   'download-pipe-to-shell': {
     bad: [
       [

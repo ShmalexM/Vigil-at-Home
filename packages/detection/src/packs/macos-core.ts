@@ -236,13 +236,78 @@ export const macosCoreRules: DetectionRuleInput[] = [
   rule({
     id: 'santa-blocked-launch',
     name: 'Blocked before it could run',
-    description: 'Santa stopped a program from launching or from opening a protected file.',
+    description: 'Santa stopped a program from launching.',
     mode: 'alert',
     severity: 'high',
     fidelity: 'high',
     eventKinds: ['santa.decision'],
-    condition: { field: 'decision', op: 'eq', value: 'block' },
+    condition: {
+      all: [
+        { field: 'target', op: 'eq', value: 'execution' },
+        { field: 'decision', op: 'eq', value: 'block' },
+      ],
+    },
     reasons: ['{{process.name}} was stopped by Santa ({{reason}}).'],
+  }),
+  rule({
+    id: 'santa-protected-file-access',
+    name: 'Program opened a protected password or key file',
+    description:
+      "Santa reported a program that isn't allowed to touch browser passwords, cookies, the keychain or SSH keys opening one of them. Santa only reports programs outside its allow list, so this is rarely a false alarm.",
+    mode: 'alert',
+    severity: 'critical',
+    fidelity: 'high',
+    eventKinds: ['santa.decision'],
+    condition: {
+      all: [
+        { field: 'target', op: 'eq', value: 'file_access' },
+        // audit_only is Santa's default: it reports without stopping the read.
+        { field: 'decision', op: 'in', value: ['audit_only', 'block'] },
+      ],
+    },
+    response: [SUSPEND],
+    reasons: [
+      '{{process.name}} opened {{path}}, which holds saved passwords, cookies or keys.',
+      'Santa reported it because this program is not on the list allowed to read it ({{reason}}).',
+    ],
+    santa: { ruleType: 'binary', from: 'process.sha256' },
+    tags: ['attack.credential_access', 'attack.t1555'],
+  }),
+  rule({
+    id: 'xprotect-detected',
+    name: 'macOS found malware',
+    description:
+      "XProtect, macOS's built-in malware scanner, matched a file against its signatures. macOS usually blocks or removes it; Vigil makes sure you hear about it.",
+    mode: 'alert',
+    severity: 'high',
+    fidelity: 'high',
+    eventKinds: ['system.alert'],
+    condition: { field: 'subtype', op: 'eq', value: 'xprotect_detected' },
+    reasons: ['macOS recognised {{path}} as malware ({{details.malware}}).'],
+    tags: ['attack.execution'],
+  }),
+  rule({
+    id: 'tcc-changed-by-untrusted',
+    name: 'Privacy permission changed by an untrusted program',
+    description:
+      'A camera, microphone, screen or file permission changed, and the change came from an unsigned or ad hoc signed program rather than System Settings.',
+    mode: 'alert',
+    severity: 'high',
+    fidelity: 'high',
+    eventKinds: ['system.alert'],
+    condition: {
+      all: [
+        { field: 'subtype', op: 'eq', value: 'tcc_modified' },
+        { field: 'process.signing', op: 'in', value: UNTRUSTED_SIGNING },
+      ],
+    },
+    response: [SUSPEND],
+    reasons: [
+      '{{process.name}} changed the {{details.service}} permission for {{details.identity}}.',
+      'Permissions are normally changed in System Settings, not by other programs.',
+    ],
+    santa: { ruleType: 'binary', from: 'process.sha256' },
+    tags: ['attack.defense_evasion', 'attack.t1548'],
   }),
 
   // ------------------------------------------------------------------ alert
