@@ -12,6 +12,26 @@ export interface OllamaAdapterOptions {
   readonly baseUrl: string;
   /** A model to use. Without one, Vigil picks the largest installed model that supports tools. */
   readonly model?: string;
+  /**
+   * Picks among installed models when `model` is unset. Default: the largest
+   * one that supports tools.
+   */
+  readonly pickModel?: (
+    installed: ReadonlyArray<{ name: string; size?: number }>,
+  ) => string | undefined;
+  /** Keeps a small model light on a slow laptop. Passed to Ollama as is. */
+  readonly runtime?: {
+    /** Context window in tokens. */
+    readonly numCtx?: number;
+    /** CPU threads Ollama may use for this model. */
+    readonly numThread?: number;
+    /** Most tokens one reply may generate. Defaults to DEFAULT_MAX_OUTPUT_TOKENS. */
+    readonly numPredict?: number;
+    /** How long Ollama keeps the model in memory after a request, e.g. "1m". */
+    readonly keepAlive?: string;
+  };
+  /** What to suggest pulling when nothing suitable is installed. */
+  readonly suggestedModel?: string;
   readonly fetch?: typeof fetch;
 }
 
@@ -25,6 +45,13 @@ interface ChatMessage {
 const MAX_TOOL_ROUNDS = 6;
 
 /**
+ * Small models sometimes loop instead of closing their JSON. A cap turns that
+ * into a fast invalid answer (which the runner retries) instead of minutes of
+ * CPU until the deadline.
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 1024;
+
+/**
  * A local model through Ollama. There is no vendor agent here: Vigil runs the
  * small tool loop itself, so only Vigil's tools can ever be called.
  */
@@ -32,6 +59,18 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
   const http = options.fetch ?? fetch;
   const base = options.baseUrl.replace(/\/$/, '');
   let chosen: string | undefined;
+  const rt = options.runtime;
+  const runtimeOptions = {
+    num_predict: rt?.numPredict ?? DEFAULT_MAX_OUTPUT_TOKENS,
+    // Vigil only asks for short structured answers; a low temperature keeps
+    // small models from wandering into loops.
+    temperature: 0.2,
+    // Small models can repeat one phrase until the output cap; a mild
+    // penalty breaks the loop without changing short answers.
+    repeat_penalty: 1.15,
+    ...(rt?.numCtx !== undefined ? { num_ctx: rt.numCtx } : {}),
+    ...(rt?.numThread !== undefined ? { num_thread: rt.numThread } : {}),
+  };
 
   async function supportsTools(model: string): Promise<boolean> {
     const res = await http(`${base}/api/show`, {
@@ -53,6 +92,7 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
         ? wanted
         : undefined;
     }
+    if (options.pickModel) return options.pickModel(models);
     const bySize = [...models].sort((a, b) => (b.size ?? 0) - (a.size ?? 0));
     for (const m of bySize) if (await supportsTools(m.name)) return m.name;
     return undefined;
@@ -84,7 +124,7 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
         : {
             provider: 'ollama',
             state: 'not_installed',
-            detail: `Run: ollama pull ${options.model ?? 'gpt-oss:20b'}`,
+            detail: `Run: ollama pull ${options.model ?? options.suggestedModel ?? 'gpt-oss:20b'}`,
           };
     },
 
@@ -116,6 +156,8 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
               model,
               messages,
               stream: false,
+              options: runtimeOptions,
+              ...(options.runtime?.keepAlive ? { keep_alive: options.runtime.keepAlive } : {}),
               format: input.jsonSchema,
               ...(tools.size > 0 && round < MAX_TOOL_ROUNDS
                 ? {
@@ -144,12 +186,9 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
             try {
               return { kind: 'ok', json: JSON.parse(body.message.content), audit, usage: usage() };
             } catch {
-              return {
-                kind: 'error',
-                message: 'Ollama answer was not JSON.',
-                audit,
-                usage: usage(),
-              };
+              // Usually a reply cut off at the output cap. Handing back the text
+              // makes the runner count it as a wrong format and ask once more.
+              return { kind: 'ok', json: body.message.content, audit, usage: usage() };
             }
           }
           messages.push(body.message);

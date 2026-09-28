@@ -262,10 +262,18 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
             record(id, 'ok', out.audit, undefined, out.usage);
             return { ok: true, value: parsed.data, provider: id, logId, audit: out.audit };
           }
-          record(id, 'invalid_output', out.audit, parsed.error.message, out.usage);
+          // A bare string is a reply that never became JSON, usually one cut off
+          // at the output cap. Say so, with its end, instead of a schema error.
+          const cutOff = typeof out.json === 'string';
+          const detail = cutOff
+            ? `The answer was not complete JSON (${out.usage?.outputTokens ?? '?'} output tokens), ending: ${JSON.stringify(out.json.slice(-120))}`
+            : parsed.error.message;
+          record(id, 'invalid_output', out.audit, detail, out.usage);
           lastReason = 'invalid_output';
-          lastDetail = parsed.error.message;
-          prompt = `${userPrompt}\n\nYour previous answer did not match the required format: ${parsed.error.message}`;
+          lastDetail = detail;
+          prompt = cutOff
+            ? `${userPrompt}\n\nYour previous answer ran too long and was cut off. Answer again with the JSON only, keeping every text field under 60 words.`
+            : `${userPrompt}\n\nYour previous answer did not match the required format: ${parsed.error.message}`;
         }
       }
 
