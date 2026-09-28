@@ -97,7 +97,9 @@ export class Journal {
 
   private save(): void {
     if (!this.filePath) return;
-    mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 });
+    // The journal file itself is 0600; its folder is Vigil's support folder,
+    // which Santa's sync service must be able to pass through.
+    mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o755 });
     const tmp = `${this.filePath}.tmp-${process.pid}`;
     writeFileSync(tmp, JSON.stringify(this.data, null, 2), { mode: 0o600 });
     renameSync(tmp, this.filePath);
