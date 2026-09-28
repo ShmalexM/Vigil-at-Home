@@ -1,10 +1,13 @@
 import type { RuleMode } from '@vigil/core';
+import { Pencil, Plus } from 'lucide-react';
 import { useState } from 'react';
 import type { RuleView } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
 import { HoldButton } from '../components/HoldButton';
+import { NewRulePanel, RuleEditorPanel } from '../components/RuleEditor';
 import { useToast } from '../components/Toasts';
-import { Card, Chip, Segmented, SeverityMark } from '../components/ui';
+import { Button, Card, Chip, Segmented, SeverityMark } from '../components/ui';
+import '../styles/rules.css';
 import { PageHead } from './AppShell';
 
 const MODES: { value: RuleMode; label: string }[] = [
@@ -14,9 +17,17 @@ const MODES: { value: RuleMode; label: string }[] = [
   { value: 'block', label: 'Block' },
 ];
 
-export function RulesView() {
+export function RulesView({
+  selected,
+  go,
+}: {
+  selected?: string | undefined;
+  go?: (route: string) => void;
+}) {
   const [rules] = useLive(() => vigil.listRules());
   const [filter, setFilter] = useState<'all' | 'review'>('all');
+  const [creating, setCreating] = useState(false);
+  const open = (id: string | undefined) => go?.(id ? `rules/${id}` : 'rules');
   const list = (rules ?? []).filter((r) => filter === 'all' || r.rule.mode === 'shadow');
 
   return (
@@ -25,17 +36,27 @@ export function RulesView() {
         title="Rules"
         purpose="Rules decide instantly and offline; the AI never blocks on its own. New and AI-drafted rules start in Shadow, where they only log matches. Promote one when its matches look right."
         right={
-          <Segmented
-            label="Filter"
-            value={filter}
-            onChange={setFilter}
-            options={[
-              { value: 'all', label: 'All' },
-              { value: 'review', label: 'In shadow' },
-            ]}
-          />
+          <>
+            <Segmented
+              label="Filter"
+              value={filter}
+              onChange={setFilter}
+              options={[
+                { value: 'all', label: 'All' },
+                { value: 'review', label: 'In shadow' },
+              ]}
+            />
+            <Button size="sm" icon={<Plus size={14} />} onClick={() => setCreating(true)}>
+              New rule
+            </Button>
+          </>
         }
       />
+      {creating && (
+        <Card>
+          <NewRulePanel onClose={() => setCreating(false)} />
+        </Card>
+      )}
       {list.length === 0 ? (
         <div className="empty">
           <span className="t-h3">No rules yet</span>
@@ -46,7 +67,12 @@ export function RulesView() {
       ) : (
         <div className="col" style={{ gap: 10 }}>
           {list.map((r) => (
-            <RuleRow key={r.rule.id} view={r} />
+            <RuleRow
+              key={r.rule.id}
+              view={r}
+              editing={selected === r.rule.id}
+              onEdit={(on) => open(on ? r.rule.id : undefined)}
+            />
           ))}
         </div>
       )}
@@ -54,7 +80,15 @@ export function RulesView() {
   );
 }
 
-function RuleRow({ view }: { view: RuleView }) {
+function RuleRow({
+  view,
+  editing,
+  onEdit,
+}: {
+  view: RuleView;
+  editing: boolean;
+  onEdit: (on: boolean) => void;
+}) {
   const { rule, matches } = view;
   const toast = useToast();
   const [confirmBlock, setConfirmBlock] = useState(false);
@@ -97,6 +131,16 @@ function RuleRow({ view }: { view: RuleView }) {
           options={MODES}
           onChange={(m) => void set(m)}
         />
+        <Button
+          size="sm"
+          kind={editing ? 'secondary' : 'ghost'}
+          icon={<Pencil size={13} />}
+          aria-expanded={editing}
+          title={`Edit ${rule.name} and its exclusions`}
+          onClick={() => onEdit(!editing)}
+        >
+          {editing ? 'Close' : 'Edit'}
+        </Button>
       </div>
       {rule.provenance && (
         <span className="t-small">Why the AI drafted it: {rule.provenance.rationale}</span>
@@ -121,6 +165,7 @@ function RuleRow({ view }: { view: RuleView }) {
           />
         </div>
       )}
+      {editing && <RuleEditorPanel id={rule.id} onClose={() => onEdit(false)} />}
     </Card>
   );
 }

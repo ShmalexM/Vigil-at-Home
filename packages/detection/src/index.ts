@@ -60,3 +60,11 @@ export {
 export { RULE_REVIEW_PROMPT } from './proposals/prompt.js';
 export { mergeRules } from './merge.js';
 export * from './feeds/index.js';
+export {
+  RuleEditor,
+  exclusionFor,
+  type EditResult,
+  type ExcludeScope,
+  type PreviewResult,
+  type RuleEditView,
+} from './editing.js';
