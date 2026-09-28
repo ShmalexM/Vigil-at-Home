@@ -61,5 +61,8 @@ describe.skipIf(!live)('local event labelling', () => {
         `labels ${JSON.stringify(result.ok ? result.labels.filter((l) => l.label !== 'benign') : result)}`,
     );
     expect(result.ok, JSON.stringify(result)).toBe(true);
+    // Reported, not asserted: a small model's judgement varies run to run.
+    const hidden = result.ok ? result.labels.find((l) => l.eventId === 'evt-0') : undefined;
+    console.log(`classify: hidden unsigned program labelled ${hidden?.label ?? 'nothing'}`);
   }, 300_000);
 });

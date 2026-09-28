@@ -102,6 +102,10 @@ const INSTRUCTIONS = [
   'new login items, reading browser or keychain data, connections to strange hosts, listening ports).',
   'For suspicious events give a reason of at most 8 words; for unusual ones leave the reason empty.',
   'If nothing stands out, return an empty list.',
+  // Small models follow an example far better than a description.
+  'Example: for the lines "e1 process started /usr/bin/git [apple] parent=/bin/zsh" and',
+  '"e2 process started /private/tmp/.u/update [unsigned] parent=/bin/bash" the answer is',
+  '{"flagged":[{"key":"e2","label":"suspicious","reason":"unsigned program in hidden temp folder"}]}.',
 ].join(' ');
 
 const SCORE = { benign: 0, unusual: 0.5, suspicious: 0.9 } as const;
