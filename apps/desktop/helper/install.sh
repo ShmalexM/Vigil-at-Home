@@ -38,6 +38,19 @@ install -d -o root -g wheel -m 755 /Library/Logs/Vigil
 # A downloaded app's files carry the quarantine flag; the copies don't need it.
 xattr -cr "$DEST" "$TOOLS/vigil-helper" "$PLIST" 2>/dev/null || true
 
+# Point osquery at Vigil's queries, keeping any config it had before.
+if [ -d /var/osquery ]; then
+  for f in conf flags; do
+    target=/var/osquery/osquery.$f
+    if [ -f "$target" ] && [ ! -f "$target.before-vigil" ]; then
+      cp -p "$target" "$target.before-vigil"
+    fi
+  done
+  "$TOOLS/vigil-helper" osquery-config >/var/osquery/osquery.conf
+  "$TOOLS/vigil-helper" osquery-flags >/var/osquery/osquery.flags
+  launchctl kickstart -k system/io.osquery.agent 2>/dev/null || true
+fi
+
 launchctl bootstrap system "$PLIST"
 
 i=0

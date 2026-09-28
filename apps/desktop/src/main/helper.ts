@@ -12,6 +12,8 @@ export const HELPER_RETRY_MS = 15_000;
 const QUERY_TIMEOUT_MS = 5_000;
 const ACTION_TIMEOUT_MS = 15_000;
 const RELEASE_TIMEOUT_MS = 3 * 60_000;
+/** The helper keeps its last 2000 events; remember a little more than that. */
+const SEEN_EVENT_IDS = 4000;
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -45,6 +47,10 @@ export class HelperLink
   private stopped = false;
   private connecting = false;
   state: HelperState = 'not_installed';
+  /** The last event received, so a reconnect only replays what was missed. */
+  private lastEventId: string | undefined;
+  /** Recent event ids. After a helper restart it replays its whole buffer. */
+  private seen = new Set<string>();
   readonly dryRun = new DryRunExecutor();
 
   constructor(
@@ -157,8 +163,8 @@ export class HelperLink
         return;
       }
       this.client = client;
-      client.onEvent((e) => this.emit('event', e));
-      await client.subscribe();
+      client.onEvent((e) => this.received(e));
+      await client.subscribe(this.lastEventId);
       this.setState('connected');
     } catch {
       this.client = undefined;
@@ -167,6 +173,20 @@ export class HelperLink
     } finally {
       this.connecting = false;
     }
+  }
+
+  private received(e: SensorEvent): void {
+    if (this.seen.has(e.id)) return;
+    this.seen.add(e.id);
+    if (this.seen.size > SEEN_EVENT_IDS) {
+      // Sets iterate oldest first.
+      for (const id of this.seen) {
+        this.seen.delete(id);
+        if (this.seen.size <= SEEN_EVENT_IDS / 2) break;
+      }
+    }
+    this.lastEventId = e.id;
+    this.emit('event', e);
   }
 
   private dropped(client: HelperClient): void {

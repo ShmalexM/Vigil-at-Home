@@ -65,11 +65,28 @@ describe('HelperLink', () => {
       kind: 'process.exec',
       process: { pid: 1, path: '/bin/ls' },
     });
+    // A helper restart replays its buffer; each event is handled once.
+    fake.emit({
+      id: 'e1',
+      ts: 1,
+      source: 'santa',
+      kind: 'process.exec',
+      process: { pid: 1, path: '/bin/ls' },
+    });
     expect(events.map((e) => e.id)).toEqual(['e1']);
 
     const r = await link.execute({ kind: 'file.quarantine', path: '/tmp/x' });
     expect(r.quarantineId).toBe('q1');
     expect(link.dryRun.log).toHaveLength(0);
+    // Reconnecting asks only for what came after the last event.
+    const subscribed: (string | undefined)[] = [];
+    (fake.client as unknown as { subscribe: (s?: string) => Promise<void> }).subscribe = async (
+      since,
+    ) => {
+      subscribed.push(since);
+    };
+    await link.reconnect();
+    expect(subscribed).toEqual(['e1']);
     link.stop();
   });
 
