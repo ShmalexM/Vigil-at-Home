@@ -1,7 +1,10 @@
 name: Release
 
-# Builds the Mac app. Pushing a tag like v0.1.0 publishes a draft GitHub
-# release; running it by hand only uploads the build as a workflow artifact.
+# Builds the Mac app for Apple silicon and Intel. Pushing a tag like v0.1.0, or
+# running it by hand with a version, creates a draft GitHub release with the
+# DMGs attached; a maintainer publishes it. Versions with a hyphen
+# (0.1.0-alpha.1) are marked as pre-releases. Running it by hand without a
+# version only uploads the build as a workflow artifact.
 #
 # Signing is optional. With no Apple secrets the app is ad hoc signed: it runs,
 # but macOS asks the user to approve it once in System Settings > Privacy &
@@ -14,6 +17,10 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, like 0.1.0 or 0.1.0-alpha.1 (leave empty to only build)
+        required: false
   # Also check packaging whenever the packaging setup changes.
   pull_request:
     paths:
@@ -37,10 +44,21 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
 
-      - name: Set the app version from the tag
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Pick the release version
+        id: version
+        env:
+          INPUT: ${{ inputs.version }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF_NAME#v}"; else v="${INPUT#v}"; fi
+          if [[ -n "$v" && ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "Not a version: $v" >&2; exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Set the app version
+        if: steps.version.outputs.version != ''
         working-directory: apps/desktop
-        run: npm pkg set version="${GITHUB_REF_NAME#v}"
+        run: npm pkg set version="${{ steps.version.outputs.version }}"
 
       - name: Build and package
         working-directory: apps/desktop
@@ -72,10 +90,11 @@ jobs:
             apps/desktop/dist/*.zip
 
       - name: Draft a GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.version.outputs.version != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --draft --title "Vigil at Home $GITHUB_REF_NAME" \
-            --notes "Unsigned builds: on first launch, open System Settings > Privacy & Security and choose Open Anyway." \
-            apps/desktop/dist/*.dmg apps/desktop/dist/*.zip
+          flags=(--draft --target "$GITHUB_SHA" --title "Vigil at Home $VERSION" --notes-file .github/release-notes.md)
+          [[ "$VERSION" == *-* ]] && flags+=(--prerelease)
+          gh release create "v$VERSION" "${flags[@]}" apps/desktop/dist/*.dmg apps/desktop/dist/*.zip
