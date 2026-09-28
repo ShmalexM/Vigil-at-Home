@@ -1,0 +1,234 @@
+/* The Usage page, laid out after T3 Code's. */
+
+.usage .num {
+  font-variant-numeric: tabular-nums;
+}
+.usage .muted {
+  color: var(--tx2);
+}
+.usage .seg button:disabled {
+  cursor: default;
+}
+.usage .spin {
+  animation: spin 1.1s linear infinite;
+}
+.usage-toolbar {
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: -4px;
+}
+.usage-window {
+  margin-left: auto;
+}
+.usage-top {
+  display: grid;
+  grid-template-columns: minmax(0, 18rem) minmax(0, 1fr);
+  gap: 28px;
+}
+@media (max-width: 900px) {
+  .usage-top {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.usage-headline {
+  font-size: 36px;
+  font-weight: 650;
+  letter-spacing: -0.5px;
+  line-height: 1.1;
+  color: var(--tx0);
+}
+.usage-info {
+  display: inline-flex;
+  color: var(--tx3);
+  cursor: help;
+}
+.usage-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+}
+.usage-provider {
+  font-size: 13px;
+  color: var(--tx0);
+}
+.usage-subtle {
+  font-size: 11px;
+  color: var(--tx3);
+}
+.usage-provider-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tx0);
+}
+
+/* ---------------------------------------------------------------- chart */
+.usage-chart-axis {
+  position: relative;
+  width: 56px;
+  height: 224px;
+  flex: none;
+}
+.usage-chart-axis span {
+  position: absolute;
+  right: 0;
+  transform: translateY(-50%);
+  font-size: 10px;
+  color: var(--tx3);
+  font-variant-numeric: tabular-nums;
+}
+.usage-chart-plot {
+  position: relative;
+  height: 224px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.usage-chart-plot svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.usage-chart-x {
+  padding-left: 64px;
+  font-size: 10px;
+  color: var(--tx3);
+  text-transform: uppercase;
+}
+.usage-tooltip {
+  position: absolute;
+  z-index: 10;
+  min-width: 150px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--tx0);
+  background: var(--bg2);
+  border: 1px solid var(--ln1);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px var(--shadow);
+  pointer-events: none;
+}
+.usage-tooltip .row {
+  gap: 12px;
+}
+.usage-tooltip-total {
+  margin-top: 3px;
+  padding-top: 4px;
+  border-top: 1px solid var(--ln1);
+}
+
+/* ---------------------------------------------------------------- totals and tables */
+.usage-totals {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 16px 24px;
+  padding: 4px 0;
+}
+@media (max-width: 900px) {
+  .usage-totals {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.usage-metric {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--tx0);
+}
+.usage-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 13px;
+  color: var(--tx0);
+}
+.usage-table th {
+  padding: 8px 0;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--tx2);
+  text-align: right;
+  border-bottom: 1px solid var(--ln1);
+}
+.usage-table td {
+  padding: 8px 0;
+  text-align: right;
+  border-bottom: 1px solid var(--ln0);
+}
+.usage-table th:first-child,
+.usage-table td:first-child {
+  text-align: left;
+}
+.usage-table tbody tr:hover {
+  background: var(--bg2);
+}
+.usage-table td.usage-empty {
+  padding: 24px 0;
+  text-align: center;
+  color: var(--tx2);
+}
+
+/* ---------------------------------------------------------------- limits */
+.usage-plan {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: capitalize;
+  color: var(--tx1);
+  background: var(--bg3);
+}
+.usage-limit-grid {
+  display: grid;
+  grid-template-columns: 13rem minmax(0, 1fr) 11rem;
+  align-items: center;
+  gap: 6px 16px;
+}
+.usage-limit-label {
+  font-size: 12px;
+  gap: 8px;
+}
+.usage-limit-side {
+  gap: 8px;
+  white-space: nowrap;
+  color: var(--tx2);
+}
+.usage-bar {
+  position: relative;
+  height: 24px;
+  border-radius: 999px;
+  cursor: default;
+}
+.usage-bar-track,
+.usage-bar-fill {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 0;
+  border-radius: 999px;
+}
+.usage-bar-track {
+  right: 0;
+  background: var(--ln1);
+}
+.usage-bar-pace {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  width: 1px;
+  transform: translateX(-50%);
+  background: color-mix(in srgb, var(--tx0) 60%, transparent);
+}
+.usage-pace {
+  display: inline-flex;
+  color: var(--tx2);
+}
+.usage-vigil {
+  color: var(--tx3);
+}
+.usage-skeleton {
+  border-radius: var(--radius-lg);
+  background: var(--bg2);
+}
