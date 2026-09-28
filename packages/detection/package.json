@@ -1,0 +1,19 @@
+{
+  "name": "@vigil/detection",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Deterministic inline detection and the AI rule-proposal pipeline for Vigil at Home",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./user": "./src/user.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@vigil/core": "workspace:*",
+    "zod": "^4.1.0"
+  }
+}
