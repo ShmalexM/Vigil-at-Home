@@ -372,6 +372,6 @@ export class RulePipeline {
   }
 }
 
-function formatZod(err: z.ZodError): string[] {
+export function formatZod(err: z.ZodError): string[] {
   return err.issues.slice(0, 20).map((i) => `${i.path.join('.') || 'input'}: ${i.message}`);
 }

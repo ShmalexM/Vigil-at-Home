@@ -12,6 +12,7 @@ import {
 import { AlertService, type DecisionInput } from './alerts.js';
 import type { Store } from './db/store.js';
 import { FEED_CHECK_MS, type Detector } from './detection.js';
+import { RuleEditing } from './rule-editing.js';
 import type { ActionExecutor } from './executor.js';
 import { Scheduler } from './scheduler.js';
 import { SensorRegistry } from './sensors.js';
@@ -38,6 +39,7 @@ export class VigilCore {
   readonly feed = new EventEmitter<{ events: [number] }>();
   /** The rule engine, once attached. Without it events are stored unanalysed. */
   detector: Detector | undefined;
+  private editing: RuleEditing | undefined;
   private feedPending = 0;
   private feedTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -162,6 +164,13 @@ export class VigilCore {
       .filter((r) => r.id !== TEST_RULE.id && !this.detector?.hasRule(r.id))
       .map((rule) => ({ rule, matches: counts.get(rule.id) ?? 0 }));
     return [...engine, ...own];
+  }
+
+  /** The rule editor, once detection is running. */
+  ruleEditing(): RuleEditing | undefined {
+    if (!this.detector) return undefined;
+    this.editing ??= new RuleEditing(this.detector, this.store);
+    return this.editing;
   }
 
   /** From the UI, so the actor is the user. */
