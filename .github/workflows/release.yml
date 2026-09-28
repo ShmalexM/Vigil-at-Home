@@ -94,8 +94,10 @@ jobs:
               test -f "$h/$f" || { echo "Missing $h/$f"; exit 1; }
             done
             echo "$app: helper runtime $(lipo -archs "$h/node")"
-            # electron-builder must leave Node.js's own signature in place.
-            codesign -dv "$h/node" 2>&1 | grep -q 'Authority=Developer ID Application: Node.js Foundation' \
+            # electron-builder must leave Node.js's own signature in place
+            # (HX7739G8FX is the Node.js Foundation's Apple team).
+            codesign --verify --strict "$h/node"
+            codesign -dv "$h/node" 2>&1 | grep -q '^TeamIdentifier=HX7739G8FX$' \
               || { codesign -dv "$h/node"; exit 1; }
           done
           h="mac-arm64/Vigil at Home.app/Contents/Resources/helper"
