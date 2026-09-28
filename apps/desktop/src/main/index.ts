@@ -1,10 +1,12 @@
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { app, powerMonitor, safeStorage } from 'electron';
+import type { HelperInstallResult } from '../shared/ipc.js';
 import { Store } from './db/store.js';
 import { seedDemo, startDemoFeed } from './demo.js';
 import { Detector } from './detection.js';
+import { helperBundleDir, helperInstallCommand, runHelperScript } from './helper-install.js';
 import { HelperLink } from './helper.js';
 import { registerIpc } from './ipc.js';
 import { systemProbe } from './onboarding/checks.js';
@@ -42,6 +44,31 @@ function start(): void {
     selfPaths: [app.isPackaged ? join(process.execPath, '../../..') : process.execPath],
   });
   const windows = new Windows();
+  const probe = macProbe(
+    (source) => store.lastEventAt(source),
+    () => helper.state,
+    async () => (await helper.query<{ sensors?: HelperSensors }>('helper.status'))?.sensors ?? null,
+  );
+
+  core.helperInstallable = process.platform === 'darwin' && helperBundleDir() !== null;
+  // Santa's configuration profile comes from the helper, which holds the sync
+  // server's certificate. Setup offers it once it has been written here.
+  const santaProfilePath = join(dataDir, 'Vigil Santa.mobileconfig');
+  const saveSantaProfile = async () => {
+    try {
+      const r = await helper.query<{ mobileconfig: string }>('santa.profile');
+      if (r?.mobileconfig) writeFileSync(santaProfilePath, r.mobileconfig);
+    } catch {
+      // The next connection tries again.
+    }
+  };
+  // Installing or removing the helper shows macOS's own password dialog.
+  const afterHelperScript = async (r: HelperInstallResult) => {
+    await helper.reconnect();
+    await reportHealth(core.sensors, probe);
+    return r;
+  };
+
   const demo = !app.isPackaged && !!process.env['VIGIL_DEMO'];
   const setup = new OnboardingService({
     store,
@@ -51,9 +78,20 @@ function start(): void {
       decrypt: (b) => safeStorage.decryptString(b),
     }),
     ...(demo ? { probe: demoProbe(), supported: true } : { probe: systemProbe() }),
+    // The wizard's helper and Santa steps, once this build can install them.
+    plan: () => {
+      const command = helperInstallCommand();
+      return {
+        ...(command ? { helperInstallCommand: command } : {}),
+        ...(existsSync(santaProfilePath) ? { santaProfilePath } : {}),
+      };
+    },
   });
 
-  registerIpc(core, windows, setup);
+  registerIpc(core, windows, setup, {
+    install: async () => afterHelperScript(await runHelperScript('install')),
+    uninstall: async () => afterHelperScript(await runHelperScript('uninstall')),
+  });
   windows.createTray();
   windows.applyTheme(core.theme());
 
@@ -75,13 +113,11 @@ function start(): void {
 
   // Sensor events arrive through the helper, which reads Santa's and osquery's logs as root.
   helper.on('event', (e) => void core.handleEvent(e));
-  const probe = macProbe(
-    (source) => store.lastEventAt(source),
-    () => helper.state,
-    async () => (await helper.query<{ sensors?: HelperSensors }>('helper.status'))?.sensors ?? null,
-  );
   const checkHealth = () => reportHealth(core.sensors, probe);
-  helper.on('state', () => void checkHealth());
+  helper.on('state', (state) => {
+    void checkHealth();
+    if (state === 'connected') void saveSantaProfile();
+  });
   if (process.platform === 'darwin') {
     helper.start();
     core.scheduler.every(

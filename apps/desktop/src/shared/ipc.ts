@@ -126,6 +126,8 @@ export const calls = {
   saveApiKey: z.tuple([ApiKeyInput]),
   clearApiKey: z.tuple([ApiKeyProvider]),
   openSettingsPane: z.tuple([SettingsPane]),
+  installHelper: z.tuple([]),
+  uninstallHelper: z.tuple([]),
 } as const;
 export type CallName = keyof typeof calls;
 
@@ -144,6 +146,14 @@ export interface StatusView {
   sensors: SensorView[];
   /** True while blocks are simulated because the privileged helper is missing. */
   dryRun: boolean;
+  /** True when this build carries the helper, so the app can install it. */
+  helperInstallable: boolean;
+}
+
+export interface HelperInstallResult {
+  ok: boolean;
+  /** Set when it failed; "cancelled" when the user closed the password dialog. */
+  error?: string;
 }
 
 export interface AlertDetail {
@@ -284,6 +294,8 @@ export interface CallResults {
   saveApiKey: SetupView;
   clearApiKey: SetupView;
   openSettingsPane: void;
+  installHelper: HelperInstallResult;
+  uninstallHelper: HelperInstallResult;
 }
 
 /** Pushed from main to every window. */

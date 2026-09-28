@@ -1,6 +1,7 @@
 import { app, ipcMain, type IpcMainInvokeEvent } from 'electron';
 import type { z } from 'zod';
 import { calls, type CallName, type CallResults } from '../shared/ipc.js';
+import type { HelperInstallResult } from '../shared/ipc.js';
 import { onboardingHandlers } from './onboarding/ipc.js';
 import type { OnboardingService } from './onboarding/service.js';
 import type { VigilCore } from './service.js';
@@ -13,8 +14,23 @@ export type Handlers = {
   ) => CallResults[K] | Promise<CallResults[K]>;
 };
 
+export interface HelperControl {
+  install(): Promise<HelperInstallResult>;
+  uninstall(): Promise<HelperInstallResult>;
+}
+
+const noHelper: HelperControl = {
+  install: async () => ({ ok: false, error: 'The helper only runs on macOS' }),
+  uninstall: async () => ({ ok: false, error: 'The helper only runs on macOS' }),
+};
+
 /** Register one validated handler per call. Arguments are parsed with zod before use. */
-export function registerIpc(core: VigilCore, windows: Windows, setup: OnboardingService): void {
+export function registerIpc(
+  core: VigilCore,
+  windows: Windows,
+  setup: OnboardingService,
+  helper: HelperControl = noHelper,
+): void {
   const h: Handlers = {
     getStatus: () => core.status(),
     listAlerts: (status) => core.store.listAlerts(status ? { status } : {}),
@@ -53,6 +69,8 @@ export function registerIpc(core: VigilCore, windows: Windows, setup: Onboarding
     fitPopup: (height) => windows.fitPopup(height),
     quit: () => app.quit(),
     ...onboardingHandlers(setup, () => windows.openMain('home')),
+    installHelper: () => helper.install(),
+    uninstallHelper: () => helper.uninstall(),
   };
 
   for (const name of Object.keys(calls) as CallName[]) {

@@ -48,9 +48,11 @@ describe('checkHealth', () => {
     expect(fresh['osquery']?.state).toBe('ok');
     expect(fresh['helper']?.state).toBe('ok');
     const quiet = await byId(
-      probe({ ...base, lastEventAt: () => 1_000_000_000 - QUIET_AFTER_MS - 120_000 }),
+      probe({ ...base, lastEventAt: () => 1_000_000_000 - QUIET_AFTER_MS.osquery - 120_000 }),
     );
-    expect(quiet['osquery']).toMatchObject({ state: 'degraded', note: 'No events for 17 minutes' });
+    expect(quiet['osquery']).toMatchObject({ state: 'degraded', note: 'No events for 32 minutes' });
+    const starting = await byId(probe(base));
+    expect(starting['osquery']).toMatchObject({ state: 'ok', note: 'Starting; no events yet' });
   });
 
   it("uses the helper's own report of installs and last events", async () => {

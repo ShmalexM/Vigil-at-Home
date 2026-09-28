@@ -38,6 +38,8 @@ export const CALL_NAMES = [
   'saveApiKey',
   'clearApiKey',
   'openSettingsPane',
+  'installHelper',
+  'uninstallHelper',
 ] as const;
 
 export const PUSH_NAMES = ['changed', 'popup', 'navigate', 'theme', 'events'] as const;

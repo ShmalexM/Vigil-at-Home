@@ -7,8 +7,11 @@ import type { SensorHealth } from './status.js';
 
 /** How often the Protection card is re-checked. */
 export const HEALTH_CHECK_MS = 60_000;
-/** A sensor that has sent nothing for this long needs a look (osquery polls every 10 to 300 s). */
-export const QUIET_AFTER_MS = 15 * 60_000;
+/**
+ * A sensor that has sent nothing for this long needs a look. Santa logs every
+ * program launch; osquery only logs changes.
+ */
+export const QUIET_AFTER_MS = { santa: 5 * 60_000, osquery: 30 * 60_000 } as const;
 
 export const SANTA_PATHS = ['/Applications/Santa.app', '/usr/local/bin/santactl'];
 /** Santa's system extension daemon, by the names current and older releases use. */
@@ -99,9 +102,9 @@ export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
       (t): t is number => t !== null,
     );
     const last = times.length ? Math.max(...times) : null;
-    if (last === null) return { ...base, state: 'degraded', note: 'Running; no events yet' };
+    if (last === null) return { ...base, state: 'ok', note: 'Starting; no events yet' };
     const quiet = p.now() - last;
-    if (quiet > QUIET_AFTER_MS) {
+    if (quiet > QUIET_AFTER_MS[id]) {
       return { ...base, state: 'degraded', note: `No events for ${minutes(quiet)} minutes` };
     }
     return { ...base, state: 'ok' };

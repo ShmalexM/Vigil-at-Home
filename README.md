@@ -15,7 +15,19 @@ Download the latest DMG from [Releases](https://github.com/ShmalexM/Vigil-at-Hom
 3. Open **System Settings > Privacy & Security**, scroll to Security and choose **Open Anyway** next to Vigil at Home.
 4. Vigil appears as a shield in the menu bar.
 
-Steps 2 and 3 happen once. To skip them, build it yourself:
+Steps 2 and 3 happen once. To skip them, build it yourself (see below).
+
+### The Vigil helper
+
+Blocking needs a small helper that runs as root. Until it's installed, Vigil only simulates blocks and says so. On **Home > Protection**, choose **Install helper**. macOS asks for your password once. The same script also runs from Terminal:
+
+```bash
+sudo "/Applications/Vigil at Home.app/Contents/Resources/helper/install.sh"
+```
+
+It copies the helper and its own Node.js runtime into `/Library/PrivilegedHelperTools`, owned by root, and starts it with launchd. `uninstall.sh`, in the same folder, removes it. Uninstalling keeps `/Library/Application Support/Vigil`, so nothing Vigil quarantined is lost.
+
+### Build from source
 
 ```bash
 git clone https://github.com/ShmalexM/Vigil-at-Home.git && cd Vigil-at-Home

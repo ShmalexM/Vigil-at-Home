@@ -35,6 +35,8 @@ export class VigilCore {
   readonly alerts: AlertService;
   readonly scheduler: Scheduler;
   readonly sensors = new SensorRegistry();
+  /** Set at startup when this build ships the helper. */
+  helperInstallable = false;
   /** Emits `events` (count) at most once per FEED_BATCH_MS while events arrive. */
   readonly feed = new EventEmitter<{ events: [number] }>();
   /** The rule engine, once attached. Without it events are stored unanalysed. */
@@ -141,6 +143,7 @@ export class VigilCore {
       ...s,
       sensors: this.sensors.list(),
       dryRun: this.executor.simulated ?? this.dryRun,
+      helperInstallable: this.helperInstallable,
     };
   }
 
