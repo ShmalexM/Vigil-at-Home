@@ -58,6 +58,8 @@ export {
   type JevAnswer,
   type JevClient,
   type JevOptions,
+  JEV_OPENROUTER_MODEL,
+  JEV_OPENROUTER_URL,
 } from './providers/jev.js';
 export {
   CLASSIFIER_MODELS,
@@ -155,11 +157,19 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
             ],
             log: options.log,
           });
+    // An OpenRouter key set up as the API connection can also reach Jev.
+    const openRouterKey =
+      settings.api.enabled &&
+      !settings.pausedByVigil.includes('api') &&
+      new URL(settings.api.baseUrl).hostname === 'openrouter.ai' &&
+      options.getApiKey
+        ? options.getApiKey
+        : undefined;
     const useJev =
       settings.jev.enabled &&
       allowedByMode(settings, 'jev') &&
       !settings.pausedByVigil.includes('jev') &&
-      options.getJevApiKey !== undefined;
+      (options.getJevApiKey !== undefined || openRouterKey !== undefined);
     const cap = settings.quota.apiKeyMonthlyCapUsd;
     const spent = options.spentThisMonthUsd;
     classifier = createEventClassifier({
@@ -169,7 +179,8 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
             jev: createJevClient({
               baseUrl: settings.jev.baseUrl,
               model: settings.jev.model,
-              getApiKey: options.getJevApiKey!,
+              getApiKey: options.getJevApiKey ?? (async () => undefined),
+              ...(openRouterKey ? { getOpenRouterApiKey: openRouterKey } : {}),
               log: options.log,
             }),
             ...(cap !== undefined && spent

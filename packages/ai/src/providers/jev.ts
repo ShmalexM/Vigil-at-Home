@@ -8,11 +8,18 @@ import { isSafeBaseUrl } from './openaiCompatible.js';
  * in TypeSafe's cloud (POST /v1/systemone); there are no weights to run
  * locally. Vigil uses it for one job: labelling events its rules didn't
  * explain. It gets no tools and can't act; it only returns probabilities.
+ *
+ * OpenRouter also carries Jev (beta, POST /api/alpha/decisions, same request
+ * and answers), so a user's OpenRouter key works too when they have no
+ * TypeSafe key.
  */
 export const JEV_DEFAULT_BASE_URL = 'https://api.typesafe.ai/v1';
 export const JEV_DEFAULT_MODEL = 'jev-latest';
 /** Input tokens only; TypeSafe doesn't charge for output (docs, 2026-09-28). */
 export const JEV_USD_PER_INPUT_TOKEN = 0.042 / 1_000_000;
+/** Fixed, so an OpenRouter key only ever goes to OpenRouter. */
+export const JEV_OPENROUTER_URL = 'https://openrouter.ai/api/alpha/decisions';
+export const JEV_OPENROUTER_MODEL = '~typesafe/jev-latest';
 
 export const JEV_LABELS = {
   benign: 'Normal activity for a personal Mac: known apps, system services, developer tools.',
@@ -29,6 +36,8 @@ export interface JevOptions {
   readonly model?: string;
   /** Reads the TypeSafe key from the Keychain for each call. Vigil keeps no copy. */
   readonly getApiKey: () => Promise<string | undefined>;
+  /** The user's OpenRouter key, used only when there is no TypeSafe key. */
+  readonly getOpenRouterApiKey?: () => Promise<string | undefined>;
   readonly log: PromptLog;
   readonly fetch?: typeof fetch;
   readonly timeoutMs?: number;
@@ -55,7 +64,8 @@ interface ChoiceAnswer {
 interface SystemOneResponse {
   model?: string;
   answers?: Record<string, ChoiceAnswer>;
-  usage?: { input_tokens?: number; output_tokens?: number };
+  /** OpenRouter adds `cost` in USD. */
+  usage?: { input_tokens?: number; output_tokens?: number; cost?: number };
 }
 
 const INSTRUCTIONS =
@@ -70,10 +80,21 @@ export function createJevClient(options: JevOptions) {
   return {
     /** Labels one batch: one Choice question per event, all asked of the same state in one call. */
     async label(events: ReadonlyArray<{ id: string; line: string }>): Promise<JevResult> {
-      if (!isSafeBaseUrl(baseUrl))
+      const typesafeKey = await options.getApiKey();
+      const openRouterKey = typesafeKey ? undefined : await options.getOpenRouterApiKey?.();
+      const route = typesafeKey
+        ? { name: 'TypeSafe', url: `${baseUrl}/systemone`, model, key: typesafeKey }
+        : openRouterKey
+          ? {
+              name: 'OpenRouter',
+              url: JEV_OPENROUTER_URL,
+              model: JEV_OPENROUTER_MODEL,
+              key: openRouterKey,
+            }
+          : undefined;
+      if (!route) return { ok: false, detail: 'Add a TypeSafe or OpenRouter API key.' };
+      if (!isSafeBaseUrl(route.url))
         return { ok: false, detail: 'The TypeSafe address must use https.' };
-      const key = await options.getApiKey();
-      if (!key) return { ok: false, detail: 'Add a TypeSafe API key.' };
 
       // Keys are Vigil's own (e1, e2...), so an event id never becomes part of the request shape.
       const keyOf = new Map(events.map((e, i) => [`e${i + 1}`, e.id]));
@@ -84,25 +105,27 @@ export function createJevClient(options: JevOptions) {
           { type: 'choice', instructions: INSTRUCTIONS.replace('%KEY%', k), criteria: JEV_LABELS },
         ]),
       );
-      const body = JSON.stringify({ model, state, questions });
+      const body = JSON.stringify({ model: route.model, state, questions });
 
       const started = Date.now();
       let outcome: 'ok' | 'quota' | 'timeout' | 'error' | 'invalid_output' = 'error';
       let detail: string | undefined;
       let usage: SystemOneResponse['usage'];
       try {
-        const res = await doFetch(`${baseUrl}/systemone`, {
+        const res = await doFetch(route.url, {
           method: 'POST',
-          headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+          headers: { authorization: `Bearer ${route.key}`, 'content-type': 'application/json' },
           body,
           signal: AbortSignal.timeout(options.timeoutMs ?? 15_000),
         });
         if (!res.ok) {
-          outcome = res.status === 429 || res.status === 529 ? 'quota' : 'error';
+          outcome = [402, 429, 529].includes(res.status) ? 'quota' : 'error';
           detail =
             res.status === 401 || res.status === 403
-              ? 'TypeSafe refused the API key.'
-              : `TypeSafe answered ${res.status}.`;
+              ? `${route.name} refused the API key.`
+              : res.status === 402
+                ? `${route.name} is out of credit.`
+                : `${route.name} answered ${res.status}.`;
           return { ok: false, detail };
         }
         const json = (await res.json()) as SystemOneResponse;
@@ -124,11 +147,12 @@ export function createJevClient(options: JevOptions) {
           });
         }
         outcome = answers.length > 0 || events.length === 0 ? 'ok' : 'invalid_output';
-        if (outcome !== 'ok') detail = 'TypeSafe returned no usable answers.';
+        if (outcome !== 'ok') detail = `${route.name} returned no usable answers.`;
         return outcome === 'ok' ? { ok: true, answers } : { ok: false, detail: detail! };
       } catch (err) {
         outcome = err instanceof Error && err.name === 'TimeoutError' ? 'timeout' : 'error';
-        detail = outcome === 'timeout' ? 'TypeSafe took too long.' : 'Could not reach TypeSafe.';
+        detail =
+          outcome === 'timeout' ? `${route.name} took too long.` : `Could not reach ${route.name}.`;
         return { ok: false, detail };
       } finally {
         // Same prompt log as every other AI call, so the activity feed shows what left the Mac.
@@ -149,7 +173,8 @@ export function createJevClient(options: JevOptions) {
                   inputTokens: input,
                   cachedInputTokens: 0,
                   outputTokens: usage.output_tokens ?? 0,
-                  costUsd: input * JEV_USD_PER_INPUT_TOKEN,
+                  costUsd:
+                    typeof usage.cost === 'number' ? usage.cost : input * JEV_USD_PER_INPUT_TOKEN,
                 },
               }
             : {}),

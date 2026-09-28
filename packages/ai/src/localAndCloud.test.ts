@@ -594,7 +594,7 @@ describe('Jev as the event labeller', () => {
     });
     expect(await noKey.label([{ id: 'a', line: 'x' }])).toEqual({
       ok: false,
-      detail: 'Add a TypeSafe API key.',
+      detail: 'Add a TypeSafe or OpenRouter API key.',
     });
     const http = createJevClient({
       baseUrl: 'http://api.typesafe.ai/v1',
@@ -604,6 +604,72 @@ describe('Jev as the event labeller', () => {
     });
     expect((await http.label([{ id: 'a', line: 'x' }])).ok).toBe(false);
     expect(calls).toHaveLength(0);
+  });
+
+  it('reaches Jev through OpenRouter with the OpenRouter key when there is no TypeSafe key', async () => {
+    const { f, calls } = jevFetch({ ...jevReply, usage: { input_tokens: 1000, cost: 0.00005 } });
+    const log: PromptLogEntry[] = [];
+    const jev = createJevClient({
+      getApiKey: async () => undefined,
+      getOpenRouterApiKey: async () => 'or-key',
+      log: { record: (e) => log.push(e) },
+      fetch: f,
+    });
+    expect((await jev.label([{ id: 'a', line: 'x' }])).ok).toBe(true);
+    expect(calls[0]).toMatchObject({
+      url: 'https://openrouter.ai/api/alpha/decisions',
+      auth: 'Bearer or-key',
+      body: { model: '~typesafe/jev-latest' },
+    });
+    // OpenRouter reports its own cost, which the spending page uses.
+    expect(log[0]!.usage?.costUsd).toBe(0.00005);
+
+    // A TypeSafe key wins, so the OpenRouter key isn't sent anywhere.
+    const both = jevFetch(jevReply);
+    await createJevClient({
+      getApiKey: async () => 'ts-key',
+      getOpenRouterApiKey: async () => 'or-key',
+      log: { record: () => {} },
+      fetch: both.f,
+    }).label([{ id: 'a', line: 'x' }]);
+    expect(both.calls.map((c) => c.auth)).toEqual(['Bearer ts-key']);
+  });
+
+  it('uses the OpenRouter API connection for Jev only outside local mode', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', async (url: string) => {
+      urls.push(url);
+      return url === 'https://openrouter.ai/api/alpha/decisions'
+        ? Response.json(jevReply)
+        : new Response('{}', { status: 503 });
+    });
+    try {
+      const base = defaultAiSettings('/tmp/v');
+      const opts = {
+        log: { record: () => {} },
+        pins: memoryPinStore(),
+        getApiKey: async () => 'or',
+      };
+      const events = [exec('evt-a', '/Users/Shared/.x/run')];
+      await createVigilAi({ ...opts, settings: { ...base, mode: 'local' } }).classifier!.classify(
+        events,
+      );
+      expect(urls.some((u) => u.includes('openrouter.ai'))).toBe(false);
+      const both = await createVigilAi({ ...opts, settings: base }).classifier!.classify(events);
+      expect(both).toMatchObject({ ok: true, labels: [{ by: 'jev' }] });
+      // Another API (not OpenRouter) never gets Jev requests.
+      urls.length = 0;
+      await createVigilAi({
+        ...opts,
+        settings: {
+          ...base,
+          api: { ...base.api, preset: 'custom', baseUrl: 'https://api.example.com/v1' },
+        },
+      }).classifier!.classify(events);
+      expect(urls.some((u) => u.includes('decisions'))).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('is never used in local mode', async () => {
