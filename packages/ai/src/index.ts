@@ -135,6 +135,7 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
     // Local and both: a small model on this Mac, so high-volume labelling never
     // leaves it or uses a subscription. Cloud only: the cloud runner, inside its
     // background share.
+    const runtime = classifierRuntime();
     const labelRunner =
       settings.mode === 'cloud'
         ? runner
@@ -149,7 +150,7 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
                       pickModel: (installed) => pickClassifierModel(installed),
                       suggestedModel: recommendedClassifierModel(),
                     }),
-                runtime: classifierRuntime(),
+                runtime,
               }),
             ],
             log: options.log,
@@ -178,6 +179,8 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
         : {}),
       maxEventsPerBatch: settings.classifier.maxEventsPerBatch,
       maxBatchesPerHour: settings.classifier.maxBatchesPerHour,
+      maxCpuSecondsPerHour: settings.classifier.maxCpuSecondsPerHour,
+      cpuThreads: runtime.numThread,
       ...(options.isBusy ? { isBusy: options.isBusy } : {}),
     });
   }

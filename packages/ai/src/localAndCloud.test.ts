@@ -284,6 +284,7 @@ const exec = (id: string, path: string): SensorEvent => ({
 describe('event labelling with a small local model', () => {
   it('picks a model that fits the memory, from what is installed', () => {
     expect(recommendedClassifierModel(8 * GB)).toBe('qwen2.5:0.5b');
+    expect(recommendedClassifierModel(15 * GB)).toBe('qwen2.5:0.5b');
     expect(recommendedClassifierModel(16 * GB)).toBe('qwen2.5:1.5b');
     const installed = [{ name: 'gpt-oss:20b' }, { name: 'llama3.2:1b' }, { name: 'qwen2.5:1.5b' }];
     expect(pickClassifierModel(installed, 16 * GB)).toBe('qwen2.5:1.5b');
@@ -291,7 +292,7 @@ describe('event labelling with a small local model', () => {
     expect(pickClassifierModel([{ name: 'gpt-oss:20b' }], 8 * GB)).toBeUndefined();
     expect(classifierRuntime(8)).toEqual({
       numCtx: 4096,
-      numPredict: 2048,
+      numPredict: 256,
       numThread: 4,
       keepAlive: '1m',
     });
@@ -304,7 +305,7 @@ describe('event labelling with a small local model', () => {
     );
   });
 
-  it('labels a batch, drops ids it never sent, and requeues what it skipped', async () => {
+  it('asks only for flagged events by short key and treats the rest as benign', async () => {
     const inputs: AdapterRunInput[] = [];
     const ollama: ProviderAdapter = {
       id: 'ollama',
@@ -314,9 +315,9 @@ describe('event labelling with a small local model', () => {
         return {
           kind: 'ok',
           json: {
-            labels: [
-              { id: 'e1', label: 'suspicious', score: 1.4, reason: 'hidden unsigned program' },
-              { id: 'zzz', label: 'benign', score: 0, reason: 'made up' },
+            flagged: [
+              { key: 'e1', label: 'suspicious', reason: 'hidden unsigned program' },
+              { key: 'e9', label: 'suspicious', reason: 'made up' },
             ],
           },
           audit: audit(),
@@ -335,25 +336,28 @@ describe('event labelling with a small local model', () => {
       maxBatchesPerHour: 10,
     });
     const result = await classifier.classify([
-      exec('e1', '/Users/Shared/.x/run'),
-      exec('e2', '/Applications/Safari.app/Contents/MacOS/Safari'),
-      exec('e3', '/usr/bin/true'),
+      exec('evt-a', '/Users/Shared/.x/run'),
+      exec('evt-b', '/Applications/Safari.app/Contents/MacOS/Safari'),
+      exec('evt-c', '/usr/bin/true'),
     ]);
     expect(result).toEqual({
       ok: true,
       labels: [
         {
-          eventId: 'e1',
+          eventId: 'evt-a',
           label: 'suspicious',
-          score: 1,
+          score: 0.9,
           reason: 'hidden unsigned program',
           by: 'model',
         },
+        { eventId: 'evt-b', label: 'benign', score: 0, reason: '', by: 'model' },
       ],
-      deferred: ['e2', 'e3'],
+      deferred: ['evt-c'],
     });
+    // Short keys instead of event ids keep the model's answer small.
     expect(inputs[0]!.userPrompt).toContain('e2 process started /Applications/Safari.app');
-    expect(inputs[0]!.userPrompt).not.toContain('e3');
+    expect(inputs[0]!.userPrompt).not.toContain('evt-');
+    expect(inputs[0]!.userPrompt).not.toContain('/usr/bin/true');
     // Every batch shows up in the prompt log, which is what the activity feed reads.
     expect(log.map((e) => [e.purpose, e.provider, e.outcome])).toEqual([
       ['classify', 'ollama', 'ok'],
@@ -361,7 +365,7 @@ describe('event labelling with a small local model', () => {
   });
 
   it('waits when the Mac is busy or the hourly budget is spent', async () => {
-    const ollama = ready('ollama', { labels: [] });
+    const ollama = ready('ollama', { flagged: [] });
     const runner = createAiRunner({
       settings: { ...defaultAiSettings('/tmp/v'), order: ['ollama'] },
       adapters: [ollama],
@@ -387,6 +391,63 @@ describe('event labelling with a small local model', () => {
     now += 3_600_001;
     expect((await classifier.classify([exec('e2', '/b')])).ok).toBe(true);
     expect(ollama.runs).toBe(2);
+  });
+
+  it('charges local batches by CPU time, so a slow Mac does fewer', async () => {
+    let now = 0;
+    const slow: ProviderAdapter = {
+      id: 'ollama',
+      probe: async () => ({ provider: 'ollama', state: 'ready' }),
+      run: async () => {
+        now += 20_000; // 20 s wall on 2 threads = 40 CPU-seconds
+        return { kind: 'ok', json: { flagged: [] }, audit: audit() };
+      },
+    };
+    const classifier = createEventClassifier({
+      runner: createAiRunner({
+        settings: { ...defaultAiSettings('/tmp/v'), order: ['ollama'] },
+        adapters: [slow],
+        log: { record: () => {} },
+        now: () => now,
+      }),
+      maxEventsPerBatch: 5,
+      maxBatchesPerHour: 60,
+      maxCpuSecondsPerHour: 72,
+      cpuThreads: 2,
+      now: () => now,
+    });
+    expect((await classifier.classify([exec('a', '/a')])).ok).toBe(true); // 40 s used
+    expect((await classifier.classify([exec('b', '/b')])).ok).toBe(true); // 80 s used
+    expect(await classifier.classify([exec('c', '/c')])).toMatchObject({ reason: 'budget' });
+    now += 3_600_000;
+    expect((await classifier.classify([exec('c', '/c')])).ok).toBe(true);
+  });
+
+  it('does not charge the Mac for batches a cloud provider ran', async () => {
+    let now = 0;
+    const cloud: ProviderAdapter = {
+      id: 'claude',
+      probe: async () => ({ provider: 'claude', state: 'ready' }),
+      run: async () => {
+        now += 60_000;
+        return { kind: 'ok', json: { flagged: [] }, audit: audit() };
+      },
+    };
+    const classifier = createEventClassifier({
+      runner: createAiRunner({
+        settings: { ...defaultAiSettings('/tmp/v'), mode: 'cloud', order: ['claude'] },
+        adapters: [cloud],
+        log: { record: () => {} },
+        now: () => now,
+      }),
+      maxEventsPerBatch: 5,
+      maxBatchesPerHour: 60,
+      maxCpuSecondsPerHour: 72,
+      cpuThreads: 4,
+      now: () => now,
+    });
+    for (const id of ['a', 'b', 'c'])
+      expect((await classifier.classify([exec(id, '/x')])).ok).toBe(true);
   });
 
   it('comes with the AI when labelling is on', () => {
@@ -502,7 +563,7 @@ describe('Jev as the event labeller', () => {
     ] as const) {
       const { f, calls } = jevFetch(jevReply, status);
       const local = ready('ollama', {
-        labels: [{ id: 'evt-a', label: 'unusual', score: 0.5, reason: 'odd place' }],
+        flagged: [{ key: 'e1', label: 'unusual', reason: '' }],
       });
       const classifier = createEventClassifier({
         jev: createJevClient({ getApiKey: async () => 'k', log: { record: () => {} }, fetch: f }),

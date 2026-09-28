@@ -2,6 +2,7 @@ import { cpus, totalmem } from 'node:os';
 import type { ProcessRef, SensorEvent } from '@vigil/core';
 import { z } from 'zod';
 import type { JevAnswer, JevClient } from './providers/jev.js';
+import { LOCAL_PROVIDERS } from './types.js';
 import type { AiRunner } from './runner.js';
 
 /**
@@ -9,7 +10,7 @@ import type { AiRunner } from './runner.js';
  * first. Vigil only picks from what the user already installed.
  */
 export const CLASSIFIER_MODELS = {
-  /** For Macs with 8 GB of memory or less. */
+  /** For Macs with less than 16 GB of memory. */
   small: ['qwen2.5:0.5b', 'qwen3:0.6b', 'gemma3:1b', 'llama3.2:1b'],
   /** For everything else. */
   regular: [
@@ -24,9 +25,15 @@ export const CLASSIFIER_MODELS = {
 
 const GB = 1024 ** 3;
 
+/**
+ * Below 16 GB the 0.5B model: 1.5B is half the speed per token and keeps about
+ * 1 GB resident (measured on GitHub's Intel and M1 runners, docs/performance.md).
+ */
+const SMALL_BELOW = 16 * GB;
+
 /** The model setup suggests pulling on this Mac. */
 export function recommendedClassifierModel(memoryBytes: number = totalmem()): string {
-  return memoryBytes <= 8 * GB ? CLASSIFIER_MODELS.small[0] : CLASSIFIER_MODELS.regular[0];
+  return memoryBytes < SMALL_BELOW ? CLASSIFIER_MODELS.small[0] : CLASSIFIER_MODELS.regular[0];
 }
 
 /** The first suitable small model the user has installed, or nothing. */
@@ -35,7 +42,7 @@ export function pickClassifierModel(
   memoryBytes: number = totalmem(),
 ): string | undefined {
   const names = new Set(installed.flatMap((m) => [m.name, m.name.replace(/:latest$/, '')]));
-  const list = memoryBytes <= 8 * GB ? CLASSIFIER_MODELS.small : CLASSIFIER_MODELS.regular;
+  const list = memoryBytes < SMALL_BELOW ? CLASSIFIER_MODELS.small : CLASSIFIER_MODELS.regular;
   return list.find((m) => names.has(m));
 }
 
@@ -43,8 +50,8 @@ export function pickClassifierModel(
 export function classifierRuntime(cores: number = cpus().length) {
   return {
     numCtx: 4096,
-    // A batch of 20 labels is about 800 tokens of JSON.
-    numPredict: 2048,
+    // The answer lists only flagged events, so it is short; this stops a loop early.
+    numPredict: 256,
     numThread: Math.max(1, Math.floor(cores / 2)),
     keepAlive: '1m',
   } as const;
@@ -76,24 +83,28 @@ export type ClassifyResult =
     };
 
 const Output = z.strictObject({
-  labels: z.array(
+  flagged: z.array(
     z.strictObject({
-      id: z.string(),
-      label: z.enum(['benign', 'unusual', 'suspicious']),
-      score: z.number(),
+      key: z.string(),
+      label: z.enum(['unusual', 'suspicious']),
       reason: z.string(),
     }),
   ),
 });
 
+// Output tokens are nearly all of a small model's time on a CPU, so the answer
+// names only the events worth a look, by short key, with a reason only when
+// suspicious. Everything not listed is benign.
 const INSTRUCTIONS = [
-  "Each line in the data is one event from this Mac, starting with its id. Vigil's rules did not match these events.",
-  'Label every event: "benign" for normal activity, "unusual" for something a careful person might want to glance at,',
+  "Each line in the data is one event from this Mac, starting with its key (e1, e2...). Vigil's rules did not match these events.",
+  'Most are normal. List only the events that are not: "unusual" for something a careful person might want to glance at,',
   '"suspicious" for activity that looks like malware or an attacker (hidden or unsigned programs in odd places,',
   'new login items, reading browser or keychain data, connections to strange hosts, listening ports).',
-  'Give a score from 0 to 1 for how much a person should look at it, and a reason of at most 12 words.',
-  'Most events are benign. Answer for every id, and only for those ids.',
+  'For suspicious events give a reason of at most 8 words; for unusual ones leave the reason empty.',
+  'If nothing stands out, return an empty list.',
 ].join(' ');
+
+const SCORE = { benign: 0, unusual: 0.5, suspicious: 0.9 } as const;
 
 function proc(p: ProcessRef | undefined): string {
   if (!p) return '';
@@ -143,7 +154,15 @@ export interface EventClassifierOptions {
   /** False once Jev's spending this month reached the cap. */
   readonly jevAllowed?: () => Promise<boolean>;
   readonly maxEventsPerBatch: number;
+  /** Most batches per hour wherever they run, local or cloud. */
   readonly maxBatchesPerHour: number;
+  /**
+   * CPU time the local model may use per hour, in seconds. Each local batch is
+   * charged its wall time x `cpuThreads`, so a slow Mac does fewer batches.
+   */
+  readonly maxCpuSecondsPerHour?: number;
+  /** Threads the local model runs with (see `classifierRuntime`). */
+  readonly cpuThreads?: number;
   /** The app says when the Mac is busy or on low battery; labelling then waits. */
   readonly isBusy?: () => boolean;
   readonly deadlineMs?: number;
@@ -158,6 +177,7 @@ export interface EventClassifierOptions {
 export function createEventClassifier(options: EventClassifierOptions) {
   const now = options.now ?? Date.now;
   const sent: number[] = [];
+  const cpu: Array<{ at: number; seconds: number }> = [];
 
   return {
     async classify(events: readonly SensorEvent[]): Promise<ClassifyResult> {
@@ -168,7 +188,12 @@ export function createEventClassifier(options: EventClassifierOptions) {
       if (options.isBusy?.()) return { ok: false, reason: 'busy', deferred: all };
       const hourAgo = now() - 3_600_000;
       while (sent.length > 0 && sent[0]! < hourAgo) sent.shift();
-      if (sent.length >= options.maxBatchesPerHour)
+      while (cpu.length > 0 && cpu[0]!.at < hourAgo) cpu.shift();
+      const cpuUsed = cpu.reduce((sum, c) => sum + c.seconds, 0);
+      if (
+        sent.length >= options.maxBatchesPerHour ||
+        (options.maxCpuSecondsPerHour !== undefined && cpuUsed >= options.maxCpuSecondsPerHour)
+      )
         return { ok: false, reason: 'budget', deferred: all };
       sent.push(now());
 
@@ -201,14 +226,19 @@ export function createEventClassifier(options: EventClassifierOptions) {
           detail: jevDetail ?? 'No model set up.',
         };
 
+      const keyOf = new Map(batch.map((e, i) => [`e${i + 1}`, e.id]));
+      const started = now();
       const result = await options.runner.run({
         purpose: 'classify',
         urgency: 'background',
         instructions: INSTRUCTIONS,
-        data: batch.map((e) => `${e.id} ${eventLine(e)}`),
+        data: batch.map((e, i) => `e${i + 1} ${eventLine(e)}`),
         output: Output,
         deadlineMs: options.deadlineMs ?? 60_000,
       });
+      // A cloud provider costs this Mac nothing; failed local runs used the CPU too.
+      if (!result.ok || LOCAL_PROVIDERS.includes(result.provider))
+        cpu.push({ at: now(), seconds: ((now() - started) / 1000) * (options.cpuThreads ?? 1) });
       if (!result.ok)
         return {
           ok: false,
@@ -217,16 +247,20 @@ export function createEventClassifier(options: EventClassifierOptions) {
           ...(result.detail ? { detail: result.detail } : { detail: result.reason }),
         };
 
-      for (const l of result.value.labels) {
-        if (!ids.has(l.id) || labels.has(l.id)) continue;
-        labels.set(l.id, {
-          eventId: l.id,
-          label: l.label,
-          score: Math.min(1, Math.max(0, l.score)),
-          reason: l.reason.slice(0, 200),
+      for (const f of result.value.flagged) {
+        const id = keyOf.get(f.key);
+        if (!id || labels.has(id)) continue;
+        labels.set(id, {
+          eventId: id,
+          label: f.label,
+          score: SCORE[f.label],
+          reason: f.label === 'suspicious' ? f.reason.slice(0, 200) : '',
           by: 'model',
         });
       }
+      for (const id of ids)
+        if (!labels.has(id))
+          labels.set(id, { eventId: id, label: 'benign', score: 0, reason: '', by: 'model' });
       return done();
     },
   };

@@ -68,8 +68,13 @@ export interface AiSettings {
     readonly model?: string;
     /** Most events sent in one request. */
     readonly maxEventsPerBatch: number;
-    /** Most requests per hour, so labelling never keeps a slow laptop busy. */
+    /** Most requests per hour, local or cloud. */
     readonly maxBatchesPerHour: number;
+    /**
+     * CPU seconds per hour the local model may use: 72 is 2% of one core, the
+     * speed budget in docs/performance.md. A slow Mac simply does fewer batches.
+     */
+    readonly maxCpuSecondsPerHour: number;
   };
   readonly quota: {
     /** Vigil's share of each subscription usage window for background work, in percent. */
@@ -109,7 +114,12 @@ export function defaultAiSettings(appSupportDir: string): AiSettings {
     ollama: { enabled: true, baseUrl: 'http://127.0.0.1:11434' },
     api: { enabled: true, preset: 'openrouter', baseUrl: API_PRESETS.openrouter.baseUrl },
     jev: { enabled: true, baseUrl: JEV_DEFAULT_BASE_URL, model: JEV_DEFAULT_MODEL },
-    classifier: { enabled: true, maxEventsPerBatch: 20, maxBatchesPerHour: 60 },
+    classifier: {
+      enabled: true,
+      maxEventsPerBatch: 20,
+      maxBatchesPerHour: 60,
+      maxCpuSecondsPerHour: 72,
+    },
     quota: { backgroundSharePercent: 10 },
     pausedByVigil: [],
     redaction: { maxDataBytes: 48_000 },
