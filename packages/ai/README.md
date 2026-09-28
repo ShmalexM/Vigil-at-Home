@@ -47,6 +47,8 @@ Nothing needs setting up. Vigil looks for each app on every check and uses the f
 
 Codex is the one app that needs a click. Codex always loads the config in its home folder, including your MCP servers, and none of its settings turn that off for the app server (checked against 0.157.1: a server in your `config.toml` still starts). So Vigil keeps its own Codex home, and `ai.signIn('codex')` returns ChatGPT's own sign-in page for the app to open. Codex stores the login; Vigil never sees it.
 
+If the user's own Codex is already signed in, that second sign-in isn't needed. The Codex status then has `canShareSignIn: true`, and `shareCodexSignIn(codexHome)` links Vigil's folder's `auth.json` to the one in `~/.codex`. Only the Codex binary opens it; Vigil checks that it exists and never reads it. Codex writes refreshed sign-ins through the link (checked on 0.158.0), so both stay signed in. Nothing else comes across: a test runs Codex on the shared sign-in against a stand-in model server and checks that the user's MCP server doesn't start and their instructions don't reach the model, with the user's own folder as a control. It needs a file sign-in; a Codex that keeps its login in the Keychain has no `auth.json`, and the user signs in from Vigil instead. `stopSharingCodexSignIn(codexHome)` removes the link.
+
 `result.reason` on failure is one of `quota`, `timeout`, `invalid_output`, `no_provider`, `error`. Every prompt is recorded through `log` so the user can see what was sent.
 
 ## What the agent can and can't do

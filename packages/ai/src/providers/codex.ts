@@ -4,6 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { buildChildEnv } from '../env.js';
+import {
+  canShareCodexSignIn,
+  DEFAULT_USER_CODEX_HOME,
+  isCodexSignInShared,
+} from './codexSignIn.js';
 import type { PinStore } from '../executable.js';
 import { callTool, toolJsonSchema } from '../tools.js';
 import type {
@@ -62,7 +67,7 @@ export const CODEX_DISABLED_FEATURES = [
   'workspace_dependencies',
 ] as const;
 
-export function codexAppServerArgs(): string[] {
+export function codexAppServerArgs(opts: { sharedSignIn?: boolean } = {}): string[] {
   const args = [
     'app-server',
     '-c',
@@ -73,6 +78,9 @@ export function codexAppServerArgs(): string[] {
     '-c',
     'tools.experimental_request_user_input.enabled=false',
   ];
+  // A shared sign-in lives in the linked auth.json, so read it from there
+  // rather than from a Keychain entry for Vigil's own folder.
+  if (opts.sharedSignIn) args.push('-c', 'cli_auth_credentials_store="file"');
   for (const feature of CODEX_DISABLED_FEATURES) args.push('--disable', feature);
   return args;
 }
@@ -185,6 +193,8 @@ export interface CodexAdapterOptions {
   readonly executablePath?: string;
   readonly codexHome: string;
   readonly pins: PinStore;
+  /** The user's everyday Codex folder, for offering its sign-in. Default ~/.codex. */
+  readonly userCodexHome?: string;
 }
 
 export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapter {
@@ -196,7 +206,14 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
     handlers: ConstructorParameters<typeof JsonRpcStdio>[4],
   ) {
     await mkdir(options.codexHome, { recursive: true, mode: 0o700 });
-    const rpc = new JsonRpcStdio(binaryPath, codexAppServerArgs(), env(), cwd, handlers);
+    const sharedSignIn = await isCodexSignInShared(options.codexHome);
+    const rpc = new JsonRpcStdio(
+      binaryPath,
+      codexAppServerArgs({ sharedSignIn }),
+      env(),
+      cwd,
+      handlers,
+    );
     await rpc.request('initialize', {
       clientInfo: { name: 'vigil_at_home', title: 'Vigil at Home', version: '0.1.0' },
       // Dynamic tools, which keep Vigil's tools in Vigil's process, are an experimental API.
@@ -227,12 +244,22 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
         const account = await rpc.request<{
           account: { type: string; email?: string | null } | null;
         }>('account/read', {});
+        const canShare =
+          !account.account &&
+          (await canShareCodexSignIn(options.userCodexHome ?? DEFAULT_USER_CODEX_HOME));
         return {
           provider: 'codex',
           state: account.account ? 'ready' : 'needs_sign_in',
           version: stdout.trim(),
           ...(account.account ? { account: account.account.email ?? account.account.type } : {}),
-          ...(account.account ? {} : { detail: 'Sign in with ChatGPT from Vigil to use Codex.' }),
+          ...(account.account
+            ? {}
+            : {
+                detail: canShare
+                  ? 'Use the Codex sign-in you already have, or sign in with ChatGPT from Vigil.'
+                  : 'Sign in with ChatGPT from Vigil to use Codex.',
+              }),
+          ...(canShare ? { canShareSignIn: true } : {}),
         };
       } catch (error) {
         return {

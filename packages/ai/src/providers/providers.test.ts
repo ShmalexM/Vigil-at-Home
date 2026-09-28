@@ -1,4 +1,6 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { mkdtemp, readFile, readlink, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createRequire } from 'node:module';
@@ -22,6 +24,12 @@ import {
   codexThreadStartParams,
   codexTurnStartParams,
 } from './codex.js';
+import {
+  canShareCodexSignIn,
+  isCodexSignInShared,
+  shareCodexSignIn,
+  stopSharingCodexSignIn,
+} from './codexSignIn.js';
 import { JsonRpcStdio } from './jsonRpcStdio.js';
 import { createOllamaAdapter } from './ollama.js';
 import { readTool } from '../tools.js';
@@ -406,4 +414,122 @@ describe('Ollama adapter', () => {
       title: 'New login item',
     });
   });
+});
+
+describe('Sharing the Codex sign-in the user already has', () => {
+  it('links only auth.json, and only when the user has one', async () => {
+    const user = await tempDir('vigil-user-codex-');
+    const vigil = await tempDir('vigil-codex-shared-');
+    expect(await canShareCodexSignIn(user)).toBe(false);
+    expect(await shareCodexSignIn(vigil, user)).toEqual({ ok: false, reason: 'no_sign_in_file' });
+
+    await writeFile(join(user, 'auth.json'), '{}', { mode: 0o600 });
+    // Vigil's own earlier sign-in is replaced by the link.
+    await writeFile(join(vigil, 'auth.json'), '{"vigil":true}');
+    expect(await shareCodexSignIn(vigil, user)).toEqual({ ok: true });
+    expect(await isCodexSignInShared(vigil)).toBe(true);
+    expect(await readlink(join(vigil, 'auth.json'))).toBe(join(user, 'auth.json'));
+    expect(codexAppServerArgs({ sharedSignIn: true }).join(' ')).toContain(
+      'cli_auth_credentials_store="file"',
+    );
+
+    await stopSharingCodexSignIn(vigil);
+    expect(await isCodexSignInShared(vigil)).toBe(false);
+    expect(await readFile(join(user, 'auth.json'), 'utf8')).toBe('{}');
+  });
+
+  it.skipIf(!bundledCodex())(
+    "runs on the shared sign-in without the user's MCP servers or instructions",
+    async () => {
+      const user = await tempDir('vigil-user-codex-');
+      const vigil = await tempDir('vigil-codex-shared-');
+      const marker = join(user, 'mcp-server-started');
+      const requests: Array<{
+        instructions?: string;
+        input?: unknown;
+        tools?: Array<{ name?: string; type: string }>;
+      }> = [];
+      const server = createServer((req, res) => {
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', () => {
+          if (req.url === '/v1/responses') requests.push(JSON.parse(body));
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end('{"error":{"message":"test server"}}');
+        });
+      });
+      await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+      const { port } = server.address() as AddressInfo;
+      const provider = [
+        'model = "gpt-5.5"',
+        'model_provider = "test"',
+        '[model_providers.test]',
+        'name = "test"',
+        `base_url = "http://127.0.0.1:${port}/v1"`,
+        'wire_api = "responses"',
+        'experimental_bearer_token = "x"',
+        'request_max_retries = 0',
+        'stream_max_retries = 0',
+      ];
+      // The user's own Codex: signed in, with instructions and an MCP server that leaves a marker.
+      await writeFile(
+        join(user, 'config.toml'),
+        [
+          'developer_instructions = "USER-INSTRUCTIONS"',
+          ...provider,
+          '[mcp_servers.home]',
+          'command = "/bin/sh"',
+          `args = ["-c", "touch ${marker}; sleep 5"]`,
+        ].join('\n'),
+      );
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(process.execPath, [bundledCodex()!, 'login', '--with-api-key'], {
+          env: buildChildEnv({ CODEX_HOME: user }),
+        });
+        child.stdin.end('sk-vigil-test');
+        child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`login ${code}`))));
+      });
+      const adapter = (codexHome: string) =>
+        createCodexAdapter({
+          codexHome,
+          pins: memoryPinStore(),
+          executablePath: bundledCodex()!,
+          userCodexHome: user,
+        });
+      const run = (codexHome: string) =>
+        adapter(codexHome).run({
+          systemPrompt: 's',
+          userPrompt: 'u',
+          jsonSchema: schema,
+          tools: [getFinding],
+          signal: AbortSignal.timeout(60_000),
+          onUsage: () => {},
+        });
+      try {
+        expect(await adapter(vigil).probe()).toMatchObject({
+          state: 'needs_sign_in',
+          canShareSignIn: true,
+        });
+        await shareCodexSignIn(vigil, user);
+        expect(await adapter(vigil).probe()).toMatchObject({ state: 'ready' });
+        // A stand-in model server, so the run needs no network.
+        await writeFile(join(vigil, 'config.toml'), provider.join('\n'));
+
+        await run(vigil);
+        expect(requests.length).toBeGreaterThan(0);
+        expect(JSON.stringify(requests)).not.toContain('USER-INSTRUCTIONS');
+        expect(requests[0]!.tools?.map((t) => t.name ?? t.type)).toEqual(['get_finding']);
+        expect(existsSync(marker)).toBe(false);
+
+        // Control: the user's own folder does bring both in, so the checks above can fail.
+        requests.length = 0;
+        await run(user);
+        expect(JSON.stringify(requests)).toContain('USER-INSTRUCTIONS');
+        expect(existsSync(marker)).toBe(true);
+      } finally {
+        server.close();
+      }
+    },
+    90_000,
+  );
 });

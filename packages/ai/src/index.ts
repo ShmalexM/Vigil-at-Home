@@ -27,6 +27,14 @@ export { memoryPinStore, type ExecutablePin, type PinStore } from './executable.
 export { QuotaTracker } from './quota.js';
 export { createClaudeAdapter } from './providers/claude.js';
 export { createCodexAdapter } from './providers/codex.js';
+export {
+  canShareCodexSignIn,
+  DEFAULT_USER_CODEX_HOME,
+  isCodexSignInShared,
+  shareCodexSignIn,
+  stopSharingCodexSignIn,
+  type ShareCodexSignInResult,
+} from './providers/codexSignIn.js';
 export { createOllamaAdapter } from './providers/ollama.js';
 
 export interface VigilAiOptions {

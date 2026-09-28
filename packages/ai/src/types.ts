@@ -62,6 +62,11 @@ export interface ProviderStatus {
   readonly detail?: string;
   /** True when Vigil can start the vendor's sign-in itself (see `AiRunner.signIn`). */
   readonly canSignIn?: boolean;
+  /**
+   * Codex only: the user's own Codex has a sign-in Vigil's folder can link to
+   * (`shareCodexSignIn`), so no second sign-in is needed.
+   */
+  readonly canShareSignIn?: boolean;
 }
 
 /** One usage window as the vendor reports it (for example Claude's five_hour, Codex's primary). */
