@@ -10,6 +10,8 @@ import {
   type StatusView,
 } from '../shared/ipc.js';
 import { AlertService, type DecisionInput } from './alerts.js';
+import { EventLog } from './events.js';
+import { BATTERY_SLOWDOWN, type PowerMode } from './power.js';
 import type { Store } from './db/store.js';
 import { FEED_CHECK_MS, type Detector } from './detection.js';
 import { RuleEditing } from './rule-editing.js';
@@ -24,6 +26,12 @@ const DAY = 24 * HOUR;
 /** The feed hears about new events at most this often, however fast they arrive. */
 const FEED_BATCH_MS = 1000;
 export const EVENT_RETENTION_DAYS = 30;
+/**
+ * Most disk the database may use (docs/performance.md). At a busy developer's
+ * rate of about 100,000 events a day this still holds more than the 14 days
+ * rule replay needs.
+ */
+export const DEFAULT_MAX_DB_BYTES = 1024 * 1024 * 1024;
 /** Same window the detection engine replays AI-drafted rules over before approval. */
 export const RULE_REVIEW_DAYS = 14;
 
@@ -35,6 +43,8 @@ export class VigilCore {
   readonly alerts: AlertService;
   readonly scheduler: Scheduler;
   readonly sensors = new SensorRegistry();
+  /** Sensors hand every event here after detection has seen it. */
+  readonly events: EventLog;
   /** Set at startup when this build ships the helper. */
   helperInstallable = false;
   /** Emits `events` (count) at most once per FEED_BATCH_MS while events arrive. */
@@ -50,8 +60,12 @@ export class VigilCore {
     readonly executor: ActionExecutor,
     readonly dryRun: boolean,
     private readonly now: () => number = Date.now,
+    private readonly maxDbBytes: number = DEFAULT_MAX_DB_BYTES,
   ) {
     this.alerts = new AlertService(store, executor, now);
+    this.events = new EventLog(store, {
+      onError: (err) => console.error('[events] write failed:', err),
+    });
     this.scheduler = new Scheduler({
       onError: (name, err) => console.error(`[scheduler] ${name} failed:`, err),
     });
@@ -82,19 +96,31 @@ export class VigilCore {
       },
       true,
     );
+    this.scheduler.every('cap-disk', HOUR, () => {
+      this.store.pruneEventsToSize(this.maxDbBytes);
+    });
   }
 
   stop(): void {
     this.scheduler.stop();
     clearTimeout(this.feedTimer);
+    this.events.flush();
+  }
+
+  /** Slow or hold routine work to match the Mac's power state. */
+  applyPower(mode: PowerMode): void {
+    this.scheduler.setSlowdown(mode === 'saving' ? BATTERY_SLOWDOWN : 1);
+    if (mode === 'constrained') this.scheduler.pause();
+    else this.scheduler.resume();
   }
 
   /**
    * Store one sensor event and what detection made of it. Sensors and the
-   * detection engine call this; the feed shows it.
+   * detection engine call this; the feed shows it. Writes are batched
+   * (EventLog), so the feed ping below and the write land about together.
    */
   ingest(event: SensorEvent, outcome?: EventOutcome): void {
-    this.store.insertEvent(event, outcome);
+    this.events.add(event, outcome);
     this.feedPending++;
     this.feedTimer ??= setTimeout(() => {
       const n = this.feedPending;

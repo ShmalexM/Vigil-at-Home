@@ -13,11 +13,17 @@ import { systemProbe } from './onboarding/checks.js';
 import { demoProbe } from './onboarding/demo.js';
 import { KeyStore } from './onboarding/keys.js';
 import { OnboardingService } from './onboarding/service.js';
+import { PowerPolicy } from './power.js';
 import { HEALTH_CHECK_MS, macProbe, reportHealth, type HelperSensors } from './sensor-health.js';
 import { VigilCore } from './service.js';
 import { Windows } from './windows.js';
 
 app.setName('Vigil at Home');
+
+// The resource check (perf/measure.mjs) runs the app against a throwaway
+// profile and drives it from the main process.
+const perf = !app.isPackaged && !!process.env['VIGIL_PERF'];
+if (perf && process.env['VIGIL_USER_DATA']) app.setPath('userData', process.env['VIGIL_USER_DATA']);
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -94,6 +100,8 @@ function start(): void {
   });
   windows.createTray();
   windows.applyTheme(core.theme());
+  // After start-up settles, so the menu-bar item appears first.
+  setTimeout(() => windows.prewarmPopover(), 2000);
 
   const refresh = () => {
     windows.setNeedsYou(core.status().needsYou);
@@ -106,9 +114,11 @@ function start(): void {
   core.feed.on('events', (n) => windows.broadcast('events', n));
   refresh();
 
-  // Routine work waits while the Mac sleeps or saves battery; blocking never does.
-  powerMonitor.on('suspend', () => core.scheduler.pause());
-  powerMonitor.on('resume', () => core.scheduler.resume());
+  // Routine work slows on battery and waits while the Mac is hot or asleep;
+  // blocking never does. `power.isBusy()` is what optional AI work checks.
+  const power = new PowerPolicy(powerMonitor);
+  core.applyPower(power.mode);
+  power.on('change', (mode) => core.applyPower(mode));
   core.start();
 
   // Sensor events arrive through the helper, which reads Santa's and osquery's logs as root.
@@ -147,7 +157,8 @@ function start(): void {
       app.on('before-quit', stop);
     });
   }
+  if (perf) Object.assign(globalThis, { vigil: { core, windows, power, readyAt: Date.now() } });
   // First run opens setup; after that Vigil starts quietly in the menu bar.
-  if (!setup.finished()) windows.openMain('setup');
+  else if (!setup.finished()) windows.openMain('setup');
   else if (!app.isPackaged) windows.openMain();
 }

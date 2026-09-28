@@ -51,6 +51,10 @@ to `OnboardingService` and those two steps turn on.
   resolved; for shadow mode call `core.alerts.recordShadowMatch(rule, events)`.
 - **Sensors and helper**: implement `ActionExecutor` and report health with
   `core.sensors.report({ id, name, state })`.
+- **Sensor events**: after detection has seen an event, hand it to
+  `core.events.add(event)`, which stores it in batches. Optional work checks
+  `power.isBusy()` first. Both follow the budget in
+  [docs/performance.md](../../docs/performance.md).
 - **AI bridge**: read with `core.alertDetail(id)`, write with
   `core.alerts.recordAssessment(id, assessment)` and
   `core.alerts.propose('ai', action, alertId, rationale)`. Queue AI work with

@@ -51,6 +51,7 @@ describe('Detector', () => {
   it('stores ordinary events with how many rules checked them', async () => {
     const { core, store, popups } = setup();
     await core.handleEvent(exec('/usr/bin/git'));
+    core.events.flush(); // events are written in batches
     const [view] = store.listEventViews();
     expect(view?.outcome?.checked).toBeGreaterThan(0);
     expect(view?.outcome?.matches).toEqual([]);
@@ -61,6 +62,7 @@ describe('Detector', () => {
     const { core, store, executor, popups } = setup();
     core.detector!.stores.lists.add('known_bad_sha256', BAD, { source: 'test', updatedAt: 1 });
     await core.handleEvent(exec('/Users/you/Downloads/evil', BAD));
+    core.events.flush();
 
     const [view] = store.listEventViews({ matchedOnly: true });
     expect(view?.outcome?.matches).toEqual([
