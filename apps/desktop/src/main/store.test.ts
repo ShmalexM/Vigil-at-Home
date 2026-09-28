@@ -70,4 +70,43 @@ describe('Store', () => {
     }
     expect(s.ruleMatchCounts(15).get('r')).toBe(2);
   });
+
+  it('lists the event feed with filters, paging and outcomes', () => {
+    const s = memoryStore();
+    const a = { ...makeExec('/Applications/Safari.app/Contents/MacOS/Safari'), ts: 1000 };
+    const b = { ...makeExec('/tmp/100%_evil'), ts: 2000 };
+    s.insertEvent(a, { checked: 3, matches: [] });
+    s.insertEvent(b, {
+      checked: 3,
+      matches: [{ ruleId: 'r1', ruleName: 'Rule one', mode: 'alert' }],
+    });
+    s.insertEvent({
+      id: 'net1',
+      ts: 3000,
+      source: 'osquery',
+      kind: 'network.connection',
+      direction: 'outbound',
+      protocol: 'tcp',
+      remoteAddress: '1.2.3.4',
+    });
+
+    expect(s.listEventViews().map((v) => v.event.ts)).toEqual([3000, 2000, 1000]);
+    expect(s.listEventViews({ group: 'network' })).toHaveLength(1);
+    expect(s.listEventViews({ matchedOnly: true }).map((v) => v.event.id)).toEqual([b.id]);
+    expect(s.listEventViews({ text: 'safari' }).map((v) => v.event.id)).toEqual([a.id]);
+    // % and _ are literal, not wildcards.
+    expect(s.listEventViews({ text: '100%_' }).map((v) => v.event.id)).toEqual([b.id]);
+    expect(s.listEventViews({ text: '%' }).map((v) => v.event.id)).toEqual([b.id]);
+    expect(s.listEventViews({ before: 2000, limit: 5 }).map((v) => v.event.id)).toEqual([a.id]);
+    expect(s.listEventViews({ group: 'network' })[0]?.outcome).toBeNull();
+
+    const stats = s.eventStats(1500);
+    expect(stats).toMatchObject({
+      lastHour: 2,
+      matchedLastHour: 1,
+      programsLastHour: 1,
+      newest: 3000,
+    });
+    expect(stats.byGroup).toMatchObject({ programs: 1, network: 1, files: 0 });
+  });
 });

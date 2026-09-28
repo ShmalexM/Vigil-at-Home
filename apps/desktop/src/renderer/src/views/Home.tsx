@@ -65,7 +65,9 @@ export function HomeView({ go }: { go: (r: string) => void }) {
                   onClick={() => go(`alerts/${a.id}`)}
                 >
                   <SeverityMark severity={a.severity} />
-                  <span className="grow ellipsis t-h3">{a.title}</span>
+                  <span className="grow clamp-2 t-h3" title={a.title}>
+                    {a.title}
+                  </span>
                   {a.containment === 'active' && <Chip tone="good">Blocked</Chip>}
                   <span className="t-small nowrap">{timeAgo(a.createdAt)}</span>
                 </button>

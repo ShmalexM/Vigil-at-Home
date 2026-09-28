@@ -78,12 +78,18 @@ function RuleRow({ view }: { view: RuleView }) {
             {rule.origin === 'ai' && <Chip tone="ai">AI-drafted</Chip>}
             {rule.origin === 'user' && <Chip>Yours</Chip>}
           </div>
-          <span className="t-small ellipsis">{rule.description}</span>
+          <span className="t-small clamp-2" title={rule.description}>
+            {rule.description}
+          </span>
         </div>
         <SeverityMark severity={rule.severity} />
         <Chip title="How often this rule is expected to be right">{rule.fidelity} fidelity</Chip>
-        <span className="t-small" style={{ width: 96, textAlign: 'right' }}>
-          {matches} match{matches === 1 ? '' : 'es'} / 14d
+        <span
+          className="t-small nowrap"
+          style={{ width: 104, textAlign: 'right' }}
+          title="Matches in the last 14 days, in any mode"
+        >
+          {matches} in 14 days
         </span>
         <Segmented
           label={`Mode for ${rule.name}`}

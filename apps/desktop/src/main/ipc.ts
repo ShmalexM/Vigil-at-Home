@@ -17,7 +17,7 @@ export function registerIpc(core: VigilCore, windows: Windows): void {
     getStatus: () => core.status(),
     listAlerts: (status) => core.store.listAlerts(status ? { status } : {}),
     getAlertDetail: (id) => core.alertDetail(id),
-    decide: (id, input) => core.alerts.decide(id, stripUndefined(input)),
+    decide: (id, input) => core.decide(id, stripUndefined(input)),
     reopen: (id) => core.alerts.reopen(id),
     undoAction: (id) => core.alerts.undo(id),
     approveProposal: (id) => core.alerts.approveProposal(id),
@@ -25,6 +25,8 @@ export function registerIpc(core: VigilCore, windows: Windows): void {
     listRules: () => core.rules(),
     setRuleMode: (id: string, mode) => core.setRuleMode(id, mode),
     listActions: () => core.store.listActions({ limit: 300 }),
+    listEvents: (q) => core.store.listEventViews(stripUndefined(q)),
+    eventStats: () => core.eventStats(),
     getSettings: () => ({
       theme: core.theme(),
       dataDir: app.getPath('userData'),

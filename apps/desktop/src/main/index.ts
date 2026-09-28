@@ -3,7 +3,8 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { app, powerMonitor } from 'electron';
 import { Store } from './db/store.js';
-import { seedDemo } from './demo.js';
+import { seedDemo, startDemoFeed } from './demo.js';
+import { Detector } from './detection.js';
 import { DryRunExecutor } from './executor.js';
 import { registerIpc } from './ipc.js';
 import { VigilCore } from './service.js';
@@ -23,10 +24,16 @@ function start(): void {
 
   const dataDir = app.getPath('userData');
   mkdirSync(dataDir, { recursive: true });
-  const store = new Store(new DatabaseSync(join(dataDir, 'vigil.db')));
+  const db = new DatabaseSync(join(dataDir, 'vigil.db'));
+  const store = new Store(db);
 
   // Until the privileged helper is installed, blocks are simulated and the UI says so.
   const core = new VigilCore(store, new DryRunExecutor(), true);
+  core.detector = new Detector(db, store, core.alerts, (e, o) => core.ingest(e, o), {
+    installedAt: core.installedAt(),
+    // The .app bundle when packaged; the Electron binary in development.
+    selfPaths: [app.isPackaged ? join(process.execPath, '../../..') : process.execPath],
+  });
   const windows = new Windows();
 
   registerIpc(core, windows);
@@ -40,6 +47,7 @@ function start(): void {
   core.alerts.on('changed', refresh);
   core.sensors.on('changed', refresh);
   core.alerts.on('popup', (alert) => windows.showPopup(alert.id));
+  core.feed.on('events', (n) => windows.broadcast('events', n));
   refresh();
 
   // Routine work waits while the Mac sleeps or saves battery; blocking never does.
@@ -56,6 +64,11 @@ function start(): void {
     store.close();
   });
 
-  if (!app.isPackaged && process.env['VIGIL_DEMO']) void seedDemo(core);
+  if (!app.isPackaged && process.env['VIGIL_DEMO']) {
+    void seedDemo(core).then(() => {
+      const stop = startDemoFeed(core);
+      app.on('before-quit', stop);
+    });
+  }
   if (!app.isPackaged) windows.openMain();
 }
