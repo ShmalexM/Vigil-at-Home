@@ -11,6 +11,7 @@ import {
 } from '@vigil/core';
 import { z } from 'zod';
 import type { CALL_NAMES, PUSH_NAMES } from './channels.js';
+import { ApiKeyInput, ApiKeyProvider, SettingsPane, SetupMode, type SetupView } from './setup.js';
 
 /**
  * The renderer's whole view of the main process. Every call is one IPC
@@ -86,6 +87,16 @@ export const calls = {
   /** The popup's content height in CSS pixels, so the window hugs it. */
   fitPopup: z.tuple([z.number().int().min(80).max(1000)]),
   quit: z.tuple([]),
+  // First-run setup (main/onboarding).
+  getSetup: z.tuple([]),
+  checkSetup: z.tuple([]),
+  setSetupMode: z.tuple([SetupMode]),
+  skipSetupStep: z.tuple([z.string().max(64), z.boolean()]),
+  finishSetup: z.tuple([]),
+  restartSetup: z.tuple([]),
+  saveApiKey: z.tuple([ApiKeyInput]),
+  clearApiKey: z.tuple([ApiKeyProvider]),
+  openSettingsPane: z.tuple([SettingsPane]),
   installHelper: z.tuple([]),
   uninstallHelper: z.tuple([]),
 } as const;
@@ -178,6 +189,15 @@ export interface CallResults {
   closePopup: void;
   fitPopup: void;
   quit: void;
+  getSetup: SetupView;
+  checkSetup: SetupView;
+  setSetupMode: SetupView;
+  skipSetupStep: SetupView;
+  finishSetup: void;
+  restartSetup: void;
+  saveApiKey: SetupView;
+  clearApiKey: SetupView;
+  openSettingsPane: void;
   installHelper: HelperInstallResult;
   uninstallHelper: HelperInstallResult;
 }

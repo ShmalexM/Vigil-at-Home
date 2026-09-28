@@ -2,11 +2,13 @@ import { app, ipcMain, type IpcMainInvokeEvent } from 'electron';
 import type { z } from 'zod';
 import { calls, type CallName, type CallResults } from '../shared/ipc.js';
 import type { HelperInstallResult } from '../shared/ipc.js';
+import { onboardingHandlers } from './onboarding/ipc.js';
+import type { OnboardingService } from './onboarding/service.js';
 import type { VigilCore } from './service.js';
 import { sendTestAlert } from './test-alert.js';
 import { rendererOrigin, type Windows } from './windows.js';
 
-type Handlers = {
+export type Handlers = {
   [K in CallName]: (
     ...args: z.output<(typeof calls)[K]>
   ) => CallResults[K] | Promise<CallResults[K]>;
@@ -26,6 +28,7 @@ const noHelper: HelperControl = {
 export function registerIpc(
   core: VigilCore,
   windows: Windows,
+  setup: OnboardingService,
   helper: HelperControl = noHelper,
 ): void {
   const h: Handlers = {
@@ -56,6 +59,7 @@ export function registerIpc(
     closePopup: () => windows.hidePopup(),
     fitPopup: (height) => windows.fitPopup(height),
     quit: () => app.quit(),
+    ...onboardingHandlers(setup, () => windows.openMain('home')),
     installHelper: () => helper.install(),
     uninstallHelper: () => helper.uninstall(),
   };

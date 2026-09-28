@@ -22,9 +22,13 @@ export interface SensorHubOptions {
 
 const DEDUPE_WINDOW = 5000;
 
+/** When each sensor last delivered an event (ms since epoch), for health checks. */
+export type SensorActivity = Record<'santa' | 'osquery', number | null>;
+
 export class SensorHub {
   private readonly tailers = new Map<string, FileTailer>();
   private readonly seen = new Set<string>();
+  private readonly activity: SensorActivity = { santa: null, osquery: null };
 
   constructor(private readonly opts: SensorHubOptions) {
     const santa = opts.santaLogPath ?? DEFAULT_PATHS.santaLog;
@@ -52,7 +56,14 @@ export class SensorHub {
     );
   }
 
+  /** When Santa and osquery last delivered an event, or null if they haven't since start. */
+  lastEventAt(): SensorActivity {
+    return { ...this.activity };
+  }
+
   emit(event: SensorEvent): void {
+    if (event.source === 'santa' || event.source === 'osquery')
+      this.activity[event.source] = Date.now();
     if (this.seen.has(event.id)) return;
     this.seen.add(event.id);
     if (this.seen.size > DEDUPE_WINDOW) {

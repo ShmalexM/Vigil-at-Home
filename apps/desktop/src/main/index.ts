@@ -1,14 +1,18 @@
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { app, powerMonitor } from 'electron';
+import { app, powerMonitor, safeStorage } from 'electron';
 import type { HelperInstallResult } from '../shared/ipc.js';
 import { Store } from './db/store.js';
 import { seedDemo, startDemoFeed } from './demo.js';
 import { Detector } from './detection.js';
-import { runHelperScript, helperBundleDir } from './helper-install.js';
+import { helperBundleDir, helperInstallCommand, runHelperScript } from './helper-install.js';
 import { HelperLink } from './helper.js';
 import { registerIpc } from './ipc.js';
+import { systemProbe } from './onboarding/checks.js';
+import { demoProbe } from './onboarding/demo.js';
+import { KeyStore } from './onboarding/keys.js';
+import { OnboardingService } from './onboarding/service.js';
 import { HEALTH_CHECK_MS, macProbe, reportHealth, type HelperSensors } from './sensor-health.js';
 import { VigilCore } from './service.js';
 import { Windows } from './windows.js';
@@ -47,13 +51,44 @@ function start(): void {
   );
 
   core.helperInstallable = process.platform === 'darwin' && helperBundleDir() !== null;
+  // Santa's configuration profile comes from the helper, which holds the sync
+  // server's certificate. Setup offers it once it has been written here.
+  const santaProfilePath = join(dataDir, 'Vigil Santa.mobileconfig');
+  const saveSantaProfile = async () => {
+    try {
+      const r = await helper.query<{ mobileconfig: string }>('santa.profile');
+      if (r?.mobileconfig) writeFileSync(santaProfilePath, r.mobileconfig);
+    } catch {
+      // The next connection tries again.
+    }
+  };
   // Installing or removing the helper shows macOS's own password dialog.
   const afterHelperScript = async (r: HelperInstallResult) => {
     await helper.reconnect();
     await reportHealth(core.sensors, probe);
     return r;
   };
-  registerIpc(core, windows, {
+
+  const demo = !app.isPackaged && !!process.env['VIGIL_DEMO'];
+  const setup = new OnboardingService({
+    store,
+    keys: new KeyStore(join(dataDir, 'api-keys.json'), {
+      available: () => safeStorage.isEncryptionAvailable(),
+      encrypt: (s) => safeStorage.encryptString(s),
+      decrypt: (b) => safeStorage.decryptString(b),
+    }),
+    ...(demo ? { probe: demoProbe(), supported: true } : { probe: systemProbe() }),
+    // The wizard's helper and Santa steps, once this build can install them.
+    plan: () => {
+      const command = helperInstallCommand();
+      return {
+        ...(command ? { helperInstallCommand: command } : {}),
+        ...(existsSync(santaProfilePath) ? { santaProfilePath } : {}),
+      };
+    },
+  });
+
+  registerIpc(core, windows, setup, {
     install: async () => afterHelperScript(await runHelperScript('install')),
     uninstall: async () => afterHelperScript(await runHelperScript('uninstall')),
   });
@@ -66,6 +101,7 @@ function start(): void {
   };
   core.alerts.on('changed', refresh);
   core.sensors.on('changed', refresh);
+  setup.on('changed', () => windows.broadcast('changed'));
   core.alerts.on('popup', (alert) => windows.showPopup(alert.id));
   core.feed.on('events', (n) => windows.broadcast('events', n));
   refresh();
@@ -78,7 +114,10 @@ function start(): void {
   // Sensor events arrive through the helper, which reads Santa's and osquery's logs as root.
   helper.on('event', (e) => void core.handleEvent(e));
   const checkHealth = () => reportHealth(core.sensors, probe);
-  helper.on('state', () => void checkHealth());
+  helper.on('state', (state) => {
+    void checkHealth();
+    if (state === 'connected') void saveSantaProfile();
+  });
   if (process.platform === 'darwin') {
     helper.start();
     core.scheduler.every(
@@ -102,11 +141,13 @@ function start(): void {
     store.close();
   });
 
-  if (!app.isPackaged && process.env['VIGIL_DEMO']) {
+  if (demo) {
     void seedDemo(core).then(() => {
       const stop = startDemoFeed(core);
       app.on('before-quit', stop);
     });
   }
-  if (!app.isPackaged) windows.openMain();
+  // First run opens setup; after that Vigil starts quietly in the menu bar.
+  if (!setup.finished()) windows.openMain('setup');
+  else if (!app.isPackaged) windows.openMain();
 }
