@@ -17,7 +17,7 @@ import {
   type VigilAi,
   type VigilAiOptions,
 } from '@vigil/ai';
-import type { AiAssessment, Alert } from '@vigil/core';
+import type { AiAssessment, Alert, SensorEvent } from '@vigil/core';
 import {
   AiPrefs,
   AiPrefsPatch,
@@ -27,7 +27,7 @@ import {
   type AiProviderView,
   type AiView,
 } from '../shared/ai.js';
-import type { AlertDetail } from '../shared/ipc.js';
+import type { AlertDetail, EventOutcome } from '../shared/ipc.js';
 import type { ApiKeyProvider, SetupMode } from '../shared/setup.js';
 import type { Store } from './db/store.js';
 import type { VigilCore } from './service.js';
@@ -41,6 +41,12 @@ const EXPLAIN_NOW_DEADLINE_MS = 90_000;
 const EXPLAIN_BACKGROUND_DEADLINE_MS = 180_000;
 /** Most events of one alert the AI sees. */
 const MAX_EVENTS = 20;
+const LABEL_EVERY_MS = 60_000;
+/** The same program or destination is labelled at most once an hour. */
+const REPEAT_MS = 60 * 60_000;
+const MAX_LABEL_QUEUE = 200;
+const MAX_REMEMBERED = 5_000;
+
 /**
  * Alerts without a popup waiting for an explanation at once. More than this
  * (a burst) go unexplained, so AI work never crowds out Vigil's routine jobs.
@@ -106,6 +112,11 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
   private readonly now: () => number;
   private readonly explaining = new Set<string>();
   private queuedBackground = 0;
+  /** Events waiting for a label, oldest first. */
+  private labelQueue: SensorEvent[] = [];
+  private cachedPrefs: AiPrefs | undefined;
+  /** When each program or destination was last queued, so repeats aren't sent again. */
+  private readonly lastQueued = new Map<string, number>();
   /** The model behind recent runs, so an explanation can say who wrote it. */
   private readonly models = new Map<string, string>();
 
@@ -115,7 +126,13 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
   }
 
   prefs(): AiPrefs {
-    return this.o.store.getSetting(KEY_PREFS, AiPrefs, DEFAULT_AI_PREFS);
+    // Read once: `consider` asks for every event.
+    if (this.cachedPrefs) return this.cachedPrefs;
+    // Prefs saved by an older Vigil lack newer switches; those take their defaults.
+    const saved = this.o.store.getSetting(KEY_PREFS, AiPrefs.partial(), {});
+    const defined = Object.fromEntries(Object.entries(saved).filter(([, v]) => v !== undefined));
+    this.cachedPrefs = AiPrefs.parse({ ...DEFAULT_AI_PREFS, ...defined });
+    return this.cachedPrefs;
   }
 
   setPrefs(raw: AiPrefsPatch): AiView['prefs'] {
@@ -129,6 +146,7 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
       next = withoutCap;
     } else if (monthlyCapUsd !== undefined) next = { ...next, monthlyCapUsd };
     this.o.store.setSetting(KEY_PREFS, AiPrefs.parse(next));
+    this.cachedPrefs = undefined;
     this.emit('changed');
     return this.prefs();
   }
@@ -165,8 +183,7 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
           }
         : { ...base.api, enabled: false },
       jev: { ...base.jev, enabled: prefs.jev },
-      // Labelling events is wired separately; until then nothing is sent for it.
-      classifier: { ...base.classifier, enabled: false },
+      classifier: { ...base.classifier, enabled: prefs.labelling },
       quota: { ...base.quota, ...(cap !== undefined ? { apiKeyMonthlyCapUsd: cap } : {}) },
     };
   }
@@ -362,6 +379,70 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
   }
 
   /**
+   * Labels events no rule matched, a batch a minute, as hints in Activity.
+   * Apple's own programs and repeats within an hour are skipped; the
+   * classifier keeps to its hourly and CPU budgets and waits while the Mac is
+   * busy. A label never blocks, allows or raises anything.
+   */
+  labelEventsFrom(
+    core: Pick<VigilCore, 'scheduler' | 'store'> & { onIngest: VigilCore['onIngest'] },
+  ): void {
+    core.onIngest = (event, outcome) => this.consider(event, outcome);
+    core.scheduler.every('label-events', LABEL_EVERY_MS, async () => {
+      await this.labelBatch(core.store);
+    });
+  }
+
+  /** Queues an event for labelling when it's worth a model's look. Cheap: runs for every event. */
+  consider(event: SensorEvent, outcome: EventOutcome | undefined): void {
+    if (!outcome || outcome.matches.length > 0) return;
+    const key = labelKey(event);
+    if (!key || !this.prefs().labelling) return;
+    const at = this.now();
+    const last = this.lastQueued.get(key);
+    if (last !== undefined && at - last < REPEAT_MS) return;
+    this.lastQueued.delete(key);
+    this.lastQueued.set(key, at);
+    if (this.lastQueued.size > MAX_REMEMBERED)
+      this.lastQueued.delete(this.lastQueued.keys().next().value!);
+    this.labelQueue.push(event);
+    if (this.labelQueue.length > MAX_LABEL_QUEUE) this.labelQueue.shift();
+  }
+
+  /** Sends one batch to the classifier and stores what comes back. */
+  async labelBatch(store: Pick<Store, 'setEventLabels'>): Promise<number> {
+    if (this.labelQueue.length === 0) return 0;
+    const classifier = this.ai().classifier;
+    if (!classifier) {
+      this.labelQueue = [];
+      return 0;
+    }
+    const batch = this.labelQueue;
+    this.labelQueue = [];
+    const result = await classifier.classify(batch);
+    // Whatever wasn't labelled goes back ahead of newer events, within the cap.
+    const deferred = new Set(result.deferred);
+    this.labelQueue = [...batch.filter((e) => deferred.has(e.id)), ...this.labelQueue].slice(
+      -MAX_LABEL_QUEUE,
+    );
+    if (!result.ok) return 0;
+    const at = this.now();
+    store.setEventLabels(
+      result.labels.map((l) => ({
+        eventId: l.eventId,
+        label: {
+          label: l.label,
+          score: l.score,
+          reason: l.reason.slice(0, 300),
+          by: l.by,
+          at,
+        },
+      })),
+    );
+    return result.labels.length;
+  }
+
+  /**
    * Asks the AI to explain a new alert in plain words. Advisory: the response
    * already ran, and nothing here changes it. Popups ask right away; other
    * alerts wait for quota headroom.
@@ -414,6 +495,32 @@ function providerView(s: ProviderStatus, codexShared: boolean): AiProviderView {
 }
 
 /** Claude Code reports how it's signed in, not who; say it in words. */
+/**
+ * What makes two events the same for labelling: the program, plus where it
+ * connected. Undefined for events not worth a model's look: Apple's own
+ * programs, exits, file events and system alerts.
+ */
+export function labelKey(e: SensorEvent): string | undefined {
+  switch (e.kind) {
+    case 'process.exec':
+      return e.process.signing === 'apple' ? undefined : `exec:${e.process.path}`;
+    case 'network.connection':
+      return e.process?.signing === 'apple'
+        ? undefined
+        : `net:${e.process?.path ?? '?'}>${e.remoteHost ?? e.remoteAddress}:${e.remotePort ?? ''}`;
+    case 'network.listen':
+      return e.process?.signing === 'apple'
+        ? undefined
+        : `listen:${e.process?.path ?? '?'}:${e.localPort}`;
+    case 'persistence':
+      return e.change === 'removed' ? undefined : `persist:${e.path}`;
+    case 'browser.extension':
+      return e.change === 'removed' ? undefined : `ext:${e.extensionId}`;
+    default:
+      return undefined;
+  }
+}
+
 function claudeAuth(method: string): string {
   const words: Record<string, string> = {
     'claude.ai': 'Signed in with your Claude account',

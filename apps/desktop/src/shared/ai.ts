@@ -15,6 +15,8 @@ export const AiPrefs = z.object({
   api: z.boolean(),
   ollama: z.boolean(),
   jev: z.boolean(),
+  /** A model labels events no rule matched, as hints in Activity. */
+  labelling: z.boolean(),
   /** Claude through the user's own Claude Code sign-in, or a saved Anthropic API key. */
   claudeUses: z.enum(['subscription', 'apiKey']),
   /** Vigil stops using paid keys (API, Jev, Claude on a key) for the month past this. */
@@ -28,6 +30,7 @@ export const DEFAULT_AI_PREFS: AiPrefs = {
   api: true,
   ollama: true,
   jev: true,
+  labelling: true,
   claudeUses: 'subscription',
 };
 

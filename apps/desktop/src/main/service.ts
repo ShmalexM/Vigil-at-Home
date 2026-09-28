@@ -56,6 +56,8 @@ export class VigilCore {
   readonly usage: UsageService;
   /** The rule engine, once attached. Without it events are stored unanalysed. */
   detector: Detector | undefined;
+  /** Sees every stored event and its outcome (the AI picks ones to label). Must be cheap. */
+  onIngest: ((event: SensorEvent, outcome: EventOutcome | undefined) => void) | undefined;
   private editing: RuleEditing | undefined;
   private feedPending = 0;
   private feedTimer: ReturnType<typeof setTimeout> | undefined;
@@ -128,6 +130,7 @@ export class VigilCore {
    */
   ingest(event: SensorEvent, outcome?: EventOutcome): void {
     this.events.add(event, outcome);
+    this.onIngest?.(event, outcome);
     this.feedPending++;
     this.feedTimer ??= setTimeout(() => {
       const n = this.feedPending;

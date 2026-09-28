@@ -12,6 +12,7 @@ import {
 import { z } from 'zod';
 import {
   EVENT_GROUPS,
+  EventLabel,
   EventOutcome,
   TEXT_SEARCH_WINDOW_MS,
   type EventGroup,
@@ -173,14 +174,33 @@ export class Store {
       where.push(`body LIKE ? ESCAPE '\\'`);
       args.push(`%${q.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
     }
-    const sql = `SELECT body, outcome FROM events ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+    const sql = `SELECT body, outcome, label FROM events ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY ts DESC, id DESC LIMIT ?`;
     args.push(q.limit ?? 200);
-    const rows = this.db.prepare(sql).all(...args) as { body: string; outcome: string | null }[];
-    return rows.map((r) => ({
-      event: SensorEvent.parse(JSON.parse(r.body)),
-      outcome: r.outcome ? EventOutcome.parse(JSON.parse(r.outcome)) : null,
-    }));
+    const rows = this.db.prepare(sql).all(...args) as {
+      body: string;
+      outcome: string | null;
+      label: string | null;
+    }[];
+    return rows.map((r) => {
+      const label = r.label ? EventLabel.safeParse(JSON.parse(r.label)) : undefined;
+      return {
+        event: SensorEvent.parse(JSON.parse(r.body)),
+        outcome: r.outcome ? EventOutcome.parse(JSON.parse(r.outcome)) : null,
+        ...(label?.success ? { label: label.data } : {}),
+      };
+    });
+  }
+
+  /** Stores models' labels on events already written. Unknown ids are ignored. */
+  setEventLabels(labels: readonly { eventId: string; label: EventLabel }[]): void {
+    this.tx(() => {
+      for (const l of labels)
+        this.stmt('UPDATE events SET label = ? WHERE id = ?').run(
+          JSON.stringify(EventLabel.parse(l.label)),
+          l.eventId,
+        );
+    });
   }
 
   eventStats(since: number): Omit<EventStats, 'retentionDays'> {
