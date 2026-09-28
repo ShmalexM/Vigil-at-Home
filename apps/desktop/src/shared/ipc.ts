@@ -53,6 +53,9 @@ export const EVENT_GROUPS: Record<EventGroup, EventKind[]> = {
   system: ['system.alert'],
 };
 
+/** How far back one text search looks; the feed then offers the day before. */
+export const TEXT_SEARCH_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 export const EventQuery = z.object({
   group: EventGroup.optional(),
   /** Only events that matched a rule. */
