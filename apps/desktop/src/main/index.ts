@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { app, dialog, powerMonitor, safeStorage, shell } from 'electron';
+import { app, dialog, Notification, powerMonitor, safeStorage, shell } from 'electron';
+import { z } from 'zod';
 import type { HelperInstallResult } from '../shared/ipc.js';
 import { AiBridge } from './ai.js';
 import { Store } from './db/store.js';
@@ -18,6 +19,7 @@ import { OnboardingService } from './onboarding/service.js';
 import { PowerPolicy } from './power.js';
 import { HEALTH_CHECK_MS, macProbe, reportHealth, type HelperSensors } from './sensor-health.js';
 import { VigilCore } from './service.js';
+import { UpdateChecker } from './updates.js';
 import { Windows } from './windows.js';
 
 app.setName('Vigil at Home');
@@ -141,7 +143,29 @@ function start(): void {
   ai.explainAlertsFrom(core);
   ai.labelEventsFrom(core);
 
-  registerIpc(core, windows, setup, ai, {
+  // Tells the user when a newer release is out. Unsigned builds can't update
+  // themselves, so it offers the DMG; nothing installs without the user.
+  const updates = new UpdateChecker({
+    current: app.getVersion(),
+    arch: process.arch,
+    load: () => store.getSetting('updates', z.unknown(), {}),
+    save: (s) => store.setSetting('updates', s),
+    openExternal: (url) => shell.openExternal(url),
+    onFound: (version) => {
+      if (!Notification.isSupported()) return;
+      const n = new Notification({
+        title: `Vigil at Home ${version} is available`,
+        body: 'Open Vigil to download it.',
+      });
+      n.on('click', () => windows.openMain());
+      n.show();
+    },
+  });
+  updates.on('changed', () => windows.broadcast('changed'));
+  if (app.isPackaged) updates.start();
+  app.on('before-quit', () => updates.stop());
+
+  registerIpc(core, windows, setup, ai, updates, {
     install: async () => afterHelperScript(await runHelperScript('install', helperDir())),
     uninstall: async () => afterHelperScript(await runHelperScript('uninstall', helperDir())),
   });

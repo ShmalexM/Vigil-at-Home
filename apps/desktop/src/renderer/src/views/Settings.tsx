@@ -5,6 +5,7 @@ import { useToast } from '../components/Toasts';
 import { Button, Card, SectionHead } from '../components/ui';
 import { AiSection } from './Ai';
 import { AppearanceSection } from './Appearance';
+import { UpdatesRow } from './Updates';
 import { PageHead } from './AppShell';
 import { SetupPanel } from './onboarding/SetupPanel';
 
@@ -54,6 +55,10 @@ export function SettingsView() {
         <dl className="kv">
           <dt>Version</dt>
           <dd>{settings.version}</dd>
+          <dt>Updates</dt>
+          <dd>
+            <UpdatesRow />
+          </dd>
           <dt>Data folder</dt>
           <dd className="mono">{settings.dataDir}</dd>
           <dt>License</dt>

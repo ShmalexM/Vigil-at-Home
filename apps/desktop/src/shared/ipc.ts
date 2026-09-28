@@ -13,6 +13,7 @@ import { z } from 'zod';
 import type { CALL_NAMES, PUSH_NAMES } from './channels.js';
 import { AiPrefsPatch, AiProvider, type AiActionResult, type AiView } from './ai.js';
 import type { AppearanceSettings } from './themes.js';
+import type { UpdateView } from './updates.js';
 import type { UsageLimitsView, UsageReport } from './usage.js';
 import {
   ApiKeyInput,
@@ -171,6 +172,12 @@ export const calls = {
   signInAi: z.tuple([AiProvider]),
   shareCodexSignIn: z.tuple([]),
   stopSharingCodexSignIn: z.tuple([]),
+  // Update notices (main/updates.ts).
+  getUpdates: z.tuple([]),
+  checkUpdates: z.tuple([]),
+  setUpdateAuto: z.tuple([z.boolean()]),
+  dismissUpdate: z.tuple([]),
+  downloadUpdate: z.tuple([]),
 } as const;
 export type CallName = keyof typeof calls;
 
@@ -364,6 +371,11 @@ export interface CallResults {
   signInAi: AiActionResult;
   shareCodexSignIn: AiActionResult;
   stopSharingCodexSignIn: void;
+  getUpdates: UpdateView;
+  checkUpdates: UpdateView;
+  setUpdateAuto: void;
+  dismissUpdate: void;
+  downloadUpdate: void;
 }
 
 /** Pushed from main to every window. */
