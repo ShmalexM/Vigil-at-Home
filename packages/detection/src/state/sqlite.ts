@@ -23,6 +23,8 @@ export interface SqlStatement {
   run(...params: unknown[]): unknown;
   get(...params: unknown[]): unknown;
   all(...params: unknown[]): unknown[];
+  /** Streams rows one at a time (node:sqlite has it); used for replay windows. */
+  iterate?(...params: unknown[]): Iterable<unknown>;
 }
 export interface SqlDatabase {
   exec(sql: string): unknown;
@@ -220,8 +222,11 @@ class SqliteEventHistory implements EventHistory {
     this.ins.run(e.id, e.ts, e.kind, JSON.stringify(e));
   }
   *range(fromTs: number, toTs: number): Iterable<DetectionEvent> {
-    for (const r of this.sel.all(fromTs, toTs) as Array<{ body: string }>)
-      yield JSON.parse(r.body) as DetectionEvent;
+    // A 14-day window can hold over a million events, so stream it.
+    const rows = (this.sel.iterate?.(fromTs, toTs) ?? this.sel.all(fromTs, toTs)) as Iterable<{
+      body: string;
+    }>;
+    for (const r of rows) yield JSON.parse(r.body) as DetectionEvent;
   }
   prune(beforeTs: number): number {
     const res = this.del.run(beforeTs) as { changes?: number | bigint };
