@@ -45,9 +45,9 @@ const MODE_TEXT = {
 };
 
 /**
- * The AI that explains alerts: which apps and keys Vigil uses, and switches
- * for each. Probing runs the vendors' CLIs, so it happens on open and on
- * Refresh, not on every change in the app.
+ * The AI card: which apps and keys explain alerts, which label events, and a
+ * switch for each. Probing runs the vendors' CLIs, so it happens on open and
+ * on Refresh, not on every change in the app.
  */
 export function AiSection() {
   const [view, setView] = useState<AiView>();
@@ -78,15 +78,96 @@ export function AiSection() {
     await load();
   };
 
+  const row = (p: AiProviderView, view: AiView) => (
+    <li key={p.provider} className="ai-row">
+      <StatusMark state={MARK[p.state]} label={STATE_TEXT[p.state]} />
+      <div className="ai-main">
+        <div className="ai-name">
+          {p.name}
+          <Chip>{p.local ? 'On this Mac' : 'Cloud'}</Chip>
+        </div>
+        <div className="ai-used">{usedFor(p, view)}</div>
+        <div className="ai-sub">{describe(p, view)}</div>
+        {p.provider === 'claude' && view.prefs.claude && (
+          <Segmented
+            label="How Claude is paid for"
+            value={view.prefs.claudeUses}
+            options={[
+              { value: 'subscription', label: 'My Claude plan' },
+              { value: 'apiKey', label: 'Anthropic API key' },
+            ]}
+            onChange={(v) => void setPref({ claudeUses: v })}
+          />
+        )}
+        {p.provider === 'codex' && view.prefs.codex && (
+          <Segmented
+            label="How Codex is paid for"
+            value={view.prefs.codexUses}
+            options={[
+              { value: 'subscription', label: 'My ChatGPT plan' },
+              { value: 'apiKey', label: 'OpenAI API key' },
+            ]}
+            onChange={(v) => void setPref({ codexUses: v })}
+          />
+        )}
+      </div>
+      <div className="ai-actions">
+        {p.canShareSignIn && !p.signInShared && (
+          <Button
+            size="sm"
+            kind="primary"
+            icon={<LogIn size={14} />}
+            onClick={() =>
+              void act(() => vigil.shareCodexSignIn(), 'Vigil now uses your Codex sign-in')
+            }
+          >
+            Use my Codex sign-in
+          </Button>
+        )}
+        {p.canSignIn && (
+          <Button
+            size="sm"
+            icon={<LogIn size={14} />}
+            onClick={() =>
+              void act(() => vigil.signInAi(p.provider), 'Finish signing in in your browser')
+            }
+          >
+            Sign in
+          </Button>
+        )}
+        {p.signInShared && (
+          <Button
+            size="sm"
+            kind="ghost"
+            icon={<Unlink size={14} />}
+            onClick={() =>
+              void act(
+                () => vigil.stopSharingCodexSignIn(),
+                'Vigil stopped using your Codex sign-in',
+              )
+            }
+          >
+            Stop sharing
+          </Button>
+        )}
+        <Segmented
+          label={`Use ${p.name}`}
+          value={view.prefs[p.provider] ? 'on' : 'off'}
+          options={[
+            { value: 'on', label: 'On' },
+            { value: 'off', label: 'Off' },
+          ]}
+          onChange={(v) => void setPref({ [p.provider]: v === 'on' })}
+        />
+      </div>
+    </li>
+  );
+
   return (
     <>
       <SectionHead
         title="AI"
-        sub={
-          view?.mode
-            ? `Explains alerts in plain words, ${MODE_TEXT[view.mode]}. It never blocks or allows anything; you decide. Change where it runs in Setup.`
-            : 'Explains alerts in plain words. It never blocks or allows anything; you decide.'
-        }
+        sub={`Explains alerts and labels unusual events${view?.mode ? `, ${MODE_TEXT[view.mode]}` : ''}. None of it blocks or allows anything: rules do the blocking, and you decide. Change where it runs in Setup.`}
         right={
           <IconButton label="Check again" onClick={() => void load()} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'spin' : undefined} />
@@ -96,124 +177,77 @@ export function AiSection() {
       {!view ? (
         <p className="ai-sub ai-empty">Checking your AI apps…</p>
       ) : (
-        <ul className="ai-list">
-          {view.providers.map((p) => (
-            <li key={p.provider} className="ai-row">
-              <StatusMark state={MARK[p.state]} label={STATE_TEXT[p.state]} />
-              <div className="ai-main">
-                <div className="ai-name">
-                  {p.name}
-                  <Chip>{p.local ? 'On this Mac' : 'Cloud'}</Chip>
-                </div>
-                <div className="ai-sub">{describe(p, view)}</div>
-                {p.provider === 'claude' && view.prefs.claude && (
-                  <Segmented
-                    label="How Claude is paid for"
-                    value={view.prefs.claudeUses}
-                    options={[
-                      { value: 'subscription', label: 'My Claude plan' },
-                      { value: 'apiKey', label: 'Anthropic API key' },
-                    ]}
-                    onChange={(v) => void setPref({ claudeUses: v })}
-                  />
-                )}
-                {p.provider === 'codex' && view.prefs.codex && (
-                  <Segmented
-                    label="How Codex is paid for"
-                    value={view.prefs.codexUses}
-                    options={[
-                      { value: 'subscription', label: 'My ChatGPT plan' },
-                      { value: 'apiKey', label: 'OpenAI API key' },
-                    ]}
-                    onChange={(v) => void setPref({ codexUses: v })}
-                  />
-                )}
-              </div>
-              <div className="ai-actions">
-                {p.canShareSignIn && !p.signInShared && (
-                  <Button
-                    size="sm"
-                    kind="primary"
-                    icon={<LogIn size={14} />}
-                    onClick={() =>
-                      void act(() => vigil.shareCodexSignIn(), 'Vigil now uses your Codex sign-in')
-                    }
-                  >
-                    Use my Codex sign-in
-                  </Button>
-                )}
-                {p.canSignIn && (
-                  <Button
-                    size="sm"
-                    icon={<LogIn size={14} />}
-                    onClick={() =>
-                      void act(
-                        () => vigil.signInAi(p.provider),
-                        'Finish signing in in your browser',
-                      )
-                    }
-                  >
-                    Sign in
-                  </Button>
-                )}
-                {p.signInShared && (
-                  <Button
-                    size="sm"
-                    kind="ghost"
-                    icon={<Unlink size={14} />}
-                    onClick={() =>
-                      void act(
-                        () => vigil.stopSharingCodexSignIn(),
-                        'Vigil stopped using your Codex sign-in',
-                      )
-                    }
-                  >
-                    Stop sharing
-                  </Button>
-                )}
-                <Segmented
-                  label={`Use ${p.name}`}
-                  value={view.prefs[p.provider] ? 'on' : 'off'}
-                  options={[
-                    { value: 'on', label: 'On' },
-                    { value: 'off', label: 'Off' },
-                  ]}
-                  onChange={(v) => void setPref({ [p.provider]: v === 'on' })}
-                />
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-      {view && (
-        <div className="ai-option">
-          <div className="ai-main">
-            <div className="ai-name">Label events no rule matched</div>
-            <div className="ai-sub">
-              {view.mode === 'local'
-                ? 'A small model on this Mac marks unusual programs and connections in Activity.'
-                : view.jevVia
-                  ? 'Jev marks unusual programs and connections in Activity, with the model on this Mac as a fallback.'
-                  : 'A small model on this Mac marks unusual programs and connections in Activity.'}{' '}
-              Hints only: nothing is blocked or allowed because of a label.
+        <>
+          <h4 className="ai-group">Explains alerts</h4>
+          <p className="ai-sub ai-group-sub">
+            When an alert comes in, Vigil asks the first app here that’s ready, top to bottom, to
+            explain it in plain words.
+          </p>
+          <ul className="ai-list">
+            {view.providers.filter((p) => p.provider !== 'jev').map((p) => row(p, view))}
+          </ul>
+          <h4 className="ai-group">Labels events no rule matched</h4>
+          <p className="ai-sub ai-group-sub">
+            Programs and connections no rule explained get a hint in Activity, like “unusual”. Hints
+            only: nothing is blocked or allowed because of a label.
+          </p>
+          <div className="ai-option">
+            <div className="ai-main">
+              <div className="ai-name">Label events</div>
+              <div className="ai-sub">{labellingText(view)}</div>
             </div>
+            <Segmented
+              label="Label events no rule matched"
+              value={view.prefs.labelling ? 'on' : 'off'}
+              options={[
+                { value: 'on', label: 'On' },
+                { value: 'off', label: 'Off' },
+              ]}
+              onChange={(v) => void setPref({ labelling: v === 'on' })}
+            />
           </div>
-          <Segmented
-            label="Label events no rule matched"
-            value={view.prefs.labelling ? 'on' : 'off'}
-            options={[
-              { value: 'on', label: 'On' },
-              { value: 'off', label: 'Off' },
-            ]}
-            onChange={(v) => void setPref({ labelling: v === 'on' })}
-          />
-        </div>
-      )}
-      {view && (
-        <CapField cap={view.prefs.monthlyCapUsd} onSave={(c) => setPref({ monthlyCapUsd: c })} />
+          <ul className="ai-list ai-list-bordered">
+            {view.providers.filter((p) => p.provider === 'jev').map((p) => row(p, view))}
+          </ul>
+          <CapField cap={view.prefs.monthlyCapUsd} onSave={(c) => setPref({ monthlyCapUsd: c })} />
+        </>
       )}
     </>
   );
+}
+
+/**
+ * What Vigil uses this app or key for, given where AI runs. Mirrors the
+ * routing in @vigil/ai: explanations go down the list in order; labels go to
+ * Jev first, then the small local model (or, cloud only, the apps above).
+ */
+function usedFor(p: AiProviderView, view: AiView): string {
+  const labels = view.prefs.labelling;
+  if (p.provider === 'jev') return 'Used for: labelling events only. It never explains alerts.';
+  if (p.provider === 'ollama') {
+    if (view.mode === 'cloud') return 'Not used while Vigil runs AI in the cloud only.';
+    const explain =
+      view.mode === 'local' ? 'explaining alerts' : 'explaining alerts when nothing above is ready';
+    if (!labels) return `Used for: ${explain}.`;
+    return view.mode !== 'local' && view.jevVia
+      ? `Used for: ${explain}, and labelling events with a small model when Jev can’t.`
+      : `Used for: ${explain}, and labelling events with a small model.`;
+  }
+  if (view.mode === 'local') return 'Not used while Vigil runs AI on this Mac only.';
+  return view.mode === 'cloud' && labels
+    ? 'Used for: explaining alerts, and labelling events when Jev can’t.'
+    : 'Used for: explaining alerts.';
+}
+
+function labellingText(view: AiView): string {
+  if (view.mode === 'local') return 'A small model on this Mac labels them.';
+  if (view.mode === 'cloud')
+    return view.jevVia
+      ? 'Jev labels them. When it can’t, the apps above do, within their background share.'
+      : 'The apps above label them, within their background share. An OpenRouter or TypeSafe key adds Jev.';
+  return view.jevVia
+    ? 'Jev labels them. When it can’t, a small model on this Mac does.'
+    : 'A small model on this Mac labels them. An OpenRouter or TypeSafe key adds Jev.';
 }
 
 function describe(p: AiProviderView, view: AiView): string {
@@ -267,8 +301,8 @@ function CapField({
         Save
       </Button>
       <span className="ai-sub">
-        Covers the cloud API, Jev and Claude on an API key. Vigil stops using them for the month
-        once it’s reached.
+        Covers the cloud API, Jev, and Claude or Codex on an API key. Vigil stops using them for the
+        month once it’s reached.
       </span>
     </form>
   );
