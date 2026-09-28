@@ -59,6 +59,10 @@ If the user's own Codex is already signed in, that second sign-in isn't needed. 
 | Codex    | `shell_tool`, `unified_exec`, `code_mode_host`, web search, apps, plugins, hooks and more off; approvals declined | Vigil's own `CODEX_HOME`                                      | Read-only sandbox without network, ephemeral thread |
 | Ollama   | None. Vigil runs the tool loop                                                                                    | None                                                          | Talks only to `127.0.0.1`                           |
 
+Codex has two modes, like Claude (`settings.codex.mode`). `subscription` (the default) uses a ChatGPT sign-in: Vigil's own, or the user's shared one. `apiKey` uses an OpenAI API key that the app passes in as `getOpenAiApiKey`. The key goes to Codex only in its environment (`VIGIL_OPENAI_API_KEY`), through a provider of Vigil's own whose address is fixed to `https://api.openai.com/v1`. Codex never writes the key to disk, and a test checks that nothing in Vigil's Codex folder contains it. Codex doesn't report a price, so these runs show as unpriced, and the monthly cap can't count them.
+
+A sign-in from Vigil counts as done only once Codex reads the account back. Checking as soon as the browser page said "Signed in" could run before Codex had saved the sign-in, and then the status stayed at Needs sign-in.
+
 Codex runs always use `gpt-5.5` (`CODEX_MODEL`). Codex's newer models (GPT-6, GPT-5.6) run in code mode, where every tool sits behind a JavaScript runner next to agent and question tools, and in tests on a real Mac the model answered without calling Vigil's tool at all. A test checks that the request Codex builds names that model and offers nothing but Vigil's tools, both as tools and as input items.
 
 Vigil's tools run inside Vigil's process (the Claude SDK's in-process MCP server, Codex's dynamic tools), so there is no port for another program to reach. The user's login stays with the vendor's CLI; this package never reads a credential file or Keychain item.

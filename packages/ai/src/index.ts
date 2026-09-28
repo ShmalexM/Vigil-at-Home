@@ -88,6 +88,8 @@ export interface VigilAiOptions {
   readonly log: PromptLog;
   /** Where the binaries recorded at setup are kept (the app's database). */
   readonly pins: PinStore;
+  /** Reads the OpenAI API key from the Keychain. Only used when Codex is in apiKey mode. */
+  readonly getOpenAiApiKey?: () => Promise<string | undefined>;
   /** Reads the Anthropic API key from the Keychain. Only used in apiKey mode. */
   readonly getAnthropicApiKey?: () => Promise<string | undefined>;
   /** Reads the key for the OpenAI-style API (OpenRouter, OpenAI...) from the Keychain. */
@@ -126,6 +128,8 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
     createCodexAdapter({
       codexHome: settings.codex.codexHome,
       pins: options.pins,
+      ...(settings.codex.mode ? { mode: settings.codex.mode } : {}),
+      ...(options.getOpenAiApiKey ? { getApiKey: options.getOpenAiApiKey } : {}),
       ...(settings.codex.executablePath ? { executablePath: settings.codex.executablePath } : {}),
     }),
     api,
