@@ -90,6 +90,33 @@ importers:
         specifier: ^4.1.0
         version: 4.6.5
 
+  packages/detection:
+    dependencies:
+      '@vigil/core':
+        specifier: workspace:*
+        version: link:../core
+      zod:
+        specifier: ^4.1.0
+        version: 4.6.5
+
+  packages/helper:
+    dependencies:
+      '@vigil/core':
+        specifier: workspace:*
+        version: link:../core
+      '@vigil/sensors':
+        specifier: workspace:*
+        version: link:../sensors
+      zod:
+        specifier: ^4.1.0
+        version: 4.6.5
+
+  packages/sensors:
+    dependencies:
+      '@vigil/core':
+        specifier: workspace:*
+        version: link:../core
+
 packages:
 
   '@babel/code-frame@7.29.7':
