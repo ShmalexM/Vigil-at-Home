@@ -56,12 +56,17 @@ export function registerIpc(
     eventStats: () => core.eventStats(),
     getSettings: () => ({
       theme: core.theme(),
+      appearance: core.appearance(),
       dataDir: app.getPath('userData'),
       version: app.getVersion(),
     }),
     setTheme: (theme) => {
       core.setTheme(theme);
-      windows.applyTheme(theme);
+      windows.applyTheme(theme, core.appearance());
+    },
+    setAppearance: (appearance) => {
+      core.setAppearance(appearance);
+      windows.applyTheme(core.theme(), core.appearance());
     },
     sendTestAlert: () => sendTestAlert(core.alerts),
     openMain: (route) => windows.openMain(route),

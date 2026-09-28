@@ -3,6 +3,7 @@ import { app, BrowserWindow, nativeTheme, screen, shell, Tray, type Rectangle } 
 import trayIcon from '../../resources/trayTemplate.png?asset';
 import trayAlertIcon from '../../resources/trayAlertTemplate.png?asset';
 import type { Pushes, ThemePref } from '../shared/ipc.js';
+import { DEFAULT_APPEARANCE, windowBackground, type AppearanceSettings } from '../shared/themes.js';
 
 const POPOVER = { width: 380, height: 540 };
 const POPUP = { width: 420, height: 400 };
@@ -55,6 +56,7 @@ export class Windows {
   private popover?: BrowserWindow;
   private main?: BrowserWindow;
   private popup?: BrowserWindow;
+  private appearance: AppearanceSettings = DEFAULT_APPEARANCE;
   private readonly releaseTimers = new Map<BrowserWindow, ReturnType<typeof setTimeout>>();
 
   createTray(): void {
@@ -131,7 +133,7 @@ export class Windows {
         title: 'Vigil at Home',
         titleBarStyle: 'hiddenInset',
         trafficLightPosition: { x: 16, y: 18 },
-        backgroundColor: nativeTheme.shouldUseDarkColors ? '#141414' : '#F2F4F8',
+        backgroundColor: this.background(),
         webPreferences: webPreferences(),
       }),
     );
@@ -229,9 +231,15 @@ export class Windows {
     for (const win of BrowserWindow.getAllWindows()) this.send(win, channel, ...args);
   }
 
-  applyTheme(pref: ThemePref): void {
+  applyTheme(pref: ThemePref, appearance: AppearanceSettings = DEFAULT_APPEARANCE): void {
     nativeTheme.themeSource = pref;
+    this.appearance = appearance;
     this.broadcast('theme', pref);
+  }
+
+  /** The theme's window colour, so the main window doesn't flash before it paints. */
+  private background(): string {
+    return windowBackground(this.appearance, nativeTheme.shouldUseDarkColors ? 'dark' : 'light');
   }
 
   private send<K extends keyof Pushes>(win: BrowserWindow, channel: K, ...args: Pushes[K]): void {
