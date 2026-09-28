@@ -209,16 +209,43 @@ interface CodexNotificationParams {
   };
 }
 
+/**
+ * OpenAI's published standard price for CODEX_MODEL, in US dollars per million
+ * tokens (developers.openai.com/api/docs/models/gpt-5.5, 2026-09-28). Prompts
+ * over 272K input tokens cost 2x input and 1.5x output. Recheck with CODEX_MODEL.
+ */
+export const CODEX_API_PRICE_PER_MTOK = { input: 5, cachedInput: 0.5, output: 30 } as const;
+const LONG_PROMPT_TOKENS = 272_000;
+
+/** What an API-key run cost, from the token counts Codex reports. */
+export function codexApiCostUsd(u: {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+}): number {
+  const long = u.inputTokens + u.cachedInputTokens > LONG_PROMPT_TOKENS;
+  const p = CODEX_API_PRICE_PER_MTOK;
+  return (
+    ((u.inputTokens * p.input + u.cachedInputTokens * p.cachedInput) * (long ? 2 : 1) +
+      u.outputTokens * p.output * (long ? 1.5 : 1)) /
+    1_000_000
+  );
+}
+
 /** Codex reports cached input inside inputTokens; Vigil keeps the two apart. */
 function runUsageFromCodex(
   total: NonNullable<CodexNotificationParams['tokenUsage']>['total'],
+  apiKey: boolean,
 ): RunUsage {
-  return {
+  const tokens = {
     inputTokens: Math.max(0, total.inputTokens - total.cachedInputTokens),
     cachedInputTokens: total.cachedInputTokens,
     outputTokens: total.outputTokens,
-    // A ChatGPT plan has no per-token price.
-    costUsd: null,
+  };
+  return {
+    ...tokens,
+    // A ChatGPT plan has no per-token price; an API key pays OpenAI's list price.
+    costUsd: apiKey ? codexApiCostUsd(tokens) : null,
     model: CODEX_MODEL,
   };
 }
@@ -518,7 +545,7 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
                 lastMessage = item.text;
               else if (FORBIDDEN_ITEMS.has(item.type)) audit.denied.push(`item: ${item.type}`);
             } else if (method === 'thread/tokenUsage/updated' && p.tokenUsage) {
-              usage = runUsageFromCodex(p.tokenUsage.total);
+              usage = runUsageFromCodex(p.tokenUsage.total, apiKeyMode);
             } else if (method === 'account/rateLimits/updated') {
               usageFromSnapshot(p.rateLimits ?? {}).forEach(input.onUsage);
             } else if (method === 'error') {

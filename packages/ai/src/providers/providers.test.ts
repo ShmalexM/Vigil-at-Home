@@ -21,6 +21,7 @@ import {
   CODEX_DISABLED_FEATURES,
   CODEX_API_KEY_ENV,
   CODEX_MODEL,
+  codexApiCostUsd,
   codexAppServerArgs,
   createCodexAdapter,
   codexThreadStartParams,
@@ -342,6 +343,16 @@ describe('Codex with an OpenAI API key', () => {
     expect(args).toContain('base_url = "https://api.openai.com/v1"');
     expect(args).toContain(`env_key = "${CODEX_API_KEY_ENV}"`);
     expect(codexAppServerArgs().join(' ')).not.toContain('vigil_openai');
+  });
+
+  it("prices a run at OpenAI's list price for the model", () => {
+    expect(
+      codexApiCostUsd({ inputTokens: 100_000, cachedInputTokens: 100_000, outputTokens: 10_000 }),
+    ).toBeCloseTo(0.1 * 5 + 0.1 * 0.5 + 0.01 * 30);
+    // Over 272K input tokens: 2x input, 1.5x output.
+    expect(
+      codexApiCostUsd({ inputTokens: 300_000, cachedInputTokens: 0, outputTokens: 100_000 }),
+    ).toBeCloseTo(0.3 * 5 * 2 + 0.1 * 30 * 1.5);
   });
 
   it('refuses a stand-in address that is neither https nor on this Mac', () => {
