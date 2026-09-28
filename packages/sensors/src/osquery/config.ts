@@ -10,6 +10,8 @@
 
 export const OSQUERY_RESULTS_LOG = '/var/log/osquery/osqueryd.results.log';
 export const OSQUERY_CONFIG_PATH = '/var/osquery/osquery.conf';
+/** Where osquery's macOS package installs the daemon. */
+export const OSQUERYD_PATH = '/opt/osquery/lib/osquery.app/Contents/MacOS/osqueryd';
 /** osquery's launchd job reads startup flags from here. */
 export const OSQUERY_FLAGS_PATH = '/var/osquery/osquery.flags';
 
