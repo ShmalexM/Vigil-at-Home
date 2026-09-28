@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import type { EventOfKind, SensorEvent } from '@vigil/core';
 import { defined, pidOf } from '../types.js';
 import { QUERY_NAMES } from './config.js';
+import { osquerySigning } from '../signing.js';
 
 interface OsqueryResultLine {
   name?: string;
@@ -92,7 +93,14 @@ export function osqueryLineToEvents(line: string, opts: OsqueryParseOptions = {}
           protocol: protocolName(c.protocol),
           localPort,
           ...defined({ localAddress: c.address || undefined }),
-          process: defined({ pid: pidOf(c.pid) ?? 0, path: c.path ?? '', uid: pidOf(c.uid) }),
+          process: defined({
+            pid: pidOf(c.pid) ?? 0,
+            path: c.path ?? '',
+            uid: pidOf(c.uid),
+            signing: osquerySigning(c),
+            teamId: c.team_identifier || undefined,
+            signingId: c.identifier || undefined,
+          }),
         },
       ];
     }

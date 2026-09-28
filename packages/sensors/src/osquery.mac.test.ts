@@ -92,6 +92,10 @@ describe.skipIf(!enabled)('osquery on a real Mac', () => {
       localPort: listenPort,
       process: { pid: process.pid, path: realpathSync(process.execPath) },
     });
+    // Node from nodejs.org and setup-node is Developer ID signed; Homebrew's is ad hoc.
+    expect(['developer_id', 'adhoc']).toContain(
+      ev?.kind === 'network.listen' ? ev.process?.signing : undefined,
+    );
   });
 
   it('sees this process connected to 1.1.1.1', () => {
