@@ -89,15 +89,22 @@ export function HomeView({ go }: { go: (r: string) => void }) {
                   <span className="t-h3">{s.name}</span>
                   <span className="t-small">{s.detail}</span>
                 </div>
-                <span className="t-small">
-                  {
+                <span className="col" style={{ gap: 0, alignItems: 'flex-end' }}>
+                  <span className="t-small">
                     {
-                      ok: 'Running',
-                      degraded: 'Degraded',
-                      down: 'Stopped',
-                      not_installed: 'Not installed',
-                    }[s.state]
-                  }
+                      {
+                        ok: 'Running',
+                        degraded: 'Needs attention',
+                        down: 'Stopped',
+                        not_installed: 'Not installed',
+                      }[s.state]
+                    }
+                  </span>
+                  {s.note && (
+                    <span className="t-small" style={{ color: 'var(--tx3)', textAlign: 'right' }}>
+                      {s.note}
+                    </span>
+                  )}
                 </span>
               </div>
             ))}

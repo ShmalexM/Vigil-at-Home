@@ -156,6 +156,16 @@ export class Store {
     };
   }
 
+  /** When this sensor last reported anything, or null if never. */
+  lastEventAt(source: string): number | null {
+    const row = this.db
+      .prepare('SELECT MAX(ts) AS ts FROM events WHERE source = ?')
+      .get(source) as {
+      ts: number | null;
+    };
+    return row.ts;
+  }
+
   /** Oldest first, for replaying rules over history. */
   *eventsBetween(from: number, to: number): Iterable<SensorEvent> {
     const rows = this.db

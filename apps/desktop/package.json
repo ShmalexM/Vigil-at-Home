@@ -27,6 +27,8 @@
     "@types/react-dom": "^19.2.0",
     "@vigil/core": "workspace:*",
     "@vigil/detection": "workspace:*",
+    "@vigil/helper": "workspace:*",
+    "@vigil/sensors": "workspace:*",
     "@vitejs/plugin-react": "^5.2.0",
     "electron": "^44.0.0",
     "electron-builder": "^26.15.0",

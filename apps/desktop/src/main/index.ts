@@ -5,8 +5,9 @@ import { app, powerMonitor } from 'electron';
 import { Store } from './db/store.js';
 import { seedDemo, startDemoFeed } from './demo.js';
 import { Detector } from './detection.js';
-import { DryRunExecutor } from './executor.js';
+import { HelperLink } from './helper.js';
 import { registerIpc } from './ipc.js';
+import { HEALTH_CHECK_MS, macProbe, reportHealth, type HelperSensors } from './sensor-health.js';
 import { VigilCore } from './service.js';
 import { Windows } from './windows.js';
 
@@ -27,8 +28,10 @@ function start(): void {
   const db = new DatabaseSync(join(dataDir, 'vigil.db'));
   const store = new Store(db);
 
-  // Until the privileged helper is installed, blocks are simulated and the UI says so.
-  const core = new VigilCore(store, new DryRunExecutor(), true);
+  // Actions go to the privileged helper. Until it is installed and answering,
+  // they are simulated and the UI says so.
+  const helper = new HelperLink();
+  const core = new VigilCore(store, helper, true);
   core.detector = new Detector(db, store, core.alerts, (e, o) => core.ingest(e, o), {
     installedAt: core.installedAt(),
     // The .app bundle when packaged; the Electron binary in development.
@@ -55,11 +58,34 @@ function start(): void {
   powerMonitor.on('resume', () => core.scheduler.resume());
   core.start();
 
+  // Sensor events arrive through the helper, which reads Santa's and osquery's logs as root.
+  helper.on('event', (e) => void core.handleEvent(e));
+  const probe = macProbe(
+    (source) => store.lastEventAt(source),
+    () => helper.state,
+    async () => (await helper.query<{ sensors?: HelperSensors }>('helper.status'))?.sensors ?? null,
+  );
+  const checkHealth = () => reportHealth(core.sensors, probe);
+  helper.on('state', () => void checkHealth());
+  if (process.platform === 'darwin') {
+    helper.start();
+    core.scheduler.every(
+      'sensor-health',
+      HEALTH_CHECK_MS,
+      async () => {
+        await helper.ping();
+        await checkHealth();
+      },
+      true,
+    );
+  }
+
   app.on('second-instance', () => windows.openMain());
   app.on('activate', () => windows.openMain());
   // Keep running in the menu bar when windows close.
   app.on('window-all-closed', () => {});
   app.on('before-quit', () => {
+    helper.stop();
     core.stop();
     store.close();
   });
