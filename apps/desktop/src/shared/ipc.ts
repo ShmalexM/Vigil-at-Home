@@ -3,6 +3,7 @@ import {
   RuleMode,
   UserDecision,
   type ActionProposal,
+  type EventKind,
   type ActionRecord,
   type Alert,
   type Rule,
@@ -30,6 +31,40 @@ export const Route = z.string().regex(/^[a-z]+(\/[A-Za-z0-9_-]+)?$/);
 export const ThemePref = z.enum(['system', 'dark', 'light']);
 export type ThemePref = z.infer<typeof ThemePref>;
 
+/**
+ * What detection made of one event: how many rules looked at it and which
+ * matched. Missing when nothing has analysed the event (no rules loaded yet).
+ */
+export const EventOutcome = z.object({
+  checked: z.number().int().nonnegative(),
+  matches: z.array(z.object({ ruleId: z.string(), ruleName: z.string(), mode: RuleMode })),
+});
+export type EventOutcome = z.infer<typeof EventOutcome>;
+
+/** Which events broad kind the feed filters by. */
+export const EventGroup = z.enum(['programs', 'network', 'files', 'startup', 'system']);
+export type EventGroup = z.infer<typeof EventGroup>;
+
+export const EVENT_GROUPS: Record<EventGroup, EventKind[]> = {
+  programs: ['process.exec', 'process.exit', 'santa.decision'],
+  network: ['network.connection', 'network.listen'],
+  files: ['file'],
+  startup: ['persistence', 'browser.extension'],
+  system: ['system.alert'],
+};
+
+export const EventQuery = z.object({
+  group: EventGroup.optional(),
+  /** Only events that matched a rule. */
+  matchedOnly: z.boolean().optional(),
+  /** Case-insensitive text anywhere in the event. */
+  text: z.string().max(200).optional(),
+  /** Page backwards from this timestamp. */
+  before: z.number().int().optional(),
+  limit: z.number().int().min(1).max(500).optional(),
+});
+export type EventQuery = z.infer<typeof EventQuery>;
+
 export const calls = {
   getStatus: z.tuple([]),
   listAlerts: z.tuple([z.enum(['open', 'resolved']).optional()]),
@@ -42,6 +77,8 @@ export const calls = {
   listRules: z.tuple([]),
   setRuleMode: z.tuple([z.string(), RuleMode]),
   listActions: z.tuple([]),
+  listEvents: z.tuple([EventQuery]),
+  eventStats: z.tuple([]),
   getSettings: z.tuple([]),
   setTheme: z.tuple([ThemePref]),
   sendTestAlert: z.tuple([]),
@@ -93,6 +130,26 @@ export interface RuleView {
   matches: number;
 }
 
+export interface EventView {
+  event: SensorEvent;
+  outcome: EventOutcome | null;
+}
+
+export interface EventStats {
+  /** Events in the last hour. */
+  lastHour: number;
+  /** Of those, how many matched a rule in any mode. */
+  matchedLastHour: number;
+  /** Distinct programs started in the last hour. */
+  programsLastHour: number;
+  /** Last hour's events by group. */
+  byGroup: Record<EventGroup, number>;
+  /** Timestamp of the newest event, if any. */
+  newest: number | null;
+  /** How many days of events Vigil keeps. */
+  retentionDays: number;
+}
+
 export interface SettingsView {
   theme: ThemePref;
   dataDir: string;
@@ -112,6 +169,8 @@ export interface CallResults {
   listRules: RuleView[];
   setRuleMode: Rule;
   listActions: ActionRecord[];
+  listEvents: EventView[];
+  eventStats: EventStats;
   getSettings: SettingsView;
   setTheme: void;
   sendTestAlert: Alert;
@@ -139,6 +198,8 @@ export interface Pushes {
   /** Navigate the main window. */
   navigate: [string];
   theme: [ThemePref];
+  /** New events were stored. Sent at most once a second, with how many arrived. */
+  events: [number];
 }
 
 export type VigilApi = {

@@ -69,4 +69,8 @@ export const migrations: string[] = [
     value TEXT NOT NULL
   );
   `,
+  // What detection made of each event, for the "What Vigil sees" feed.
+  `
+  ALTER TABLE events ADD COLUMN outcome TEXT;
+  `,
 ];

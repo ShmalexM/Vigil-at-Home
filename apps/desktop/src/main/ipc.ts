@@ -27,6 +27,8 @@ export function registerIpc(core: VigilCore, windows: Windows, setup: Onboarding
     listRules: () => core.rules(),
     setRuleMode: (id: string, mode) => core.setRuleMode(id, mode),
     listActions: () => core.store.listActions({ limit: 300 }),
+    listEvents: (q) => core.store.listEventViews(stripUndefined(q)),
+    eventStats: () => core.eventStats(),
     getSettings: () => ({
       theme: core.theme(),
       dataDir: app.getPath('userData'),

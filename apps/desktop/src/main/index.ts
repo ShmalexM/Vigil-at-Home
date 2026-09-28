@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { app, powerMonitor, safeStorage } from 'electron';
 import { Store } from './db/store.js';
-import { seedDemo } from './demo.js';
+import { seedDemo, startDemoFeed } from './demo.js';
 import { DryRunExecutor } from './executor.js';
 import { registerIpc } from './ipc.js';
 import { systemProbe } from './onboarding/checks.js';
@@ -55,6 +55,7 @@ function start(): void {
   core.sensors.on('changed', refresh);
   setup.on('changed', () => windows.broadcast('changed'));
   core.alerts.on('popup', (alert) => windows.showPopup(alert.id));
+  core.feed.on('events', (n) => windows.broadcast('events', n));
   refresh();
 
   // Routine work waits while the Mac sleeps or saves battery; blocking never does.
@@ -71,7 +72,12 @@ function start(): void {
     store.close();
   });
 
-  if (demo) void seedDemo(core);
+  if (demo) {
+    void seedDemo(core).then(() => {
+      const stop = startDemoFeed(core);
+      app.on('before-quit', stop);
+    });
+  }
   // First run opens setup; after that Vigil starts quietly in the menu bar.
   if (!setup.finished()) windows.openMain('setup');
   else if (!app.isPackaged) windows.openMain();

@@ -84,7 +84,9 @@ function AlertRow({
   return (
     <button type="button" className="list-row" aria-current={current} onClick={onClick}>
       <div className="col grow" style={{ gap: 3 }}>
-        <span className="t-h3 ellipsis">{alert.title}</span>
+        <span className="t-h3 clamp-2" title={alert.title}>
+          {alert.title}
+        </span>
         <span className="row t-small">
           <SeverityMark severity={alert.severity} />
           <span>· {timeAgo(alert.createdAt)}</span>
