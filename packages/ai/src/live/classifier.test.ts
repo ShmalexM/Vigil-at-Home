@@ -61,5 +61,5 @@ describe.skipIf(!live)('local event labelling', () => {
         `labels ${JSON.stringify(result.ok ? result.labels.filter((l) => l.label !== 'benign') : result)}`,
     );
     expect(result.ok, JSON.stringify(result)).toBe(true);
-  });
+  }, 300_000);
 });
