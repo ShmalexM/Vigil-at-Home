@@ -124,6 +124,8 @@ export interface PipelineOptions {
   repository?: { save(rule: DetectionRule, ts: number): void };
 }
 
+/** More alerts a day than this from a new AI rule means it matches ordinary use. */
+const MAX_NEW_RULE_ALERTS_PER_DAY = 3;
 const DAY = 86_400_000;
 
 /**
@@ -387,6 +389,21 @@ export class RulePipeline {
       const after = this.replay(p.rule);
       proposal.replay = after.report;
       if (!p.base) proposal.impact = this.prove(undefined, p.rule);
+      // A new AI rule that would pester the user goes back for narrowing rather than to them.
+      if (p.kind === 'new_rule' && after.report.popupsPerDay > MAX_NEW_RULE_ALERTS_PER_DAY) {
+        const seen = after.report.samples
+          .slice(0, 3)
+          .map((x) => x.subject)
+          .join('; ');
+        lint.errors.push(
+          `On this Mac's last ${this.opts.replayDays} days it would alert about ${after.report.popupsPerDay.toFixed(1)} times a day, mostly on ${after.report.topPrograms
+            .slice(0, 3)
+            .map((t) => t.program)
+            .join(
+              ', ',
+            )} (e.g. ${seen}). That is ordinary use here; narrow it to what only the attack does.`,
+        );
+      }
       if (p.base) {
         const before = this.replay(p.base);
         const removed = [...before.hitEventIds].filter((id) => !after.hitEventIds.has(id));
