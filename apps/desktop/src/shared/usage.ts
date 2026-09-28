@@ -35,8 +35,18 @@ export const PURPOSE_LABEL: Record<UsagePurpose, string> = {
   classify: 'Labelling events',
 };
 
-/** Providers that charge the user's own API key per call, so their cost is a bill, not an estimate. */
-export const BILLED_PROVIDERS: readonly UsageProvider[] = ['jev', 'api'];
+/**
+ * Providers that can charge the user's own API key per call, so their cost is
+ * a bill, not an estimate. Codex bills only on an OpenAI API key: those runs
+ * carry a cost, while ChatGPT plan runs stay unpriced.
+ */
+export const BILLED_PROVIDERS: readonly UsageProvider[] = ['codex', 'jev', 'api'];
+
+/** Whether this run was charged to one of the user's keys. */
+export function isKeyBilled(run: { provider: UsageProvider; costUsd: number | null }): boolean {
+  if (run.provider === 'codex') return run.costUsd !== null;
+  return run.provider === 'jev' || run.provider === 'api';
+}
 
 /** One AI run as the prompt log recorded it. */
 export interface UsageRun {

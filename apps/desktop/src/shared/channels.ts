@@ -49,6 +49,11 @@ export const CALL_NAMES = [
   'signInAi',
   'shareCodexSignIn',
   'stopSharingCodexSignIn',
+  'getUpdates',
+  'checkUpdates',
+  'setUpdateAuto',
+  'dismissUpdate',
+  'downloadUpdate',
 ] as const;
 
 export const PUSH_NAMES = ['changed', 'popup', 'navigate', 'theme', 'events'] as const;

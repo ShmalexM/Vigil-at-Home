@@ -85,6 +85,35 @@ describe('UsageService', () => {
     expect(u.report(7).totals.runs).toBe(2);
   });
 
+  it('counts Codex on an OpenAI key as billed and keeps ChatGPT plan runs unpriced', async () => {
+    const u = service();
+    const codex = (costUsd: number | null) =>
+      entry({
+        provider: 'codex',
+        model: 'gpt-5.5',
+        usage: { inputTokens: 1000, cachedInputTokens: 0, outputTokens: 100, costUsd },
+      });
+    u.record(codex(0.05));
+    u.record(codex(null));
+    const r = u.report(7);
+    const row = r.providers.find((p) => p.provider === 'codex');
+    expect(row).toMatchObject({ runs: 2, unpricedRuns: 1, billedUsd: 0.05 });
+    expect(r.totals.billedUsd).toBeCloseTo(0.05);
+    const view = await u.limits();
+    expect(view.keys).toEqual([{ provider: 'codex', runs: 1, spentUsd: 0.05 }]);
+  });
+
+  it('shows no Codex key row for a ChatGPT plan alone', async () => {
+    const u = service();
+    u.record(
+      entry({
+        provider: 'codex',
+        usage: { inputTokens: 10, cachedInputTokens: 0, outputTokens: 5, costUsd: null },
+      }),
+    );
+    expect((await u.limits()).keys).toEqual([]);
+  });
+
   it('reports each plan window with its length, and this month on each key', async () => {
     const u = service();
     u.record(entry({ provider: 'jev', purpose: 'classify' }));

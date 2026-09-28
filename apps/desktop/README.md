@@ -87,3 +87,14 @@ by hand). Until Apple signing secrets are added they are ad hoc signed, so macOS
 asks the user to approve the app once under System Settings › Privacy &
 Security › Open Anyway. The workflow signs and notarizes automatically once the
 secrets exist; nothing else changes.
+
+### Updates
+
+The installed app checks this repo's published GitHub releases a minute after
+it starts and every six hours (Settings › About › Updates can turn that off).
+When a newer version is out it shows a banner and a macOS notification, and
+Download opens the DMG for the Mac's chip. Only published releases count:
+drafts from the Release workflow stay invisible until a maintainer publishes
+them. Pre-releases are offered only to people already on a pre-release. Because
+builds are unsigned, Vigil can't replace itself; once signing is set up, this
+can move to installing updates automatically.
