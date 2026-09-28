@@ -75,10 +75,18 @@ describe('FileTailer', () => {
   });
 
   describe('while running', () => {
-    const until = async (check: () => boolean, ms = 2000) => {
+    const until = async (check: () => boolean, ms = 10_000) => {
       const end = Date.now() + ms;
       while (!check() && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
       return check();
+    };
+    /** Append warm-up lines until one arrives through the watch. */
+    const watchReady = async (path: string, lines: string[]) => {
+      for (let i = 0; i < 50 && !lines.some((l) => l.startsWith('warmup')); i++) {
+        appendFileSync(path, `warmup ${i}\n`);
+        await until(() => lines.some((l) => l.startsWith('warmup')), 200);
+      }
+      return lines.some((l) => l.startsWith('warmup'));
     };
 
     it('picks up appends and rotation through the file watch, without waiting for the poll', async () => {
@@ -88,6 +96,9 @@ describe('FileTailer', () => {
       const t = new FileTailer({ path, intervalMs: 60_000, onLine: (l) => lines.push(l) });
       await t.start();
       try {
+        // FSEvents starts its stream asynchronously and drops changes made
+        // before it is running, so wait until the watch delivers something.
+        expect(await watchReady(path, lines)).toBe(true);
         appendFileSync(path, 'one\n');
         expect(await until(() => lines.includes('one'))).toBe(true);
         renameSync(path, path + '.0');
@@ -98,7 +109,7 @@ describe('FileTailer', () => {
       } finally {
         await t.stop();
       }
-    });
+    }, 60_000);
 
     it('finds a file that appears later through the fallback poll', async () => {
       const { path, lines } = setup();

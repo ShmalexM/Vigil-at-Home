@@ -2,15 +2,18 @@
 //   build/helper/common/        helper.mjs (the helper, bundled), the launchd job,
 //                               the install/uninstall scripts and the vigil-helper launcher
 //   build/helper/darwin-<arch>/ node, Node.js's own signed and notarized macOS binary
-// electron-builder copies both into Contents/Resources/helper.
+//   build/helper/dev-<arch>/    both together, which a development build installs from
+// electron-builder copies common and darwin-<arch> into Contents/Resources/helper.
 //
-// Usage: node scripts/build-helper.mjs [--arch arm64,x64] [--skip-node]
+// Usage: node scripts/build-helper.mjs [--arch arm64,x64] [--skip-node] [--dev]
+//   --dev builds for this Mac only, and only bundles the helper elsewhere.
 
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -29,9 +32,10 @@ const repo = join(app, '..', '..');
 const out = join(app, 'build', 'helper');
 
 const args = process.argv.slice(2);
+const dev = args.includes('--dev');
 const archArg = args.includes('--arch') ? args[args.indexOf('--arch') + 1] : 'arm64,x64';
-const arches = archArg.split(',').filter(Boolean);
-const skipNode = args.includes('--skip-node');
+const arches = dev ? [process.arch] : archArg.split(',').filter(Boolean);
+const skipNode = args.includes('--skip-node') || (dev && process.platform !== 'darwin');
 
 async function bundle() {
   const common = join(out, 'common');
@@ -101,5 +105,20 @@ async function node(arch) {
   console.log(`${name} verified and unpacked to ${dir}`);
 }
 
+/** The bundle and node side by side, as the app ships them, for development builds. */
+function devDir(arch) {
+  const dir = join(out, `dev-${arch}`);
+  rmSync(dir, { recursive: true, force: true });
+  cpSync(join(out, 'common'), dir, { recursive: true });
+  copyFileSync(join(out, `darwin-${arch}`, 'node'), join(dir, 'node'));
+  chmodSync(join(dir, 'node'), 0o755);
+  console.log(`development helper ready in ${dir}`);
+}
+
 await bundle();
-if (!skipNode) for (const arch of arches) await node(arch);
+if (!skipNode) {
+  for (const arch of arches) {
+    await node(arch);
+    devDir(arch);
+  }
+}

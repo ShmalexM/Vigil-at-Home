@@ -59,6 +59,12 @@ to `OnboardingService` and those two steps turn on.
   `core.alerts.recordAssessment(id, assessment)` and
   `core.alerts.propose('ai', action, alertId, rationale)`. Queue AI work with
   `core.scheduler.enqueue(name, fn, 'urgent')`.
+- **Usage page** (`main/usage.ts`): hand every prompt log entry to
+  `core.usage.record(entry)` as well (a `PromptLogEntry` fits; add `model` when
+  known), and set `core.usage.setLimitsSource(async () => { const s = await
+ai.spending([]); return { plans: s.plans, backgroundSharePercent:
+s.limits.backgroundSharePercent, caps } })`, where `caps` holds any monthly
+  caps on the Jev and cloud API keys. `VIGIL_DEMO=1` seeds 90 days of runs.
 
 ## Package it
 

@@ -3,14 +3,21 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { HelperInstallResult } from '../shared/ipc.js';
 
+const hasHelper = (dir: string) =>
+  existsSync(join(dir, 'install.sh')) && existsSync(join(dir, 'node'));
+
 /**
- * The helper files shipped in the app (Contents/Resources/helper), or null in
- * a development build, which doesn't carry them.
+ * The helper files shipped in the app (Contents/Resources/helper). A
+ * development build doesn't carry them, so it uses `devDir` instead, which
+ * `pnpm build:helper` fills (`pnpm dev` runs it first). Null when neither has them.
  */
-export function helperBundleDir(resourcesPath = process.resourcesPath): string | null {
-  if (!resourcesPath) return null;
-  const dir = join(resourcesPath, 'helper');
-  return existsSync(join(dir, 'install.sh')) && existsSync(join(dir, 'node')) ? dir : null;
+export function helperBundleDir(
+  resourcesPath: string | undefined = process.resourcesPath,
+  devDir?: string,
+): string | null {
+  if (resourcesPath && hasHelper(join(resourcesPath, 'helper')))
+    return join(resourcesPath, 'helper');
+  return devDir && hasHelper(devDir) ? devDir : null;
 }
 
 /** Shell-quote one argument for a command the user pastes into Terminal. */

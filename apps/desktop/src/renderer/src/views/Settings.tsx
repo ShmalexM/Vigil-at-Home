@@ -1,36 +1,30 @@
+import { useEffect } from 'react';
 import { BellRing, Wrench } from 'lucide-react';
-import type { ThemePref } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
 import { useToast } from '../components/Toasts';
-import { Button, Card, SectionHead, Segmented } from '../components/ui';
+import { Button, Card, SectionHead } from '../components/ui';
+import { AppearanceSection } from './Appearance';
 import { PageHead } from './AppShell';
 
 export function SettingsView() {
   const [settings, reload] = useLive(() => vigil.getSettings());
   const toast = useToast();
+  // The theme can change from another window too.
+  useEffect(() => vigil.on('theme', reload), [reload]);
   if (!settings) return null;
 
   return (
     <div className="page">
       <PageHead title="Settings" purpose="How Vigil looks and behaves on this Mac." />
       <Card>
-        <SectionHead title="Appearance" />
-        <div className="row spread">
-          <span>Theme</span>
-          <Segmented<ThemePref>
-            label="Theme"
-            value={settings.theme}
-            onChange={async (t) => {
-              await vigil.setTheme(t);
-              reload();
-            }}
-            options={[
-              { value: 'system', label: 'System' },
-              { value: 'dark', label: 'Dark' },
-              { value: 'light', label: 'Light' },
-            ]}
-          />
-        </div>
+        <AppearanceSection
+          theme={settings.theme}
+          saved={settings.appearance}
+          onTheme={async (t) => {
+            await vigil.setTheme(t);
+            reload();
+          }}
+        />
       </Card>
       <Card>
         <SectionHead

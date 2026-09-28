@@ -26,7 +26,9 @@ is its sync server on the same Mac:
   `::1` (`SNTConfigurator.mm`, `syncBaseURL`). Vigil still uses HTTPS: anything running
   as the user could grab the port first and serve "allow" rules. A private CA
   (`tls.ts`) is pinned through Santa's `ServerAuthRootsFile`, and its key is readable
-  only by root. If something else holds the port, syncs fail and Santa keeps its
+  only by root. The folder and `ca.pem` stay world-readable, because `santasyncservice`
+  runs as `nobody` and fails every sync with a TLS error if it can't read the CA
+  (found on a real Mac with Santa 2026.8). If something else holds the port, syncs fail and Santa keeps its
   current rules.
 - **Monitor mode.** The profile sets `ClientMode` 1: Santa enforces only explicit block
   rules, so a personal Mac keeps working. Lockdown would block every program not

@@ -34,8 +34,18 @@ describe('checkHealth', () => {
   });
 
   it('says a sensor is down when installed but not running', async () => {
-    const h = await byId(probe({ installed: ['/opt/osquery/lib/osquery.app'] }));
+    const h = await byId(
+      probe({ installed: ['/opt/osquery/lib/osquery.app'], helper: () => 'connected' as const }),
+    );
     expect(h['osquery']?.state).toBe('down');
+  });
+
+  it('expects osquery to wait for the helper, which starts it', async () => {
+    const h = await byId(probe({ installed: ['/opt/osquery/lib/osquery.app'] }));
+    expect(h['osquery']).toMatchObject({
+      state: 'degraded',
+      note: 'Starts once the Vigil helper is installed',
+    });
   });
 
   it('is healthy when events arrive, and flags a sensor gone quiet', async () => {

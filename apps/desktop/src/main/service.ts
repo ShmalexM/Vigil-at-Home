@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { z } from 'zod';
 import { canChangeMode, type Rule, type RuleMode, type SensorEvent } from '@vigil/core';
 import {
+  Appearance,
   ThemePref,
   type AlertDetail,
   type EventOutcome,
@@ -9,6 +10,7 @@ import {
   type RuleView,
   type StatusView,
 } from '../shared/ipc.js';
+import { DEFAULT_APPEARANCE, type AppearanceSettings } from '../shared/themes.js';
 import { AlertService, type DecisionInput } from './alerts.js';
 import { EventLog } from './events.js';
 import { BATTERY_SLOWDOWN, type PowerMode } from './power.js';
@@ -20,6 +22,7 @@ import { Scheduler } from './scheduler.js';
 import { SensorRegistry } from './sensors.js';
 import { computeStatus } from './status.js';
 import { TEST_RULE } from './test-alert.js';
+import { UsageService } from './usage.js';
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -49,6 +52,8 @@ export class VigilCore {
   helperInstallable = false;
   /** Emits `events` (count) at most once per FEED_BATCH_MS while events arrive. */
   readonly feed = new EventEmitter<{ events: [number] }>();
+  /** Vigil's AI runs and plan limits, for the Usage page. */
+  readonly usage: UsageService;
   /** The rule engine, once attached. Without it events are stored unanalysed. */
   detector: Detector | undefined;
   private editing: RuleEditing | undefined;
@@ -63,6 +68,7 @@ export class VigilCore {
     private readonly maxDbBytes: number = DEFAULT_MAX_DB_BYTES,
   ) {
     this.alerts = new AlertService(store, executor, now);
+    this.usage = new UsageService(store, now);
     this.events = new EventLog(store, {
       onError: (err) => console.error('[events] write failed:', err),
     });
@@ -93,6 +99,7 @@ export class VigilCore {
       DAY,
       () => {
         this.store.pruneEvents(this.now() - EVENT_RETENTION_DAYS * DAY);
+        this.usage.prune();
       },
       true,
     );
@@ -237,5 +244,13 @@ export class VigilCore {
 
   setTheme(theme: ThemePref): void {
     this.store.setSetting('theme', ThemePref.parse(theme));
+  }
+
+  appearance(): AppearanceSettings {
+    return this.store.getSetting('appearance', Appearance, DEFAULT_APPEARANCE);
+  }
+
+  setAppearance(appearance: AppearanceSettings): void {
+    this.store.setSetting('appearance', Appearance.parse(appearance));
   }
 }
