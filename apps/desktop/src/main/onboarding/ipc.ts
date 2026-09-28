@@ -15,6 +15,7 @@ type SetupCall =
   | 'checkSetup'
   | 'setSetupMode'
   | 'skipSetupStep'
+  | 'runSetupAction'
   | 'finishSetup'
   | 'restartSetup'
   | 'saveApiKey'
@@ -36,6 +37,7 @@ export function onboardingHandlers(
       setup.skip(id, skipped);
       return setup.view();
     },
+    runSetupAction: (action) => setup.runAction(action),
     finishSetup: () => {
       setup.finish();
       onFinish();

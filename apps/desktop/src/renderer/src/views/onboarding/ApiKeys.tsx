@@ -5,7 +5,7 @@ import { vigil } from '../../api';
 import { Button, Card, Chip, SectionHead } from '../../components/ui';
 
 /** Electron wraps errors from main as "Error invoking remote method '…': Error: <message>". */
-function cleanError(err: unknown): string {
+export function cleanError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   return msg.replace(/^Error invoking remote method '[^']+': (\w*Error: )?/, '');
 }

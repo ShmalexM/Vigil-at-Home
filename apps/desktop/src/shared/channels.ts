@@ -34,6 +34,7 @@ export const CALL_NAMES = [
   'checkSetup',
   'setSetupMode',
   'skipSetupStep',
+  'runSetupAction',
   'finishSetup',
   'restartSetup',
   'saveApiKey',
