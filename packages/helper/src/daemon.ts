@@ -24,6 +24,7 @@ import { Approvals } from './approval.js';
 import { defaultPaths, SANTA_SYNC_PORT, type HelperPaths } from './config.js';
 import { Executor } from './executor.js';
 import { Journal } from './journal.js';
+import { ensureOsquery, defaultOsqueryPaths, type OsqueryPaths } from './osquery.js';
 import { HelperServer } from './server.js';
 import { BINARIES, realSystem, type System } from './system.js';
 
@@ -37,6 +38,8 @@ export interface DaemonOptions {
   opensslBin?: string;
   /** Files whose presence means Santa and osquery are installed; tests point these elsewhere. */
   sensorBinaries?: { santa: string; osquery: string };
+  /** Where osquery lives; false leaves osquery alone (tests). Only acted on as root. */
+  osquery?: OsqueryPaths | false;
 }
 
 /** What helper.status reports about each sensor. The app decides what counts as stale. */
@@ -140,6 +143,20 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     log(`could not re-apply network blocks: ${(err as Error).message}`);
   }
 
+  // Start osquery with Vigil's queries once it is installed, and keep it loaded.
+  const osqueryPaths = opts.osquery ?? defaultOsqueryPaths();
+  const keepOsquery = () => {
+    if (!osqueryPaths || process.getuid?.() !== 0) return;
+    ensureOsquery(sys, osqueryPaths)
+      .then((state) => {
+        if (state === 'started' || state === 'restarted') log(`osquery ${state}`);
+      })
+      .catch((err: Error) => log(`could not start osquery: ${err.message}`));
+  };
+  keepOsquery();
+  const osqueryTimer = setInterval(keepOsquery, 5 * 60 * 1000);
+  osqueryTimer.unref();
+
   // Renew the sync certificate daily if it is close to expiring.
   const renew = setInterval(
     () => {
@@ -161,6 +178,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
 
   return async () => {
     clearInterval(renew);
+    clearInterval(osqueryTimer);
     await hub.stop();
     await server.close();
     await new Promise<void>((r) => https.close(() => r()));

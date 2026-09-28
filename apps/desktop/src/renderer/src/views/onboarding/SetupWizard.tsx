@@ -53,6 +53,25 @@ const MODES: { id: SetupMode; icon: ReactNode; title: string; body: string; cost
   },
 ];
 
+/**
+ * Re-check while the window is in front, so a step turns green soon after its
+ * command finishes in Terminal. Only while setup is on screen.
+ */
+export function useSetupPolling(active: boolean, setView: (v: SetupView) => void) {
+  useEffect(() => {
+    if (!active) return;
+    const tick = () => {
+      if (document.hasFocus()) void vigil.getSetup().then(setView);
+    };
+    const id = setInterval(tick, POLL_MS);
+    window.addEventListener('focus', tick);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener('focus', tick);
+    };
+  }, [active, setView]);
+}
+
 export function SetupWizard({ onDone }: { onDone: () => void }) {
   const [view, setView] = useState<SetupView>();
   const [stage, setStage] = useState<Stage>('choose');
@@ -74,20 +93,7 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
     });
   }, []);
 
-  // Re-check while the window is in front, so a step turns green soon after
-  // its command finishes in Terminal.
-  useEffect(() => {
-    if (stage === 'choose') return;
-    const tick = () => {
-      if (document.hasFocus()) void vigil.getSetup().then(setView);
-    };
-    const id = setInterval(tick, POLL_MS);
-    window.addEventListener('focus', tick);
-    return () => {
-      clearInterval(id);
-      window.removeEventListener('focus', tick);
-    };
-  }, [stage]);
+  useSetupPolling(stage !== 'choose', setView);
 
   if (!view) return null;
   const idx = STAGES.findIndex((s) => s.id === stage);
@@ -284,7 +290,13 @@ const MARK: Record<SetupStepView['state'], [MarkState, string]> = {
   unavailable: ['warn', 'Not available yet'],
 };
 
-function StepCard({ step, setView }: { step: SetupStepView; setView: (v: SetupView) => void }) {
+export function StepCard({
+  step,
+  setView,
+}: {
+  step: SetupStepView;
+  setView: (v: SetupView) => void;
+}) {
   const [mark, markLabel] = MARK[step.state];
   const open = step.state === 'todo' && !step.skipped;
   return (

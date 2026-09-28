@@ -151,6 +151,7 @@ export class OnboardingService extends EventEmitter<{ changed: [] }> {
           ...(k.url ? { url: k.url } : {}),
           use: k.use,
           needsBaseUrl: k.needsBaseUrl ?? false,
+          more: k.more ?? false,
           ...(s ? { saved: s.last4, ...(s.baseUrl ? { baseUrl: s.baseUrl } : {}) } : {}),
         };
       }),

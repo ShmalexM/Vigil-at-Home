@@ -11,6 +11,11 @@ function cleanError(err: unknown): string {
 }
 
 export function ApiKeys({ view, setView }: { view: SetupView; setView: (v: SetupView) => void }) {
+  const main = view.keys.filter((k) => !k.more);
+  const more = view.keys.filter((k) => k.more);
+  const row = (k: ApiKeyView) => (
+    <KeyRow key={k.provider} k={k} disabled={!view.canSaveKeys} setView={setView} />
+  );
   return (
     <Card>
       <SectionHead
@@ -23,9 +28,16 @@ export function ApiKeys({ view, setView }: { view: SetupView; setView: (v: Setup
         </div>
       )}
       <div className="col" style={{ gap: 10 }}>
-        {view.keys.map((k) => (
-          <KeyRow key={k.provider} k={k} disabled={!view.canSaveKeys} setView={setView} />
-        ))}
+        {main.map(row)}
+        {more.length > 0 && (
+          // Open when one of these is already saved, so it's never hidden from the user.
+          <details className="key-more" open={more.some((k) => k.saved) || undefined}>
+            <summary className="t-small">More options</summary>
+            <div className="col" style={{ gap: 10, marginTop: 10 }}>
+              {more.map(row)}
+            </div>
+          </details>
+        )}
       </div>
     </Card>
   );

@@ -73,6 +73,8 @@ export interface ApiKeyView {
   url?: string;
   use: string;
   needsBaseUrl: boolean;
+  /** Listed under "More options" rather than as the main key. */
+  more: boolean;
   /** Last four characters of the saved key. The key itself never leaves main. */
   saved?: string;
   baseUrl?: string;
