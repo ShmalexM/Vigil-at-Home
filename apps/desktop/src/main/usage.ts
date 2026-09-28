@@ -1,6 +1,7 @@
 import type { Store } from './db/store.js';
 import {
   BILLED_PROVIDERS,
+  isKeyBilled,
   USAGE_PROVIDERS,
   type KeySpendView,
   type LimitWindowView,
@@ -197,7 +198,7 @@ function add(t: UsageTotals, r: UsageRun): void {
   if (r.costUsd === null) t.unpricedRuns += 1;
   else {
     t.costUsd += r.costUsd;
-    if (BILLED_PROVIDERS.includes(r.provider)) t.billedUsd += r.costUsd;
+    if (isKeyBilled(r)) t.billedUsd += r.costUsd;
   }
 }
 
@@ -309,7 +310,7 @@ export function keySpend(
   caps: Partial<Record<UsageProvider, number>>,
 ): KeySpendView[] {
   return BILLED_PROVIDERS.flatMap((provider) => {
-    const runs = monthRuns.filter((r) => r.provider === provider);
+    const runs = monthRuns.filter((r) => r.provider === provider && isKeyBilled(r));
     const cap = caps[provider];
     if (runs.length === 0 && cap === undefined) return [];
     return [
