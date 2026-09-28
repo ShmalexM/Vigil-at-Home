@@ -1,4 +1,12 @@
-import { Activity, Bell, House, ListChecks, Settings as SettingsIcon, Wrench } from 'lucide-react';
+import {
+  Activity,
+  Bell,
+  ChartSpline,
+  House,
+  ListChecks,
+  Settings as SettingsIcon,
+  Wrench,
+} from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { LEVEL_MEANING, LEVEL_RULES } from '../../../shared/levels';
 import { useLive, vigil } from '../api';
@@ -10,12 +18,14 @@ import { HomeView } from './Home';
 import { SetupWizard } from './onboarding/SetupWizard';
 import { RulesView } from './Rules';
 import { SettingsView } from './Settings';
+import { UsageView } from './Usage';
 
 const NAV: { id: string; label: string; icon: ReactNode }[] = [
   { id: 'home', label: 'Home', icon: <House size={16} /> },
   { id: 'alerts', label: 'Alerts', icon: <Bell size={16} /> },
   { id: 'rules', label: 'Rules', icon: <ListChecks size={16} /> },
   { id: 'activity', label: 'Activity', icon: <Activity size={16} /> },
+  { id: 'usage', label: 'Usage', icon: <ChartSpline size={16} /> },
   { id: 'settings', label: 'Settings', icon: <SettingsIcon size={16} /> },
 ];
 
@@ -107,6 +117,7 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
         {section === 'alerts' && <AlertsView selected={param} go={go} />}
         {section === 'rules' && <RulesView selected={param} go={go} />}
         {section === 'activity' && <ActivityView />}
+        {section === 'usage' && <UsageView />}
         {section === 'settings' && <SettingsView />}
       </main>
     </div>

@@ -56,11 +56,13 @@ describe('runner', () => {
       kind: 'ok',
       json: { verdict: 'benign', summary: 'ok' },
       audit: audit(),
+      usage: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, costUsd: 0, model: 'm-1' },
     }));
     const { runner, log } = setup([claude]);
     const result = await runner.run(request);
     expect(result).toMatchObject({ ok: true, provider: 'claude', value: { verdict: 'benign' } });
     expect(log).toHaveLength(1);
+    expect(log[0]?.model).toBe('m-1');
     expect(log[0]?.userPrompt).toContain('/Users/<user>/Downloads/x');
     expect(log[0]?.userPrompt).not.toContain('me@example.com');
     expect(claude.inputs[0]?.jsonSchema).toMatchObject({

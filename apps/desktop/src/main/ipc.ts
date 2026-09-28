@@ -76,6 +76,8 @@ export function registerIpc(
     ...onboardingHandlers(setup, () => windows.openMain('home')),
     installHelper: () => helper.install(),
     uninstallHelper: () => helper.uninstall(),
+    getUsage: (days) => core.usage.report(days),
+    getUsageLimits: (refresh) => core.usage.limits(refresh ?? false),
   };
 
   for (const name of Object.keys(calls) as CallName[]) {

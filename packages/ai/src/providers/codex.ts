@@ -199,6 +199,7 @@ function runUsageFromCodex(
     outputTokens: total.outputTokens,
     // A ChatGPT plan has no per-token price.
     costUsd: null,
+    model: CODEX_MODEL,
   };
 }
 

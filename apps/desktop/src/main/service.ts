@@ -22,6 +22,7 @@ import { Scheduler } from './scheduler.js';
 import { SensorRegistry } from './sensors.js';
 import { computeStatus } from './status.js';
 import { TEST_RULE } from './test-alert.js';
+import { UsageService } from './usage.js';
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -51,6 +52,8 @@ export class VigilCore {
   helperInstallable = false;
   /** Emits `events` (count) at most once per FEED_BATCH_MS while events arrive. */
   readonly feed = new EventEmitter<{ events: [number] }>();
+  /** Vigil's AI runs and plan limits, for the Usage page. */
+  readonly usage: UsageService;
   /** The rule engine, once attached. Without it events are stored unanalysed. */
   detector: Detector | undefined;
   private editing: RuleEditing | undefined;
@@ -65,6 +68,7 @@ export class VigilCore {
     private readonly maxDbBytes: number = DEFAULT_MAX_DB_BYTES,
   ) {
     this.alerts = new AlertService(store, executor, now);
+    this.usage = new UsageService(store, now);
     this.events = new EventLog(store, {
       onError: (err) => console.error('[events] write failed:', err),
     });
@@ -95,6 +99,7 @@ export class VigilCore {
       DAY,
       () => {
         this.store.pruneEvents(this.now() - EVENT_RETENTION_DAYS * DAY);
+        this.usage.prune();
       },
       true,
     );

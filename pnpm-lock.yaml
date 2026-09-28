@@ -101,6 +101,9 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: 0.3.283
         version: 0.3.283(@anthropic-ai/sdk@0.128.0(zod@4.6.5))(@modelcontextprotocol/sdk@1.30.1(zod@4.6.5))(zod@4.6.5)
+      '@vigil/core':
+        specifier: workspace:*
+        version: link:../core
       zod:
         specifier: ^4.1.0
         version: 4.6.5

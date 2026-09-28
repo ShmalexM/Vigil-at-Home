@@ -7,6 +7,8 @@
  *
  * Codex needs a Vigil Codex home signed in first:
  *   CODEX_HOME=<dir> codex login   then   VIGIL_CODEX_HOME=<dir>
+ * The OpenAI-style API uses VIGIL_API_KEY, VIGIL_API_MODEL and optionally
+ * VIGIL_API_BASE_URL (default OpenRouter).
  * Ollama uses VIGIL_OLLAMA_MODEL, or picks an installed model itself. CI runs
  * the Ollama tests on every change to this package (.github/workflows/ai-escape.yml).
  */
@@ -22,6 +24,7 @@ import { memoryPinStore } from '../executable.js';
 import { createClaudeAdapter } from '../providers/claude.js';
 import { createCodexAdapter } from '../providers/codex.js';
 import { createOllamaAdapter } from '../providers/ollama.js';
+import { createApiAdapter } from '../providers/openaiCompatible.js';
 import { createAiRunner } from '../runner.js';
 import { defaultAiSettings } from '../settings.js';
 import { readTool } from '../tools.js';
@@ -79,11 +82,20 @@ function adapterFor(id: ProviderId): ProviderAdapter {
         pins,
         codexHome: process.env.VIGIL_CODEX_HOME ?? join(tmpdir(), 'vigil-codex-home'),
       });
+    case 'api':
+      return createApiAdapter({
+        baseUrl: process.env.VIGIL_API_BASE_URL ?? 'https://openrouter.ai/api/v1',
+        getApiKey: async () => process.env.VIGIL_API_KEY,
+        ...(process.env.VIGIL_API_MODEL ? { model: process.env.VIGIL_API_MODEL } : {}),
+      });
     case 'ollama':
       return createOllamaAdapter({
         baseUrl: 'http://127.0.0.1:11434',
         ...(process.env.VIGIL_OLLAMA_MODEL ? { model: process.env.VIGIL_OLLAMA_MODEL } : {}),
       });
+    case 'jev':
+      // Jev takes no prompt and has no tools, so there is nothing to escape from.
+      throw new Error('Jev only labels events; it has no escape test.');
   }
 }
 
