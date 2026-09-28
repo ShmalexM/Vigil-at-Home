@@ -51,6 +51,10 @@ export const ApiKeyInput = z.object({
 });
 export type ApiKeyInput = z.input<typeof ApiKeyInput>;
 
+/** A one-click fix a step offers besides its commands. */
+export const SetupAction = z.enum(['codex-share']);
+export type SetupAction = z.infer<typeof SetupAction>;
+
 export interface SetupStepView {
   id: string;
   group: StepGroup;
@@ -65,6 +69,8 @@ export interface SetupStepView {
   /** What Vigil found, e.g. "Santa 2026.9, monitor mode". */
   detail?: string;
   skipped: boolean;
+  /** Shown as a button on the step, e.g. "Use my Codex sign-in". */
+  action?: { id: SetupAction; label: string };
 }
 
 export interface ApiKeyView {

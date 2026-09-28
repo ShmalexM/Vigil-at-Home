@@ -6,7 +6,7 @@ import { memoryStore } from '../testing.js';
 import { CHECKS, HELPER_SOCKET, type Probe } from './checks.js';
 import { KeyStore, type Cipher } from './keys.js';
 import { LOCAL_MODEL, LOCAL_MODEL_SMALL, localModelFor, setupPlan, stepsFor } from './plan.js';
-import { OnboardingService } from './service.js';
+import { OnboardingService, type CodexSetup } from './service.js';
 
 /** A Mac described by the files, programs and command output it has. */
 function fakeMac(opts: {
@@ -48,7 +48,7 @@ const testCipher = (available = true): Cipher => ({
   decrypt: (b) => Buffer.from([...b].map((x) => x ^ 0x5a)).toString(),
 });
 
-function service(probe: Probe, cipher = testCipher()) {
+function service(probe: Probe, cipher = testCipher(), codex?: CodexSetup) {
   const dir = mkdtempSync(join(tmpdir(), 'vigil-setup-'));
   const keys = new KeyStore(join(dir, 'keys.json'), cipher);
   let t = 1_000_000;
@@ -58,6 +58,7 @@ function service(probe: Probe, cipher = testCipher()) {
     probe,
     supported: true,
     now: () => (t += 5000),
+    ...(codex ? { codex } : {}),
   });
   return { svc, keys, keyFile: join(dir, 'keys.json') };
 }
@@ -326,5 +327,76 @@ describe('API keys', () => {
   it('refuses to save when the Keychain is unavailable', () => {
     const { svc } = service(fakeMac({}), testCipher(false));
     expect(() => svc.setKey({ provider: 'openrouter', key: orKey })).toThrow('Keychain');
+  });
+});
+
+describe('Codex sign-in', () => {
+  const codexMac = () => fakeMac({ bins: ['/opt/homebrew/bin/codex'] });
+  const fakeCodex = (status: Awaited<ReturnType<CodexSetup['status']>>, share = { ok: true }) => {
+    const calls = { status: 0, share: 0 };
+    let current = status;
+    const codex: CodexSetup = {
+      status: async () => (calls.status++, current),
+      share: async () => {
+        calls.share++;
+        if (share.ok) current = { state: 'ready', account: 'me@example.com' };
+        return share;
+      },
+    };
+    return { codex, calls };
+  };
+  const codexStep = async (svc: OnboardingService, fresh = false) => {
+    svc.setMode('cloud');
+    return (await svc.view(fresh)).steps.find((s) => s.id === 'codex')!;
+  };
+
+  it('offers the existing sign-in when Codex can share it, and nothing else runs until pressed', async () => {
+    const { codex, calls } = fakeCodex({ state: 'needs_sign_in', canShareSignIn: true });
+    const { svc } = service(codexMac(), testCipher(), codex);
+    const step = await codexStep(svc);
+    expect(step.state).toBe('todo');
+    expect(step.action).toEqual({ id: 'codex-share', label: 'Use my Codex sign-in' });
+    expect(step.commands).toEqual([]);
+    expect(calls.share).toBe(0);
+  });
+
+  it('shares the sign-in, re-checks and marks the step done', async () => {
+    const { codex, calls } = fakeCodex({ state: 'needs_sign_in', canShareSignIn: true });
+    const { svc } = service(codexMac(), testCipher(), codex);
+    await codexStep(svc);
+    const v = await svc.runAction('codex-share');
+    const step = v.steps.find((s) => s.id === 'codex')!;
+    expect(calls.share).toBe(1);
+    expect(step.state).toBe('done');
+    expect(step.detail).toBe('Signed in as me@example.com');
+    expect(step.action).toBeUndefined();
+  });
+
+  it('keeps ChatGPT sign-in as the way when the sign-in lives in the Keychain', async () => {
+    const { codex } = fakeCodex({ state: 'needs_sign_in' }, {
+      ok: false,
+      reason: 'no_sign_in_file',
+    } as never);
+    const { svc } = service(codexMac(), testCipher(), codex);
+    const step = await codexStep(svc);
+    expect(step.action).toBeUndefined();
+    await expect(svc.runAction('codex-share')).rejects.toThrow('Keychain');
+  });
+
+  it('does not start Codex on every poll', async () => {
+    const { codex, calls } = fakeCodex({ state: 'needs_sign_in', canShareSignIn: true });
+    const { svc } = service(codexMac(), testCipher(), codex);
+    await codexStep(svc);
+    await codexStep(svc);
+    expect(calls.status).toBe(1);
+    await codexStep(svc, true);
+    expect(calls.status).toBe(2);
+  });
+
+  it('never asks about sign-in when Codex is not installed', async () => {
+    const { codex, calls } = fakeCodex({ state: 'not_installed' });
+    const { svc } = service(fakeMac({}), testCipher(), codex);
+    expect((await codexStep(svc)).state).not.toBe('done');
+    expect(calls.status).toBe(0);
   });
 });

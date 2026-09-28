@@ -15,7 +15,7 @@ import { vigil } from '../../api';
 import { Shield } from '../../components/Shield';
 import { useToast } from '../../components/Toasts';
 import { Button, Card, Chip, StatusMark, type MarkState } from '../../components/ui';
-import { ApiKeys } from './ApiKeys';
+import { ApiKeys, cleanError } from './ApiKeys';
 import './onboarding.css';
 
 type Stage = 'choose' | 'protection' | 'ai' | 'review';
@@ -283,6 +283,46 @@ function StepList({
   );
 }
 
+function StepAction({
+  action,
+  setView,
+}: {
+  action: NonNullable<SetupStepView['action']>;
+  setView: (v: SetupView) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  return (
+    <div className="col" style={{ gap: 6 }}>
+      <div className="row">
+        <Button
+          kind="primary"
+          size="sm"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            setError(undefined);
+            try {
+              setView(await vigil.runSetupAction(action.id));
+            } catch (err) {
+              setError(cleanError(err));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? 'Checking…' : action.label}
+        </Button>
+      </div>
+      {error && (
+        <span className="t-small" role="alert" style={{ color: 'var(--poor)' }}>
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
 const MARK: Record<SetupStepView['state'], [MarkState, string]> = {
   done: ['done', 'Done'],
   todo: ['pending', 'To do'],
@@ -329,6 +369,7 @@ export function StepCard({
       </div>
       {open && (
         <div className="col step-body">
+          {step.action && <StepAction action={step.action} setView={setView} />}
           {step.commands.map((c) => (
             <Command key={c.cmd} label={c.label} cmd={c.cmd} />
           ))}
