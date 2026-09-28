@@ -172,6 +172,8 @@ export class Detector {
       const l = JSON.parse(r.label) as { label: 'unusual' | 'suspicious'; reason?: string };
       const f: FlaggedEvent = { kind: e.kind, subject: flaggedSubject(e), label: l.label };
       if (l.reason) f.reason = l.reason;
+      const args = 'process' in e ? e.process?.args : undefined;
+      if (args?.length) f.commandLine = args.join(' ');
       yield f;
     }
   }

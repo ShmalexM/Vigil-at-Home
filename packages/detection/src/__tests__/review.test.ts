@@ -83,7 +83,12 @@ describe('classifier leads in the telemetry summary', () => {
   it('lists flagged activity no rule matched, redacted and grouped, suspicious first', async () => {
     const { engine, pipeline, stores } = twoWeeks();
     const flagged = [
-      { kind: 'process.exec', subject: '/Users/alex/tmp/x', label: 'unusual' as const },
+      {
+        kind: 'process.exec',
+        subject: '/Users/alex/tmp/x',
+        label: 'unusual' as const,
+        commandLine: `x --token ${'a1B2'.repeat(10)} --out /Users/alex/Desktop/me@home.org`,
+      },
       { kind: 'process.exec', subject: '/Users/alex/tmp/x', label: 'unusual' as const },
       {
         kind: 'network.connection',
@@ -110,7 +115,13 @@ describe('classifier leads in the telemetry summary', () => {
         count: 1,
         reason: 'mailed <email>',
       },
-      { what: '~/tmp/x', kind: 'process.exec', label: 'unusual', count: 2 },
+      {
+        what: '~/tmp/x',
+        kind: 'process.exec',
+        label: 'unusual',
+        count: 2,
+        example: 'x --token <token> --out ~/Desktop/<email>',
+      },
     ]);
   });
 });

@@ -45,6 +45,8 @@ export interface TelemetrySummary {
     label: 'unusual' | 'suspicious';
     count: number;
     reason?: string;
+    /** One redacted command line, so a proposed rule can name the exact arguments. */
+    example?: string;
   }>;
   recentProposals: Array<{
     id: string;
@@ -63,10 +65,24 @@ export interface FlaggedEvent {
   subject: string;
   label: 'unusual' | 'suspicious';
   reason?: string;
+  /** The program's command line, when there is one. Redacted here. */
+  commandLine?: string;
 }
 
 const HOME = /^\/Users\/[^/]+/;
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+const HOME_ANYWHERE = /\/Users\/[^/\s'"]+/g;
+/** Long random-looking runs: API keys, bearer tokens, session ids. */
+const TOKEN = /[A-Za-z0-9+/_=-]{32,}/g;
+
+/** A command line with home folders, emails and anything token-like removed. */
+export function redactCommandLine(c: string): string {
+  return c
+    .replace(HOME_ANYWHERE, '~')
+    .replace(EMAIL, '<email>')
+    .replace(TOKEN, '<token>')
+    .slice(0, 240);
+}
 
 export function redactPath(p: string | undefined): string {
   if (!p) return 'unknown';
@@ -188,6 +204,7 @@ export function summarizeTelemetry(opts: {
         count: 1,
       };
       if (f.reason) entry.reason = f.reason.replace(EMAIL, '<email>').slice(0, 200);
+      if (f.commandLine) entry.example = redactCommandLine(f.commandLine);
       flagged.set(key, entry);
     }
   }

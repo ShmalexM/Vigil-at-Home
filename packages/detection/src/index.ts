@@ -49,6 +49,7 @@ export {
 export {
   summarizeTelemetry,
   redactPath,
+  redactCommandLine,
   type FlaggedEvent,
   type TelemetrySummary,
 } from './proposals/telemetry.js';
