@@ -11,6 +11,7 @@ import {
 } from '@vigil/core';
 import { z } from 'zod';
 import type { CALL_NAMES, PUSH_NAMES } from './channels.js';
+import { ApiKeyInput, ApiKeyProvider, SettingsPane, SetupMode, type SetupView } from './setup.js';
 
 /**
  * The renderer's whole view of the main process. Every call is one IPC
@@ -52,6 +53,9 @@ export const EVENT_GROUPS: Record<EventGroup, EventKind[]> = {
   system: ['system.alert'],
 };
 
+/** How far back one text search looks; the feed then offers the day before. */
+export const TEXT_SEARCH_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 export const EventQuery = z.object({
   group: EventGroup.optional(),
   /** Only events that matched a rule. */
@@ -64,6 +68,26 @@ export const EventQuery = z.object({
 });
 export type EventQuery = z.infer<typeof EventQuery>;
 
+const RuleId = z.string().min(1).max(100);
+/** A rule as JSON text from the editor. Main parses and validates it. */
+const RuleJson = z.string().min(2).max(50_000);
+
+/** One simple exclusion from the Rules screen: never fire when this field matches. */
+export const ExclusionInput = z.object({
+  field: z
+    .string()
+    .max(100)
+    .regex(/^[a-z][A-Za-z0-9]*(\.[a-z][A-Za-z0-9]*)*$/),
+  op: z.enum(['eq', 'startsWith', 'endsWith', 'contains', 'glob', 'in']),
+  /** For `in`, a comma-separated list. */
+  value: z.string().min(1).max(2000),
+});
+export type ExclusionInput = z.infer<typeof ExclusionInput>;
+
+/** What an exclusion made from an alert covers. */
+export const ExcludeScope = z.enum(['this_binary', 'this_signer', 'this_path', 'this_host']);
+export type ExcludeScope = z.infer<typeof ExcludeScope>;
+
 export const calls = {
   getStatus: z.tuple([]),
   listAlerts: z.tuple([z.enum(['open', 'resolved']).optional()]),
@@ -75,6 +99,15 @@ export const calls = {
   rejectProposal: z.tuple([Id]),
   listRules: z.tuple([]),
   setRuleMode: z.tuple([z.string(), RuleMode]),
+  getRuleEditor: z.tuple([RuleId]),
+  previewRule: z.tuple([RuleJson]),
+  saveRule: z.tuple([RuleJson]),
+  revertRule: z.tuple([RuleId]),
+  deleteRule: z.tuple([RuleId]),
+  addExclusion: z.tuple([RuleId, ExclusionInput]),
+  removeExclusion: z.tuple([RuleId, z.number().int().min(0).max(100)]),
+  removeException: z.tuple([z.string().min(1).max(100)]),
+  excludeFromAlert: z.tuple([Id, ExcludeScope]),
   listActions: z.tuple([]),
   listEvents: z.tuple([EventQuery]),
   eventStats: z.tuple([]),
@@ -86,6 +119,16 @@ export const calls = {
   /** The popup's content height in CSS pixels, so the window hugs it. */
   fitPopup: z.tuple([z.number().int().min(80).max(1000)]),
   quit: z.tuple([]),
+  // First-run setup (main/onboarding).
+  getSetup: z.tuple([]),
+  checkSetup: z.tuple([]),
+  setSetupMode: z.tuple([SetupMode]),
+  skipSetupStep: z.tuple([z.string().max(64), z.boolean()]),
+  finishSetup: z.tuple([]),
+  restartSetup: z.tuple([]),
+  saveApiKey: z.tuple([ApiKeyInput]),
+  clearApiKey: z.tuple([ApiKeyProvider]),
+  openSettingsPane: z.tuple([SettingsPane]),
   installHelper: z.tuple([]),
   uninstallHelper: z.tuple([]),
 } as const;
@@ -130,6 +173,64 @@ export interface RuleView {
   matches: number;
 }
 
+/** Everything the rule editor shows for one rule. */
+export interface RuleEditorView {
+  rule: Rule;
+  /** The rule as editable JSON, bookkeeping fields left out. */
+  ruleJson: string;
+  /** The mode the engine applies (the rule's own, or your or the engine's override). */
+  mode: RuleMode;
+  /** Shipped with Vigil. Built-ins can be edited and reverted, not deleted. */
+  builtin: boolean;
+  /** A built-in you changed. */
+  edited: boolean;
+  /** Vigil shipped a newer version of a built-in you changed. */
+  builtinUpdateAvailable: boolean;
+  /** The rule's exclusions, in plain words, in order (the index removes one). */
+  exclusions: string[];
+  /** "Don't alert me about this again" answers from alerts for this rule. */
+  exceptions: { id: string; summary: string; note?: string; createdAt: number }[];
+  /** Field names the rule language knows, for the exclusion form. */
+  fields: string[];
+}
+
+/**
+ * How a draft would have behaved over recent history. The same shape as
+ * @vigil/detection's ReplayReport, restated so the renderer does not compile
+ * the engine.
+ */
+export interface ReplayPreview {
+  windowStart: number;
+  windowEnd: number;
+  eventsScanned: number;
+  hits: number;
+  popups: number;
+  hitsPerDay: number;
+  popupsPerDay: number;
+  distinctPrograms: number;
+  topPrograms: { program: string; hits: number }[];
+  hitsOnUserAllowed: number;
+  hitsOnAppleSigned: number;
+  samples: {
+    ts: number;
+    program?: string;
+    subject: string;
+    reasons: string[];
+    wouldDo: string[];
+  }[];
+  verdict: 'never_fired' | 'quiet' | 'ok' | 'noisy';
+  notes: string[];
+}
+
+/** The result of checking or saving a rule draft. */
+export interface RuleCheck {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+  /** How the draft would have behaved on this Mac over the last 14 days. */
+  replay?: ReplayPreview;
+}
+
 export interface EventView {
   event: SensorEvent;
   outcome: EventOutcome | null;
@@ -168,6 +269,15 @@ export interface CallResults {
   rejectProposal: void;
   listRules: RuleView[];
   setRuleMode: Rule;
+  getRuleEditor: RuleEditorView | null;
+  previewRule: RuleCheck;
+  saveRule: RuleCheck;
+  revertRule: void;
+  deleteRule: void;
+  addExclusion: RuleCheck;
+  removeExclusion: RuleCheck;
+  removeException: void;
+  excludeFromAlert: RuleCheck;
   listActions: ActionRecord[];
   listEvents: EventView[];
   eventStats: EventStats;
@@ -178,6 +288,15 @@ export interface CallResults {
   closePopup: void;
   fitPopup: void;
   quit: void;
+  getSetup: SetupView;
+  checkSetup: SetupView;
+  setSetupMode: SetupView;
+  skipSetupStep: SetupView;
+  finishSetup: void;
+  restartSetup: void;
+  saveApiKey: SetupView;
+  clearApiKey: SetupView;
+  openSettingsPane: void;
   installHelper: HelperInstallResult;
   uninstallHelper: HelperInstallResult;
 }

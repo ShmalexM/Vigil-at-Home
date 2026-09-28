@@ -371,3 +371,7 @@ body.transparent {
     margin-left: 8px;
   }
 }
+.setup-banner {
+  margin: 0 28px 16px;
+  max-width: 1124px;
+}

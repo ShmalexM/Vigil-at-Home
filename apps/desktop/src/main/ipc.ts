@@ -2,11 +2,13 @@ import { app, ipcMain, type IpcMainInvokeEvent } from 'electron';
 import type { z } from 'zod';
 import { calls, type CallName, type CallResults } from '../shared/ipc.js';
 import type { HelperInstallResult } from '../shared/ipc.js';
+import { onboardingHandlers } from './onboarding/ipc.js';
+import type { OnboardingService } from './onboarding/service.js';
 import type { VigilCore } from './service.js';
 import { sendTestAlert } from './test-alert.js';
 import { rendererOrigin, type Windows } from './windows.js';
 
-type Handlers = {
+export type Handlers = {
   [K in CallName]: (
     ...args: z.output<(typeof calls)[K]>
   ) => CallResults[K] | Promise<CallResults[K]>;
@@ -26,6 +28,7 @@ const noHelper: HelperControl = {
 export function registerIpc(
   core: VigilCore,
   windows: Windows,
+  setup: OnboardingService,
   helper: HelperControl = noHelper,
 ): void {
   const h: Handlers = {
@@ -39,6 +42,15 @@ export function registerIpc(
     rejectProposal: (id) => core.alerts.rejectProposal(id),
     listRules: () => core.rules(),
     setRuleMode: (id: string, mode) => core.setRuleMode(id, mode),
+    getRuleEditor: (id) => core.ruleEditing()?.view(id) ?? null,
+    previewRule: (json) => editing(core).preview(json),
+    saveRule: (json) => editing(core).save(json),
+    revertRule: (id) => editing(core).revert(id),
+    deleteRule: (id) => editing(core).delete(id),
+    addExclusion: (id, input) => editing(core).addExclusion(id, input),
+    removeExclusion: (id, index) => editing(core).removeExclusion(id, index),
+    removeException: (id) => editing(core).removeException(id),
+    excludeFromAlert: (id, scope) => editing(core).excludeFromAlert(id, scope),
     listActions: () => core.store.listActions({ limit: 300 }),
     listEvents: (q) => core.store.listEventViews(stripUndefined(q)),
     eventStats: () => core.eventStats(),
@@ -56,6 +68,7 @@ export function registerIpc(
     closePopup: () => windows.hidePopup(),
     fitPopup: (height) => windows.fitPopup(height),
     quit: () => app.quit(),
+    ...onboardingHandlers(setup, () => windows.openMain('home')),
     installHelper: () => helper.install(),
     uninstallHelper: () => helper.uninstall(),
   };
@@ -69,6 +82,12 @@ export function registerIpc(
       return (h[name] as (...a: unknown[]) => unknown)(...args);
     });
   }
+}
+
+function editing(core: VigilCore) {
+  const e = core.ruleEditing();
+  if (!e) throw new Error('Detection is not running');
+  return e;
 }
 
 /** zod output has `key: undefined` where our types want the key absent. */

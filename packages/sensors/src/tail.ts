@@ -1,8 +1,15 @@
 // Follows an append-only log file line by line, surviving rotation
 // (newsyslog renames santa.log and starts a new file) and truncation.
-// Polls rather than using fs.watch, which is unreliable across renames.
+//
+// It watches the file's folder so new lines arrive at once without waking
+// the CPU when nothing happens. A folder watch keeps working across rotation
+// (a watch on the file itself follows the old file, and on macOS did not
+// report appends at all). It also polls every couple of seconds in case the
+// watch misses something or the folder does not exist yet.
 
+import { watch, type FSWatcher } from 'node:fs';
 import { open, stat } from 'node:fs/promises';
+import { basename, dirname } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 
 export interface TailPosition {
@@ -16,7 +23,10 @@ export interface TailOptions {
   onError?: (err: Error) => void;
   /** Resume from a saved position; by default starts at the current end of the file. */
   from?: TailPosition | 'start' | 'end';
+  /** Fallback poll interval. Changes usually arrive through the file watch well before this. */
   intervalMs?: number;
+  /** Watch the file for changes (default true). Without it, lines arrive on the fallback poll only. */
+  watch?: boolean;
   /** Lines longer than this are dropped (a runaway line must not eat memory). */
   maxLineBytes?: number;
 }
@@ -28,6 +38,8 @@ export class FileTailer {
   private timer: NodeJS.Timeout | undefined;
   private running = false;
   private polling: Promise<void> | undefined;
+  private pollAgain = false;
+  private watcher: FSWatcher | undefined;
 
   constructor(private readonly opts: TailOptions) {}
 
@@ -51,12 +63,14 @@ export class FileTailer {
       // the beginning once it appears.
       this.pos = undefined;
     }
+    this.arm();
     this.schedule();
   }
 
   async stop(): Promise<void> {
     this.running = false;
     if (this.timer) clearTimeout(this.timer);
+    this.unwatch();
     await this.polling;
   }
 
@@ -126,12 +140,50 @@ export class FileTailer {
     }
   }
 
+  /** Poll now, or once more right after the poll in progress. */
+  private kick(): void {
+    if (!this.running) return;
+    if (this.polling) {
+      this.pollAgain = true;
+      return;
+    }
+    this.polling = this.poll()
+      .catch((err: Error) => this.opts.onError?.(err))
+      .finally(() => {
+        this.polling = undefined;
+        this.arm();
+        if (this.pollAgain) {
+          this.pollAgain = false;
+          this.kick();
+        }
+      });
+  }
+
+  /** Watch the file's folder; retried after each poll until the folder exists. */
+  private arm(): void {
+    if (!this.running || this.opts.watch === false || this.watcher) return;
+    const name = basename(this.opts.path);
+    try {
+      const w = watch(dirname(this.opts.path), { persistent: false }, (_event, file) => {
+        if (file == null || file.toString() === name) this.kick();
+      });
+      w.on('error', () => this.unwatch());
+      this.watcher = w;
+    } catch {
+      // Folder not there yet; the fallback poll keeps trying.
+    }
+  }
+
+  private unwatch(): void {
+    this.watcher?.close();
+    this.watcher = undefined;
+  }
+
   private schedule(): void {
     if (!this.running) return;
     this.timer = setTimeout(() => {
-      this.polling = this.poll()
-        .catch((err: Error) => this.opts.onError?.(err))
-        .finally(() => this.schedule());
-    }, this.opts.intervalMs ?? 200);
+      this.kick();
+      this.schedule();
+    }, this.opts.intervalMs ?? 2000);
   }
 }

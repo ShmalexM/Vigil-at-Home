@@ -1,0 +1,187 @@
+/* First-run setup. Built from the app's tokens only. */
+.setup {
+  height: 100%;
+  overflow: auto;
+  background: var(--bg0);
+}
+.setup > .drag {
+  position: sticky;
+  top: 0;
+  background: var(--bg0);
+  z-index: 5;
+}
+.setup-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 0 28px 48px;
+}
+.setup-stages {
+  display: flex;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  flex-wrap: wrap;
+}
+.setup-stages button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 12px 0 6px;
+  border: 1px solid var(--ln0);
+  border-radius: 999px;
+  background: var(--bg1);
+  color: var(--tx2);
+  font-weight: 600;
+  cursor: pointer;
+}
+.setup-stages button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.setup-stages .num {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--bg3);
+  font-size: 11px;
+}
+.setup-stages [aria-current='step'] button {
+  border-color: var(--ac-ln);
+  background: var(--ac-bg);
+  color: var(--tx0);
+}
+.setup-stages [aria-current='step'] .num {
+  background: var(--ac);
+  color: var(--ac-tx);
+}
+
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+@media (max-width: 760px) {
+  .mode-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.mode-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 16px;
+  border: 1.5px solid var(--ln1);
+  border-radius: var(--radius-lg);
+  background: var(--bg1);
+  color: var(--tx1);
+  text-align: left;
+  cursor: pointer;
+}
+.mode-card:hover {
+  border-color: var(--ln2);
+}
+.mode-card[aria-checked='true'] {
+  border-color: var(--ac);
+  background: var(--ac-bg);
+}
+.mode-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--bg3);
+  color: var(--ac);
+}
+
+.step-card.done,
+.step-card.waiting,
+.step-card.skipped {
+  background: var(--bg2);
+}
+.step-card.waiting .t-h3,
+.step-card.skipped .t-h3 {
+  color: var(--tx2);
+}
+.step-detail.done {
+  color: var(--good);
+}
+.step-body {
+  gap: 10px;
+  padding-left: 28px;
+}
+.command {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px 6px 12px;
+  border: 1px solid var(--ln1);
+  border-radius: var(--radius-sm);
+  background: var(--bg0);
+}
+.command code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--tx0);
+  user-select: text;
+  cursor: text;
+}
+.manual {
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  color: var(--tx0);
+}
+
+.key-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--ln0);
+  border-radius: var(--radius);
+  background: var(--bg2);
+}
+.key-form {
+  gap: 8px;
+}
+.input {
+  height: 32px;
+  min-width: 0;
+  padding: 0 10px;
+  border: 1px solid var(--ln1);
+  border-radius: var(--radius-sm);
+  background: var(--bg0);
+  color: var(--tx0);
+  user-select: text;
+}
+.input:focus {
+  outline: 2px solid var(--ac);
+  outline-offset: 0;
+}
+a.btn {
+  text-decoration: none;
+}
+
+.review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.spin {
+  animation: spin 1.1s linear infinite;
+}

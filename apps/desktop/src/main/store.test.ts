@@ -1,3 +1,4 @@
+import { TEXT_SEARCH_WINDOW_MS } from '../shared/ipc.js';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { makeExec, makeRule, memoryStore } from './testing.js';
@@ -127,12 +128,16 @@ describe('Store', () => {
     expect(s.listEventViews().map((v) => v.event.ts)).toEqual([3000, 2000, 1000]);
     expect(s.listEventViews({ group: 'network' })).toHaveLength(1);
     expect(s.listEventViews({ matchedOnly: true }).map((v) => v.event.id)).toEqual([b.id]);
-    expect(s.listEventViews({ text: 'safari' }).map((v) => v.event.id)).toEqual([a.id]);
+    expect(s.listEventViews({ text: 'safari' }, 5000).map((v) => v.event.id)).toEqual([a.id]);
     // % and _ are literal, not wildcards.
-    expect(s.listEventViews({ text: '100%_' }).map((v) => v.event.id)).toEqual([b.id]);
-    expect(s.listEventViews({ text: '%' }).map((v) => v.event.id)).toEqual([b.id]);
+    expect(s.listEventViews({ text: '100%_' }, 5000).map((v) => v.event.id)).toEqual([b.id]);
+    expect(s.listEventViews({ text: '%' }, 5000).map((v) => v.event.id)).toEqual([b.id]);
     expect(s.listEventViews({ before: 2000, limit: 5 }).map((v) => v.event.id)).toEqual([a.id]);
     expect(s.listEventViews({ group: 'network' })[0]?.outcome).toBeNull();
+    // A search looks back one day from where the page starts.
+    const dayLater = 1000 + TEXT_SEARCH_WINDOW_MS + 1;
+    expect(s.listEventViews({ text: 'safari' }, dayLater)).toEqual([]);
+    expect(s.listEventViews({ text: 'safari', before: 1500 }, dayLater)).toHaveLength(1);
 
     const stats = s.eventStats(1500);
     expect(stats).toMatchObject({
@@ -151,5 +156,18 @@ describe('Store', () => {
     s.insertEvents([{ event: { ...e, raw: undefined }, outcome: { checked: 2, matches: [] } }]);
     expect(s.getEvent(e.id)).toMatchObject({ raw: { line: 'santa' } });
     expect(s.listEventViews()[0]?.outcome).toEqual({ checked: 2, matches: [] });
+  });
+
+  it('marks batched events that matched a rule, including ones an alert stored first', () => {
+    const s = memoryStore();
+    const hit = makeExec();
+    const plain = makeExec();
+    const matches = [{ ruleId: 'r', ruleName: 'R', mode: 'alert' as const }];
+    s.insertEvent(hit);
+    s.insertEvents([
+      { event: hit, outcome: { checked: 1, matches } },
+      { event: plain, outcome: { checked: 1, matches: [] } },
+    ]);
+    expect(s.listEventViews({ matchedOnly: true }).map((v) => v.event.id)).toEqual([hit.id]);
   });
 });

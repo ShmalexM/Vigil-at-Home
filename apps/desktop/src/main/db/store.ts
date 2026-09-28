@@ -13,6 +13,7 @@ import type { z } from 'zod';
 import {
   EVENT_GROUPS,
   EventOutcome,
+  TEXT_SEARCH_WINDOW_MS,
   type EventGroup,
   type EventQuery,
   type EventStats,
@@ -117,8 +118,10 @@ export class Store {
    */
   private writeEvent(e: SensorEvent, outcome?: EventOutcome): void {
     this.stmt(
-      `INSERT INTO events (id, ts, kind, source, body, outcome) VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT (id) DO UPDATE SET outcome = COALESCE(excluded.outcome, outcome)`,
+      `INSERT INTO events (id, ts, kind, source, body, outcome, matched) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET
+         outcome = COALESCE(excluded.outcome, outcome),
+         matched = CASE WHEN excluded.outcome IS NULL THEN matched ELSE excluded.matched END`,
     ).run(
       e.id,
       e.ts,
@@ -126,11 +129,17 @@ export class Store {
       e.source,
       JSON.stringify(e),
       outcome ? JSON.stringify(outcome) : null,
+      outcome && outcome.matches.length > 0 ? 1 : 0,
     );
   }
 
   /** Newest first, for the feed. */
-  listEventViews(q: EventQuery = {}): EventView[] {
+  /**
+   * The feed's page of events, newest first. Every filter walks an index on
+   * ts, and text search only looks back a day from where the page starts, so
+   * no query scans the whole table on the thread that also runs detection.
+   */
+  listEventViews(q: EventQuery = {}, now = Date.now()): EventView[] {
     const where: string[] = [];
     const args: SQLInputValue[] = [];
     if (q.group) {
@@ -138,12 +147,14 @@ export class Store {
       where.push(`kind IN (${kinds.map(() => '?').join(',')})`);
       args.push(...kinds);
     }
-    if (q.matchedOnly) where.push(`json_array_length(outcome, '$.matches') > 0`);
+    if (q.matchedOnly) where.push('matched = 1');
     if (q.before !== undefined) {
       where.push('ts < ?');
       args.push(q.before);
     }
     if (q.text) {
+      where.push('ts >= ?');
+      args.push((q.before ?? now) - TEXT_SEARCH_WINDOW_MS);
       where.push(`body LIKE ? ESCAPE '\\'`);
       args.push(`%${q.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
     }
@@ -161,7 +172,7 @@ export class Store {
     const byKind = this.db
       .prepare(
         `SELECT kind, COUNT(*) AS n,
-           SUM(CASE WHEN json_array_length(outcome, '$.matches') > 0 THEN 1 ELSE 0 END) AS matched
+           SUM(matched) AS matched
          FROM events WHERE ts >= ? GROUP BY kind`,
       )
       .all(since) as { kind: string; n: number; matched: number }[];
