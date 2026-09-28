@@ -80,4 +80,10 @@ export const migrations: string[] = [
     body TEXT NOT NULL
   );
   `,
+  // "Rule matches only" in the feed, without scanning every event's JSON.
+  `
+  ALTER TABLE events ADD COLUMN matched INTEGER NOT NULL DEFAULT 0;
+  UPDATE events SET matched = 1 WHERE json_array_length(outcome, '$.matches') > 0;
+  CREATE INDEX events_matched_ts ON events (ts) WHERE matched = 1;
+  `,
 ];

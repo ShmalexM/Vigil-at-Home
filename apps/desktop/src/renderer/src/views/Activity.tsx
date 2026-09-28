@@ -76,6 +76,9 @@ const GROUPS: { value: EventGroup | 'all'; label: string }[] = [
 
 const PAGE = 100;
 
+/** Matches TEXT_SEARCH_WINDOW_MS in shared/ipc.ts (not imported, to keep zod out of the renderer). */
+const SEARCH_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 function EventFeed() {
   const [group, setGroup] = useState<EventGroup | 'all'>('all');
   const [matchedOnly, setMatchedOnly] = useState(false);
@@ -83,6 +86,8 @@ function EventFeed() {
   const [paused, setPaused] = useState(false);
   const [rows, setRows] = useState<EventView[]>();
   const [more, setMore] = useState(false);
+  /** With a search: how far back it has looked so far. */
+  const [searchedTo, setSearchedTo] = useState<number>();
   const [waiting, setWaiting] = useState(0);
   const [open, setOpen] = useState<string>();
   const [stats, reloadStats] = useLive(() => vigil.eventStats());
@@ -99,9 +104,11 @@ function EventFeed() {
   pausedRef.current = paused;
 
   const load = useRef(() => {
+    const from = Date.now();
     void vigil.listEvents(queryRef.current).then((r) => {
       setRows(r);
       setMore(r.length === PAGE);
+      setSearchedTo(queryRef.current.text ? from - SEARCH_WINDOW_MS : undefined);
       setWaiting(0);
     });
   }).current;
@@ -124,12 +131,19 @@ function EventFeed() {
     [load, reloadStats],
   );
 
+  // A search looks back one day at a time, so it never scans the whole history at once.
+  const searching = searchedTo !== undefined;
+  const oldestKept = Date.now() - (stats?.retentionDays ?? 30) * 24 * 60 * 60 * 1000;
+  const canSearchBack = searching && !more && searchedTo > oldestKept;
+
   const older = async () => {
     const last = rows?.at(-1);
-    if (!last) return;
-    const r = await vigil.listEvents({ ...queryRef.current, before: last.event.ts });
+    const before = more && last ? last.event.ts : searchedTo;
+    if (before === undefined) return;
+    const r = await vigil.listEvents({ ...queryRef.current, before });
     setRows([...(rows ?? []), ...r]);
     setMore(r.length === PAGE);
+    if (searching) setSearchedTo(before - SEARCH_WINDOW_MS);
   };
 
   const empty = stats && stats.newest === null;
@@ -198,7 +212,7 @@ function EventFeed() {
               osquery are installed. Everything it sees will show up here as it happens.
             </span>
           </div>
-        ) : rows && rows.length === 0 ? (
+        ) : rows && rows.length === 0 && !canSearchBack ? (
           <span className="t-small feed-none">No events match these filters.</span>
         ) : (
           (rows ?? []).map((v) => (
@@ -210,10 +224,15 @@ function EventFeed() {
             />
           ))
         )}
-        {more && (
-          <div className="row" style={{ justifyContent: 'center', padding: 10 }}>
+        {(more || canSearchBack) && (
+          <div className="row" style={{ justifyContent: 'center', padding: 10, gap: 10 }}>
+            {!more && searchedTo !== undefined && (
+              <span className="t-small">
+                {rows?.length ? 'No more matches' : 'No matches'} since {timeOfDay(searchedTo)}
+              </span>
+            )}
             <Button size="sm" kind="ghost" onClick={() => void older()}>
-              Show older events
+              {more ? 'Show older events' : 'Search the day before'}
             </Button>
           </div>
         )}
