@@ -1,0 +1,62 @@
+/* Rule editor and exclusions (Rules page, alert detail). */
+.field {
+  background: var(--bg2);
+  border: 1px solid var(--ln1);
+  border-radius: var(--radius-sm);
+  color: var(--tx0);
+  padding: 6px 9px;
+  font-size: 13px;
+  min-width: 0;
+  user-select: text;
+}
+.field:focus {
+  border-color: var(--ac-ln);
+  outline: none;
+}
+.rule-json {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  min-height: 260px;
+  resize: vertical;
+  width: 100%;
+  box-sizing: border-box;
+  tab-size: 2;
+}
+.editor {
+  border-top: 1px solid var(--ln0);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.excl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg2);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+.excl-form {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) 130px minmax(140px, 2fr) auto;
+  gap: 8px;
+}
+@media (max-width: 720px) {
+  .excl-form {
+    grid-template-columns: 1fr;
+  }
+}
+.issues {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+}
+.issues.errors {
+  color: var(--poor);
+}
+.issues.warnings {
+  color: var(--fair);
+}
