@@ -33,7 +33,7 @@ export type StepState = 'done' | 'todo' | 'waiting' | 'unavailable';
 export const SettingsPane = z.enum(['extensions', 'fullDiskAccess', 'profiles', 'terminal']);
 export type SettingsPane = z.infer<typeof SettingsPane>;
 
-export const ApiKeyProvider = z.enum(['openrouter', 'anthropic', 'openai', 'custom']);
+export const ApiKeyProvider = z.enum(['openrouter', 'anthropic', 'openai', 'custom', 'typesafe']);
 export type ApiKeyProvider = z.infer<typeof ApiKeyProvider>;
 
 export const ApiKeyInput = z.object({

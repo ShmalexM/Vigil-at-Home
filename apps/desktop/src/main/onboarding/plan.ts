@@ -264,6 +264,12 @@ export const API_KEYS: readonly KeyDef[] = [
     prefix: 'sk-',
   },
   {
+    provider: 'typesafe',
+    name: 'TypeSafe key for fast event labelling',
+    url: 'https://typesafe.ai',
+    use: 'Optional. TypeSafe’s Jev labels events as benign, unusual or suspicious in under a second. Vigil sends it event lines (paths, hosts) and nothing else, and falls back to the local model without it.',
+  },
+  {
     provider: 'custom',
     name: 'Other OpenAI-compatible gateway',
     use: 'Any gateway that speaks the OpenAI API, such as a company proxy. Needs its address too.',

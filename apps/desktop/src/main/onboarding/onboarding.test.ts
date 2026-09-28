@@ -287,6 +287,14 @@ describe('API keys', () => {
     expect(keys.get('custom')).toEqual({ key, baseUrl: 'http://127.0.0.1:4000/v1' });
   });
 
+  it('offers and stores a TypeSafe key for Jev', async () => {
+    const { svc, keys } = service(fakeMac({}));
+    const v = await svc.view();
+    expect(v.keys.map((k) => k.provider)).toContain('typesafe');
+    svc.setKey({ provider: 'typesafe', key: 'ts-0123456789abcdef' });
+    expect(keys.get('typesafe')).toEqual({ key: 'ts-0123456789abcdef' });
+  });
+
   it('refuses to save when the Keychain is unavailable', () => {
     const { svc } = service(fakeMac({}), testCipher(false));
     expect(() => svc.setKey({ provider: 'openrouter', key: orKey })).toThrow('Keychain');
