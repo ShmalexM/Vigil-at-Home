@@ -99,7 +99,7 @@ function start(): void {
     uninstall: async () => afterHelperScript(await runHelperScript('uninstall')),
   });
   windows.createTray();
-  windows.applyTheme(core.theme());
+  windows.applyTheme(core.theme(), core.appearance());
   // After start-up settles, so the menu-bar item appears first.
   setTimeout(() => windows.prewarmPopover(), 2000);
 

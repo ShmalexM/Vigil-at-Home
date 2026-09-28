@@ -11,6 +11,7 @@ import {
 } from '@vigil/core';
 import { z } from 'zod';
 import type { CALL_NAMES, PUSH_NAMES } from './channels.js';
+import type { AppearanceSettings } from './themes.js';
 import { ApiKeyInput, ApiKeyProvider, SettingsPane, SetupMode, type SetupView } from './setup.js';
 
 /**
@@ -30,6 +31,24 @@ export const Route = z.string().regex(/^[a-z]+(\/[A-Za-z0-9_-]+)?$/);
 
 export const ThemePref = z.enum(['system', 'dark', 'light']);
 export type ThemePref = z.infer<typeof ThemePref>;
+
+const HexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/);
+const FontFamily = z.string().regex(/^[\w\s,'"().-]{0,120}$/);
+const VariantTheme = z.object({
+  preset: z.string().regex(/^[a-z-]{1,40}$/),
+  accent: HexColor.optional(),
+  background: HexColor.optional(),
+  foreground: HexColor.optional(),
+});
+/** Settings › Appearance; see shared/themes.ts. */
+export const Appearance = z.object({
+  light: VariantTheme,
+  dark: VariantTheme,
+  contrast: z.number().int().min(0).max(100),
+  uiFontSize: z.number().int().min(11).max(16),
+  uiFont: FontFamily,
+  codeFont: FontFamily,
+}) satisfies z.ZodType<AppearanceSettings>;
 
 /**
  * What detection made of one event: how many rules looked at it and which
@@ -113,6 +132,7 @@ export const calls = {
   eventStats: z.tuple([]),
   getSettings: z.tuple([]),
   setTheme: z.tuple([ThemePref]),
+  setAppearance: z.tuple([Appearance]),
   sendTestAlert: z.tuple([]),
   openMain: z.tuple([Route.optional()]),
   closePopup: z.tuple([]),
@@ -253,6 +273,7 @@ export interface EventStats {
 
 export interface SettingsView {
   theme: ThemePref;
+  appearance: AppearanceSettings;
   dataDir: string;
   version: string;
 }
@@ -283,6 +304,7 @@ export interface CallResults {
   eventStats: EventStats;
   getSettings: SettingsView;
   setTheme: void;
+  setAppearance: void;
   sendTestAlert: Alert;
   openMain: void;
   closePopup: void;

@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { z } from 'zod';
 import { canChangeMode, type Rule, type RuleMode, type SensorEvent } from '@vigil/core';
 import {
+  Appearance,
   ThemePref,
   type AlertDetail,
   type EventOutcome,
@@ -9,6 +10,7 @@ import {
   type RuleView,
   type StatusView,
 } from '../shared/ipc.js';
+import { DEFAULT_APPEARANCE, type AppearanceSettings } from '../shared/themes.js';
 import { AlertService, type DecisionInput } from './alerts.js';
 import { EventLog } from './events.js';
 import { BATTERY_SLOWDOWN, type PowerMode } from './power.js';
@@ -237,5 +239,13 @@ export class VigilCore {
 
   setTheme(theme: ThemePref): void {
     this.store.setSetting('theme', ThemePref.parse(theme));
+  }
+
+  appearance(): AppearanceSettings {
+    return this.store.getSetting('appearance', Appearance, DEFAULT_APPEARANCE);
+  }
+
+  setAppearance(appearance: AppearanceSettings): void {
+    this.store.setSetting('appearance', Appearance.parse(appearance));
   }
 }
