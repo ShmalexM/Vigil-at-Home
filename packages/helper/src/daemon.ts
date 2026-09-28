@@ -9,7 +9,7 @@
 //         ◄── rules ─── RuleStore ◄── santa.block / santa.allow
 
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
   OSQUERYD_PATH,
@@ -58,6 +58,10 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   // Everything the helper creates is private unless it says otherwise.
   process.umask(0o077);
   mkdirSync(paths.supportDir, { recursive: true, mode: 0o755 });
+  // The umask above would make it 0700, and so did earlier versions. Santa's
+  // sync service runs as nobody and must pass through it to read the pinned CA
+  // in santa-sync/. Everything inside is 0600/0644 or its own 0700 folder.
+  chmodSync(paths.supportDir, 0o755);
 
   const tls = syncTlsPaths(paths.tlsDir);
   await ensureSyncTls(tls, opts.opensslBin);

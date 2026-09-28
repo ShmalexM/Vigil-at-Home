@@ -1,5 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { request } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,6 +34,8 @@ beforeAll(async () => {
   };
   writeFileSync(paths.santaLog as string, '');
   writeFileSync(paths.osqueryResults as string, '');
+  // As earlier versions left it; the daemon must open it up on start.
+  mkdirSync(paths.supportDir, { mode: 0o700 });
   // Handing the socket to the console user needs root; CI runs as a normal
   // user, where the socket simply stays with the current user.
   const sys = new FakeSystem();
@@ -74,6 +84,13 @@ function santaPost(stage: string, body: unknown): Promise<any> {
 }
 
 describe('helper daemon', () => {
+  it("lets Santa's sync service (running as nobody) reach the pinned CA", () => {
+    expect(statSync(paths.supportDir).mode & 0o777).toBe(0o755);
+    expect(statSync(paths.tlsDir).mode & 0o777).toBe(0o755);
+    expect(statSync(join(paths.tlsDir, 'ca.pem')).mode & 0o777).toBe(0o644);
+    expect(statSync(join(paths.tlsDir, 'ca.key')).mode & 0o777).toBe(0o600);
+  });
+
   it('serves commands, Santa sync and live sensor events together', async () => {
     const status = await client!.call<{ activeActions: number; sensors: SensorHealth }>({
       kind: 'helper.status',
