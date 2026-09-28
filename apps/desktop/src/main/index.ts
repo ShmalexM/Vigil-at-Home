@@ -1,11 +1,15 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { app, powerMonitor } from 'electron';
+import { app, powerMonitor, safeStorage } from 'electron';
 import { Store } from './db/store.js';
 import { seedDemo, startDemoFeed } from './demo.js';
 import { DryRunExecutor } from './executor.js';
 import { registerIpc } from './ipc.js';
+import { systemProbe } from './onboarding/checks.js';
+import { demoProbe } from './onboarding/demo.js';
+import { KeyStore } from './onboarding/keys.js';
+import { OnboardingService } from './onboarding/service.js';
 import { VigilCore } from './service.js';
 import { Windows } from './windows.js';
 
@@ -28,8 +32,18 @@ function start(): void {
   // Until the privileged helper is installed, blocks are simulated and the UI says so.
   const core = new VigilCore(store, new DryRunExecutor(), true);
   const windows = new Windows();
+  const demo = !app.isPackaged && !!process.env['VIGIL_DEMO'];
+  const setup = new OnboardingService({
+    store,
+    keys: new KeyStore(join(dataDir, 'api-keys.json'), {
+      available: () => safeStorage.isEncryptionAvailable(),
+      encrypt: (s) => safeStorage.encryptString(s),
+      decrypt: (b) => safeStorage.decryptString(b),
+    }),
+    ...(demo ? { probe: demoProbe(), supported: true } : { probe: systemProbe() }),
+  });
 
-  registerIpc(core, windows);
+  registerIpc(core, windows, setup);
   windows.createTray();
   windows.applyTheme(core.theme());
 
@@ -39,6 +53,7 @@ function start(): void {
   };
   core.alerts.on('changed', refresh);
   core.sensors.on('changed', refresh);
+  setup.on('changed', () => windows.broadcast('changed'));
   core.alerts.on('popup', (alert) => windows.showPopup(alert.id));
   core.feed.on('events', (n) => windows.broadcast('events', n));
   refresh();
@@ -57,11 +72,13 @@ function start(): void {
     store.close();
   });
 
-  if (!app.isPackaged && process.env['VIGIL_DEMO']) {
+  if (demo) {
     void seedDemo(core).then(() => {
       const stop = startDemoFeed(core);
       app.on('before-quit', stop);
     });
   }
-  if (!app.isPackaged) windows.openMain();
+  // First run opens setup; after that Vigil starts quietly in the menu bar.
+  if (!setup.finished()) windows.openMain('setup');
+  else if (!app.isPackaged) windows.openMain();
 }
