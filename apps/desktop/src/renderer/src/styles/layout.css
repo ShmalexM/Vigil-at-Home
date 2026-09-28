@@ -375,3 +375,38 @@ body.transparent {
   margin: 0 28px 16px;
   max-width: 1124px;
 }
+.sidebar-status-why {
+  color: var(--tx0);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.level-rules summary {
+  cursor: pointer;
+  color: var(--ac);
+  font-size: 12px;
+  font-weight: 600;
+  width: fit-content;
+}
+.level-rules ul {
+  list-style: none;
+  margin: 10px 0 6px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--tx1);
+}
+.level-rules li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.level-rules li.current {
+  color: var(--tx0);
+  font-weight: 600;
+}
+.level-rules p {
+  margin: 0;
+}

@@ -1,0 +1,23 @@
+{
+  "name": "@vigil/ai",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Connects Vigil to the AI subscriptions the user already has, with no shell, file or network access for the agent",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test:live": "vitest run --root ../.. packages/ai/src/live"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.283",
+    "@vigil/core": "workspace:*",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@openai/codex": "0.157.1"
+  }
+}

@@ -49,6 +49,8 @@ export interface StepDef {
   checks: string;
   /** Steps that have to be done first. */
   after?: string[];
+  /** Why the step has nothing to run yet, when it has no command or click. */
+  unavailable?: string;
 }
 
 const ALL: readonly SetupMode[] = ['local', 'cloud', 'both'];
@@ -148,6 +150,8 @@ export function setupPlan(inputs: PlanInputs = {}): StepDef[] {
       check: 'helper',
       checks: 'the helper’s socket at /var/run/vigil-helper.sock',
       after: ['santa-approve', 'osquery'],
+      unavailable:
+        'This build of Vigil doesn’t include the helper. Install Vigil from its DMG, or run pnpm build:helper in the repo and restart Vigil.',
     },
     {
       id: 'santa-profile',
@@ -169,6 +173,8 @@ export function setupPlan(inputs: PlanInputs = {}): StepDef[] {
       check: 'santa.profile',
       checks: 'santactl status shows the sync server at 127.0.0.1',
       after: ['helper'],
+      unavailable:
+        'Vigil makes this profile once the helper is running. It should appear in a few seconds.',
     },
     {
       id: 'ollama',

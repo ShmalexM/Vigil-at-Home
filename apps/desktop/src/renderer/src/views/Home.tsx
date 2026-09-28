@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { useLive, vigil } from '../api';
 import { Card, Chip, LevelPill, SectionHead, SeverityMark, StatusMark } from '../components/ui';
 import { actorLabel, describeRecord, timeAgo } from '../format';
+import { LEVEL_RULES } from '../../../shared/levels';
 import { PageHead } from './AppShell';
 
 const levelSentence = {
@@ -37,6 +38,20 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               ))}
             </ul>
           )}
+          <details className="level-rules">
+            <summary>How is this worked out?</summary>
+            <ul>
+              {(['poor', 'fair', 'good'] as const).map((l) => (
+                <li key={l} className={l === status.level ? 'current' : ''}>
+                  <LevelPill level={l} small /> {LEVEL_RULES[l]}
+                </li>
+              ))}
+            </ul>
+            <p className="t-small">
+              The first reason above is the one that sets the level. Protection layers are Santa,
+              osquery and the Vigil helper.
+            </p>
+          </details>
           {status.dryRun && (
             <div className="attn fair">
               <TriangleAlert size={17} />

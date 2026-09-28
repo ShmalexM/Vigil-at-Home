@@ -93,7 +93,14 @@ export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
     const installed = reported?.installed || paths.some((path) => p.exists(path));
     if (!installed) return { ...base, state: 'not_installed' };
     const running = await Promise.all(processes.map((name) => p.running(name)));
-    if (!running.some(Boolean)) return { ...base, state: 'down', note: 'Installed, not running' };
+    if (!running.some(Boolean)) {
+      // The helper writes osquery's settings and starts osqueryd, so before the
+      // helper is installed, osquery not running is expected, not a failure.
+      if (id === 'osquery' && helperState !== 'connected') {
+        return { ...base, state: 'degraded', note: 'Starts once the Vigil helper is installed' };
+      }
+      return { ...base, state: 'down', note: 'Installed, not running' };
+    }
     // Its events reach Vigil through the helper, which reads the logs as root.
     if (helperState !== 'connected') {
       return { ...base, state: 'degraded', note: 'Running; Vigil needs its helper to read it' };

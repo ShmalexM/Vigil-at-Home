@@ -15,6 +15,8 @@ const POPUP = { width: 420, height: 400 };
  * 10 to 60 ms (docs/performance.md).
  */
 const RELEASE_POPUP_MS = 60 * 1000;
+/** How long the first popup waits for its first paint before showing anyway. */
+const POPUP_SHOW_FALLBACK_MS = 1500;
 
 /** Where renderer pages are served from, for loading and for checking IPC senders. */
 export function rendererOrigin(): string {
@@ -174,7 +176,20 @@ export class Windows {
       this.popup.setAlwaysOnTop(true, 'screen-saver');
       this.popup.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
       load(this.popup, `popup/${alertId}`);
-      this.popup.once('ready-to-show', () => this.placeAndShowPopup());
+      // A hidden transparent panel may never paint, so on macOS 'ready-to-show'
+      // can fail to fire and the first popup would stay hidden. Show it on
+      // whichever comes first: first paint, the page finishing loading, or a
+      // short fallback.
+      const win = this.popup;
+      let shown = false;
+      const showOnce = () => {
+        if (shown || win.isDestroyed() || win !== this.popup) return;
+        shown = true;
+        this.placeAndShowPopup();
+      };
+      win.once('ready-to-show', showOnce);
+      win.webContents.once('did-finish-load', showOnce);
+      setTimeout(showOnce, POPUP_SHOW_FALLBACK_MS);
       return;
     }
     this.send(this.popup, 'popup', alertId);

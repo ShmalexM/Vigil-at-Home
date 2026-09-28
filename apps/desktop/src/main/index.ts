@@ -5,6 +5,7 @@ import { app, powerMonitor, safeStorage } from 'electron';
 import type { HelperInstallResult } from '../shared/ipc.js';
 import { Store } from './db/store.js';
 import { seedDemo, startDemoFeed } from './demo.js';
+import { seedUsageDemo } from './usage-demo.js';
 import { Detector } from './detection.js';
 import { helperBundleDir, helperInstallCommand, runHelperScript } from './helper-install.js';
 import { HelperLink } from './helper.js';
@@ -56,7 +57,13 @@ function start(): void {
     async () => (await helper.query<{ sensors?: HelperSensors }>('helper.status'))?.sensors ?? null,
   );
 
-  core.helperInstallable = process.platform === 'darwin' && helperBundleDir() !== null;
+  // A development build installs the helper that `pnpm build:helper` made.
+  const helperDir = () =>
+    helperBundleDir(
+      process.resourcesPath,
+      app.isPackaged ? undefined : join(app.getAppPath(), 'build', 'helper', `dev-${process.arch}`),
+    );
+  core.helperInstallable = process.platform === 'darwin' && helperDir() !== null;
   // Santa's configuration profile comes from the helper, which holds the sync
   // server's certificate. Setup offers it once it has been written here.
   const santaProfilePath = join(dataDir, 'Vigil Santa.mobileconfig');
@@ -86,7 +93,7 @@ function start(): void {
     ...(demo ? { probe: demoProbe(), supported: true } : { probe: systemProbe() }),
     // The wizard's helper and Santa steps, once this build can install them.
     plan: () => {
-      const command = helperInstallCommand();
+      const command = helperInstallCommand(helperDir());
       return {
         ...(command ? { helperInstallCommand: command } : {}),
         ...(existsSync(santaProfilePath) ? { santaProfilePath } : {}),
@@ -95,8 +102,8 @@ function start(): void {
   });
 
   registerIpc(core, windows, setup, {
-    install: async () => afterHelperScript(await runHelperScript('install')),
-    uninstall: async () => afterHelperScript(await runHelperScript('uninstall')),
+    install: async () => afterHelperScript(await runHelperScript('install', helperDir())),
+    uninstall: async () => afterHelperScript(await runHelperScript('uninstall', helperDir())),
   });
   windows.createTray();
   windows.applyTheme(core.theme(), core.appearance());
@@ -152,6 +159,7 @@ function start(): void {
   });
 
   if (demo) {
+    seedUsageDemo(core.usage);
     void seedDemo(core).then(() => {
       const stop = startDemoFeed(core);
       app.on('before-quit', stop);
