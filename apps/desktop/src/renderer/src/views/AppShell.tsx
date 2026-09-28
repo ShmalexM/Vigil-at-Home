@@ -1,11 +1,12 @@
-import { Activity, Bell, House, ListChecks, Settings as SettingsIcon } from 'lucide-react';
+import { Activity, Bell, House, ListChecks, Settings as SettingsIcon, Wrench } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { useLive, vigil } from '../api';
 import { Shield } from '../components/Shield';
-import { LevelPill } from '../components/ui';
+import { Button, LevelPill } from '../components/ui';
 import { ActivityView } from './Activity';
 import { AlertsView } from './Alerts';
 import { HomeView } from './Home';
+import { SetupWizard } from './onboarding/SetupWizard';
 import { RulesView } from './Rules';
 import { SettingsView } from './Settings';
 
@@ -31,7 +32,10 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
   };
 
   const [status] = useLive(() => vigil.getStatus());
+  const [setup] = useLive(() => vigil.getSetup());
   const [section = 'home', param] = route.split('/');
+
+  if (section === 'setup') return <SetupWizard onDone={() => go('home')} />;
 
   return (
     <div className="shell">
@@ -68,6 +72,15 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
       </aside>
       <main className="content scroll">
         <div className="drag" />
+        {setup && !setup.finished && (
+          <div className="attn accent setup-banner">
+            <Wrench size={16} />
+            <span className="grow">Setup isn’t finished, so some protection is missing.</span>
+            <Button size="sm" kind="primary" onClick={() => go('setup')}>
+              Continue setup
+            </Button>
+          </div>
+        )}
         {section === 'home' && <HomeView go={go} />}
         {section === 'alerts' && <AlertsView selected={param} go={go} />}
         {section === 'rules' && <RulesView />}

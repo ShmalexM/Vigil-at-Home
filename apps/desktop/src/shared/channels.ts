@@ -18,6 +18,15 @@ export const CALL_NAMES = [
   'closePopup',
   'fitPopup',
   'quit',
+  'getSetup',
+  'checkSetup',
+  'setSetupMode',
+  'skipSetupStep',
+  'finishSetup',
+  'restartSetup',
+  'saveApiKey',
+  'clearApiKey',
+  'openSettingsPane',
 ] as const;
 
 export const PUSH_NAMES = ['changed', 'popup', 'navigate', 'theme'] as const;
