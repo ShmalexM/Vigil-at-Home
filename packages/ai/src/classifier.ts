@@ -245,6 +245,9 @@ export function createEventClassifier(options: EventClassifierOptions) {
           ...(result.detail ? { detail: result.detail } : { detail: result.reason }),
         };
 
+      // A small local model flagged half the Apple binaries in a 20-event test,
+      // so its labels are shown as hints and don't reorder the feed (score 0).
+      const hintOnly = LOCAL_PROVIDERS.includes(result.provider);
       // Suspicious first, so a key in both lists keeps the stronger label.
       for (const label of ['suspicious', 'unusual'] as const)
         for (const key of result.value[label]) {
@@ -253,8 +256,8 @@ export function createEventClassifier(options: EventClassifierOptions) {
           labels.set(id, {
             eventId: id,
             label,
-            score: SCORE[label],
-            reason: `Local model: ${label}`,
+            score: hintOnly ? 0 : SCORE[label],
+            reason: hintOnly ? `Local model hint: ${label}` : `Cloud model: ${label}`,
             by: 'model',
           });
         }

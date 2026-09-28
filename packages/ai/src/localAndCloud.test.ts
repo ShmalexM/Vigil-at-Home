@@ -346,8 +346,9 @@ describe('event labelling with a small local model', () => {
         {
           eventId: 'evt-a',
           label: 'suspicious',
-          score: 0.9,
-          reason: 'Local model: suspicious',
+          // Local labels are hints: they tag the event but don't reorder the feed.
+          score: 0,
+          reason: 'Local model hint: suspicious',
           by: 'model',
         },
         { eventId: 'evt-b', label: 'benign', score: 0, reason: '', by: 'model' },
