@@ -304,6 +304,11 @@ describe('API keys', () => {
     const { svc, keys } = service(fakeMac({}));
     const v = await svc.view();
     expect(v.keys.map((k) => k.provider)).toContain('typesafe');
+    // OpenRouter carries Jev too, so it's the one main key; TypeSafe sits under More options.
+    expect(v.keys.filter((k) => !k.more).map((k) => k.provider)).toEqual(['openrouter']);
+    expect(v.keys.find((k) => k.provider === 'typesafe')?.use).toMatch(
+      /^Not needed if you use OpenRouter/,
+    );
     svc.setKey({ provider: 'typesafe', key: 'ts-0123456789abcdef' });
     expect(keys.get('typesafe')).toEqual({ key: 'ts-0123456789abcdef' });
   });
