@@ -14,7 +14,14 @@ import type { CALL_NAMES, PUSH_NAMES } from './channels.js';
 import { AiPrefsPatch, AiProvider, type AiActionResult, type AiView } from './ai.js';
 import type { AppearanceSettings } from './themes.js';
 import type { UsageLimitsView, UsageReport } from './usage.js';
-import { ApiKeyInput, ApiKeyProvider, SettingsPane, SetupMode, type SetupView } from './setup.js';
+import {
+  ApiKeyInput,
+  ApiKeyProvider,
+  SettingsPane,
+  SetupAction,
+  SetupMode,
+  type SetupView,
+} from './setup.js';
 
 /**
  * The renderer's whole view of the main process. Every call is one IPC
@@ -146,6 +153,7 @@ export const calls = {
   checkSetup: z.tuple([]),
   setSetupMode: z.tuple([SetupMode]),
   skipSetupStep: z.tuple([z.string().max(64), z.boolean()]),
+  runSetupAction: z.tuple([SetupAction]),
   finishSetup: z.tuple([]),
   restartSetup: z.tuple([]),
   saveApiKey: z.tuple([ApiKeyInput]),
@@ -326,6 +334,7 @@ export interface CallResults {
   checkSetup: SetupView;
   setSetupMode: SetupView;
   skipSetupStep: SetupView;
+  runSetupAction: SetupView;
   finishSetup: void;
   restartSetup: void;
   saveApiKey: SetupView;
