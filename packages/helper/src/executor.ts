@@ -29,6 +29,7 @@ import {
 import { Firewall, normalizeTarget } from './commands/firewall.js';
 import {
   quarantine,
+  realParentPath,
   restore,
   type QuarantineOptions,
   type QuarantineRecord,
@@ -137,13 +138,16 @@ export class Executor {
           (e) => e.kind === 'file.quarantine' && e.id === cmd.quarantineId,
           'quarantine with that id',
         );
-      case 'persistence.enable':
+      case 'persistence.enable': {
+        // The journal holds the resolved path (see resolveTarget).
+        const paths = new Set([cmd.path, realParentPath(cmd.path)]);
         return pick(
           (e) =>
             e.kind === 'persistence.disable' &&
-            (e.undo?.persistence as PersistenceRecord).quarantine.originalPath === cmd.path,
+            paths.has((e.undo?.persistence as PersistenceRecord).quarantine.originalPath),
           `disabled startup item at ${cmd.path}`,
         );
+      }
       default:
         return undefined;
     }
