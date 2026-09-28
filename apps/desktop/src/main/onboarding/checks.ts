@@ -14,8 +14,12 @@ export interface CheckResult {
 export interface Probe {
   exists(path: string): boolean;
   executable(path: string): boolean;
-  /** Run a program by absolute path with a short timeout. Never through a shell. */
-  run(file: string, args: string[]): Promise<{ code: number; stdout: string }>;
+  /** Run a program by absolute path with a timeout (default 4 s). Never through a shell. */
+  run(
+    file: string,
+    args: string[],
+    opts?: { timeoutMs?: number },
+  ): Promise<{ code: number; stdout: string; timedOut?: boolean }>;
   getJson(url: string): Promise<unknown>;
   home: string;
 }
@@ -99,8 +103,22 @@ export const CHECKS: Record<CheckId, (p: Probe) => Promise<CheckResult>> = {
   claude: async (p) => {
     const bin = which(p, 'claude');
     if (!bin) return { ok: false };
-    const r = await p.run(bin, ['auth', 'status']);
-    const signedIn = r.code === 0 && !/not (logged|signed) in|"loggedIn":\s*false/i.test(r.stdout);
+    // Claude Code can take several seconds to start, especially the first time
+    // after an update, so it gets a longer timeout than the other checks.
+    const r = await p.run(bin, ['auth', 'status', '--json'], { timeoutMs: CLAUDE_TIMEOUT_MS });
+    if (r.timedOut) {
+      return {
+        ok: false,
+        detail: `Installed, but claude auth status didn’t answer within ${CLAUDE_TIMEOUT_MS / 1000} s`,
+      };
+    }
+    let signedIn: boolean;
+    try {
+      signedIn = (JSON.parse(r.stdout) as { loggedIn?: unknown }).loggedIn === true;
+    } catch {
+      // Older versions without --json: go by the exit code and wording.
+      signedIn = r.code === 0 && !/not (logged|signed) in/i.test(r.stdout);
+    }
     return signedIn
       ? { ok: true, detail: 'Installed and signed in' }
       : { ok: false, detail: 'Installed, not signed in' };
@@ -124,11 +142,36 @@ async function ollamaModels(p: Probe): Promise<string[] | undefined> {
 }
 
 const RUN_TIMEOUT_MS = 4000;
+export const CLAUDE_TIMEOUT_MS = 15_000;
+
+/** What a checked CLI may inherit: enough to find its login and reach the network, nothing else. */
+const INHERITED_ENV = [
+  'USER',
+  'LOGNAME',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'TMPDIR',
+  'HTTPS_PROXY',
+  'HTTP_PROXY',
+  'NO_PROXY',
+  'https_proxy',
+  'http_proxy',
+  'no_proxy',
+  'NODE_EXTRA_CA_CERTS',
+  'SSL_CERT_FILE',
+] as const;
 
 export function systemProbe(home = homedir()): Probe {
   // Finder-launched apps get a minimal PATH. Vendor CLIs installed with npm
   // are node scripts, so node has to be findable too.
-  const env = { HOME: home, PATH: [...BIN_DIRS(home), '/usr/bin', '/bin'].join(':') };
+  const env: Record<string, string> = {};
+  for (const name of INHERITED_ENV) {
+    const v = process.env[name];
+    if (v !== undefined) env[name] = v;
+  }
+  env['HOME'] = home;
+  env['PATH'] = [...BIN_DIRS(home), '/usr/bin', '/bin'].join(':');
   return {
     home,
     exists: (path) => existsSync(path),
@@ -140,15 +183,15 @@ export function systemProbe(home = homedir()): Probe {
         return false;
       }
     },
-    run: (file, args) =>
+    run: (file, args, opts) =>
       new Promise((resolve) => {
         execFile(
           file,
           args,
-          { timeout: RUN_TIMEOUT_MS, maxBuffer: 256 * 1024, env },
+          { timeout: opts?.timeoutMs ?? RUN_TIMEOUT_MS, maxBuffer: 256 * 1024, env },
           (err, stdout) => {
             const code = err ? (typeof err.code === 'number' ? err.code : 1) : 0;
-            resolve({ code, stdout: String(stdout) });
+            resolve({ code, stdout: String(stdout), ...(err?.killed ? { timedOut: true } : {}) });
           },
         );
       }),

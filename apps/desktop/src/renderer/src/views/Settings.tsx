@@ -1,10 +1,11 @@
 import { useEffect } from 'react';
-import { BellRing, Wrench } from 'lucide-react';
+import { BellRing } from 'lucide-react';
 import { useLive, vigil } from '../api';
 import { useToast } from '../components/Toasts';
 import { Button, Card, SectionHead } from '../components/ui';
 import { AppearanceSection } from './Appearance';
 import { PageHead } from './AppShell';
+import { SetupPanel } from './onboarding/SetupPanel';
 
 export function SettingsView() {
   const [settings, reload] = useLive(() => vigil.getSettings());
@@ -43,23 +44,7 @@ export function SettingsView() {
           }
         />
       </Card>
-      <Card>
-        <SectionHead
-          title="Setup"
-          sub="Walk through installing protection and connecting AI again, or switch between local, cloud and both. Saved keys are kept."
-          right={
-            <Button
-              icon={<Wrench size={15} />}
-              onClick={async () => {
-                await vigil.restartSetup();
-                location.hash = 'setup';
-              }}
-            >
-              Run setup again
-            </Button>
-          }
-        />
-      </Card>
+      <SetupPanel />
       <Card>
         <SectionHead title="About" />
         <dl className="kv">

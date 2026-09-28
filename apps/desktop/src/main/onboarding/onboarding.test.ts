@@ -12,7 +12,7 @@ import { OnboardingService } from './service.js';
 function fakeMac(opts: {
   files?: string[];
   bins?: string[];
-  runs?: Record<string, { code: number; stdout: string }>;
+  runs?: Record<string, { code: number; stdout: string; timedOut?: boolean }>;
   ollama?: string[] | 'down';
 }): Probe & { runs: string[] } {
   const ran: string[] = [];
@@ -162,19 +162,31 @@ describe('checks', () => {
 
   it('tells installed-but-signed-out Claude apart from signed in', async () => {
     const bin = '/Users/me/.local/bin/claude';
-    const out = await CHECKS.claude(fakeMac({ bins: [bin] }));
-    expect(out).toEqual({ ok: false, detail: 'Installed, not signed in' });
-    const signedIn = await CHECKS.claude(
-      fakeMac({ bins: [bin], runs: { [`${bin} auth status`]: { code: 0, stdout: 'ok' } } }),
-    );
-    expect(signedIn.ok).toBe(true);
-    const json = await CHECKS.claude(
+    const status = (r: { code: number; stdout: string; timedOut?: boolean }) =>
+      CHECKS.claude(fakeMac({ bins: [bin], runs: { [`${bin} auth status --json`]: r } }));
+    expect(await CHECKS.claude(fakeMac({ bins: [bin] }))).toEqual({
+      ok: false,
+      detail: 'Installed, not signed in',
+    });
+    expect(
+      (await status({ code: 0, stdout: '{"loggedIn": true, "authMethod": "claude.ai"}' })).ok,
+    ).toBe(true);
+    expect((await status({ code: 0, stdout: '{"loggedIn": false}' })).ok).toBe(false);
+    // Versions without --json fall back to the exit code and wording.
+    expect((await status({ code: 0, stdout: 'Logged in as me@example.com' })).ok).toBe(true);
+    expect((await status({ code: 1, stdout: 'Not logged in' })).ok).toBe(false);
+  });
+
+  it('says so when Claude Code is too slow to answer, instead of calling it signed out', async () => {
+    const bin = '/opt/homebrew/bin/claude';
+    const r = await CHECKS.claude(
       fakeMac({
         bins: [bin],
-        runs: { [`${bin} auth status`]: { code: 0, stdout: '{"loggedIn": false}' } },
+        runs: { [`${bin} auth status --json`]: { code: 1, stdout: '', timedOut: true } },
       }),
     );
-    expect(json.ok).toBe(false);
+    expect(r.ok).toBe(false);
+    expect(r.detail).toContain('didn’t answer');
   });
 });
 
@@ -302,6 +314,11 @@ describe('API keys', () => {
     const { svc, keys } = service(fakeMac({}));
     const v = await svc.view();
     expect(v.keys.map((k) => k.provider)).toContain('typesafe');
+    // OpenRouter carries Jev too, so it's the one main key; TypeSafe sits under More options.
+    expect(v.keys.filter((k) => !k.more).map((k) => k.provider)).toEqual(['openrouter']);
+    expect(v.keys.find((k) => k.provider === 'typesafe')?.use).toMatch(
+      /^Not needed if you use OpenRouter/,
+    );
     svc.setKey({ provider: 'typesafe', key: 'ts-0123456789abcdef' });
     expect(keys.get('typesafe')).toEqual({ key: 'ts-0123456789abcdef' });
   });
