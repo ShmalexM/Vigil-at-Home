@@ -20,7 +20,15 @@ const NAV: { id: string; label: string; icon: ReactNode }[] = [
 
 export function AppShell({ initialRoute }: { initialRoute: string }) {
   const [route, setRoute] = useState(initialRoute);
-  useEffect(() => vigil.on('navigate', setRoute), []);
+  // Keep the hash in step with pushed navigation, so the window's URL always names its page.
+  useEffect(
+    () =>
+      vigil.on('navigate', (r) => {
+        location.hash = r;
+        setRoute(r);
+      }),
+    [],
+  );
   useEffect(() => {
     const onHash = () => setRoute(location.hash.slice(1) || 'home');
     window.addEventListener('hashchange', onHash);

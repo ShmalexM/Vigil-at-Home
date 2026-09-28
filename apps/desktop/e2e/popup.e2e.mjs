@@ -120,6 +120,14 @@ function checkPopup(label, s) {
 }
 
 try {
+  // A fresh profile opens first-run setup; finish it so the main window shows Home.
+  const first = await Promise.any([windowByHash('setup'), windowByHash('home')]);
+  if ((await first.url()).includes('#setup')) {
+    await first.evaluate(async () => {
+      await window.vigil.setSetupMode('local');
+      await window.vigil.finishSetup();
+    });
+  }
   const main = await windowByHash('home');
   await sleep(1500);
 
