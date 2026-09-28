@@ -97,9 +97,10 @@ describe('setup plan', () => {
     expect(model.commands[0]!.cmd).toBe(`ollama pull ${LOCAL_MODEL}`);
   });
 
-  it('picks a smaller model for Macs with less than 8 GB', () => {
+  it('picks a smaller model for Macs with less than 16 GB', () => {
     expect(localModelFor(4 * 1024 ** 3)).toBe(LOCAL_MODEL_SMALL);
-    expect(localModelFor(8 * 1024 ** 3)).toBe(LOCAL_MODEL);
+    expect(localModelFor(8 * 1024 ** 3)).toBe(LOCAL_MODEL_SMALL);
+    expect(localModelFor(16 * 1024 ** 3)).toBe(LOCAL_MODEL);
     const step = stepsFor('local', { localModel: LOCAL_MODEL_SMALL }).find(
       (s) => s.id === 'ollama-model',
     )!;

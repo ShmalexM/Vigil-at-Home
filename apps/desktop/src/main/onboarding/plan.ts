@@ -8,7 +8,7 @@ import type {
 
 /**
  * The small model offered for "run it on this Mac": qwen2.5:1.5b (about 1 GB)
- * with 8 GB of memory or more, qwen2.5:0.5b (about 400 MB) below that. Same
+ * with 16 GB of memory or more, qwen2.5:0.5b (about 400 MB) below that. Same
  * rule as `recommendedClassifierModel` in @vigil/ai, which replaces this once
  * that package is in the app.
  */
@@ -17,7 +17,7 @@ export const LOCAL_MODEL_SMALL = 'qwen2.5:0.5b';
 const GB = 1024 ** 3;
 
 export function localModelFor(totalMemBytes: number): string {
-  return totalMemBytes < 8 * GB ? LOCAL_MODEL_SMALL : LOCAL_MODEL;
+  return totalMemBytes < 16 * GB ? LOCAL_MODEL_SMALL : LOCAL_MODEL;
 }
 
 export interface StepCommand {
