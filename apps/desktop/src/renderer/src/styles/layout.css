@@ -201,3 +201,7 @@ body.transparent {
   font-weight: 600;
   cursor: pointer;
 }
+.setup-banner {
+  margin: 0 28px 16px;
+  max-width: 1124px;
+}
