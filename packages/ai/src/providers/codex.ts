@@ -24,6 +24,7 @@ import type {
   UsageWindow,
 } from '../types.js';
 import { JsonRpcStdio } from './jsonRpcStdio.js';
+import { isSafeBaseUrl } from './openaiCompatible.js';
 import { verifyBinary } from './verifyBinary.js';
 
 const execFileAsync = promisify(execFile);
@@ -32,7 +33,10 @@ const execFileAsync = promisify(execFile);
 export const CODEX_TESTED_VERSION = '0.157.1';
 
 const SIGN_IN_TIMEOUT_MS = 10 * 60_000;
+const SIGN_IN_CONFIRM_TRIES = 10;
+const SIGN_IN_CONFIRM_DELAY_MS = 500;
 
+const NO_API_KEY = 'Add an OpenAI API key in Setup.';
 const LINK_BROKEN =
   "Codex replaced Vigil's link to your Codex sign-in. Use your Codex sign-in again, or sign in from Vigil.";
 
@@ -79,7 +83,14 @@ export const CODEX_DISABLED_FEATURES = [
  */
 export const CODEX_MODEL = 'gpt-5.5';
 
-export function codexAppServerArgs(opts: { sharedSignIn?: boolean } = {}): string[] {
+/** The only address an OpenAI API key is sent to in apiKey mode. */
+export const CODEX_OPENAI_BASE_URL = 'https://api.openai.com/v1';
+/** The variable the key travels in, from Vigil to Codex's process only. */
+export const CODEX_API_KEY_ENV = 'VIGIL_OPENAI_API_KEY';
+
+export function codexAppServerArgs(
+  opts: { sharedSignIn?: boolean; apiKey?: boolean; apiBaseUrl?: string } = {},
+): string[] {
   const args = [
     'app-server',
     '-c',
@@ -93,6 +104,15 @@ export function codexAppServerArgs(opts: { sharedSignIn?: boolean } = {}): strin
   // A shared sign-in lives in the linked auth.json, so read it from there
   // rather than from a Keychain entry for Vigil's own folder.
   if (opts.sharedSignIn) args.push('-c', 'cli_auth_credentials_store="file"');
+  // An API key goes to OpenAI through a provider of Vigil's own, read from the
+  // environment Vigil gives Codex. Codex never stores it, and no sign-in is used.
+  if (opts.apiKey)
+    args.push(
+      '-c',
+      'model_provider="vigil_openai"',
+      '-c',
+      `model_providers.vigil_openai={ name = "OpenAI", base_url = "${opts.apiBaseUrl ?? CODEX_OPENAI_BASE_URL}", env_key = "${CODEX_API_KEY_ENV}", wire_api = "responses" }`,
+    );
   for (const feature of CODEX_DISABLED_FEATURES) args.push('--disable', feature);
   return args;
 }
@@ -189,16 +209,43 @@ interface CodexNotificationParams {
   };
 }
 
+/**
+ * OpenAI's published standard price for CODEX_MODEL, in US dollars per million
+ * tokens (developers.openai.com/api/docs/models/gpt-5.5, 2026-09-28). Prompts
+ * over 272K input tokens cost 2x input and 1.5x output. Recheck with CODEX_MODEL.
+ */
+export const CODEX_API_PRICE_PER_MTOK = { input: 5, cachedInput: 0.5, output: 30 } as const;
+const LONG_PROMPT_TOKENS = 272_000;
+
+/** What an API-key run cost, from the token counts Codex reports. */
+export function codexApiCostUsd(u: {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+}): number {
+  const long = u.inputTokens + u.cachedInputTokens > LONG_PROMPT_TOKENS;
+  const p = CODEX_API_PRICE_PER_MTOK;
+  return (
+    ((u.inputTokens * p.input + u.cachedInputTokens * p.cachedInput) * (long ? 2 : 1) +
+      u.outputTokens * p.output * (long ? 1.5 : 1)) /
+    1_000_000
+  );
+}
+
 /** Codex reports cached input inside inputTokens; Vigil keeps the two apart. */
 function runUsageFromCodex(
   total: NonNullable<CodexNotificationParams['tokenUsage']>['total'],
+  apiKey: boolean,
 ): RunUsage {
-  return {
+  const tokens = {
     inputTokens: Math.max(0, total.inputTokens - total.cachedInputTokens),
     cachedInputTokens: total.cachedInputTokens,
     outputTokens: total.outputTokens,
-    // A ChatGPT plan has no per-token price.
-    costUsd: null,
+  };
+  return {
+    ...tokens,
+    // A ChatGPT plan has no per-token price; an API key pays OpenAI's list price.
+    costUsd: apiKey ? codexApiCostUsd(tokens) : null,
     model: CODEX_MODEL,
   };
 }
@@ -209,10 +256,27 @@ export interface CodexAdapterOptions {
   readonly pins: PinStore;
   /** The user's everyday Codex folder, for offering its sign-in. Default ~/.codex. */
   readonly userCodexHome?: string;
+  /** "subscription" (default) uses a ChatGPT sign-in. "apiKey" uses an OpenAI API key. */
+  readonly mode?: 'subscription' | 'apiKey';
+  /** Only used in apiKey mode. Reads the OpenAI key from the Keychain at run time. */
+  readonly getApiKey?: () => Promise<string | undefined>;
+  /** Tests only: a local stand-in for api.openai.com. Settings never set this. */
+  readonly apiBaseUrl?: string;
 }
 
 export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapter {
+  if (options.apiBaseUrl && !isSafeBaseUrl(options.apiBaseUrl))
+    throw new Error('The API address must be https or on this Mac.');
+  const apiKeyMode = options.mode === 'apiKey';
   const env = () => buildChildEnv({ CODEX_HOME: options.codexHome });
+  /** The environment for the app server; undefined in apiKey mode when no key is saved. */
+  async function serverEnv(): Promise<Record<string, string> | undefined> {
+    if (!apiKeyMode) return env();
+    const key = await options.getApiKey?.();
+    return key
+      ? buildChildEnv({ CODEX_HOME: options.codexHome, [CODEX_API_KEY_ENV]: key })
+      : undefined;
+  }
 
   async function connect(
     binaryPath: string,
@@ -220,11 +284,17 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
     handlers: ConstructorParameters<typeof JsonRpcStdio>[4],
   ) {
     await mkdir(options.codexHome, { recursive: true, mode: 0o700 });
-    const sharedSignIn = await isCodexSignInShared(options.codexHome);
+    const sharedSignIn = !apiKeyMode && (await isCodexSignInShared(options.codexHome));
+    const childEnv = await serverEnv();
+    if (!childEnv) throw new Error(NO_API_KEY);
     const rpc = new JsonRpcStdio(
       binaryPath,
-      codexAppServerArgs({ sharedSignIn }),
-      env(),
+      codexAppServerArgs({
+        sharedSignIn,
+        apiKey: apiKeyMode,
+        ...(options.apiBaseUrl ? { apiBaseUrl: options.apiBaseUrl } : {}),
+      }),
+      childEnv,
       cwd,
       handlers,
     );
@@ -243,6 +313,28 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
     async probe(): Promise<ProviderStatus> {
       const binary = await verifyBinary('codex', 'codex', options.pins, options.executablePath);
       if (binary.state !== 'ok') return { provider: 'codex', state: binary.state };
+      if (apiKeyMode) {
+        if (!(await serverEnv()))
+          return { provider: 'codex', state: 'needs_setup', detail: NO_API_KEY };
+        try {
+          const { stdout } = await execFileAsync(binary.path, ['--version'], {
+            env: env(),
+            timeout: 15_000,
+          });
+          return {
+            provider: 'codex',
+            state: 'ready',
+            version: stdout.trim(),
+            account: 'OpenAI API key',
+          };
+        } catch (error) {
+          return {
+            provider: 'codex',
+            state: 'error',
+            detail: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }
       if (await isCodexSignInLinkBroken(options.codexHome))
         return {
           provider: 'codex',
@@ -303,6 +395,7 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
      * could then call.
      */
     async signIn(): Promise<SignInFlow> {
+      if (apiKeyMode) throw new Error('Codex is set to use an OpenAI API key.');
       const binary = await verifyBinary('codex', 'codex', options.pins, options.executablePath);
       if (binary.state !== 'ok') throw new Error(`Codex: ${binary.state}`);
       let settle!: (ok: boolean) => void;
@@ -315,9 +408,26 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
         onNotification(method, params) {
           const p = params as { success?: boolean; loginId?: string | null };
           if (method === 'account/login/completed' && (!p.loginId || p.loginId === loginId))
-            settle(p.success === true);
+            void (p.success === true ? confirmSignedIn() : Promise.resolve(false)).then(settle);
         },
       });
+      /**
+       * The browser saying "Signed in" isn't enough: report success only once
+       * this Codex home reads back an account, so the app never shows a sign-in
+       * that didn't stick. Waits a little for Codex to finish saving it.
+       */
+      async function confirmSignedIn(): Promise<boolean> {
+        for (let i = 0; i < SIGN_IN_CONFIRM_TRIES; i++) {
+          try {
+            const { account } = await rpc.request<{ account: unknown }>('account/read', {});
+            if (account) return true;
+          } catch {
+            // Try again below.
+          }
+          await new Promise((r) => setTimeout(r, SIGN_IN_CONFIRM_DELAY_MS));
+        }
+        return false;
+      }
       const timer = setTimeout(() => settle(false), SIGN_IN_TIMEOUT_MS);
       void completed.then(() => {
         clearTimeout(timer);
@@ -345,6 +455,8 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
 
     /** The plan's windows, from Codex's own documented account calls. No model is called. */
     async readUsage(): Promise<PlanUsage | undefined> {
+      // An API key has no plan windows.
+      if (apiKeyMode) return undefined;
       const binary = await verifyBinary('codex', 'codex', options.pins, options.executablePath);
       if (binary.state !== 'ok') return undefined;
       let rpc: JsonRpcStdio | undefined;
@@ -375,7 +487,8 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
 
     async run(input: AdapterRunInput): Promise<AdapterRunOutput> {
       const audit: ToolAudit = { called: [], denied: [] };
-      if (await isCodexSignInLinkBroken(options.codexHome))
+      if (apiKeyMode && !(await serverEnv())) return { kind: 'error', message: NO_API_KEY, audit };
+      if (!apiKeyMode && (await isCodexSignInLinkBroken(options.codexHome)))
         return { kind: 'error', message: LINK_BROKEN, audit };
       const binary = await verifyBinary('codex', 'codex', options.pins, options.executablePath);
       if (binary.state !== 'ok') return { kind: 'error', message: `Codex: ${binary.state}`, audit };
@@ -432,7 +545,7 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
                 lastMessage = item.text;
               else if (FORBIDDEN_ITEMS.has(item.type)) audit.denied.push(`item: ${item.type}`);
             } else if (method === 'thread/tokenUsage/updated' && p.tokenUsage) {
-              usage = runUsageFromCodex(p.tokenUsage.total);
+              usage = runUsageFromCodex(p.tokenUsage.total, apiKeyMode);
             } else if (method === 'account/rateLimits/updated') {
               usageFromSnapshot(p.rateLimits ?? {}).forEach(input.onUsage);
             } else if (method === 'error') {

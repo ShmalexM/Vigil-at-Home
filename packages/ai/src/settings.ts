@@ -30,6 +30,11 @@ export interface AiSettings {
   };
   readonly codex: {
     readonly enabled: boolean;
+    /**
+     * "subscription" uses a ChatGPT sign-in (Vigil's own, or the user's shared one).
+     * "apiKey" uses an OpenAI API key from the Keychain, sent only to api.openai.com.
+     */
+    readonly mode?: 'subscription' | 'apiKey';
     readonly executablePath?: string;
     /**
      * Vigil's own Codex home, so the user's config, MCP servers and plugins never

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, readlink, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, readFile, readdir, readlink, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createRequire } from 'node:module';
@@ -19,7 +19,9 @@ import {
 import { memoryPinStore } from '../executable.js';
 import {
   CODEX_DISABLED_FEATURES,
+  CODEX_API_KEY_ENV,
   CODEX_MODEL,
+  codexApiCostUsd,
   codexAppServerArgs,
   createCodexAdapter,
   codexThreadStartParams,
@@ -331,6 +333,117 @@ describe.skipIf(!bundledClaude() || !bundledCodex())('Plan usage from the real C
     expect(await claude.readUsage!()).toBeUndefined();
     expect(await codex.readUsage!()).toBeUndefined();
     expect(Date.now() - started).toBeLessThan(40_000);
+  }, 60_000);
+});
+
+describe('Codex with an OpenAI API key', () => {
+  it('sends the key only through the environment, to OpenAI', () => {
+    const args = codexAppServerArgs({ apiKey: true }).join(' ');
+    expect(args).toContain('model_provider="vigil_openai"');
+    expect(args).toContain('base_url = "https://api.openai.com/v1"');
+    expect(args).toContain(`env_key = "${CODEX_API_KEY_ENV}"`);
+    expect(codexAppServerArgs().join(' ')).not.toContain('vigil_openai');
+  });
+
+  it("prices a run at OpenAI's list price for the model", () => {
+    expect(
+      codexApiCostUsd({ inputTokens: 100_000, cachedInputTokens: 100_000, outputTokens: 10_000 }),
+    ).toBeCloseTo(0.1 * 5 + 0.1 * 0.5 + 0.01 * 30);
+    // Over 272K input tokens: 2x input, 1.5x output.
+    expect(
+      codexApiCostUsd({ inputTokens: 300_000, cachedInputTokens: 0, outputTokens: 100_000 }),
+    ).toBeCloseTo(0.3 * 5 * 2 + 0.1 * 30 * 1.5);
+  });
+
+  it('refuses a stand-in address that is neither https nor on this Mac', () => {
+    expect(() =>
+      createCodexAdapter({
+        codexHome: '/tmp/x',
+        pins: memoryPinStore(),
+        mode: 'apiKey',
+        apiBaseUrl: 'http://example.com/v1',
+      }),
+    ).toThrow();
+  });
+});
+
+describe.skipIf(!bundledCodex())('Codex with an OpenAI API key, real binary', () => {
+  it('asks for a key when none is saved, and has no sign-in', async () => {
+    const adapter = createCodexAdapter({
+      codexHome: await tempDir('vigil-codex-key-'),
+      pins: memoryPinStore(),
+      executablePath: bundledCodex()!,
+      mode: 'apiKey',
+      getApiKey: async () => undefined,
+    });
+    expect(await adapter.probe()).toMatchObject({ state: 'needs_setup' });
+    await expect(adapter.signIn!()).rejects.toThrow();
+  }, 60_000);
+
+  it("runs with the key, Vigil's model and Vigil's tools only, and never stores the key", async () => {
+    const requests: Array<{
+      url?: string;
+      auth?: string;
+      model?: string;
+      tools?: Array<{ name?: string; type: string }>;
+      input?: Array<{ type?: string; tools?: unknown[] }>;
+    }> = [];
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        requests.push({
+          ...(body ? JSON.parse(body) : {}),
+          url: req.url,
+          auth: req.headers.authorization,
+        });
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end('{"error":{"message":"test server"}}');
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const { port } = server.address() as AddressInfo;
+    const codexHome = await tempDir('vigil-codex-key-run-');
+    try {
+      const adapter = createCodexAdapter({
+        codexHome,
+        pins: memoryPinStore(),
+        executablePath: bundledCodex()!,
+        mode: 'apiKey',
+        getApiKey: async () => 'sk-test-vigil',
+        apiBaseUrl: `http://127.0.0.1:${port}/v1`,
+      });
+      expect(await adapter.probe()).toMatchObject({ state: 'ready' });
+      const out = await adapter.run({
+        systemPrompt: 's',
+        userPrompt: 'u',
+        jsonSchema: schema,
+        tools: [getFinding],
+        signal: AbortSignal.timeout(60_000),
+        onUsage: () => {},
+      });
+      expect(out.kind).toBe('error');
+      const sent = requests.filter((r) => r.url === '/v1/responses');
+      expect(sent.length).toBeGreaterThan(0);
+      for (const r of sent) {
+        expect(r.auth).toBe('Bearer sk-test-vigil');
+        expect(r.model).toBe(CODEX_MODEL);
+        expect((r.tools ?? []).map((t) => t.name ?? t.type)).toEqual(['get_finding']);
+        expect((r.input ?? []).flatMap((i) => i.tools ?? [])).toEqual([]);
+      }
+      // Nothing in Vigil's Codex folder holds the key.
+      for (const name of await readdir(codexHome, { recursive: true })) {
+        const path = join(codexHome, name);
+        // Codex's own databases come and go while it shuts down.
+        const text = await lstat(path)
+          .then((st) => (st.isFile() ? readFile(path, 'utf8') : ''))
+          .catch(() => '');
+        expect(text).not.toContain('sk-test-vigil');
+      }
+      expect(existsSync(join(codexHome, 'auth.json'))).toBe(false);
+    } finally {
+      server.close();
+    }
   }, 60_000);
 });
 
