@@ -122,15 +122,6 @@ jobs:
         if: always() && steps.sensors.outputs.yes == 'true'
         working-directory: apps/desktop
         run: sudo -E env "PATH=$PATH" node perf/sensors.mjs perf-results
-      - name: TEMP classifier batch cost
-        if: always()
-        working-directory: apps/desktop
-        run: |
-          brew install ollama
-          (ollama serve > /tmp/ollama.log 2>&1 &)
-          sleep 5
-          ollama pull qwen2.5:0.5b && ollama pull qwen2.5:1.5b
-          node perf/classifier-temp.mjs qwen2.5:0.5b qwen2.5:1.5b
       - uses: actions/upload-artifact@v4
         if: always()
         with:

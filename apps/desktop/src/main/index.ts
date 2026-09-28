@@ -38,6 +38,8 @@ function start(): void {
   registerIpc(core, windows);
   windows.createTray();
   windows.applyTheme(core.theme());
+  // After start-up settles, so the menu-bar item appears first.
+  setTimeout(() => windows.prewarmPopover(), 2000);
 
   const refresh = () => {
     windows.setNeedsYou(core.status().needsYou);

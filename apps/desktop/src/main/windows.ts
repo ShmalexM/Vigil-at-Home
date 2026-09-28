@@ -7,12 +7,12 @@ import type { Pushes, ThemePref } from '../shared/ipc.js';
 const POPOVER = { width: 380, height: 540 };
 const POPUP = { width: 420, height: 400 };
 /**
- * Each window's page is a renderer process (60 to 120 MB). Hidden ones are
- * closed after this long, so a menu-bar app that sits idle all day holds
- * only the main process. Reopening then takes a few hundred ms instead of a
- * few ms, which is why the popover waits longer than the rare popup.
+ * Each window's page is a renderer process (30 to 80 MB on macOS). The main
+ * window's goes when it closes and a hidden popup's after a minute, so an
+ * idle menu-bar app holds little. The popover is the exception: it is loaded at start-up and kept,
+ * because a cold open measured 1 to 2 seconds on CI Macs and a warm one
+ * 10 to 60 ms (docs/performance.md).
  */
-const RELEASE_POPOVER_MS = 5 * 60 * 1000;
 const RELEASE_POPUP_MS = 60 * 1000;
 
 /** Where renderer pages are served from, for loading and for checking IPC senders. */
@@ -77,6 +77,19 @@ export class Windows {
       this.popover.hide();
       return;
     }
+    this.popover = this.loadPopover();
+    const pos = popoverPosition(this.tray?.getBounds());
+    this.popover.setPosition(pos.x, pos.y, false);
+    this.popover.show();
+    this.popover.focus();
+  }
+
+  /** Load the popover without showing it, so the first click opens it at once. */
+  prewarmPopover(): void {
+    this.popover = this.loadPopover();
+  }
+
+  private loadPopover(): BrowserWindow {
     if (!this.popover || this.popover.isDestroyed()) {
       this.popover = secure(
         new BrowserWindow({
@@ -95,13 +108,9 @@ export class Windows {
         }),
       );
       this.popover.on('blur', () => this.popover?.hide());
-      this.releaseWhenHidden(this.popover, RELEASE_POPOVER_MS);
       load(this.popover, 'popover');
     }
-    const pos = popoverPosition(this.tray?.getBounds());
-    this.popover.setPosition(pos.x, pos.y, false);
-    this.popover.show();
-    this.popover.focus();
+    return this.popover;
   }
 
   openMain(route = 'home'): void {
@@ -211,10 +220,9 @@ export class Windows {
     });
   }
 
-  /** Close every hidden popover or popup now (what the timers do after a while). */
+  /** Close the popup now if hidden (what its timer does after a while). */
   releaseHidden(): void {
-    for (const win of [this.popover, this.popup])
-      if (win && !win.isDestroyed() && !win.isVisible()) win.close();
+    for (const win of [this.popup]) if (win && !win.isDestroyed() && !win.isVisible()) win.close();
   }
 
   broadcast<K extends keyof Pushes>(channel: K, ...args: Pushes[K]): void {

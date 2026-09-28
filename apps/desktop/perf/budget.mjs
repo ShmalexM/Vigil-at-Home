@@ -11,7 +11,7 @@ const LIMITS = {
   'idle.cpuPct': { target: 0.5, hard: 3, label: 'Idle CPU (% of one core)', unit: '%' },
   'idle.wakeupsPerS': { target: 5, hard: 40, label: 'Idle wakeups', unit: '/s' },
   'idle.memMb': { target: 180, hard: 350, label: 'Idle memory, nothing open', unit: 'MB' },
-  'popover.coldMs': { target: 800, hard: 3000, label: 'Popover, first open', unit: 'ms' },
+  'popover.coldMs': { target: 800, hard: 3000, label: 'Popover, first click', unit: 'ms' },
   'popover.warmMs': { target: 150, hard: 600, label: 'Popover, reopen', unit: 'ms' },
   'window.memMb': { target: 400, hard: 700, label: 'Memory, main window open', unit: 'MB' },
   'closed.memMb': { target: 200, hard: 400, label: 'Memory after windows close', unit: 'MB' },
