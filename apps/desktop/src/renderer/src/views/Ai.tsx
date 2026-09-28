@@ -20,6 +20,7 @@ const MARK: Record<AiProviderView['state'], MarkState> = {
   not_installed: 'pending',
   binary_changed: 'warn',
   needs_setup: 'warn',
+  optional: 'pending',
   disabled: 'pending',
   paused_by_vigil: 'pending',
   error: 'failed',
@@ -31,6 +32,7 @@ const STATE_TEXT: Record<AiProviderView['state'], string> = {
   not_installed: 'Not installed',
   binary_changed: 'Program changed since setup',
   needs_setup: 'Not set up',
+  optional: 'Optional',
   disabled: 'Off',
   paused_by_vigil: 'Paused by a Vigil update',
   error: 'Not working',
@@ -206,7 +208,12 @@ export function AiSection() {
 function describe(p: AiProviderView, view: AiView): string {
   const parts: string[] = [STATE_TEXT[p.state]];
   if (p.provider === 'api' && view.api) parts.push(`${view.api.name} key ending ${view.api.last4}`);
-  if (p.provider === 'api' && !view.api) parts.push('Add an OpenRouter or OpenAI key in Setup');
+  if (p.provider === 'api' && !view.api)
+    parts.push(
+      view.jevVia === 'typesafe'
+        ? 'Your TypeSafe key covers only Jev. An OpenRouter key in Setup would cover this and Jev'
+        : 'Add an OpenRouter or OpenAI key in Setup to use it',
+    );
   if (p.signInShared) parts.push('Using your own Codex sign-in');
   if (p.account) parts.push(p.account);
   if (p.version) parts.push(p.version);

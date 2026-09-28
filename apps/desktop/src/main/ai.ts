@@ -266,9 +266,10 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
     const statuses = await this.ai().status();
     const shared = await isCodexSignInShared(settings.codex.codexHome);
     const providers: AiProviderView[] = statuses.map((s) =>
-      // With no key the API is off in the runner, but to the user it's waiting on a key.
+      // With no key the API is off in the runner. Other apps explain alerts without it,
+      // so to the user it's an optional extra, not a problem.
       s.provider === 'api' && !this.apiConnection() && this.prefs().api && settings.mode !== 'local'
-        ? providerView({ provider: 'api', state: 'needs_setup' }, shared)
+        ? { ...providerView({ provider: 'api', state: 'disabled' }, shared), state: 'optional' }
         : providerView(s, shared),
     );
     // Jev isn't a runner provider; it rides on the keys.
