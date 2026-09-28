@@ -83,29 +83,23 @@ export type ClassifyResult =
     };
 
 const Output = z.strictObject({
-  flagged: z.array(
-    z.strictObject({
-      key: z.string(),
-      label: z.enum(['unusual', 'suspicious']),
-      reason: z.string(),
-    }),
-  ),
+  suspicious: z.array(z.string()),
+  unusual: z.array(z.string()),
 });
 
-// Output tokens are nearly all of a small model's time on a CPU, so the answer
-// names only the events worth a look, by short key, with a reason only when
-// suspicious. Everything not listed is benign.
+// Output tokens are nearly all of a small model's time on a CPU, and a small
+// model writing prose runs long and breaks its JSON. So the answer is just two
+// lists of short keys; everything not listed is benign.
 const INSTRUCTIONS = [
   "Each line in the data is one event from this Mac, starting with its key (e1, e2...). Vigil's rules did not match these events.",
-  'Most are normal. List only the events that are not: "unusual" for something a careful person might want to glance at,',
-  '"suspicious" for activity that looks like malware or an attacker (hidden or unsigned programs in odd places,',
-  'new login items, reading browser or keychain data, connections to strange hosts, listening ports).',
-  'For suspicious events give a reason of at most 8 words; for unusual ones leave the reason empty.',
-  'If nothing stands out, return an empty list.',
+  'Most are normal. Put the key of each event that looks like malware or an attacker in "suspicious"',
+  '(hidden or unsigned programs in odd places, new login items, reading browser or keychain data,',
+  'connections to strange hosts, listening ports), and the key of each event a careful person might',
+  'want to glance at in "unusual". Leave both lists empty if nothing stands out.',
   // Small models follow an example far better than a description.
-  'Example: for the lines "e1 process started /usr/bin/git [apple] parent=/bin/zsh" and',
-  '"e2 process started /private/tmp/.u/update [unsigned] parent=/bin/bash" the answer is',
-  '{"flagged":[{"key":"e2","label":"suspicious","reason":"unsigned program in hidden temp folder"}]}.',
+  'Example: for "e1 process started /usr/bin/git [apple] parent=/bin/zsh" and',
+  '"e2 process started /private/tmp/.u/update [unsigned] parent=/bin/bash"',
+  'the answer is {"suspicious":["e2"],"unusual":[]}.',
 ].join(' ');
 
 const SCORE = { benign: 0, unusual: 0.5, suspicious: 0.9 } as const;
@@ -251,17 +245,19 @@ export function createEventClassifier(options: EventClassifierOptions) {
           ...(result.detail ? { detail: result.detail } : { detail: result.reason }),
         };
 
-      for (const f of result.value.flagged) {
-        const id = keyOf.get(f.key);
-        if (!id || labels.has(id)) continue;
-        labels.set(id, {
-          eventId: id,
-          label: f.label,
-          score: SCORE[f.label],
-          reason: f.label === 'suspicious' ? f.reason.slice(0, 200) : '',
-          by: 'model',
-        });
-      }
+      // Suspicious first, so a key in both lists keeps the stronger label.
+      for (const label of ['suspicious', 'unusual'] as const)
+        for (const key of result.value[label]) {
+          const id = keyOf.get(key.trim());
+          if (!id || labels.has(id)) continue;
+          labels.set(id, {
+            eventId: id,
+            label,
+            score: SCORE[label],
+            reason: `Local model: ${label}`,
+            by: 'model',
+          });
+        }
       for (const id of ids)
         if (!labels.has(id))
           labels.set(id, { eventId: id, label: 'benign', score: 0, reason: '', by: 'model' });

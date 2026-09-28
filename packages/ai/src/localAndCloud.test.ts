@@ -315,10 +315,8 @@ describe('event labelling with a small local model', () => {
         return {
           kind: 'ok',
           json: {
-            flagged: [
-              { key: 'e1', label: 'suspicious', reason: 'hidden unsigned program' },
-              { key: 'e9', label: 'suspicious', reason: 'made up' },
-            ],
+            suspicious: ['e1', 'e9'],
+            unusual: ['e1'],
           },
           audit: audit(),
         };
@@ -347,7 +345,7 @@ describe('event labelling with a small local model', () => {
           eventId: 'evt-a',
           label: 'suspicious',
           score: 0.9,
-          reason: 'hidden unsigned program',
+          reason: 'Local model: suspicious',
           by: 'model',
         },
         { eventId: 'evt-b', label: 'benign', score: 0, reason: '', by: 'model' },
@@ -365,7 +363,7 @@ describe('event labelling with a small local model', () => {
   });
 
   it('waits when the Mac is busy or the hourly budget is spent', async () => {
-    const ollama = ready('ollama', { flagged: [] });
+    const ollama = ready('ollama', { suspicious: [], unusual: [] });
     const runner = createAiRunner({
       settings: { ...defaultAiSettings('/tmp/v'), order: ['ollama'] },
       adapters: [ollama],
@@ -400,7 +398,7 @@ describe('event labelling with a small local model', () => {
       probe: async () => ({ provider: 'ollama', state: 'ready' }),
       run: async () => {
         now += 20_000; // 20 s wall on 2 threads = 40 CPU-seconds
-        return { kind: 'ok', json: { flagged: [] }, audit: audit() };
+        return { kind: 'ok', json: { suspicious: [], unusual: [] }, audit: audit() };
       },
     };
     const classifier = createEventClassifier({
@@ -430,7 +428,7 @@ describe('event labelling with a small local model', () => {
       probe: async () => ({ provider: 'claude', state: 'ready' }),
       run: async () => {
         now += 60_000;
-        return { kind: 'ok', json: { flagged: [] }, audit: audit() };
+        return { kind: 'ok', json: { suspicious: [], unusual: [] }, audit: audit() };
       },
     };
     const classifier = createEventClassifier({
@@ -563,7 +561,8 @@ describe('Jev as the event labeller', () => {
     ] as const) {
       const { f, calls } = jevFetch(jevReply, status);
       const local = ready('ollama', {
-        flagged: [{ key: 'e1', label: 'unusual', reason: '' }],
+        suspicious: [],
+        unusual: ['e1'],
       });
       const classifier = createEventClassifier({
         jev: createJevClient({ getApiKey: async () => 'k', log: { record: () => {} }, fetch: f }),
