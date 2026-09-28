@@ -26,6 +26,16 @@ describe('helper install', () => {
     expect(helperBundleDir(res)).toBe(dir);
   });
 
+  it('lets a development build use the helper pnpm build:helper made', () => {
+    const empty = mkdtempSync(join(tmpdir(), 'empty-'));
+    const { dir: dev } = bundle();
+    expect(helperBundleDir(empty, dev)).toBe(dev);
+    expect(helperBundleDir(empty, join(empty, 'missing'))).toBeNull();
+    // A packaged app always installs the copy it carries.
+    const { res, dir } = bundle();
+    expect(helperBundleDir(res, dev)).toBe(dir);
+  });
+
   it('gives a Terminal command that survives spaces and quotes in the path', () => {
     const { dir } = bundle();
     const cmd = helperInstallCommand(dir)!;
