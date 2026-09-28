@@ -27,10 +27,20 @@ jobs:
   ollama:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Small enough for a CPU runner, supports tool calls, and doesn't spend time thinking.
+          - model: qwen2.5:1.5b
+            tests: packages/ai/src/live
+          # What Macs under 16 GB label events with; it only labels, so only that test runs.
+          - model: qwen2.5:0.5b
+            tests: packages/ai/src/live/classifier.test.ts
+    name: ollama (${{ matrix.model }})
     env:
       VIGIL_LIVE_PROVIDERS: ollama
-      # Small enough for a CPU runner, supports tool calls, and doesn't spend time thinking.
-      VIGIL_OLLAMA_MODEL: qwen2.5:1.5b
+      VIGIL_OLLAMA_MODEL: ${{ matrix.model }}
       OLLAMA_MODELS: /home/runner/.ollama-models
     steps:
       - uses: actions/checkout@v5
@@ -52,7 +62,7 @@ jobs:
           nohup ollama serve > "$RUNNER_TEMP/ollama.log" 2>&1 &
           for _ in $(seq 1 30); do curl -sf http://127.0.0.1:11434/api/version && break; sleep 1; done
           ollama pull "$VIGIL_OLLAMA_MODEL"
-      - run: pnpm --filter @vigil/ai test:live
+      - run: pnpm exec vitest run ${{ matrix.tests }}
       - name: Ollama log
         if: failure()
         run: tail -n 100 "$RUNNER_TEMP/ollama.log"

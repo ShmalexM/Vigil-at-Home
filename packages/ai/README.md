@@ -67,7 +67,23 @@ Binaries are found by absolute path (including the usual Homebrew and `~/.local/
 
 `ai.spending(log)` builds the spending page's data from the prompt log the app keeps: each plan's limit windows with the part Vigil used, and Vigil's own runs per day by provider and job, with tokens and Claude Code's cost estimate. Plan windows come from the vendors' own CLIs (Claude Code's usage call, which the SDK marks experimental, and Codex's `account/rateLimits/read`), so Vigil never touches a login. Only Vigil's runs are counted; the user's other conversations with these tools are never read.
 
-In API-key mode, `quota.apiKeyMonthlyCapUsd` stops Claude once `spentThisMonthUsd` (supplied by the app from its log) reaches the cap.
+`quota.apiKeyMonthlyCapUsd` stops the paid options (the API connection, and Claude in API-key mode) once `spentThisMonthUsd` (supplied by the app from its log) reaches the cap.
+
+## Local, cloud or both
+
+`settings.mode` decides where event data may go. `local` keeps everything on this Mac (Ollama only). `cloud` uses signed-in apps and the API connection and never Ollama. `both` (the default) uses whichever is ready, in `settings.order`.
+
+### The API connection
+
+`settings.api` points at any OpenAI-compatible endpoint: OpenRouter is the first preset, then OpenAI and a custom URL. The key comes from the app through `getApiKey()` (the app keeps it in the Keychain) and is only ever sent over https, or plain http to this Mac. The model gets Vigil's read-only tools as function calls, which Vigil runs itself; any other tool name gets "Not allowed.". Answers use a strict JSON schema. OpenRouter's reported cost goes into the spending page, and a 402 or 429 counts as quota. `ai.listApiModels()` lists the endpoint's models for setup.
+
+### Labelling events with a small local model
+
+`ai.classifier.classify(events)` sends a batch of events that rules and baselines didn't already explain to a small Ollama model, one short line per event under a short key (e1, e2...). The model answers with just two lists of keys, suspicious and unusual; everything else is benign. Output tokens are nearly all of a small model's time on a CPU, so keeping the answer short is what keeps it cheap. It is advisory only and never blocks or releases anything. A small local model's labels are hints with score 0, so they tag events without reordering the feed (in a 20-event test qwen2.5:1.5b caught the planted program but also flagged 10 of 19 Apple binaries); labels from cloud providers or Jev carry a score that ranks the feed. The model is picked for the Mac's memory (`recommendedClassifierModel`: 0.5B below 16 GB, 1.5B from 16 GB), uses half the cores and unloads after a minute. The local model may use `classifier.maxCpuSecondsPerHour` of CPU (72 s, 2% of one core; each batch is charged its wall time times its threads, so a slow Mac simply does fewer batches), batches are also capped per hour wherever they run, labelling waits while `isBusy()` says the Mac is busy, and skipped ids come back for retry. Every batch is in the prompt log, which the activity feed can show. In cloud mode the classifier uses the cloud providers instead.
+
+### Jev (TypeSafe)
+
+Outside local mode, batches go to TypeSafe's Jev first when a key can reach it: a TypeSafe key (`getJevApiKey`), or else the OpenRouter key of the API connection, since OpenRouter carries Jev (beta, `POST https://openrouter.ai/api/alpha/decisions`, model `~typesafe/jev-latest`, same questions and answers, cost reported by OpenRouter). The OpenRouter key goes only to that fixed URL, and another API's key never reaches Jev. Jev is a cloud-only "System One" model: it answers typed questions with calibrated probabilities in about 70 to 500 ms, costs $0.042 per million input tokens with free output, and has no weights to run locally. Vigil sends one request per batch (`POST /v1/systemone`), with the event lines as the state and one Choice question per event (benign, unusual, suspicious). The score is P(suspicious) + P(unusual)/2 and the reason gives Jev's probability and confidence. Jev gets no tools and no prompt it could follow; it can only pick one of the three labels. If Jev has no key, refuses it, is overloaded (429/529) or the monthly cap is spent, the batch goes to the local model (or the cloud providers in cloud mode). Its calls are in the prompt log and on the spending page like every other. TypeSafe says it doesn't train on API data; zero retention is enterprise-only, so event lines (paths, hosts) are kept under their normal policy.
 
 ## Quota
 

@@ -128,13 +128,17 @@ export function runUsageFromResult(
   let cachedInputTokens = 0;
   let outputTokens = 0;
   let costUsd = 0;
+  // Claude Code can use a second, smaller model for housekeeping; name the one that wrote most.
+  const [model] = Object.entries(message.modelUsage ?? {}).sort(
+    ([, a], [, b]) => b.outputTokens - a.outputTokens,
+  )[0]!;
   for (const m of models) {
     inputTokens += m.inputTokens + m.cacheCreationInputTokens;
     cachedInputTokens += m.cacheReadInputTokens;
     outputTokens += m.outputTokens;
     costUsd += m.costUSD;
   }
-  return { inputTokens, cachedInputTokens, outputTokens, costUsd };
+  return { inputTokens, cachedInputTokens, outputTokens, costUsd, model };
 }
 
 type ClaudeRateLimits = NonNullable<SDKControlGetUsageResponse['rate_limits']>;

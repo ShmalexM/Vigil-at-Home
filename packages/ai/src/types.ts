@@ -1,9 +1,16 @@
 import type { z } from 'zod';
 
-export type ProviderId = 'claude' | 'codex' | 'ollama';
+/** `api` is any OpenAI-style API (OpenRouter, OpenAI, a self-hosted gateway) with the user's own key. */
+export type ProviderId = 'claude' | 'codex' | 'ollama' | 'api' | 'jev';
 
-/** "explain": the text behind a popup. "analyze": out-of-band work such as proposing rules. */
-export type Purpose = 'explain' | 'analyze';
+/** Local providers run on this Mac; cloud ones send the (redacted) data off it. */
+export const LOCAL_PROVIDERS: readonly ProviderId[] = ['ollama'];
+
+/**
+ * "explain": the text behind a popup. "analyze": out-of-band work such as proposing rules.
+ * "classify": labelling a batch of events a rule didn't already explain.
+ */
+export type Purpose = 'explain' | 'analyze' | 'classify';
 
 /** "now" runs immediately. "background" waits for quota headroom and may be skipped. */
 export type Urgency = 'now' | 'background';
@@ -31,6 +38,8 @@ export interface RunRequest<T> {
   /** Optional read-only tools. None by default. */
   readonly tools?: readonly ReadTool[];
   readonly deadlineMs: number;
+  /** Only these providers, in the usual order. Default: all the settings allow. */
+  readonly providers?: readonly ProviderId[];
 }
 
 export type RunFailureReason = 'quota' | 'timeout' | 'invalid_output' | 'no_provider' | 'error';
@@ -49,6 +58,7 @@ export type ProviderState =
   | 'needs_sign_in'
   | 'not_installed'
   | 'binary_changed'
+  | 'needs_setup'
   | 'disabled'
   | 'paused_by_vigil'
   | 'error';
@@ -102,6 +112,8 @@ export interface RunUsage {
    * where there is no per-token price: a ChatGPT plan, or a local model.
    */
   readonly costUsd: number | null;
+  /** The model that answered, as the vendor names it, when the adapter knows it. */
+  readonly model?: string;
 }
 
 export type AdapterRunOutput = (
@@ -161,4 +173,6 @@ export interface PromptLogEntry {
   readonly audit?: ToolAudit;
   readonly detail?: string;
   readonly usage?: RunUsage;
+  /** Same as usage.model, kept at the top so the usage page can group runs by model. */
+  readonly model?: string;
 }
