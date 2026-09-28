@@ -46,6 +46,8 @@ export type AiProviderState =
   | 'not_installed'
   | 'binary_changed'
   | 'needs_setup'
+  /** Not set up, and nothing needs it: other apps already explain alerts. */
+  | 'optional'
   | 'disabled'
   | 'paused_by_vigil'
   | 'error';
