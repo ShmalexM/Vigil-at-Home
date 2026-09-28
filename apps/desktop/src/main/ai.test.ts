@@ -244,6 +244,12 @@ describe('AiBridge view', () => {
       caps: { api: 20, jev: 20 },
     });
   });
+
+  it('caps Codex runs on an OpenAI key too', async () => {
+    const { ai } = setup();
+    ai.setPrefs({ monthlyCapUsd: 20, codexUses: 'apiKey' });
+    expect((await ai.limits()).caps).toEqual({ api: 20, jev: 20, codex: 20 });
+  });
 });
 
 describe('AiBridge event labels', () => {

@@ -257,6 +257,7 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
               api: cap,
               jev: cap,
               ...(settings.claude.mode === 'apiKey' ? { claude: cap } : {}),
+              ...(settings.codex.mode === 'apiKey' ? { codex: cap } : {}),
             },
           }
         : {}),
