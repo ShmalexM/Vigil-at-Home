@@ -19,6 +19,8 @@ export const AiPrefs = z.object({
   labelling: z.boolean(),
   /** Claude through the user's own Claude Code sign-in, or a saved Anthropic API key. */
   claudeUses: z.enum(['subscription', 'apiKey']),
+  /** Codex through the user's ChatGPT plan sign-in, or a saved OpenAI API key. */
+  codexUses: z.enum(['subscription', 'apiKey']),
   /** Vigil stops using paid keys (API, Jev, Claude on a key) for the month past this. */
   monthlyCapUsd: z.number().min(0).max(10_000).optional(),
 });
@@ -32,6 +34,7 @@ export const DEFAULT_AI_PREFS: AiPrefs = {
   jev: true,
   labelling: true,
   claudeUses: 'subscription',
+  codexUses: 'subscription',
 };
 
 /** A change to some prefs. A null cap removes it. */

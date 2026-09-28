@@ -112,6 +112,17 @@ describe('AiBridge settings', () => {
     expect(s.jev.enabled).toBe(true);
   });
 
+  it('runs Codex on an OpenAI API key when the user picks it', async () => {
+    const { ai, made } = setup({ saved: { openai: 'sk-aaaaaaaaaaaaaaaaaaaa5678' } });
+    expect(ai.settings().codex.mode).toBe('subscription');
+    ai.setPrefs({ codexUses: 'apiKey' });
+    expect(ai.settings().codex.mode).toBe('apiKey');
+    ai.ai();
+    expect(await made.at(-1)!.getOpenAiApiKey!()).toBe('sk-aaaaaaaaaaaaaaaaaaaa5678');
+    const codex = (await ai.view()).providers.find((p) => p.provider === 'codex');
+    expect(codex).toMatchObject({ canSignIn: false, canShareSignIn: false, signInShared: false });
+  });
+
   it('turns the API off when no key is saved', () => {
     const { ai } = setup();
     expect(ai.settings().api.enabled).toBe(false);
