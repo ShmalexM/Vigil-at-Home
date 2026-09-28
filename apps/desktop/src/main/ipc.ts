@@ -1,18 +1,20 @@
 import { app, ipcMain, type IpcMainInvokeEvent } from 'electron';
 import type { z } from 'zod';
 import { calls, type CallName, type CallResults } from '../shared/ipc.js';
+import { onboardingHandlers } from './onboarding/ipc.js';
+import type { OnboardingService } from './onboarding/service.js';
 import type { VigilCore } from './service.js';
 import { sendTestAlert } from './test-alert.js';
 import { rendererOrigin, type Windows } from './windows.js';
 
-type Handlers = {
+export type Handlers = {
   [K in CallName]: (
     ...args: z.output<(typeof calls)[K]>
   ) => CallResults[K] | Promise<CallResults[K]>;
 };
 
 /** Register one validated handler per call. Arguments are parsed with zod before use. */
-export function registerIpc(core: VigilCore, windows: Windows): void {
+export function registerIpc(core: VigilCore, windows: Windows, setup: OnboardingService): void {
   const h: Handlers = {
     getStatus: () => core.status(),
     listAlerts: (status) => core.store.listAlerts(status ? { status } : {}),
@@ -41,6 +43,7 @@ export function registerIpc(core: VigilCore, windows: Windows): void {
     closePopup: () => windows.hidePopup(),
     fitPopup: (height) => windows.fitPopup(height),
     quit: () => app.quit(),
+    ...onboardingHandlers(setup, () => windows.openMain('home')),
   };
 
   for (const name of Object.keys(calls) as CallName[]) {

@@ -31,6 +31,14 @@ Malware running as you can send the app's requests too. So every release (core's
 A process running as you cannot create a root-owned file. Releases also only reverse
 what the helper itself did: resume needs a pause in the journal, unblock needs a block.
 
+## Sensor health
+
+`helper.status` includes `sensors`: whether Santa and osquery are installed, when each
+last delivered an event, and when Santa last finished a sync with the helper
+(milliseconds since epoch, or `null` since the helper started). The app decides what
+counts as stale. osquery only logs changes, so on a quiet Mac it can go minutes without
+an event while working fine; Santa logs every program launch.
+
 ## Safety rails
 
 - **Reused process ids.** Process actions must carry the executable path or start time.
