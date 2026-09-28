@@ -96,10 +96,6 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
         { mode: 'block', actions: ['process.suspend'] },
       ],
       [
-        fileOpen(unsignedStealer, `${home}/.ssh/id_ed25519`),
-        { mode: 'block', actions: ['process.suspend'] },
-      ],
-      [
         fileOpen(
           unsignedStealer,
           `${home}/Library/Application Support/Google/Chrome/Default/Local Extension Settings/nkbihfbeogaeaoehlefnkodbefgpgknn/000003.log`,
@@ -111,6 +107,34 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
       fileOpen(chrome, `${home}/Library/Application Support/Google/Chrome/Default/Cookies`),
       fileOpen(proc({ path: '/usr/bin/ssh', signing: 'apple' }), `${home}/.ssh/id_ed25519`),
       fileOpen(unsignedStealer, `${home}/.ssh/known_hosts`),
+      // SSH keys are ssh-key-read-untrusted's, which alerts instead of blocking.
+      fileOpen(unsignedStealer, `${home}/.ssh/id_ed25519`),
+    ],
+  },
+  'ssh-key-read-untrusted': {
+    bad: [
+      [
+        fileOpen(unsignedStealer, `${home}/.ssh/id_ed25519`),
+        { mode: 'alert', actions: ['process.suspend'] },
+      ],
+      [
+        fileOpen(
+          proc({
+            path: '/opt/homebrew/Cellar/python@3.12/3.12.4/bin/python3.12',
+            signing: 'adhoc',
+          }),
+          `${home}/.ssh/id_rsa`,
+        ),
+        { mode: 'alert', actions: ['process.suspend'] },
+      ],
+    ],
+    good: [
+      fileOpen(proc({ path: '/usr/bin/ssh', signing: 'apple' }), `${home}/.ssh/id_ed25519`),
+      fileOpen(unsignedStealer, `${home}/.ssh/known_hosts`),
+      fileOpen(
+        unsignedStealer,
+        `${home}/Library/Application Support/Google/Chrome/Default/Cookies`,
+      ),
     ],
   },
   'fake-password-prompt': {

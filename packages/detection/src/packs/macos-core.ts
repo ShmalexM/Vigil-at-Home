@@ -54,6 +54,9 @@ const SANTA_BLOCK_BINARY = {
   policy: 'block',
 } as const;
 
+/** Developer tools (Homebrew Python, Ansible, git helpers) read these every day. */
+const SSH_KEY_GLOBS = ['~/.ssh/id_*'];
+
 export const CREDENTIAL_STORE_GLOBS = [
   '~/Library/Application Support/Google/Chrome/**/Cookies',
   '~/Library/Application Support/Google/Chrome/**/Login Data',
@@ -72,7 +75,7 @@ export const CREDENTIAL_STORE_GLOBS = [
   '~/Library/Cookies/Cookies.binarycookies',
   '~/Library/Containers/com.apple.Safari/Data/Library/Cookies/**',
   '~/Library/Keychains/**',
-  '~/.ssh/id_*',
+  ...SSH_KEY_GLOBS,
   '~/Library/Application Support/Exodus/**',
   '~/Library/Application Support/Electrum/wallets/**',
   '~/Library/Application Support/atomic/**',
@@ -166,6 +169,8 @@ export const macosCoreRules: DetectionRuleInput[] = [
       all: [
         { field: 'op', op: 'in', value: ['open', 'write', 'rename'] },
         { field: 'path', op: 'glob', value: CREDENTIAL_STORE_GLOBS },
+        // SSH keys only alert (ssh-key-read-untrusted): developer tools read them daily.
+        { not: { field: 'path', op: 'glob', value: SSH_KEY_GLOBS } },
         {
           any: [
             { field: 'process.signing', op: 'in', value: UNTRUSTED_SIGNING },
@@ -181,6 +186,35 @@ export const macosCoreRules: DetectionRuleInput[] = [
     ],
     santa: { ruleType: 'binary', from: 'process.sha256' },
     tags: ['attack.credential_access', 'attack.t1555'],
+  }),
+  rule({
+    id: 'ssh-key-read-untrusted',
+    name: 'Untrusted program reading an SSH key',
+    description:
+      'An unsigned program or a script tool opened one of your SSH private keys. Stealers take these, but so do developer tools like Homebrew Python and Ansible, so Vigil asks instead of blocking.',
+    mode: 'alert',
+    severity: 'high',
+    fidelity: 'medium',
+    eventKinds: ['file'],
+    condition: {
+      all: [
+        { field: 'op', op: 'in', value: ['open', 'write', 'rename'] },
+        { field: 'path', op: 'glob', value: SSH_KEY_GLOBS },
+        {
+          any: [
+            { field: 'process.signing', op: 'in', value: UNTRUSTED_SIGNING },
+            { field: 'process.name', op: 'in', value: SCRIPT_RUNNERS, nocase: true },
+          ],
+        },
+      ],
+    },
+    response: [SUSPEND],
+    reasons: [
+      '{{process.name}} opened your SSH key {{pathName}}.',
+      'If you did not just run a tool that uses SSH, it may be copying the key.',
+    ],
+    dedupe: { key: ['process.path'], windowSec: 86_400 },
+    tags: ['attack.credential_access', 'attack.t1552.004'],
   }),
   rule({
     id: 'fake-password-prompt',
