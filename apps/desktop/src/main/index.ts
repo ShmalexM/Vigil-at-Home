@@ -89,10 +89,14 @@ function start(): void {
     encrypt: (s) => safeStorage.encryptString(s),
     decrypt: (b) => safeStorage.decryptString(b),
   });
-  const setup = new OnboardingService({
+  const setup: OnboardingService = new OnboardingService({
     store,
     keys,
     ...(demo ? { probe: demoProbe(), supported: true } : { probe: systemProbe() }),
+    // Setup's Codex step can use the user's own Codex sign-in (set up below).
+    ...(demo
+      ? {}
+      : { codex: { status: () => ai.codexStatus(), share: () => ai.shareCodexSignIn() } }),
     // The wizard's helper and Santa steps, once this build can install them.
     plan: () => {
       const command = helperInstallCommand(helperDir());
@@ -109,7 +113,7 @@ function start(): void {
 
   // The AI explains alerts after their response has run. It never blocks,
   // releases or allows anything.
-  const ai = new AiBridge({
+  const ai: AiBridge = new AiBridge({
     store,
     usage: core.usage,
     keys,
