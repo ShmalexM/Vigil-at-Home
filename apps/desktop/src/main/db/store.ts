@@ -9,7 +9,7 @@ import {
   type EventKind,
   type RuleMode,
 } from '@vigil/core';
-import type { z } from 'zod';
+import { z } from 'zod';
 import {
   EVENT_GROUPS,
   EventOutcome,
@@ -19,9 +19,24 @@ import {
   type EventStats,
   type EventView,
 } from '../../shared/ipc.js';
+import type { UsageRun } from '../../shared/usage.js';
 import { migrations } from './schema.js';
 
 type Row = { body: string };
+
+const Tokens = z.number().int().nonnegative();
+const UsageRunRow = z.object({
+  id: z.string().min(1),
+  at: z.number().int(),
+  provider: z.enum(['claude', 'codex', 'jev', 'api', 'ollama']),
+  purpose: z.enum(['explain', 'analyze', 'classify']),
+  ok: z.boolean(),
+  model: z.string().max(200).optional(),
+  inputTokens: Tokens,
+  cachedInputTokens: Tokens,
+  outputTokens: Tokens,
+  costUsd: z.number().nonnegative().nullable(),
+}) satisfies z.ZodType<UsageRun>;
 
 /**
  * Typed access to Vigil's SQLite database. Pure Node (node:sqlite), no Electron,
@@ -431,6 +446,31 @@ export class Store {
       `SELECT body FROM proposals ${clause} ORDER BY created_at DESC`,
       ...args,
     );
+  }
+
+  // ---------------------------------------------------------------- AI usage
+
+  addAiRun(run: UsageRun): void {
+    const r = UsageRunRow.parse(run);
+    this.stmt('INSERT OR REPLACE INTO ai_runs (id, ts, provider, body) VALUES (?, ?, ?, ?)').run(
+      r.id,
+      r.at,
+      r.provider,
+      JSON.stringify(r),
+    );
+  }
+
+  listAiRuns(since: number, until = Number.MAX_SAFE_INTEGER): UsageRun[] {
+    return this.all(
+      UsageRunRow,
+      'SELECT body FROM ai_runs WHERE ts >= ? AND ts < ? ORDER BY ts',
+      since,
+      until,
+    );
+  }
+
+  pruneAiRuns(before: number): number {
+    return Number(this.stmt('DELETE FROM ai_runs WHERE ts < ?').run(before).changes);
   }
 
   // ---------------------------------------------------------------- settings

@@ -12,6 +12,7 @@ import {
 import { z } from 'zod';
 import type { CALL_NAMES, PUSH_NAMES } from './channels.js';
 import type { AppearanceSettings } from './themes.js';
+import type { UsageLimitsView, UsageReport } from './usage.js';
 import { ApiKeyInput, ApiKeyProvider, SettingsPane, SetupMode, type SetupView } from './setup.js';
 
 /**
@@ -151,6 +152,10 @@ export const calls = {
   openSettingsPane: z.tuple([SettingsPane]),
   installHelper: z.tuple([]),
   uninstallHelper: z.tuple([]),
+  // The Usage page (main/usage.ts).
+  getUsage: z.tuple([z.union([z.literal(1), z.literal(7), z.literal(30), z.literal(90)])]),
+  /** True to read the vendors' limits again now. */
+  getUsageLimits: z.tuple([z.boolean().optional()]),
 } as const;
 export type CallName = keyof typeof calls;
 
@@ -321,6 +326,8 @@ export interface CallResults {
   openSettingsPane: void;
   installHelper: HelperInstallResult;
   uninstallHelper: HelperInstallResult;
+  getUsage: UsageReport;
+  getUsageLimits: UsageLimitsView;
 }
 
 /** Pushed from main to every window. */

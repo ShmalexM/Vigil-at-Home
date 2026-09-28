@@ -455,6 +455,9 @@ select {
   cursor: pointer;
   white-space: nowrap;
 }
+.seg[aria-disabled='true'] {
+  opacity: 0.45;
+}
 .seg button[aria-selected='true'] {
   background: var(--bg4);
   color: var(--tx0);

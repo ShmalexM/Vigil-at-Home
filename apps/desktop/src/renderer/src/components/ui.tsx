@@ -132,20 +132,23 @@ export function Segmented<T extends string>({
   options,
   onChange,
   label,
+  disabled,
 }: {
   value: T;
   options: { value: T; label: string }[];
   onChange: (v: T) => void;
   label: string;
+  disabled?: boolean;
 }) {
   return (
-    <span className="seg" role="tablist" aria-label={label}>
+    <span className="seg" role="tablist" aria-label={label} aria-disabled={disabled || undefined}>
       {options.map((o) => (
         <button
           key={o.value}
           type="button"
           role="tab"
           aria-selected={o.value === value}
+          disabled={disabled}
           onClick={() => onChange(o.value)}
         >
           {o.label}

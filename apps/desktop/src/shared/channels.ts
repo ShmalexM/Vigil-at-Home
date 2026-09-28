@@ -41,6 +41,8 @@ export const CALL_NAMES = [
   'openSettingsPane',
   'installHelper',
   'uninstallHelper',
+  'getUsage',
+  'getUsageLimits',
 ] as const;
 
 export const PUSH_NAMES = ['changed', 'popup', 'navigate', 'theme', 'events'] as const;

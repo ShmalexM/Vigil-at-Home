@@ -86,4 +86,14 @@ export const migrations: string[] = [
   UPDATE events SET matched = 1 WHERE json_array_length(outcome, '$.matches') > 0;
   CREATE INDEX events_matched_ts ON events (ts) WHERE matched = 1;
   `,
+  // Vigil's own AI runs from the prompt log, for the Usage page.
+  `
+  CREATE TABLE ai_runs (
+    id TEXT PRIMARY KEY,
+    ts INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    body TEXT NOT NULL
+  );
+  CREATE INDEX ai_runs_ts ON ai_runs (ts);
+  `,
 ];

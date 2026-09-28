@@ -5,6 +5,7 @@ import { app, powerMonitor, safeStorage } from 'electron';
 import type { HelperInstallResult } from '../shared/ipc.js';
 import { Store } from './db/store.js';
 import { seedDemo, startDemoFeed } from './demo.js';
+import { seedUsageDemo } from './usage-demo.js';
 import { Detector } from './detection.js';
 import { helperBundleDir, helperInstallCommand, runHelperScript } from './helper-install.js';
 import { HelperLink } from './helper.js';
@@ -158,6 +159,7 @@ function start(): void {
   });
 
   if (demo) {
+    seedUsageDemo(core.usage);
     void seedDemo(core).then(() => {
       const stop = startDemoFeed(core);
       app.on('before-quit', stop);
