@@ -171,6 +171,31 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
   },
   'santa-protected-file-access': {
     bad: [
+      // Audit-only reads as the sensors report them now: file activity from Santa.
+      [
+        ev({
+          kind: 'file',
+          source: 'santa',
+          op: 'open',
+          path: `${home}/Library/Application Support/Google/Chrome/Default/Login Data`,
+          process: proc({
+            path: '/Applications/PDF Tools.app/Contents/MacOS/PDF Tools',
+            signing: 'developer_id',
+            teamId: 'ZZZ999ZZZ9',
+          }),
+        }),
+        { mode: 'alert', actions: ['process.suspend'] },
+      ],
+      [
+        ev({
+          kind: 'file',
+          source: 'santa',
+          op: 'open',
+          path: `${home}/.ssh/id_ed25519`,
+          process: { pid: 77, path: '/Users/Shared/.x/agent' },
+        }),
+        { mode: 'alert', actions: ['process.suspend'] },
+      ],
       [
         ev({
           kind: 'santa.decision',
@@ -203,6 +228,22 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
         target: 'file_access',
         decision: 'allow',
         reason: 'Chrome passwords',
+        process: chrome,
+      }),
+      // Unsigned readers are credential-theft-untrusted's, so they alert once.
+      ev({
+        kind: 'file',
+        source: 'santa',
+        op: 'open',
+        path: `${home}/Library/Application Support/Google/Chrome/Default/Login Data`,
+        process: unsignedStealer,
+      }),
+      // File activity from other sensors is not a Santa policy report.
+      ev({
+        kind: 'file',
+        source: 'osquery',
+        op: 'open',
+        path: `${home}/.ssh/id_ed25519`,
         process: chrome,
       }),
       // Launch blocks belong to santa-blocked-launch, not this rule.

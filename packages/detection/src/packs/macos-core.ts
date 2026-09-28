@@ -257,18 +257,44 @@ export const macosCoreRules: DetectionRuleInput[] = [
     mode: 'alert',
     severity: 'critical',
     fidelity: 'high',
-    eventKinds: ['santa.decision'],
+    eventKinds: ['santa.decision', 'file'],
     condition: {
-      all: [
-        { field: 'target', op: 'eq', value: 'file_access' },
-        // audit_only is Santa's default: it reports without stopping the read.
-        { field: 'decision', op: 'in', value: ['audit_only', 'block'] },
+      any: [
+        // Santa denied the read. Older builds also reported audit-only reads this way.
+        {
+          all: [
+            { field: 'kind', op: 'eq', value: 'santa.decision' },
+            { field: 'target', op: 'eq', value: 'file_access' },
+            { field: 'decision', op: 'in', value: ['audit_only', 'block'] },
+          ],
+        },
+        // An audit-only read arrives as file activity. Santa logs it only when the
+        // program is not on the watch item's allow list. Unsigned programs and
+        // script tools are credential-theft-untrusted's (it blocks), so this
+        // covers the rest: signed programs, and ones whose signing is unknown
+        // because they started before Vigil.
+        {
+          all: [
+            { field: 'kind', op: 'eq', value: 'file' },
+            { field: 'source', op: 'eq', value: 'santa' },
+            { field: 'op', op: 'in', value: ['open', 'write', 'rename'] },
+            { field: 'path', op: 'glob', value: CREDENTIAL_STORE_GLOBS },
+            {
+              not: {
+                any: [
+                  { field: 'process.signing', op: 'in', value: UNTRUSTED_SIGNING },
+                  { field: 'process.name', op: 'in', value: SCRIPT_RUNNERS, nocase: true },
+                ],
+              },
+            },
+          ],
+        },
       ],
     },
     response: [SUSPEND],
     reasons: [
       '{{process.name}} opened {{path}}, which holds saved passwords, cookies or keys.',
-      'Santa reported it because this program is not on the list allowed to read it ({{reason}}).',
+      'Santa reported it because this program is not on the list allowed to read it.',
     ],
     santa: { ruleType: 'binary', from: 'process.sha256' },
     tags: ['attack.credential_access', 'attack.t1555'],
