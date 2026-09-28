@@ -11,6 +11,9 @@ if [ "$(id -u)" != 0 ]; then
 fi
 
 LABEL=com.vigilathome.helper
+# Stop Vigil's osquery job and put back any osquery settings from before Vigil.
+# Older helpers don't have this command, so a failure here doesn't stop the removal.
+/Library/PrivilegedHelperTools/vigil-helper osquery-remove 2>/dev/null || true
 launchctl bootout "system/$LABEL" 2>/dev/null || true
 rm -f "/Library/LaunchDaemons/$LABEL.plist"
 rm -f /Library/PrivilegedHelperTools/vigil-helper
