@@ -65,6 +65,10 @@ is its sync server on the same Mac:
 watchdog limits, extensions) when they are in the config file, so those live in the
 flag file that osquery's launchd job reads.
 
+Installing osquery starts nothing. The helper (`packages/helper/src/osquery.ts`) writes
+both files, installs `/Library/LaunchDaemons/io.osquery.agent.plist` and loads it, and
+checks again every 5 minutes, so osquery installed after the helper is picked up too.
+
 `src/osquery.mac.test.ts` runs every scheduled query against the real tables on
 macOS 15 with osquery 5.23, and runs osqueryd with the generated files to check that
 its results log parses into listen and connection events

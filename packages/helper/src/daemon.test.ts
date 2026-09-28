@@ -39,6 +39,7 @@ beforeAll(async () => {
     opensslBin: 'openssl',
     // Santa counts as installed; osquery doesn't.
     sensorBinaries: { santa: paths.santaLog as string, osquery: join(root, 'no-osqueryd') },
+    osquery: false,
   });
   client = await HelperClient.connect(paths.socket, async () => false);
 });
