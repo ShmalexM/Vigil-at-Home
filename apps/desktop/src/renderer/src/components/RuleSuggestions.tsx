@@ -3,7 +3,7 @@ import { useState } from 'react';
 import type { RuleSuggestionView, RuleSuggestionsView } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
 import { timeAgo } from '../format';
-import { ReplaySummary } from './RuleEditor';
+import { ImpactSummary, ReplaySummary } from './RuleEditor';
 import { useToast } from './Toasts';
 import { Button, Card, Chip, SectionHead, SeverityMark } from './ui';
 
@@ -131,6 +131,7 @@ function Suggestion({ s, onDone }: { s: RuleSuggestionView; onDone: () => void }
           On your last 14 days: {s.tuning.hitsBefore} matches before, {s.tuning.hitsAfter} after.
         </span>
       )}
+      {s.impact && s.kind !== 'new_rule' && <ImpactSummary impact={s.impact} />}
       {s.kind !== 'tuning' && s.replay && <ReplaySummary replay={s.replay} />}
       {s.evidence.length > 0 && (
         <ul className="t-small evidence">

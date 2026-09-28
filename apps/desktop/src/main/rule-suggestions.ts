@@ -69,6 +69,7 @@ export class RuleSuggestions {
       warnings: p.lint.warnings,
     };
     if (p.replay) v.replay = p.replay;
+    if (p.impact) v.impact = p.impact;
     if (p.kind === 'new_rule') {
       v.condition = describeCondition(p.rule.condition);
       const editable = Object.fromEntries(

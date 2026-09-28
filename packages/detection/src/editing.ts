@@ -2,6 +2,7 @@ import type { DetectionEngine } from './engine.js';
 import { compileRule } from './engine.js';
 import { assertUserOrigin, type UserOrigin } from './origin.js';
 import { formatZod } from './proposals/pipeline.js';
+import { proveChange, type ImpactReport } from './proposals/prover.js';
 import { replayRule, type ReplayReport } from './proposals/replay.js';
 import { lintRule } from './rules/lint.js';
 import type { RuleRepository } from './state/sqlite.js';
@@ -36,6 +37,8 @@ export interface RuleEditView {
 export interface PreviewResult extends EditResult {
   /** How the rule would have behaved on this Mac over the replay window. */
   replay?: ReplayReport;
+  /** For an edit to an existing rule: what it would stop catching. */
+  impact?: ImpactReport;
 }
 
 export type ExcludeScope = 'this_binary' | 'this_signer' | 'this_path' | 'this_host';
@@ -147,7 +150,19 @@ export class RuleEditor {
       },
       { from: to - this.replayDays * DAY, to },
     );
-    return { ...v, replay: report };
+    const current = this.engine.getRule(v.rule.id);
+    if (!current) return { ...v, replay: report };
+    const impact = proveChange({
+      before: current,
+      beforeMode: this.engine.modeOf(current),
+      after: v.rule,
+      afterMode: v.rule.mode,
+      history: this.history,
+      lists: this.engine.stores.lists,
+      from: to - this.replayDays * DAY,
+      to,
+    });
+    return { ...v, replay: report, impact };
   }
 
   /** Save a new rule or an edit. The mode in the draft becomes the rule's running mode. */

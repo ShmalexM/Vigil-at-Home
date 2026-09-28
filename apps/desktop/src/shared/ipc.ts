@@ -274,6 +274,19 @@ export interface ReplayPreview {
 }
 
 /**
+ * What approving a change would stop catching (@vigil/detection's
+ * ImpactReport): real events it goes quiet on, and look-alikes an attacker
+ * could use that would slip through too.
+ */
+export interface ImpactPreview {
+  lostEvents: number;
+  stopsAlertingOn: { what: string; events: number; untrusted: boolean }[];
+  lookAlikes: { what: string; how: string }[];
+  findings: string[];
+  verdict: 'no_loss' | 'narrow' | 'broad';
+}
+
+/**
  * A change the AI suggested for the rules, checked and replayed on this Mac's
  * last 14 days. Nothing changes until the user accepts it.
  */
@@ -299,6 +312,7 @@ export interface RuleSuggestionView {
   ruleJson?: string;
   replay?: ReplayPreview;
   tuning?: { hitsBefore: number; hitsAfter: number; removed: number };
+  impact?: ImpactPreview;
   warnings: string[];
 }
 
@@ -330,6 +344,8 @@ export interface RuleCheck {
   warnings: string[];
   /** How the draft would have behaved on this Mac over the last 14 days. */
   replay?: ReplayPreview;
+  /** For an edit to an existing rule: what it would stop catching. */
+  impact?: ImpactPreview;
 }
 
 /**

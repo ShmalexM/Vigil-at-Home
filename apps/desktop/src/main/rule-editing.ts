@@ -55,7 +55,11 @@ export class RuleEditing {
     const parsed = parseJson(ruleJson);
     if ('error' in parsed) return { ok: false, errors: [parsed.error], warnings: [] };
     const r = this.detector.editor.preview(parsed.value);
-    return { ...check(r), ...(r.replay ? { replay: r.replay } : {}) };
+    return {
+      ...check(r),
+      ...(r.replay ? { replay: r.replay } : {}),
+      ...(r.impact ? { impact: r.impact } : {}),
+    };
   }
 
   save(ruleJson: string): RuleCheck {

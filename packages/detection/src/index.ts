@@ -34,6 +34,7 @@ export {
   type ReplayOptions,
   type ReplayContext,
 } from './proposals/replay.js';
+export { proveChange, type ImpactReport, type ProveInput } from './proposals/prover.js';
 export {
   RulePipeline,
   MemoryProposalStore,

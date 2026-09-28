@@ -211,3 +211,43 @@ describe('RuleReviewer: the daily schedule', () => {
     expect(s.reviewer.status().nextDueAt).toBe(NOW + 7 * HOUR + DAY);
   });
 });
+
+describe('rare built-in tool commands in the telemetry summary', () => {
+  it('lists one-off command lines of tools attackers use, redacted, without the labeller', async () => {
+    const { engine, pipeline, stores } = twoWeeks();
+    const exec = (id: string, path: string, args: string[], ts: number) =>
+      stores.history.append({
+        id,
+        ts,
+        source: 'test',
+        kind: 'process.exec',
+        process: { pid: 1, path, args, signing: 'apple' },
+      } as never);
+    exec(
+      's1',
+      '/usr/bin/security',
+      ['security', 'find-generic-password', '-wa', 'Chrome'],
+      NOW - HOUR,
+    );
+    for (let i = 0; i < 5; i++)
+      exec(`g${i}`, '/bin/zsh', ['zsh', '-c', 'git status'], NOW - 2 * HOUR + i);
+    exec('b1', '/bin/bash', ['bash', '/Users/alex/tmp/x.sh'], NOW - 3 * HOUR);
+    const [telemetry] = detectionReadTools({
+      engine,
+      pipeline,
+      history: stores.history,
+      now: () => NOW,
+    }).filter((t) => t.name === 'get_telemetry_summary');
+    const out = (await telemetry!.run({ sinceHours: 24 })) as {
+      rareToolCommands: Array<{ program: string; example: string; count: number }>;
+    };
+    expect(out.rareToolCommands).toEqual([
+      {
+        program: '/usr/bin/security',
+        example: 'security find-generic-password -wa Chrome',
+        count: 1,
+      },
+      { program: '/bin/bash', example: 'bash ~/tmp/x.sh', count: 1 },
+    ]);
+  });
+});

@@ -80,6 +80,7 @@ describe('AI rule suggestions in the app', () => {
     expect(s).toMatchObject({ kind: 'new_rule', ruleId: 'ai-paste-site', provider: 'claude' });
     expect(s.condition).toBe('remoteHost is one of pastebin.com, paste.ee');
     expect(s.replay?.hits).toBe(3);
+    expect(s.impact?.verdict).toBe('no_loss');
     expect(JSON.parse(s.ruleJson!)).not.toHaveProperty('version');
 
     // Nothing is live until the user accepts.

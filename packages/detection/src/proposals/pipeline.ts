@@ -6,6 +6,7 @@ import { assertUserOrigin, type UserOrigin } from '../origin.js';
 import { lintRule, type LintResult } from '../rules/lint.js';
 import type { EventHistory } from '../state/stores.js';
 import { Condition, DetectionRule } from '../types.js';
+import { proveChange, type ImpactReport } from './prover.js';
 import { replayRule, type ReplayReport } from './replay.js';
 
 export type ProposalStatus =
@@ -36,6 +37,8 @@ export interface Proposal {
   };
   /** For retire: the quieter mode the rule would move to. */
   retireTo?: 'shadow' | 'disabled';
+  /** What approving it would stop catching, including look-alikes that would slip through. */
+  impact?: ImpactReport;
   decidedAt?: number;
   decidedVia?: string;
   decisionNote?: string;
@@ -169,6 +172,27 @@ export class RulePipeline {
     if (today >= this.opts.maxPerDay)
       return `Limit of ${this.opts.maxPerDay} proposals a day reached.`;
     return undefined;
+  }
+
+  private prove(
+    before: DetectionRule | undefined,
+    after: DetectionRule | undefined,
+    afterMode?: RuleMode,
+  ): ImpactReport {
+    const to = this.opts.now();
+    const input: Parameters<typeof proveChange>[0] = {
+      history: this.history,
+      lists: this.engine.stores.lists,
+      from: to - this.opts.replayDays * DAY,
+      to,
+    };
+    if (before) {
+      input.before = before;
+      input.beforeMode = this.engine.modeOf(before);
+    }
+    if (after) input.after = after;
+    if (afterMode) input.afterMode = afterMode;
+    return proveChange(input);
   }
 
   private replay(rule: DetectionRule) {
@@ -309,6 +333,11 @@ export class RulePipeline {
       status: errors.length ? 'rejected_by_checks' : 'awaiting_review',
       lint: { errors, warnings: [] },
       replay: before.report,
+      impact: this.prove(
+        base,
+        input.toMode === 'disabled' ? undefined : base,
+        input.toMode === 'disabled' ? undefined : input.toMode,
+      ),
     };
     this.store.put(proposal);
     return {
@@ -357,6 +386,7 @@ export class RulePipeline {
     if (lint.errors.length === 0) {
       const after = this.replay(p.rule);
       proposal.replay = after.report;
+      if (!p.base) proposal.impact = this.prove(undefined, p.rule);
       if (p.base) {
         const before = this.replay(p.base);
         const removed = [...before.hitEventIds].filter((id) => !after.hitEventIds.has(id));
@@ -376,6 +406,13 @@ export class RulePipeline {
             `This exclusion would hide ${threats} detections of programs you or a threat list marked as malicious.`,
           );
         }
+        const impact = this.prove(p.base, p.rule, this.engine.modeOf(p.base));
+        proposal.impact = impact;
+        // Look-alikes go back to the AI as warnings so its fix-up can narrow the exclusion.
+        for (const l of impact.lookAlikes.slice(0, 3))
+          lint.warnings.push(
+            `Too broad: ${l.how} would also be skipped. Exclude by team ID and signing ID or by hash instead.`,
+          );
         if (before.report.hits > 0 && after.report.hits === 0 && before.report.hits >= 5) {
           lint.warnings.push(
             'This exclusion silences the rule completely on your history. Consider turning the rule off instead.',

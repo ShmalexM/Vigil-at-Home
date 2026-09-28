@@ -5,8 +5,9 @@ import type { RulePipeline } from './pipeline.js';
 
 /**
  * A compact, redacted digest of recent activity for rule-proposal runs.
- * The AI never sees raw events or command lines: only aggregates, program
- * paths with the home folder replaced by ~, and domains without URLs.
+ * The AI never sees raw events: only aggregates, program paths with the home
+ * folder replaced by ~, domains without URLs, and a few rare command lines of
+ * built-in tools with home folders, emails and token-like strings removed.
  */
 export interface TelemetrySummary {
   window: { from: string; to: string; events: number };
@@ -25,6 +26,12 @@ export interface TelemetrySummary {
     fromInternet: boolean;
   }>;
   newLoginItems: Array<{ item: string; program: string }>;
+  /**
+   * Built-in tools attackers lean on (osascript, security, curl, shells,
+   * interpreters) run with a command line seen only once or twice in the
+   * window. Gaps show up here even when no classifier labelled anything.
+   */
+  rareToolCommands: Array<{ program: string; example: string; count: number }>;
   listeners: Array<{ program: string; port?: number; address?: string }>;
   newExtensions: Array<{ browser: string; id: string; name?: string; permissions: string[] }>;
   rules: Array<{
@@ -70,6 +77,31 @@ export interface FlaggedEvent {
 }
 
 const HOME = /^\/Users\/[^/]+/;
+const LIVING_OFF_THE_LAND = new Set([
+  'osascript',
+  'security',
+  'curl',
+  'nscurl',
+  'bash',
+  'sh',
+  'zsh',
+  'dash',
+  'python3',
+  'python',
+  'perl',
+  'ruby',
+  'base64',
+  'openssl',
+  'launchctl',
+  'xattr',
+  'sqlite3',
+  'ditto',
+  'screencapture',
+  'dscl',
+  'funzip',
+]);
+const RARE_MAX_COUNT = 2;
+const RARE_MAX_KEYS = 5000;
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 const HOME_ANYWHERE = /\/Users\/[^/\s'"]+/g;
 /** Long random-looking runs: API keys, bearer tokens, session ids. */
@@ -113,6 +145,7 @@ export function summarizeTelemetry(opts: {
     string,
     { browser: string; id: string; name?: string; permissions: string[] }
   >();
+  const toolCmds = new Map<string, { program: string; count: number; last: number }>();
   let events = 0;
 
   const add = (e: DetectionEvent) => {
@@ -136,6 +169,17 @@ export function summarizeTelemetry(opts: {
         break;
       }
       case 'process.exec': {
+        const base = proc?.path.slice(proc.path.lastIndexOf('/') + 1) ?? '';
+        if (proc?.args?.length && signing === 'apple' && LIVING_OFF_THE_LAND.has(base)) {
+          const example = redactCommandLine(proc.args.join(' '));
+          const c = toolCmds.get(example);
+          if (c) {
+            c.count++;
+            c.last = e.ts;
+          } else if (toolCmds.size < RARE_MAX_KEYS) {
+            toolCmds.set(example, { program: prog, count: 1, last: e.ts });
+          }
+        }
         if (signing === 'unsigned' || signing === 'adhoc' || signing === 'invalid') {
           const u = untrusted.get(prog) ?? { signing, launches: 0, fromInternet: false };
           u.launches++;
@@ -242,6 +286,11 @@ export function summarizeTelemetry(opts: {
       ...u,
     })),
     newLoginItems: [...loginItems.entries()].slice(0, 20).map(([item, v]) => ({ item, ...v })),
+    rareToolCommands: [...toolCmds.entries()]
+      .filter(([, c]) => c.count <= RARE_MAX_COUNT)
+      .sort((a, b) => b[1].last - a[1].last)
+      .slice(0, 25)
+      .map(([example, c]) => ({ program: c.program, example, count: c.count })),
     listeners: [...listeners.values()].slice(0, 20),
     newExtensions: [...exts.values()].slice(0, 20),
     rules,
