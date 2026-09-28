@@ -267,7 +267,7 @@ export const API_KEYS: readonly KeyDef[] = [
     provider: 'typesafe',
     name: 'TypeSafe key for fast event labelling',
     url: 'https://typesafe.ai',
-    use: 'Optional. TypeSafe’s Jev labels events as benign, unusual or suspicious in under a second. Vigil sends it event lines (paths, hosts) and nothing else, and falls back to the local model without it.',
+    use: 'Optional. TypeSafe’s Jev labels events as benign, unusual or suspicious in under a second, and Vigil uses the local model when there’s no key. Vigil sends it event lines, which include file paths and host names. TypeSafe doesn’t train on API data, but it keeps what it receives under its normal retention policy (zero retention is enterprise-only).',
   },
   {
     provider: 'custom',
