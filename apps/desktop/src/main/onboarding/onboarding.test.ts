@@ -199,12 +199,22 @@ describe('OnboardingService', () => {
     expect(state['ollama-model']).toBe('waiting');
   });
 
-  it('says steps without a command yet are coming, unless already done', async () => {
-    const { svc } = service(fakeMac({}));
+  it('says why a step has nothing to run, unless already done', async () => {
+    const { svc } = service(
+      fakeMac({ bins: ['/opt/homebrew/bin/brew', '/usr/local/bin/osqueryi'] }),
+    );
     svc.setMode('local');
-    const helper = (await svc.view()).steps.find((s) => s.id === 'helper')!;
-    expect(helper.state).toBe('unavailable');
-    expect(helper.detail).toContain('blocking update');
+    const steps = (await svc.view()).steps;
+    const helper = steps.find((s) => s.id === 'helper')!;
+    // Santa isn't approved yet, so the helper step waits for it first.
+    expect(helper.state).toBe('waiting');
+    svc.skip('santa-approve', true);
+    const after = (await svc.view(true)).steps;
+    const ready = after.find((s) => s.id === 'helper')!;
+    expect(ready.state).toBe('unavailable');
+    expect(ready.detail).toContain('pnpm build:helper');
+    // The Santa profile waits for the helper, rather than saying it is missing.
+    expect(after.find((s) => s.id === 'santa-profile')!.state).toBe('waiting');
 
     const { svc: svc2 } = service(fakeMac({ files: [HELPER_SOCKET] }));
     svc2.setMode('local');

@@ -418,8 +418,8 @@ function Review({ view, onDone }: { view: SetupView; onDone: () => void }) {
       )}
       {pending.length > 0 && view.supported && (
         <div className="attn accent">
-          {pending.map((s) => s.title).join(' and ')} {pending.length === 1 ? 'arrives' : 'arrive'}{' '}
-          with the blocking update. Until then blocks are simulated and labelled that way.
+          {pending.map((s) => s.title).join(' and ')} {pending.length === 1 ? 'isn’t' : 'aren’t'}{' '}
+          set up yet. Until then blocks are simulated and labelled that way.
         </div>
       )}
       <div className="row" style={{ justifyContent: 'flex-end' }}>

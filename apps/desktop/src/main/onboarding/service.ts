@@ -122,10 +122,14 @@ export class OnboardingService extends EventEmitter<{ changed: [] }> {
         view = { ...base, state: 'unavailable', detail: 'Setup checks run on macOS only' };
       } else if (r?.ok) {
         view = { ...base, state: 'done', ...(r.detail ? { detail: r.detail } : {}) };
-      } else if (!d.commands.length && !d.manual?.length) {
-        view = { ...base, state: 'unavailable', detail: 'Arrives with the blocking update' };
       } else if ((d.after ?? []).some((id) => defs.some((x) => x.id === id) && !doneIds.has(id))) {
         view = { ...base, state: 'waiting' };
+      } else if (!d.commands.length && !d.manual?.length) {
+        view = {
+          ...base,
+          state: 'unavailable',
+          detail: d.unavailable ?? 'Not available in this build',
+        };
       } else {
         view = { ...base, state: 'todo', ...(r?.detail ? { detail: r.detail } : {}) };
       }
