@@ -62,6 +62,9 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
   const rt = options.runtime;
   const runtimeOptions = {
     num_predict: rt?.numPredict ?? DEFAULT_MAX_OUTPUT_TOKENS,
+    // Vigil only asks for short structured answers; a low temperature keeps
+    // small models from wandering into loops.
+    temperature: 0.2,
     ...(rt?.numCtx !== undefined ? { num_ctx: rt.numCtx } : {}),
     ...(rt?.numThread !== undefined ? { num_thread: rt.numThread } : {}),
   };
@@ -180,12 +183,9 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
             try {
               return { kind: 'ok', json: JSON.parse(body.message.content), audit, usage: usage() };
             } catch {
-              return {
-                kind: 'error',
-                message: 'Ollama answer was not JSON.',
-                audit,
-                usage: usage(),
-              };
+              // Usually a reply cut off at the output cap. Handing back the text
+              // makes the runner count it as a wrong format and ask once more.
+              return { kind: 'ok', json: body.message.content, audit, usage: usage() };
             }
           }
           messages.push(body.message);

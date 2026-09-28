@@ -205,12 +205,8 @@ export function createApiAdapter(options: ApiAdapterOptions): ProviderAdapter & 
             try {
               return { kind: 'ok', json: JSON.parse(message.content ?? ''), audit, usage: usage() };
             } catch {
-              return {
-                kind: 'error',
-                message: 'The API answer was not JSON.',
-                audit,
-                usage: usage(),
-              };
+              // The runner counts this as a wrong format and asks once more.
+              return { kind: 'ok', json: message.content ?? '', audit, usage: usage() };
             }
           }
           messages.push({ role: 'assistant', content: message.content ?? null, tool_calls: calls });
