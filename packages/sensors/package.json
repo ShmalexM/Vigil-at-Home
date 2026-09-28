@@ -10,7 +10,7 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "test:mac": "vitest run --root ../.. packages/sensors/src/osquery.mac.test.ts"
+    "test:mac": "vitest run --config vitest.mac.config.ts"
   },
   "dependencies": {
     "@vigil/core": "workspace:*"
