@@ -5,6 +5,7 @@ import { QuotaTracker } from './quota.js';
 import { redactAndSerialize, redactValue } from './redact.js';
 import type { AiSettings } from './settings.js';
 import { spendingDays, spendingLimits, spendingPlans, type SpendingSnapshot } from './spending.js';
+import { LOCAL_PROVIDERS } from './types.js';
 import type {
   AdapterRunOutput,
   PromptLog,
@@ -61,9 +62,15 @@ export function jsonSchemaFor(output: z.ZodType): Record<string, unknown> {
   return schema;
 }
 
+/** Whether the user's local, cloud or both choice lets this provider run at all. */
+export function allowedByMode(settings: AiSettings, id: ProviderId): boolean {
+  const local = LOCAL_PROVIDERS.includes(id);
+  return settings.mode === 'both' || (settings.mode === 'local') === local;
+}
+
 function enabled(settings: AiSettings, id: ProviderId): boolean {
   if (settings.pausedByVigil.includes(id)) return false;
-  return settings[id].enabled;
+  return allowedByMode(settings, id) && settings[id].enabled;
 }
 
 export function createAiRunner(deps: AiRunnerDeps): AiRunner {
@@ -94,8 +101,8 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
   /** The API-key cap applies only to Claude on the user's own key. */
   async function overMonthlyCap(id: ProviderId): Promise<boolean> {
     const cap = deps.settings.quota.apiKeyMonthlyCapUsd;
-    if (id !== 'claude' || deps.settings.claude.mode !== 'apiKey' || cap === undefined)
-      return false;
+    const paid = id === 'api' || (id === 'claude' && deps.settings.claude.mode === 'apiKey');
+    if (!paid || cap === undefined) return false;
     if (!deps.spentThisMonthUsd) return false;
     return (await deps.spentThisMonthUsd(id)) >= cap;
   }
@@ -141,7 +148,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
         if (!adapter) continue;
         if (deps.settings.pausedByVigil.includes(id))
           out.push({ provider: id, state: 'paused_by_vigil' });
-        else if (!deps.settings[id].enabled) out.push({ provider: id, state: 'disabled' });
+        else if (!enabled(deps.settings, id)) out.push({ provider: id, state: 'disabled' });
         else {
           const status = await statusOf(adapter, true);
           out.push(
@@ -214,6 +221,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
       for (const id of deps.settings.order) {
         const adapter = adapters.get(id);
         if (!adapter || !enabled(deps.settings, id)) continue;
+        if (request.providers && !request.providers.includes(id)) continue;
         const status = await statusOf(adapter);
         if (status.state !== 'ready') continue;
         const allowed =

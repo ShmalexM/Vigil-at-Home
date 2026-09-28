@@ -12,6 +12,24 @@ export interface OllamaAdapterOptions {
   readonly baseUrl: string;
   /** A model to use. Without one, Vigil picks the largest installed model that supports tools. */
   readonly model?: string;
+  /**
+   * Picks among installed models when `model` is unset. Default: the largest
+   * one that supports tools.
+   */
+  readonly pickModel?: (
+    installed: ReadonlyArray<{ name: string; size?: number }>,
+  ) => string | undefined;
+  /** Keeps a small model light on a slow laptop. Passed to Ollama as is. */
+  readonly runtime?: {
+    /** Context window in tokens. */
+    readonly numCtx?: number;
+    /** CPU threads Ollama may use for this model. */
+    readonly numThread?: number;
+    /** How long Ollama keeps the model in memory after a request, e.g. "1m". */
+    readonly keepAlive?: string;
+  };
+  /** What to suggest pulling when nothing suitable is installed. */
+  readonly suggestedModel?: string;
   readonly fetch?: typeof fetch;
 }
 
@@ -32,6 +50,14 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
   const http = options.fetch ?? fetch;
   const base = options.baseUrl.replace(/\/$/, '');
   let chosen: string | undefined;
+  const rt = options.runtime;
+  const runtimeOptions =
+    rt && (rt.numCtx !== undefined || rt.numThread !== undefined)
+      ? {
+          ...(rt.numCtx !== undefined ? { num_ctx: rt.numCtx } : {}),
+          ...(rt.numThread !== undefined ? { num_thread: rt.numThread } : {}),
+        }
+      : undefined;
 
   async function supportsTools(model: string): Promise<boolean> {
     const res = await http(`${base}/api/show`, {
@@ -53,6 +79,7 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
         ? wanted
         : undefined;
     }
+    if (options.pickModel) return options.pickModel(models);
     const bySize = [...models].sort((a, b) => (b.size ?? 0) - (a.size ?? 0));
     for (const m of bySize) if (await supportsTools(m.name)) return m.name;
     return undefined;
@@ -84,7 +111,7 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
         : {
             provider: 'ollama',
             state: 'not_installed',
-            detail: `Run: ollama pull ${options.model ?? 'gpt-oss:20b'}`,
+            detail: `Run: ollama pull ${options.model ?? options.suggestedModel ?? 'gpt-oss:20b'}`,
           };
     },
 
@@ -116,6 +143,8 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
               model,
               messages,
               stream: false,
+              ...(runtimeOptions ? { options: runtimeOptions } : {}),
+              ...(options.runtime?.keepAlive ? { keep_alive: options.runtime.keepAlive } : {}),
               format: input.jsonSchema,
               ...(tools.size > 0 && round < MAX_TOOL_ROUNDS
                 ? {

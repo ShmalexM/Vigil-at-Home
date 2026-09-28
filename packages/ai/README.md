@@ -65,7 +65,19 @@ Binaries are found by absolute path (including the usual Homebrew and `~/.local/
 
 `ai.spending(log)` builds the spending page's data from the prompt log the app keeps: each plan's limit windows with the part Vigil used, and Vigil's own runs per day by provider and job, with tokens and Claude Code's cost estimate. Plan windows come from the vendors' own CLIs (Claude Code's usage call, which the SDK marks experimental, and Codex's `account/rateLimits/read`), so Vigil never touches a login. Only Vigil's runs are counted; the user's other conversations with these tools are never read.
 
-In API-key mode, `quota.apiKeyMonthlyCapUsd` stops Claude once `spentThisMonthUsd` (supplied by the app from its log) reaches the cap.
+`quota.apiKeyMonthlyCapUsd` stops the paid options (the API connection, and Claude in API-key mode) once `spentThisMonthUsd` (supplied by the app from its log) reaches the cap.
+
+## Local, cloud or both
+
+`settings.mode` decides where event data may go. `local` keeps everything on this Mac (Ollama only). `cloud` uses signed-in apps and the API connection and never Ollama. `both` (the default) uses whichever is ready, in `settings.order`.
+
+### The API connection
+
+`settings.api` points at any OpenAI-compatible endpoint: OpenRouter is the first preset, then OpenAI and a custom URL. The key comes from the app through `getApiKey()` (the app keeps it in the Keychain) and is only ever sent over https, or plain http to this Mac. The model gets Vigil's read-only tools as function calls, which Vigil runs itself; any other tool name gets "Not allowed.". Answers use a strict JSON schema. OpenRouter's reported cost goes into the spending page, and a 402 or 429 counts as quota. `ai.listApiModels()` lists the endpoint's models for setup.
+
+### Labelling events with a small local model
+
+`ai.classifier.classify(events)` sends a batch of events that rules and baselines didn't already explain to a small Ollama model, one short line per event, and gets back benign, unusual or suspicious with a score and a reason. It is advisory only: it ranks what the user sees and never blocks or releases anything. The model is picked for the Mac's memory (`recommendedClassifierModel`: 0.5B under 8 GB, about 1.5B above), uses half the cores and unloads after a minute. Batches are capped per hour (`classifier.maxBatchesPerHour`), wait while `isBusy()` says the Mac is busy, and return the ids they skipped so the app can retry. Every batch is in the prompt log, which the activity feed can show. In cloud mode the classifier uses the cloud providers instead.
 
 ## Quota
 

@@ -1,7 +1,24 @@
 import { join } from 'node:path';
 import type { ProviderId } from './types.js';
 
+/**
+ * Where AI runs. "local": only on this Mac (Ollama), nothing leaves it.
+ * "cloud": the user's subscriptions and API keys. "both": local first for
+ * high-volume labelling, cloud for explanations and rule proposals, each
+ * falling back to the other.
+ */
+export type AiMode = 'local' | 'cloud' | 'both';
+
+/** Ready-made OpenAI-style endpoints. "custom" takes any base URL. */
+export const API_PRESETS = {
+  openrouter: { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' },
+  openai: { label: 'OpenAI', baseUrl: 'https://api.openai.com/v1' },
+  custom: { label: 'Other OpenAI-compatible API', baseUrl: '' },
+} as const;
+export type ApiPreset = keyof typeof API_PRESETS;
+
 export interface AiSettings {
+  readonly mode: AiMode;
   /** Tried in this order. The first ready provider with headroom runs the task. */
   readonly order: readonly ProviderId[];
   readonly claude: {
@@ -24,6 +41,24 @@ export interface AiSettings {
     readonly baseUrl: string;
     /** Unset means Vigil picks the largest installed model that supports tools. */
     readonly model?: string;
+  };
+  /** An OpenAI-style API with the user's own key, which the app keeps in the Keychain. */
+  readonly api: {
+    readonly enabled: boolean;
+    readonly preset: ApiPreset;
+    readonly baseUrl: string;
+    /** The model id as the API names it. Chosen in setup from the API's own list. */
+    readonly model?: string;
+  };
+  /** The small local model that labels events rules didn't already explain. */
+  readonly classifier: {
+    readonly enabled: boolean;
+    /** Unset means Vigil picks a small installed model that fits this Mac's memory. */
+    readonly model?: string;
+    /** Most events sent in one request. */
+    readonly maxEventsPerBatch: number;
+    /** Most requests per hour, so labelling never keeps a slow laptop busy. */
+    readonly maxBatchesPerHour: number;
   };
   readonly quota: {
     /** Vigil's share of each subscription usage window for background work, in percent. */
@@ -56,10 +91,13 @@ export const CLAUDE_SUBSCRIPTION_NOTE =
  */
 export function defaultAiSettings(appSupportDir: string): AiSettings {
   return {
-    order: ['claude', 'codex', 'ollama'],
+    mode: 'both',
+    order: ['claude', 'codex', 'api', 'ollama'],
     claude: { enabled: true, mode: 'subscription' },
     codex: { enabled: true, codexHome: join(appSupportDir, 'codex') },
     ollama: { enabled: true, baseUrl: 'http://127.0.0.1:11434' },
+    api: { enabled: true, preset: 'openrouter', baseUrl: API_PRESETS.openrouter.baseUrl },
+    classifier: { enabled: true, maxEventsPerBatch: 20, maxBatchesPerHour: 60 },
     quota: { backgroundSharePercent: 10 },
     pausedByVigil: [],
     redaction: { maxDataBytes: 48_000 },

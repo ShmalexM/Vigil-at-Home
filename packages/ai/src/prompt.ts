@@ -8,6 +8,9 @@ const ROLE: Record<Purpose, string> = {
   analyze:
     'You analyze telemetry from this Mac for Vigil, a personal security app. ' +
     'Your output is a proposal that Vigil checks and a person approves; it never takes effect on its own.',
+  classify:
+    "You label events from this Mac for Vigil, a personal security app. Vigil's rules decide what to block; " +
+    'your labels only decide which events a person looks at first.',
 };
 
 export function buildSystemPrompt(purpose: Purpose, toolNames: readonly string[]): string {
