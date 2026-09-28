@@ -36,3 +36,38 @@ describe('benchmark corpus', () => {
     expect(w.perDay.blocks).toBe(0);
   });
 });
+
+describe('rule scoring', () => {
+  it('credits a candidate rule with the attacks only it catches', async () => {
+    const { scoreCandidates } = await import('./detection.js');
+    const [score] = scoreCandidates(
+      [
+        {
+          id: 'candidate-pipe-full-path',
+          version: 1,
+          origin: 'user',
+          name: 'Downloaded script piped to a shell by full path',
+          description: 'curl or wget piped into /bin/sh, /bin/bash or /bin/zsh.',
+          mode: 'shadow',
+          severity: 'medium',
+          fidelity: 'medium',
+          eventKinds: ['process.exec'],
+          condition: {
+            field: 'process.commandLine',
+            op: 'regex',
+            value: ['(curl|wget)\\s[^|]*\\|\\s*(sudo\\s+)?/bin/(ba|z|da)?sh\\b'],
+          },
+          response: [],
+          exclusions: [],
+          reasons: ['A command downloaded code and ran it with a shell.'],
+          tags: [],
+          createdAt: START,
+          updatedAt: START,
+        },
+      ],
+      { days: 8, telemetry: ['sensors'] },
+    );
+    expect(score?.newlyCaught).toContain('curl-pipe-full-path (sensors)');
+    expect(score?.falsePerDay.developer.alerts).toBe(0);
+  }, 30_000);
+});

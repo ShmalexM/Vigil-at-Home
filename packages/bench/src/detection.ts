@@ -5,6 +5,7 @@ import {
   memoryStores,
   type Detection,
   type DetectionRule,
+  type DetectionRuleInput,
   type Stores,
 } from '@vigil/detection';
 import { ATTACKS, fakeHash, type AttackScenario, type Tactic, type Variant } from './attacks.js';
@@ -28,8 +29,15 @@ export function notifyLevel(rule: DetectionRule, mode: string): Notify {
   return 'badge';
 }
 
-function engine(stores: Stores, learningUntil: number): DetectionEngine {
-  return new DetectionEngine(macosCoreRules, stores, {
+/** The rules under test: the built-in pack unless a caller passes others (e.g. AI proposals). */
+export type RuleSet = readonly DetectionRuleInput[];
+
+function engine(
+  stores: Stores,
+  learningUntil: number,
+  rules: RuleSet = macosCoreRules,
+): DetectionEngine {
+  return new DetectionEngine([...rules], stores, {
     learningUntil,
     recordHistory: false,
     // Vigil's own app; nothing in the corpus lives there.
@@ -86,13 +94,14 @@ function runScenario(
   telemetry: Telemetry,
   learning: boolean,
   sensorOpts: SensorOptions,
+  rules: RuleSet,
 ) {
   const at = START + 10 * DAY + 3_600_000;
   const stores = memoryStores();
   seedLists(stores);
   for (const l of s.lists ?? [])
     stores.lists.add(l.list, l.value, { source: 'bench', updatedAt: at });
-  const e = engine(stores, learning ? at + DAY : at - DAY);
+  const e = engine(stores, learning ? at + DAY : at - DAY, rules);
   const raw = s.events(at);
   const events: SensorEvent[] =
     telemetry === 'ideal' ? raw : raw.flatMap((ev) => throughSensors(ev, sensorOpts));
@@ -117,12 +126,15 @@ function runScenario(
   };
 }
 
-export function runAttacks(sensorOpts: SensorOptions = {}): AttackResult[] {
+export function runAttacks(
+  sensorOpts: SensorOptions = {},
+  rules: RuleSet = macosCoreRules,
+): AttackResult[] {
   const out: AttackResult[] = [];
   for (const telemetry of ['ideal', 'sensors'] as const)
     for (const s of ATTACKS) {
-      const after = runScenario(s, telemetry, false, sensorOpts);
-      const during = runScenario(s, telemetry, true, sensorOpts);
+      const after = runScenario(s, telemetry, false, sensorOpts, rules);
+      const during = runScenario(s, telemetry, true, sensorOpts, rules);
       out.push({
         id: s.id,
         name: s.name,
@@ -179,13 +191,13 @@ function percentile(sorted: Float64Array, p: number): number {
 export function runWorkload(
   profile: Profile,
   telemetry: Telemetry,
-  opts: { days?: number; seed?: number; sensorOpts?: SensorOptions } = {},
+  opts: { days?: number; seed?: number; sensorOpts?: SensorOptions; rules?: RuleSet } = {},
 ): WorkloadResult {
   const days = opts.days ?? 14;
   const r = rng(opts.seed ?? 20260928);
   const stores = memoryStores();
   seedLists(stores);
-  const e = engine(stores, START + LEARNING_DAYS * DAY);
+  const e = engine(stores, START + LEARNING_DAYS * DAY, opts.rules);
   const alerts: FalseAlert[] = [];
   const blocks: Array<{ day: number; ruleId: string }> = [];
   const timings: number[] = [];
@@ -300,11 +312,14 @@ export interface DetectionSummary {
   }>;
 }
 
-export function summarize(results: AttackResult[]): DetectionSummary {
+export function summarize(
+  results: AttackResult[],
+  rules: RuleSet = macosCoreRules,
+): DetectionSummary {
   const count = (v: Variant, t: Telemetry) =>
     results.filter((r) => r.variant === v && r.telemetry === t);
   const caught = (xs: AttackResult[]) => xs.filter((r) => r.caught).length;
-  const byRule = macosCoreRules.map((rule) => {
+  const byRule = rules.map((rule) => {
     const ideal = results.filter(
       (r) => r.telemetry === 'ideal' && r.variant === 'canonical' && r.expect.includes(rule.id),
     );
@@ -320,7 +335,7 @@ export function summarize(results: AttackResult[]): DetectionSummary {
     };
   });
   return {
-    rules: macosCoreRules.length,
+    rules: rules.length,
     canonical: {
       total: count('canonical', 'ideal').length,
       caughtIdeal: caught(count('canonical', 'ideal')),
@@ -333,4 +348,151 @@ export function summarize(results: AttackResult[]): DetectionSummary {
     },
     byRule,
   };
+}
+
+// ------------------------------------------------------------------ rule quality
+
+export type Grade = 'good' | 'gaps' | 'noisy' | 'blind' | 'untested';
+
+export interface RuleScore {
+  ruleId: string;
+  name: string;
+  mode: string;
+  severity: string;
+  fidelity: string;
+  /** How the app tells the user when it fires. */
+  notify: Notify;
+  canonical: number;
+  caughtIdeal: number;
+  caughtSensors: number;
+  /** Evasive variants aimed at this rule, and how many it still catches. */
+  evasive: number;
+  evasiveCaught: number;
+  /** False alerts and blocks per day after the learning week, through today's sensors. */
+  falsePerDay: Record<Profile, { alerts: number; blocks: number }>;
+  /** Same with full telemetry (what the rule would do if the sensors gave it everything). */
+  falsePerDayIdeal: Record<Profile, { alerts: number; blocks: number }>;
+  grade: Grade;
+  why: string;
+}
+
+/**
+ * One line per rule: does it catch what it is for, does it still catch the
+ * obvious variations, and what does it cost in false alerts.
+ */
+export function scoreRules(
+  attacks: AttackResult[],
+  workloads: WorkloadResult[],
+  rules: RuleSet = macosCoreRules,
+): RuleScore[] {
+  const days = (w: WorkloadResult) => Math.max(1, w.days - w.learningDays);
+  const falseFor = (id: string, telemetry: Telemetry) =>
+    Object.fromEntries(
+      (['everyday', 'developer'] as const).map((p) => {
+        const w = workloads.find(
+          (x) => x.profile === p && x.telemetry === telemetry && !('variant' in x),
+        );
+        const r = w?.byRule[id];
+        return [
+          p,
+          { alerts: w && r ? r.alerts / days(w) : 0, blocks: w && r ? r.blocks / days(w) : 0 },
+        ];
+      }),
+    ) as Record<Profile, { alerts: number; blocks: number }>;
+  return rules.map((input) => {
+    const rule = DetectionRuleSchemaless(input);
+    const mine = (t: Telemetry, v: Variant) =>
+      attacks.filter((a) => a.telemetry === t && a.variant === v && a.expect.includes(rule.id));
+    const caughtBy = (xs: AttackResult[]) => xs.filter((a) => a.caughtBy.includes(rule.id)).length;
+    const canonical = mine('ideal', 'canonical');
+    const evasive = mine('ideal', 'evasive');
+    const falseSensors = falseFor(rule.id, 'sensors');
+    const falseIdeal = falseFor(rule.id, 'ideal');
+    const score: Omit<RuleScore, 'grade' | 'why'> = {
+      ruleId: rule.id,
+      name: rule.name,
+      mode: rule.mode,
+      severity: rule.severity,
+      fidelity: rule.fidelity,
+      notify: notifyLevel(rule, rule.mode),
+      canonical: canonical.length,
+      caughtIdeal: caughtBy(canonical),
+      caughtSensors: caughtBy(mine('sensors', 'canonical')),
+      evasive: evasive.length,
+      evasiveCaught: caughtBy(evasive),
+      falsePerDay: falseSensors,
+      falsePerDayIdeal: falseIdeal,
+    };
+    return { ...score, ...grade(score) };
+  });
+}
+
+/** The fields scoring needs, from a rule input (no zod: inputs may be AI drafts). */
+function DetectionRuleSchemaless(r: DetectionRuleInput): DetectionRule {
+  return r as unknown as DetectionRule;
+}
+
+function grade(s: Omit<RuleScore, 'grade' | 'why'>): { grade: Grade; why: string } {
+  const dev = s.falsePerDay.developer;
+  const devIdeal = s.falsePerDayIdeal.developer;
+  if (s.mode === 'shadow' || s.mode === 'disabled')
+    return { grade: 'untested', why: `in ${s.mode} mode, so it never alerts` };
+  if (s.canonical === 0) return { grade: 'untested', why: 'no simulated attack aims at it' };
+  if (s.caughtSensors === 0)
+    return {
+      grade: 'blind',
+      why: `catches ${s.caughtIdeal}/${s.canonical} with full telemetry but 0 through today's sensors`,
+    };
+  const falseBlocks = dev.blocks + devIdeal.blocks;
+  const popupRate = s.notify === 'popup' ? dev.alerts : 0;
+  if (falseBlocks > 0 || popupRate >= 0.1 || dev.alerts >= 0.5)
+    return {
+      grade: 'noisy',
+      why:
+        falseBlocks > 0
+          ? `would block normal activity (${devIdeal.blocks.toFixed(2)}/day for a developer with full telemetry)`
+          : `${dev.alerts.toFixed(2)} false alerts a day for a developer`,
+    };
+  if (s.evasive > 0 && s.evasiveCaught < s.evasive)
+    return {
+      grade: 'gaps',
+      why: `misses ${s.evasive - s.evasiveCaught} of ${s.evasive} simple variations`,
+    };
+  if (s.caughtSensors < s.canonical)
+    return {
+      grade: 'gaps',
+      why: `today's sensors only let it catch ${s.caughtSensors} of ${s.canonical}`,
+    };
+  return { grade: 'good', why: 'catches its attacks with few false alerts' };
+}
+
+/**
+ * Scores candidate rules (drafted by the AI or the user) against the same
+ * attacks and workload, as if they were switched to alert. Shows what each
+ * newly catches on top of the built-in pack and what it costs.
+ */
+export function scoreCandidates(
+  candidates: RuleSet,
+  opts: { days?: number; telemetry?: Telemetry[] } = {},
+) {
+  const promoted = candidates.map((r) => ({ ...r, mode: 'alert' as const }));
+  const rules = [...macosCoreRules, ...promoted];
+  const base = runAttacks();
+  const withThem = runAttacks({}, rules);
+  const workloads = (['everyday', 'developer'] as const).flatMap((p) =>
+    (opts.telemetry ?? (['ideal', 'sensors'] as const)).map((t) =>
+      runWorkload(p, t, { days: opts.days ?? 28, rules }),
+    ),
+  );
+  const scores = scoreRules(withThem, workloads, promoted);
+  return promoted.map((r, i) => ({
+    ...scores[i]!,
+    newlyCaught: withThem
+      .filter(
+        (a) =>
+          a.caughtBy.includes(r.id) &&
+          !base.find((b) => b.id === a.id && b.telemetry === a.telemetry)?.caughtBy.length,
+      )
+      .map((a) => `${a.id} (${a.telemetry})`),
+  }));
 }

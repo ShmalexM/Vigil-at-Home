@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runAttacks, runWorkload, summarize } from './detection.js';
+import { runAttacks, runWorkload, scoreRules, summarize } from './detection.js';
 import { labelSet } from './labels.js';
 import { writeResult } from './report.js';
 
@@ -29,6 +29,7 @@ describe('detection benchmark', () => {
       platform: `${process.platform}-${process.arch}`,
       node: process.version,
       summary,
+      rules: scoreRules(attacks, workload),
       attacks,
       sensorsWithFileAccessEnforced: enforced.map((r) => ({
         id: r.id,
