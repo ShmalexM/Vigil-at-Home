@@ -1,4 +1,4 @@
-import { ClipboardCopy, Download, RotateCcw } from 'lucide-react';
+import { ChevronRight, ClipboardCopy, Download, RotateCcw } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { ThemePref } from '../../../shared/ipc';
 import {
@@ -26,8 +26,9 @@ const COLOR_FIELDS: { key: keyof ThemeColors; label: string }[] = [
 
 /**
  * Settings › Appearance, laid out like the Codex desktop app: light, dark or
- * system; a theme for each whose colours can be changed; contrast, text size
- * and fonts; and Codex's share format to bring themes across.
+ * system up front; under a collapsed Advanced section, a theme for each whose
+ * colours can be changed, contrast, text size and fonts, and Codex's share
+ * format to bring themes across.
  */
 export function AppearanceSection({
   theme,
@@ -94,98 +95,107 @@ export function AppearanceSection({
           ]}
         />
       </div>
-      <div className="theme-grid">
-        {(['light', 'dark'] as const).map((v) => (
-          <VariantEditor
-            key={v}
-            variant={v}
-            a={a}
-            onChange={update}
-            onCopy={async () => {
-              await navigator.clipboard.writeText(shareCodexTheme(a, v));
-              toast({
-                text: `Copied your ${v} theme. Paste it into Codex, or into Vigil on another Mac.`,
-              });
-            }}
+      <details className="appearance-advanced">
+        <summary>
+          <ChevronRight size={15} className="appearance-chevron" aria-hidden />
+          <span>
+            Advanced
+            <span className="small muted"> · theme colours, contrast, text size, fonts</span>
+          </span>
+        </summary>
+        <div className="theme-grid">
+          {(['light', 'dark'] as const).map((v) => (
+            <VariantEditor
+              key={v}
+              variant={v}
+              a={a}
+              onChange={update}
+              onCopy={async () => {
+                await navigator.clipboard.writeText(shareCodexTheme(a, v));
+                toast({
+                  text: `Copied your ${v} theme. Paste it into Codex, or into Vigil on another Mac.`,
+                });
+              }}
+            />
+          ))}
+        </div>
+        <div className="appearance-rows">
+          <label className="row spread">
+            <span>
+              Contrast
+              <span className="small muted"> · how far surfaces and text step apart</span>
+            </span>
+            <span className="row" style={{ gap: 10 }}>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={a.contrast}
+                aria-label="Contrast"
+                onChange={(e) => update({ ...a, contrast: Number(e.target.value) })}
+              />
+              <span className="mono small range-value">{a.contrast}</span>
+            </span>
+          </label>
+          <label className="row spread">
+            <span>
+              Text size
+              <span className="small muted"> · the main window’s base size</span>
+            </span>
+            <span className="row" style={{ gap: 10 }}>
+              <input
+                type="range"
+                min={11}
+                max={16}
+                value={a.uiFontSize}
+                aria-label="Text size"
+                onChange={(e) => update({ ...a, uiFontSize: Number(e.target.value) })}
+              />
+              <span className="mono small range-value">{a.uiFontSize}px</span>
+            </span>
+          </label>
+          <FontField
+            label="UI font"
+            value={a.uiFont}
+            placeholder="Plus Jakarta Sans"
+            onChange={(uiFont) => update({ ...a, uiFont })}
           />
-        ))}
-      </div>
-      <div className="appearance-rows">
-        <label className="row spread">
-          <span>
-            Contrast
-            <span className="small muted"> · how far surfaces and text step apart</span>
-          </span>
-          <span className="row" style={{ gap: 10 }}>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              value={a.contrast}
-              aria-label="Contrast"
-              onChange={(e) => update({ ...a, contrast: Number(e.target.value) })}
-            />
-            <span className="mono small range-value">{a.contrast}</span>
-          </span>
-        </label>
-        <label className="row spread">
-          <span>
-            Text size
-            <span className="small muted"> · the main window’s base size</span>
-          </span>
-          <span className="row" style={{ gap: 10 }}>
-            <input
-              type="range"
-              min={11}
-              max={16}
-              value={a.uiFontSize}
-              aria-label="Text size"
-              onChange={(e) => update({ ...a, uiFontSize: Number(e.target.value) })}
-            />
-            <span className="mono small range-value">{a.uiFontSize}px</span>
-          </span>
-        </label>
-        <FontField
-          label="UI font"
-          value={a.uiFont}
-          placeholder="Plus Jakarta Sans"
-          onChange={(uiFont) => update({ ...a, uiFont })}
-        />
-        <FontField
-          label="Code font"
-          value={a.codeFont}
-          placeholder="Roboto Mono"
-          onChange={(codeFont) => update({ ...a, codeFont })}
-        />
-        <div className="row spread">
-          <span>
-            Import a theme
-            <span className="small muted"> · paste one shared from Codex</span>
-          </span>
-          <span className="row" style={{ gap: 8 }}>
-            <input
-              className="field import-field"
-              aria-label="Theme to import"
-              placeholder="codex-theme-v1:{…}"
-              value={importText}
-              onChange={(e) => setImportText(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && importTheme()}
-            />
-            <Button icon={<Download size={15} />} disabled={!importText} onClick={importTheme}>
-              Import
+          <FontField
+            label="Code font"
+            value={a.codeFont}
+            placeholder="Roboto Mono"
+            onChange={(codeFont) => update({ ...a, codeFont })}
+          />
+          <div className="row spread">
+            <span>
+              Import a theme
+              <span className="small muted"> · paste one shared from Codex</span>
+            </span>
+            <span className="row" style={{ gap: 8 }}>
+              <input
+                className="field import-field"
+                aria-label="Theme to import"
+                placeholder="codex-theme-v1:{…}"
+                value={importText}
+                onChange={(e) => setImportText(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && importTheme()}
+              />
+              <Button icon={<Download size={15} />} disabled={!importText} onClick={importTheme}>
+                Import
+              </Button>
+            </span>
+          </div>
+          <div className="row" style={{ justifyContent: 'flex-end' }}>
+            <Button
+              kind="ghost"
+              icon={<RotateCcw size={15} />}
+              onClick={() => update(DEFAULT_APPEARANCE)}
+            >
+              Reset appearance
             </Button>
-          </span>
+          </div>
         </div>
-        <div className="row" style={{ justifyContent: 'flex-end' }}>
-          <Button
-            kind="ghost"
-            icon={<RotateCcw size={15} />}
-            onClick={() => update(DEFAULT_APPEARANCE)}
-          >
-            Reset appearance
-          </Button>
-        </div>
-      </div>
+      </details>
     </>
   );
 }
