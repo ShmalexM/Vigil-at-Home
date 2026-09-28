@@ -11,7 +11,7 @@ import { FileTailer } from './tail.js';
 
 const enabled = process.platform === 'darwin' && process.env.VIGIL_MAC_INTEGRATION === '1';
 
-async function until(check: () => boolean, ms = 3000): Promise<boolean> {
+async function until(check: () => boolean, ms = 10_000): Promise<boolean> {
   const end = Date.now() + ms;
   while (!check() && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
   return check();
@@ -27,6 +27,12 @@ describe.skipIf(!enabled)('FileTailer on a real Mac', () => {
     await t.start();
     const sh = (cmd: string) => execFileSync('/bin/sh', ['-c', cmd], { env: { F: path } });
     try {
+      // FSEvents drops changes made before its stream is running.
+      for (let i = 0; i < 50 && !lines.some((l) => l.startsWith('warmup')); i++) {
+        sh(`echo warmup ${i} >> "$F"`);
+        await until(() => lines.some((l) => l.startsWith('warmup')), 200);
+      }
+      expect(lines.some((l) => l.startsWith('warmup'))).toBe(true);
       sh('echo one >> "$F"');
       expect(await until(() => lines.includes('one'))).toBe(true);
       sh('mv "$F" "$F.0" && echo two > "$F"');
