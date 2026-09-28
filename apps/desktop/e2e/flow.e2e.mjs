@@ -21,6 +21,7 @@
 //   4. Launch agent named like Apple's: a real plist, seen by osquery. The
 //      popup suggests disabling it; the user presses Block it; then undoes it.
 //   5. Timing: the same pause-and-popup path repeated to get a spread.
+//   6. Learning: answering "fine" three times demotes the rule from block to alert.
 //
 // The admin password dialog can't be answered on a runner, so the helper's
 // approval step (which the dialog would run as root) runs through sudo
@@ -389,14 +390,18 @@ try {
       C2,
     );
     const t0 = Date.now();
+    // Keep one HTTPS connection open and busy, so it is there when osquery
+    // takes its next snapshot (an idle socket gets closed by the server).
     const beacon = nodeStandIn(
       'beacon',
-      `const s=require('node:net').connect(443,'${C2}');s.on('error',()=>{});setInterval(()=>{},1e6)`,
+      `const https=require('node:https');const agent=new https.Agent({keepAlive:true,maxSockets:1});` +
+        `const go=()=>https.get({host:'${C2}',path:'/',agent,timeout:5000},(r)=>r.resume()).on('error',()=>{});` +
+        `go();setInterval(go,2000)`,
     );
-    let alert = await waitUntil(() => alertFor('known-bad-destination', t0), 45000, 500);
+    let alert = await waitUntil(() => alertFor('known-bad-destination', t0), 60000, 500);
     if (!alert) {
       // osquery didn't report it in time; keep the rest of the path covered.
-      s.sensor = 'simulated event (osquery did not report the connection in 45 s)';
+      s.sensor = 'simulated event (osquery did not report the connection in 60 s)';
       const t1 = await inject({
         id: `e2e-beacon-${beacon.pid}`,
         source: 'osquery',
@@ -506,7 +511,7 @@ try {
     const runs = Number(process.env.VIGIL_FLOW_RUNS ?? 15);
     for (let i = 0; i < runs; i++) {
       await main(() => globalThis.vigil.windows.hidePopup());
-      const child = sleeper('Installer');
+      const child = sleeper(`Installer-${i}`);
       await sleep(200);
       const pid = child.pid;
       const t0 = await inject({
@@ -517,7 +522,7 @@ try {
         path: `${HOME}/Library/Application Support/Google/Chrome/Default/Cookies`,
         process: {
           pid,
-          path: join(STAND_IN_DIR, 'Installer'),
+          path: join(STAND_IN_DIR, `Installer-${i}`),
           startTime: startTime(pid),
           signing: 'adhoc',
           // A new hash each time, so the rule's dedupe doesn't fold the alerts together.
@@ -531,11 +536,9 @@ try {
       const shown = shownAt ? await lastPopupAt() : null;
       const paused = procState(pid).startsWith('T');
       const t1 = Date.now();
-      if (alert)
-        await main(
-          (_e, id) => globalThis.vigil.core.decide(id, { verdict: 'benign', release: true }),
-          alert.id,
-        );
+      // Undo the pause rather than answering "fine": three "fine" answers in a
+      // row teach Vigil to demote the rule, which scenario 6 checks on its own.
+      if (act) await main((_e, id) => globalThis.vigil.core.alerts.undo(id), act.id);
       const resumed = await waitUntil(() => !procState(pid).startsWith('T'), 20000);
       results.timings.push({
         eventToBlockMs: act?.result?.at ? act.result.at - t0 : null,
@@ -551,6 +554,62 @@ try {
     check(
       `timing: ${ok.length}/${runs} runs paused, showed the popup and resumed`,
       ok.length === runs,
+    );
+  }
+
+  // ---------------------------------------------------------------- 6
+  {
+    // The user keeps saying "fine" to one rule: after three answers Vigil
+    // should stop blocking with it (block -> alert), and never raise it itself.
+    const modeOf = () =>
+      main(
+        () =>
+          globalThis.vigil.core.rules().find((r) => r.rule.id === 'credential-theft-untrusted')
+            ?.rule.mode,
+      );
+    const before = await modeOf();
+    // Scenario 1 already answered "fine" once for this rule.
+    let answers = 1;
+    for (let i = 0; i < 4 && (await modeOf()) === 'block'; i++, answers++) {
+      const child = sleeper(`Helper-${i}`);
+      await sleep(200);
+      const t0 = await inject({
+        id: `e2e-learn-${child.pid}`,
+        source: 'santa',
+        kind: 'file',
+        op: 'open',
+        path: `${HOME}/Library/Application Support/Google/Chrome/Default/Web Data`,
+        process: {
+          pid: child.pid,
+          path: join(STAND_IN_DIR, `Helper-${i}`),
+          startTime: startTime(child.pid),
+          signing: 'adhoc',
+          sha256: i.toString(16).padStart(64, 'd'),
+        },
+      });
+      const alert = await waitUntil(() => alertFor('credential-theft-untrusted', t0), 5000);
+      if (alert)
+        await main(
+          (_e, id) => globalThis.vigil.core.decide(id, { verdict: 'benign', release: true }),
+          alert.id,
+        );
+      child.kill('SIGKILL');
+    }
+    const after = await modeOf();
+    results.scenarios.learning = {
+      name: '"Fine" answers demote the rule',
+      before,
+      after,
+      answers,
+    };
+    check('learning: rule was blocking before', before === 'block', before);
+    check(
+      'learning: three "fine" answers demoted it to alert',
+      after === 'alert' && answers === 3,
+      {
+        after,
+        answers,
+      },
     );
   }
   results.approvals = await main(() => globalThis.__approvals);
