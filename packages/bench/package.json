@@ -1,0 +1,22 @@
+{
+  "name": "@vigil/bench",
+  "version": "0.0.0",
+  "private": true,
+  "description": "How well Vigil at Home works: simulated attacks, a normal-use workload, AI label accuracy",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "bench": "vitest run --config vitest.config.ts src/detection.run.ts",
+    "bench:labels": "vitest run --config vitest.config.ts src/labels.run.ts"
+  },
+  "dependencies": {
+    "@vigil/ai": "workspace:*",
+    "@vigil/core": "workspace:*",
+    "@vigil/detection": "workspace:*",
+    "@vigil/sensors": "workspace:*"
+  }
+}

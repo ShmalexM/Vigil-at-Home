@@ -1,0 +1,36 @@
+# @vigil/bench
+
+How well Vigil at Home works, measured the same way on every run.
+
+```
+simulated attacks ──┬─► rules (full telemetry) ─────────────────► caught?
+(42 scenarios)      └─► Santa/osquery log lines ─► Vigil's parsers ─► rules ─► caught?
+
+4 weeks of normal use ─► rules ─► false alerts, popups and blocks per day, µs per event
+(everyday, developer)
+
+events the rules let through ─► local model or Jev ─► flagged? (vs. ground truth)
+```
+
+- `src/attacks.ts`: harmless stand-ins for real macOS threats (AMOS, ClickFix,
+  Adload...), as the telemetry they produce. `canonical` ones must be caught;
+  `evasive` ones measure gaps.
+- `src/sensors.ts`: renders each activity as the Santa or osquery log line it
+  would produce with Vigil's shipped configuration and runs Vigil's own parser
+  on it, so the benchmark shows what the rules actually get to see.
+- `src/workday.ts`: a seeded normal-use workload, including legitimate
+  activity that looks like an attack (install one-liners, `xattr -cr`, test
+  binaries in /tmp). The daily rates are estimates and are listed in the file.
+- `src/labels.ts`: the test set for the event labeller.
+
+Run:
+
+```
+pnpm --filter @vigil/bench bench                    # detection, ~40 s
+VIGIL_BENCH_LABELLER=ollama VIGIL_OLLAMA_MODEL=qwen2.5:0.5b pnpm --filter @vigil/bench bench:labels
+```
+
+Results land in `bench-results/`. The Benchmarks workflow also runs the full
+response path on a hosted Mac (`apps/desktop/e2e/flow.e2e.mjs`). Nothing here
+runs malware: every attack is data, and the end-to-end test uses copies of
+`sleep` and `node` as the "malware".

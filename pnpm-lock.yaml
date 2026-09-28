@@ -115,6 +115,21 @@ importers:
         specifier: 0.157.1
         version: 0.157.1
 
+  packages/bench:
+    dependencies:
+      '@vigil/ai':
+        specifier: workspace:*
+        version: link:../ai
+      '@vigil/core':
+        specifier: workspace:*
+        version: link:../core
+      '@vigil/detection':
+        specifier: workspace:*
+        version: link:../detection
+      '@vigil/sensors':
+        specifier: workspace:*
+        version: link:../sensors
+
   packages/core:
     dependencies:
       zod:
