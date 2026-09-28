@@ -1,5 +1,5 @@
 import type { SensorEvent } from '@vigil/core';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import {
   classifierRuntime,
@@ -10,6 +10,7 @@ import {
 } from './classifier.js';
 import { createVigilAi } from './index.js';
 import { memoryPinStore } from './executable.js';
+import { createJevClient } from './providers/jev.js';
 import { createApiAdapter, isSafeBaseUrl } from './providers/openaiCompatible.js';
 import { createAiRunner } from './runner.js';
 import { defaultAiSettings } from './settings.js';
@@ -303,7 +304,15 @@ describe('event labelling with a small local model', () => {
     ]);
     expect(result).toEqual({
       ok: true,
-      labels: [{ eventId: 'e1', label: 'suspicious', score: 1, reason: 'hidden unsigned program' }],
+      labels: [
+        {
+          eventId: 'e1',
+          label: 'suspicious',
+          score: 1,
+          reason: 'hidden unsigned program',
+          by: 'model',
+        },
+      ],
       deferred: ['e2', 'e3'],
     });
     expect(inputs[0]!.userPrompt).toContain('e2 process started /Applications/Safari.app');
@@ -359,5 +368,169 @@ describe('event labelling with a small local model', () => {
       pins: memoryPinStore(),
     });
     expect(off.classifier).toBeUndefined();
+  });
+});
+
+describe('Jev as the event labeller', () => {
+  const jevReply = {
+    model: 'jev-1.13.0',
+    answers: {
+      e1: {
+        type: 'choice',
+        choice: 'suspicious',
+        probabilities: { benign: 0.1, unusual: 0.2, suspicious: 0.7 },
+        confidence: 0.64,
+      },
+      e2: {
+        type: 'choice',
+        choice: 'benign',
+        probabilities: { benign: 0.96, unusual: 0.04, suspicious: 0 },
+        confidence: 0.9,
+      },
+      e9: { type: 'choice', choice: 'suspicious', probabilities: {}, confidence: 1 },
+    },
+    usage: { input_tokens: 1000, output_tokens: 20 },
+  };
+
+  function jevFetch(reply: unknown, status = 200) {
+    const calls: Array<{ url: string; auth: string; body: Record<string, unknown> }> = [];
+    const f = (async (url: string, init: RequestInit) => {
+      calls.push({
+        url,
+        auth: String((init.headers as Record<string, string>).authorization),
+        body: JSON.parse(String(init.body)),
+      });
+      return status === 200 ? Response.json(reply) : new Response('{}', { status });
+    }) as unknown as typeof fetch;
+    return { f, calls };
+  }
+
+  it('asks one choice question per event and turns probabilities into labels', async () => {
+    const { f, calls } = jevFetch(jevReply);
+    const log: PromptLogEntry[] = [];
+    const jev = createJevClient({
+      getApiKey: async () => 'ts-key',
+      log: { record: (e) => log.push(e) },
+      fetch: f,
+    });
+    const local = ready('ollama', { labels: [] });
+    const classifier = createEventClassifier({
+      jev,
+      runner: createAiRunner({
+        settings: { ...defaultAiSettings('/tmp/v'), order: ['ollama'] },
+        adapters: [local],
+        log: { record: () => {} },
+      }),
+      maxEventsPerBatch: 5,
+      maxBatchesPerHour: 5,
+    });
+    const result = await classifier.classify([
+      exec('evt-a', '/Users/Shared/.x/run'),
+      exec('evt-b', '/usr/bin/true'),
+      exec('evt-c', '/bin/ls'),
+    ]);
+
+    expect(calls[0]!.url).toBe('https://api.typesafe.ai/v1/systemone');
+    expect(calls[0]!.auth).toBe('Bearer ts-key');
+    expect(calls[0]!.body).toMatchObject({
+      model: 'jev-latest',
+      state: { e1: 'process started /Users/Shared/.x/run [unsigned] parent=/bin/zsh' },
+      questions: { e1: { type: 'choice', criteria: { benign: expect.any(String) } } },
+    });
+    expect(Object.keys(calls[0]!.body.questions as object)).toEqual(['e1', 'e2', 'e3']);
+    expect(result).toMatchObject({
+      ok: true,
+      labels: [
+        {
+          eventId: 'evt-a',
+          label: 'suspicious',
+          by: 'jev',
+          reason: 'Jev: 70% suspicious, confidence 0.64',
+        },
+        { eventId: 'evt-b', label: 'benign', by: 'jev' },
+      ],
+      deferred: ['evt-c'],
+    });
+    if (result.ok) expect(result.labels[0]!.score).toBeCloseTo(0.8);
+    expect(local.runs).toBe(0);
+    expect(log[0]).toMatchObject({ provider: 'jev', purpose: 'classify', outcome: 'ok' });
+    expect(log[0]!.usage?.costUsd).toBeCloseTo(0.000042);
+  });
+
+  it('falls back to the local model when Jev refuses the key, is busy, or the cap is spent', async () => {
+    for (const [status, allowed] of [
+      [401, true],
+      [529, true],
+      [200, false],
+    ] as const) {
+      const { f, calls } = jevFetch(jevReply, status);
+      const local = ready('ollama', {
+        labels: [{ id: 'evt-a', label: 'unusual', score: 0.5, reason: 'odd place' }],
+      });
+      const classifier = createEventClassifier({
+        jev: createJevClient({ getApiKey: async () => 'k', log: { record: () => {} }, fetch: f }),
+        jevAllowed: async () => allowed,
+        runner: createAiRunner({
+          settings: { ...defaultAiSettings('/tmp/v'), order: ['ollama'] },
+          adapters: [local],
+          log: { record: () => {} },
+        }),
+        maxEventsPerBatch: 5,
+        maxBatchesPerHour: 5,
+      });
+      const result = await classifier.classify([exec('evt-a', '/Users/Shared/.x/run')]);
+      expect(result).toMatchObject({ ok: true, labels: [{ eventId: 'evt-a', by: 'model' }] });
+      expect(calls.length).toBe(allowed ? 1 : 0);
+      expect(local.runs).toBe(1);
+    }
+  });
+
+  it('never sends events without a key, or over plain http', async () => {
+    const { f, calls } = jevFetch(jevReply);
+    const noKey = createJevClient({
+      getApiKey: async () => undefined,
+      log: { record: () => {} },
+      fetch: f,
+    });
+    expect(await noKey.label([{ id: 'a', line: 'x' }])).toEqual({
+      ok: false,
+      detail: 'Add a TypeSafe API key.',
+    });
+    const http = createJevClient({
+      baseUrl: 'http://api.typesafe.ai/v1',
+      getApiKey: async () => 'k',
+      log: { record: () => {} },
+      fetch: f,
+    });
+    expect((await http.label([{ id: 'a', line: 'x' }])).ok).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('is never used in local mode', async () => {
+    const hosts: string[] = [];
+    vi.stubGlobal('fetch', async (url: string) => {
+      hosts.push(new URL(url).host);
+      return new URL(url).host === 'api.typesafe.ai'
+        ? Response.json(jevReply)
+        : new Response('{}', { status: 503 });
+    });
+    try {
+      const base = defaultAiSettings('/tmp/v');
+      const opts = {
+        log: { record: () => {} },
+        pins: memoryPinStore(),
+        getJevApiKey: async () => 'k',
+      };
+      const events = [exec('evt-a', '/Users/Shared/.x/run')];
+      await createVigilAi({ ...opts, settings: { ...base, mode: 'local' } }).classifier!.classify(
+        events,
+      );
+      expect(hosts).not.toContain('api.typesafe.ai');
+      const both = await createVigilAi({ ...opts, settings: base }).classifier!.classify(events);
+      expect(hosts).toContain('api.typesafe.ai');
+      expect(both).toMatchObject({ ok: true, labels: [{ by: 'jev' }] });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

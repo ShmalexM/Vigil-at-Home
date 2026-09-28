@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { JEV_DEFAULT_BASE_URL, JEV_DEFAULT_MODEL } from './providers/jev.js';
 import type { ProviderId } from './types.js';
 
 /**
@@ -50,6 +51,16 @@ export interface AiSettings {
     /** The model id as the API names it. Chosen in setup from the API's own list. */
     readonly model?: string;
   };
+  /**
+   * TypeSafe's Jev, a cloud model built for fast typed decisions. With a key it
+   * labels events instead of the local model (outside local mode), and the
+   * local model takes over whenever Jev can't answer.
+   */
+  readonly jev: {
+    readonly enabled: boolean;
+    readonly baseUrl: string;
+    readonly model: string;
+  };
   /** The small local model that labels events rules didn't already explain. */
   readonly classifier: {
     readonly enabled: boolean;
@@ -97,6 +108,7 @@ export function defaultAiSettings(appSupportDir: string): AiSettings {
     codex: { enabled: true, codexHome: join(appSupportDir, 'codex') },
     ollama: { enabled: true, baseUrl: 'http://127.0.0.1:11434' },
     api: { enabled: true, preset: 'openrouter', baseUrl: API_PRESETS.openrouter.baseUrl },
+    jev: { enabled: true, baseUrl: JEV_DEFAULT_BASE_URL, model: JEV_DEFAULT_MODEL },
     classifier: { enabled: true, maxEventsPerBatch: 20, maxBatchesPerHour: 60 },
     quota: { backgroundSharePercent: 10 },
     pausedByVigil: [],

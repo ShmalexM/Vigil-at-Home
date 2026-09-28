@@ -1,6 +1,7 @@
 import { cpus, totalmem } from 'node:os';
 import type { ProcessRef, SensorEvent } from '@vigil/core';
 import { z } from 'zod';
+import type { JevAnswer, JevClient } from './providers/jev.js';
 import type { AiRunner } from './runner.js';
 
 /**
@@ -51,6 +52,8 @@ export interface LabelledEvent {
   /** 0 to 1: how much a person should look at it. Orders the review list, nothing else. */
   readonly score: number;
   readonly reason: string;
+  /** Which model labelled it: the local model or Jev. */
+  readonly by: 'model' | 'jev';
 }
 
 export type ClassifyResult =
@@ -125,7 +128,14 @@ export function eventLine(e: SensorEvent): string {
 
 export interface EventClassifierOptions {
   /** A runner limited to where labelling may run (see `createVigilAi`). */
-  readonly runner: AiRunner;
+  readonly runner?: AiRunner;
+  /**
+   * TypeSafe's Jev, tried first when set. If it can't answer (no key, refused,
+   * over the monthly cap, down), the batch goes to `runner` instead.
+   */
+  readonly jev?: JevClient;
+  /** False once Jev's spending this month reached the cap. */
+  readonly jevAllowed?: () => Promise<boolean>;
   readonly maxEventsPerBatch: number;
   readonly maxBatchesPerHour: number;
   /** The app says when the Mac is busy or on low battery; labelling then waits. */
@@ -156,6 +166,35 @@ export function createEventClassifier(options: EventClassifierOptions) {
         return { ok: false, reason: 'budget', deferred: all };
       sent.push(now());
 
+      const ids = new Set(batch.map((e) => e.id));
+      const labels = new Map<string, LabelledEvent>();
+      const done = () => {
+        // Events a model skipped go back in the queue rather than counting as benign.
+        const missed = batch.filter((e) => !labels.has(e.id)).map((e) => e.id);
+        return {
+          ok: true as const,
+          labels: [...labels.values()],
+          deferred: [...missed, ...deferred],
+        };
+      };
+
+      let jevDetail: string | undefined;
+      if (options.jev && (await (options.jevAllowed?.() ?? Promise.resolve(true)))) {
+        const jev = await options.jev.label(batch.map((e) => ({ id: e.id, line: eventLine(e) })));
+        if (jev.ok) {
+          for (const a of jev.answers) if (ids.has(a.id)) labels.set(a.id, fromJev(a));
+          return done();
+        }
+        jevDetail = jev.detail;
+      }
+      if (!options.runner)
+        return {
+          ok: false,
+          reason: 'failed',
+          deferred: all,
+          detail: jevDetail ?? 'No model set up.',
+        };
+
       const result = await options.runner.run({
         purpose: 'classify',
         urgency: 'background',
@@ -172,8 +211,6 @@ export function createEventClassifier(options: EventClassifierOptions) {
           ...(result.detail ? { detail: result.detail } : { detail: result.reason }),
         };
 
-      const ids = new Set(batch.map((e) => e.id));
-      const labels = new Map<string, LabelledEvent>();
       for (const l of result.value.labels) {
         if (!ids.has(l.id) || labels.has(l.id)) continue;
         labels.set(l.id, {
@@ -181,13 +218,28 @@ export function createEventClassifier(options: EventClassifierOptions) {
           label: l.label,
           score: Math.min(1, Math.max(0, l.score)),
           reason: l.reason.slice(0, 200),
+          by: 'model',
         });
       }
-      // Events the model skipped go back in the queue rather than counting as benign.
-      const missed = batch.filter((e) => !labels.has(e.id)).map((e) => e.id);
-      return { ok: true, labels: [...labels.values()], deferred: [...missed, ...deferred] };
+      return done();
     },
   };
 }
 
 export type EventClassifier = ReturnType<typeof createEventClassifier>;
+
+/**
+ * Jev returns calibrated probabilities, not prose. The score weights unusual at
+ * half of suspicious; the reason says how sure it was.
+ */
+function fromJev(a: JevAnswer): LabelledEvent {
+  const p = a.probabilities;
+  const pct = Math.round(p[a.label] * 100);
+  return {
+    eventId: a.id,
+    label: a.label,
+    score: Math.min(1, p.suspicious + p.unusual / 2),
+    reason: `Jev: ${pct}% ${a.label}, confidence ${a.confidence.toFixed(2)}`,
+    by: 'jev',
+  };
+}

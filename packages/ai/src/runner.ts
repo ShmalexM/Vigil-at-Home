@@ -101,7 +101,8 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
   /** The API-key cap applies only to Claude on the user's own key. */
   async function overMonthlyCap(id: ProviderId): Promise<boolean> {
     const cap = deps.settings.quota.apiKeyMonthlyCapUsd;
-    const paid = id === 'api' || (id === 'claude' && deps.settings.claude.mode === 'apiKey');
+    const paid =
+      id === 'api' || id === 'jev' || (id === 'claude' && deps.settings.claude.mode === 'apiKey');
     if (!paid || cap === undefined) return false;
     if (!deps.spentThisMonthUsd) return false;
     return (await deps.spentThisMonthUsd(id)) >= cap;

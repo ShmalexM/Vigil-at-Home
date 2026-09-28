@@ -8,9 +8,10 @@ import {
   recommendedClassifierModel,
   type EventClassifier,
 } from './classifier.js';
+import { createJevClient } from './providers/jev.js';
 import { createOllamaAdapter } from './providers/ollama.js';
 import { createApiAdapter, type ApiModel } from './providers/openaiCompatible.js';
-import { createAiRunner, type AiRunner } from './runner.js';
+import { allowedByMode, createAiRunner, type AiRunner } from './runner.js';
 import type { AiSettings } from './settings.js';
 import type { PromptLog, ProviderAdapter, ProviderId } from './types.js';
 
@@ -50,6 +51,15 @@ export {
   type ApiModel,
 } from './providers/openaiCompatible.js';
 export {
+  createJevClient,
+  JEV_DEFAULT_BASE_URL,
+  JEV_DEFAULT_MODEL,
+  JEV_LABELS,
+  type JevAnswer,
+  type JevClient,
+  type JevOptions,
+} from './providers/jev.js';
+export {
   CLASSIFIER_MODELS,
   classifierRuntime,
   createEventClassifier,
@@ -71,6 +81,8 @@ export interface VigilAiOptions {
   readonly getAnthropicApiKey?: () => Promise<string | undefined>;
   /** Reads the key for the OpenAI-style API (OpenRouter, OpenAI...) from the Keychain. */
   readonly getApiKey?: () => Promise<string | undefined>;
+  /** Reads the TypeSafe key for Jev from the Keychain. No key means Jev isn't used. */
+  readonly getJevApiKey?: () => Promise<string | undefined>;
   /** What Vigil's runs on this provider cost this calendar month (for the API-key cap). */
   readonly spentThisMonthUsd?: (provider: ProviderId) => Promise<number>;
   /** The app says when the Mac is busy or on low battery, so event labelling waits. */
@@ -142,8 +154,28 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
             ],
             log: options.log,
           });
+    const useJev =
+      settings.jev.enabled &&
+      allowedByMode(settings, 'jev') &&
+      !settings.pausedByVigil.includes('jev') &&
+      options.getJevApiKey !== undefined;
+    const cap = settings.quota.apiKeyMonthlyCapUsd;
+    const spent = options.spentThisMonthUsd;
     classifier = createEventClassifier({
       runner: labelRunner,
+      ...(useJev
+        ? {
+            jev: createJevClient({
+              baseUrl: settings.jev.baseUrl,
+              model: settings.jev.model,
+              getApiKey: options.getJevApiKey!,
+              log: options.log,
+            }),
+            ...(cap !== undefined && spent
+              ? { jevAllowed: async () => (await spent('jev')) < cap }
+              : {}),
+          }
+        : {}),
       maxEventsPerBatch: settings.classifier.maxEventsPerBatch,
       maxBatchesPerHour: settings.classifier.maxBatchesPerHour,
       ...(options.isBusy ? { isBusy: options.isBusy } : {}),

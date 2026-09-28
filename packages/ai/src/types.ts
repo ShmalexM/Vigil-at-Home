@@ -1,7 +1,7 @@
 import type { z } from 'zod';
 
 /** `api` is any OpenAI-style API (OpenRouter, OpenAI, a self-hosted gateway) with the user's own key. */
-export type ProviderId = 'claude' | 'codex' | 'ollama' | 'api';
+export type ProviderId = 'claude' | 'codex' | 'ollama' | 'api' | 'jev';
 
 /** Local providers run on this Mac; cloud ones send the (redacted) data off it. */
 export const LOCAL_PROVIDERS: readonly ProviderId[] = ['ollama'];

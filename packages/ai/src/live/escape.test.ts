@@ -93,6 +93,9 @@ function adapterFor(id: ProviderId): ProviderAdapter {
         baseUrl: 'http://127.0.0.1:11434',
         ...(process.env.VIGIL_OLLAMA_MODEL ? { model: process.env.VIGIL_OLLAMA_MODEL } : {}),
       });
+    case 'jev':
+      // Jev takes no prompt and has no tools, so there is nothing to escape from.
+      throw new Error('Jev only labels events; it has no escape test.');
   }
 }
 
