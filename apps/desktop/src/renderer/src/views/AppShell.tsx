@@ -70,7 +70,7 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
         <div className="drag" />
         {section === 'home' && <HomeView go={go} />}
         {section === 'alerts' && <AlertsView selected={param} go={go} />}
-        {section === 'rules' && <RulesView />}
+        {section === 'rules' && <RulesView selected={param} go={go} />}
         {section === 'activity' && <ActivityView />}
         {section === 'settings' && <SettingsView />}
       </main>

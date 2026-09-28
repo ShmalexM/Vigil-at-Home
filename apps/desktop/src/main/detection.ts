@@ -5,6 +5,7 @@ import {
   DetectionEngine,
   FeedImporter,
   Feedback,
+  RuleEditor,
   macosCoreRules,
   mergeRules,
   sqliteStores,
@@ -45,6 +46,8 @@ export class Detector {
   readonly stores: SqliteDetectionStores;
   readonly feedback: Feedback;
   readonly feeds: FeedImporter;
+  /** The user's rule editor (Rules screen and "exclude" on alerts). */
+  readonly editor: RuleEditor;
   private checkedByKind = new Map<string, number>();
   private readonly now: () => number;
 
@@ -73,6 +76,20 @@ export class Detector {
       now: this.now,
       ...opts.feeds,
     });
+    this.editor = new RuleEditor(
+      this.engine,
+      macosCoreRules,
+      this.stores.rules,
+      this.stores.history,
+      {
+        now: this.now,
+      },
+    );
+    this.recount();
+  }
+
+  /** Call after the rule set changes outside setMode (the editor), so event counts stay right. */
+  rulesChanged(): void {
     this.recount();
   }
 
