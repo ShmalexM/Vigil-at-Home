@@ -17,6 +17,8 @@ const enabled =
   existsSync(p.osqueryd);
 const sys = realSystem();
 const results = join(p.logDir, 'osqueryd.results.log');
+// osquery's package may ship its own job; removal must put that back instead.
+const before = existsSync(p.plist) ? readFileSync(p.plist, 'utf8') : undefined;
 
 describe.skipIf(!enabled)('osquery started by the helper', () => {
   afterAll(async () => {
@@ -41,9 +43,13 @@ describe.skipIf(!enabled)('osquery started by the helper', () => {
     expect(await ensureOsquery(sys, p)).toBe('unchanged');
   }, 120_000);
 
-  it('removal stops osquery and takes out Vigil’s job', async () => {
+  it('removal takes out Vigil’s job and restores what was there before', async () => {
     await removeOsquery(sys, p);
-    expect((await sys.run('launchctl', ['print', `system/${OSQUERY_LABEL}`])).code).not.toBe(0);
-    expect(existsSync(p.plist)).toBe(false);
+    if (before === undefined) {
+      expect((await sys.run('launchctl', ['print', `system/${OSQUERY_LABEL}`])).code).not.toBe(0);
+      expect(existsSync(p.plist)).toBe(false);
+    } else {
+      expect(readFileSync(p.plist, 'utf8')).toBe(before);
+    }
   });
 });

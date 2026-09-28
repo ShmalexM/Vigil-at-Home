@@ -96,6 +96,15 @@ function backUpOnce(path: string): void {
   if (existsSync(path) && !existsSync(path + BACKUP)) copyFileSync(path, path + BACKUP);
 }
 
+/** Unload a job and wait for launchd to finish tearing it down (bootout can return first). */
+async function unload(sys: System, target: string): Promise<void> {
+  await sys.run('launchctl', ['bootout', target]);
+  for (let i = 0; i < 40; i++) {
+    if ((await sys.run('launchctl', ['print', target])).code !== 0) return;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
 export type OsqueryState = 'not-installed' | 'unchanged' | 'started' | 'restarted';
 
 export async function ensureOsquery(
@@ -122,7 +131,7 @@ export async function ensureOsquery(
   const target = `system/${OSQUERY_LABEL}`;
   let loaded = (await sys.run('launchctl', ['print', target])).code === 0;
   if (loaded && plistChanged) {
-    await sys.run('launchctl', ['bootout', target]);
+    await unload(sys, target);
     loaded = false;
   }
   if (!loaded) {
@@ -144,7 +153,7 @@ export async function removeOsquery(
 ): Promise<void> {
   const target = `system/${OSQUERY_LABEL}`;
   if (read(p.plist)?.includes(MARKER)) {
-    await sys.run('launchctl', ['bootout', target]);
+    await unload(sys, target);
     rmSync(p.plist, { force: true });
     if (existsSync(p.plist + BACKUP)) {
       renameSync(p.plist + BACKUP, p.plist);
