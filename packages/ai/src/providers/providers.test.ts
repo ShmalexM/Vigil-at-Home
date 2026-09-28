@@ -19,6 +19,7 @@ import {
 import { memoryPinStore } from '../executable.js';
 import {
   CODEX_DISABLED_FEATURES,
+  CODEX_MODEL,
   codexAppServerArgs,
   createCodexAdapter,
   codexThreadStartParams,
@@ -248,7 +249,13 @@ describe.skipIf(!bundledCodex())('Codex app-server as launched', () => {
 describe.skipIf(!bundledCodex())('What Codex offers the model', () => {
   it("sends only Vigil's own tools, with no exec, agents or questions to the user", async () => {
     // A stand-in model server records the request Codex would send to OpenAI.
-    const requests: Array<{ url?: string; tools?: Array<{ name?: string; type: string }> }> = [];
+    type Tool = { name?: string; type: string; tools?: Tool[] };
+    const requests: Array<{
+      url?: string;
+      model?: string;
+      tools?: Tool[];
+      input?: Array<{ type?: string; tools?: Tool[] }>;
+    }> = [];
     const server = createServer((req, res) => {
       let body = '';
       req.on('data', (c) => (body += c));
@@ -264,8 +271,8 @@ describe.skipIf(!bundledCodex())('What Codex offers the model', () => {
     await writeFile(
       join(codexHome, 'config.toml'),
       [
-        // A model Codex knows, so it builds the full tool list it would send.
-        'model = "gpt-5.5"',
+        // A code-mode model, which Vigil must override with its own choice.
+        'model = "gpt-6-astra"',
         'model_provider = "test"',
         '[model_providers.test]',
         'name = "test"',
@@ -291,8 +298,16 @@ describe.skipIf(!bundledCodex())('What Codex offers the model', () => {
       });
       expect(out.kind).toBe('error');
       expect(requests.filter((r) => r.url === '/v1/responses').length).toBeGreaterThan(0);
-      for (const r of requests.filter((r) => r.url === '/v1/responses'))
-        expect((r.tools ?? []).map((t) => t.name ?? t.type)).toEqual(['get_finding']);
+      // Tools can also arrive as input items, nested in namespaces (as in code mode).
+      const names = (tools: Tool[] = []): string[] =>
+        tools.flatMap((t) =>
+          t.tools ? names(t.tools).map((n) => `${t.name}.${n}`) : [t.name ?? t.type],
+        );
+      for (const r of requests.filter((r) => r.url === '/v1/responses')) {
+        expect(r.model).toBe(CODEX_MODEL);
+        expect(names(r.tools)).toEqual(['get_finding']);
+        expect((r.input ?? []).flatMap((i) => names(i.tools))).toEqual([]);
+      }
     } finally {
       server.close();
     }

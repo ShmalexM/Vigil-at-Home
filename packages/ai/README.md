@@ -59,6 +59,8 @@ If the user's own Codex is already signed in, that second sign-in isn't needed. 
 | Codex    | `shell_tool`, `unified_exec`, `code_mode_host`, web search, apps, plugins, hooks and more off; approvals declined | Vigil's own `CODEX_HOME`                                      | Read-only sandbox without network, ephemeral thread |
 | Ollama   | None. Vigil runs the tool loop                                                                                    | None                                                          | Talks only to `127.0.0.1`                           |
 
+Codex runs always use `gpt-5.5` (`CODEX_MODEL`). Codex's newer models (GPT-6, GPT-5.6) run in code mode, where every tool sits behind a JavaScript runner next to agent and question tools, and in tests on a real Mac the model answered without calling Vigil's tool at all. A test checks that the request Codex builds names that model and offers nothing but Vigil's tools, both as tools and as input items.
+
 Vigil's tools run inside Vigil's process (the Claude SDK's in-process MCP server, Codex's dynamic tools), so there is no port for another program to reach. The user's login stays with the vendor's CLI; this package never reads a credential file or Keychain item.
 
 Binaries are found by absolute path (including the usual Homebrew and `~/.local/bin` locations that a Finder-launched app misses). The first one seen is recorded. A signed binary may update as long as its Apple Team ID stays the same; an unsigned one must keep the same hash. A change stops runs until the user accepts it.
