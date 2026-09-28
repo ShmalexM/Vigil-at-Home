@@ -1,7 +1,6 @@
 import { Gauge, Info, RefreshCw, TrendingDown, TrendingUp } from 'lucide-react';
 import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import {
-  BILLED_PROVIDERS,
   PROVIDER_LABEL,
   PURPOSE_LABEL,
   type LimitWindowView,
@@ -182,7 +181,7 @@ function CostSection({
   const { totals } = report;
   const hourly = report.resolution === 'hour';
   const active = report.providers.map((p) => p.provider);
-  const usesBilled = report.providers.some((p) => BILLED_PROVIDERS.includes(p.provider));
+  const usesBilled = totals.billedUsd > 0;
 
   return (
     <>
@@ -202,7 +201,11 @@ function CostSection({
                     tabIndex={0}
                     title={[
                       'Claude Code reports what each run would cost at API prices; your plan is not charged per run.',
-                      ...(usesBilled ? ['Jev and cloud API keys show what you were billed.'] : []),
+                      ...(usesBilled
+                        ? [
+                            'Jev, cloud API keys and Codex on an OpenAI key show what you were billed.',
+                          ]
+                        : []),
                       'Models on this Mac are free.',
                       ...(totals.unpricedRuns > 0
                         ? [
@@ -478,7 +481,9 @@ function LimitsSection({ limits, now }: { limits: UsageLimitsView; now: number }
                         className="usage-dot"
                         style={{ background: PROVIDER_COLOR[k.provider] }}
                       />
-                      <span className="muted">{PROVIDER_LABEL[k.provider]}</span>
+                      <span className="muted">
+                        {k.provider === 'codex' ? 'Codex (OpenAI key)' : PROVIDER_LABEL[k.provider]}
+                      </span>
                     </span>
                     <span className="num">
                       {k.capUsd !== undefined
