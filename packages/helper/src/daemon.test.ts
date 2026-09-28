@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { SensorEvent } from '@vigil/sensors';
 import { HelperClient } from './client.js';
 import { defaultPaths, type HelperPaths } from './config.js';
-import { runDaemon } from './daemon.js';
+import { runDaemon, type SensorHealth } from './daemon.js';
 import { FakeSystem } from './testing/fakeSystem.js';
 
 let root: string;
@@ -37,6 +37,8 @@ beforeAll(async () => {
     log: () => {},
     approvalOwnerUid: process.getuid!(),
     opensslBin: 'openssl',
+    // Santa counts as installed; osquery doesn't.
+    sensorBinaries: { santa: paths.santaLog as string, osquery: join(root, 'no-osqueryd') },
   });
   client = await HelperClient.connect(paths.socket, async () => false);
 });
@@ -72,8 +74,14 @@ function santaPost(stage: string, body: unknown): Promise<any> {
 
 describe('helper daemon', () => {
   it('serves commands, Santa sync and live sensor events together', async () => {
-    const status = await client!.call<{ activeActions: number }>({ kind: 'helper.status' });
+    const status = await client!.call<{ activeActions: number; sensors: SensorHealth }>({
+      kind: 'helper.status',
+    });
     expect(status.activeActions).toBe(0);
+    expect(status.sensors).toEqual({
+      santa: { installed: true, lastEventAt: null, lastSyncAt: null },
+      osquery: { installed: false, lastEventAt: null },
+    });
 
     await client!.call({
       kind: 'santa.rule.set',
@@ -104,5 +112,11 @@ describe('helper daemon', () => {
       .map((e) => e.kind === 'santa.decision' && e.process.path);
     expect(blocks.sort()).toEqual(['/tmp/evil', '/tmp/evil2']);
     expect(readFileSync(paths.fileAccessPolicy, 'utf8')).toContain('SSHKeys');
+
+    await santaPost('postflight', { rules_received: 1, rules_processed: 1 });
+    const after = await client!.call<{ sensors: SensorHealth }>({ kind: 'helper.status' });
+    expect(after.sensors.santa.lastEventAt).toBeGreaterThan(0);
+    expect(after.sensors.santa.lastSyncAt).toBeGreaterThan(0);
+    expect(after.sensors.osquery.lastEventAt).toBeNull();
   });
 });

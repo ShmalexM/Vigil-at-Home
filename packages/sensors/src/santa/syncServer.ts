@@ -189,7 +189,11 @@ export class SantaSyncServer {
     return resp;
   }
 
+  /** When Santa last finished a sync with this server (ms since epoch), or null. */
+  lastSyncAt: number | null = null;
+
   private postflight(machineId: string, body: unknown): Record<string, never> {
+    this.lastSyncAt = Date.now();
     const session = this.sessions.get(machineId);
     this.sessions.delete(machineId);
     if (!session) return {};
