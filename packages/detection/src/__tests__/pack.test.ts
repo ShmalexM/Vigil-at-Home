@@ -102,6 +102,10 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
         ),
         { mode: 'block', actions: ['process.suspend'] },
       ],
+      [
+        fileOpen(proc({ path: '/usr/bin/curl', signing: 'apple' }), `${home}/.ssh/id_ed25519`),
+        { mode: 'block', actions: ['process.suspend'] },
+      ],
     ],
     good: [
       fileOpen(chrome, `${home}/Library/Application Support/Google/Chrome/Default/Cookies`),
@@ -215,7 +219,7 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
           kind: 'file',
           source: 'santa',
           op: 'open',
-          path: `${home}/.ssh/id_ed25519`,
+          path: `${home}/Library/Application Support/Firefox/Profiles/ab12.default/logins.json`,
           process: { pid: 77, path: '/Users/Shared/.x/agent' },
         }),
         { mode: 'alert', actions: ['process.suspend'] },
@@ -262,14 +266,17 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
         path: `${home}/Library/Application Support/Google/Chrome/Default/Login Data`,
         process: unsignedStealer,
       }),
-      // File activity from other sensors is not a Santa policy report.
-      ev({
-        kind: 'file',
-        source: 'osquery',
-        op: 'open',
-        path: `${home}/.ssh/id_ed25519`,
-        process: chrome,
-      }),
+      // The browser reading its own store.
+      fileOpen(chrome, `${home}/Library/Application Support/Google/Chrome/Default/Login Data`),
+      // A wallet app reading its own wallet, and Spotlight indexing.
+      fileOpen(
+        proc({ path: '/Applications/Exodus.app/Contents/MacOS/Exodus', signing: 'developer_id' }),
+        `${home}/Library/Application Support/Exodus/exodus.wallet/seed.seco`,
+      ),
+      fileOpen(
+        proc({ path: '/System/Library/Frameworks/CoreServices.framework/mds', signing: 'apple' }),
+        `${home}/Library/Application Support/Google/Chrome/Default/Cookies`,
+      ),
       // Launch blocks belong to santa-blocked-launch, not this rule.
       ev({
         kind: 'santa.decision',

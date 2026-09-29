@@ -56,6 +56,24 @@ const SANTA_BLOCK_BINARY = {
 
 /** Developer tools (Homebrew Python, Ansible, git helpers) read these every day. */
 const SSH_KEY_GLOBS = ['~/.ssh/id_*'];
+/** Tools that read a key only to send it somewhere. */
+const KEY_UPLOADERS = ['curl', 'nscurl', 'osascript'];
+
+/** Browser password and cookie stores, with the team ID of the browser that owns them. */
+const BROWSER_STORES = [
+  { teamId: 'EQHXZ8M8AV', root: '~/Library/Application Support/Google/Chrome' },
+  { teamId: 'KL8N8XSYF4', root: '~/Library/Application Support/BraveSoftware/Brave-Browser' },
+  { teamId: 'UBF8T346G9', root: '~/Library/Application Support/Microsoft Edge' },
+].map(({ teamId, root }) => ({
+  teamId,
+  globs: ['Cookies', 'Network/Cookies', 'Login Data', 'Web Data'].map((f) => `${root}/*/${f}`),
+}));
+BROWSER_STORES.push({
+  teamId: '43AQ936H96',
+  globs: ['cookies.sqlite', 'logins.json', 'key4.db'].map(
+    (f) => `~/Library/Application Support/Firefox/Profiles/*/${f}`,
+  ),
+});
 
 export const CREDENTIAL_STORE_GLOBS = [
   '~/Library/Application Support/Google/Chrome/**/Cookies',
@@ -169,8 +187,14 @@ export const macosCoreRules: DetectionRuleInput[] = [
       all: [
         { field: 'op', op: 'in', value: ['open', 'write', 'rename'] },
         { field: 'path', op: 'glob', value: CREDENTIAL_STORE_GLOBS },
-        // SSH keys only alert (ssh-key-read-untrusted): developer tools read them daily.
-        { not: { field: 'path', op: 'glob', value: SSH_KEY_GLOBS } },
+        // Developer tools read SSH keys daily, so those only alert
+        // (ssh-key-read-untrusted). Uploaders never need a key and still block.
+        {
+          any: [
+            { not: { field: 'path', op: 'glob', value: SSH_KEY_GLOBS } },
+            { field: 'process.name', op: 'in', value: KEY_UPLOADERS, nocase: true },
+          ],
+        },
         {
           any: [
             { field: 'process.signing', op: 'in', value: UNTRUSTED_SIGNING },
@@ -206,6 +230,7 @@ export const macosCoreRules: DetectionRuleInput[] = [
             { field: 'process.name', op: 'in', value: SCRIPT_RUNNERS, nocase: true },
           ],
         },
+        { not: { field: 'process.name', op: 'in', value: KEY_UPLOADERS, nocase: true } },
       ],
     },
     response: [SUSPEND],
@@ -302,21 +327,28 @@ export const macosCoreRules: DetectionRuleInput[] = [
             { field: 'decision', op: 'in', value: ['audit_only', 'block'] },
           ],
         },
-        // An audit-only read arrives as file activity. Santa logs it only when the
-        // program is not on the watch item's allow list. Unsigned programs and
-        // script tools are credential-theft-untrusted's (it blocks), so this
-        // covers the rest: signed programs, and ones whose signing is unknown
-        // because they started before Vigil.
+        // An audit-only read arrives as file activity. This half covers a
+        // signed program (or one whose signing is unknown because it started
+        // before Vigil) reading another vendor's browser passwords or cookies.
+        // Unsigned programs and script tools are credential-theft-untrusted's,
+        // so one read raises one alert. Stores their own apps read (wallets,
+        // Arc, keychain files) are left out: those reports are mostly the app itself.
         {
           all: [
             { field: 'kind', op: 'eq', value: 'file' },
-            { field: 'source', op: 'eq', value: 'santa' },
-            { field: 'op', op: 'in', value: ['open', 'write', 'rename'] },
-            { field: 'path', op: 'glob', value: CREDENTIAL_STORE_GLOBS },
+            { field: 'op', op: 'eq', value: 'open' },
+            {
+              any: BROWSER_STORES.map((b) => ({
+                all: [
+                  { field: 'path', op: 'glob', value: b.globs },
+                  { not: { field: 'process.teamId', op: 'eq', value: b.teamId } },
+                ],
+              })),
+            },
             {
               not: {
                 any: [
-                  { field: 'process.signing', op: 'in', value: UNTRUSTED_SIGNING },
+                  { field: 'process.signing', op: 'in', value: ['apple', ...UNTRUSTED_SIGNING] },
                   { field: 'process.name', op: 'in', value: SCRIPT_RUNNERS, nocase: true },
                 ],
               },
