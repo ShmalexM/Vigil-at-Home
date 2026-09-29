@@ -11,7 +11,8 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "bench": "vitest run --config vitest.config.ts src/detection.run.ts",
-    "bench:labels": "vitest run --config vitest.config.ts src/labels.run.ts"
+    "bench:labels": "vitest run --config vitest.config.ts src/labels.run.ts",
+    "bench:review": "vitest run --config vitest.config.ts src/review.run.ts"
   },
   "dependencies": {
     "@vigil/ai": "workspace:*",
