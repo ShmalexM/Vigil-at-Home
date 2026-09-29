@@ -84,7 +84,8 @@ const valueOf = (p: PeriodTotals, provider: UsageProvider, metric: ChartMetric) 
 
 /**
  * One line per provider over the window, each measured from zero, with a
- * hover readout. Mirrors T3 Code's usage chart.
+ * hover readout. Mirrors T3 Code's usage chart; the curve and layout code is
+ * adapted from it (MIT, Copyright (c) 2026 T3 Tools Inc.; see NOTICE).
  */
 export function UsageChart({
   providers,

@@ -1,0 +1,16 @@
+Vigil at Home
+Copyright 2026 Vigil at Home contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Portions of the Usage page (apps/desktop/src/renderer/src/views/UsageChart.tsx
+and apps/desktop/src/renderer/src/views/usage-format.ts) are adapted from
+T3 Code (https://github.com/pingdotgg/t3code), Copyright (c) 2026 T3 Tools Inc.,
+used under the MIT License.
+
+Test fixtures in packages/sensors/src/logParser.test.ts contain sample log
+lines from Santa (https://github.com/northpolesec/santa), used under the
+Apache License, Version 2.0.
+
+See THIRD_PARTY_NOTICES.md for the full license texts and for the third-party
+software bundled with or used by the app.

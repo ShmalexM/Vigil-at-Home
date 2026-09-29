@@ -31,6 +31,13 @@ mac:
     - from: build/helper/darwin-${arch}
       to: helper
       filter: [node]
+    # License notices for the code and fonts bundled into out/ (NOTICE lists them).
+    - from: ../../LICENSE
+      to: LICENSE
+    - from: ../../NOTICE
+      to: NOTICE
+    - from: ../../THIRD_PARTY_NOTICES.md
+      to: THIRD_PARTY_NOTICES.md
   # Keep Node.js's own Developer ID signature and notarization on the helper runtime.
   signIgnore:
     - Resources/helper/node$

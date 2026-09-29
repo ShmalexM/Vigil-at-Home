@@ -108,7 +108,8 @@ export function formatResetsIn(w: { resetsAt?: number }, now: number): string | 
 
 /**
  * The top of the axis: a readable 1/2/5 × 10^n step at or above the peak, so
- * the tallest period is never drawn past the top of the plot.
+ * the tallest period is never drawn past the top of the plot. Adapted from
+ * T3 Code (MIT, Copyright (c) 2026 T3 Tools Inc.; see NOTICE).
  */
 export function niceScale(peak: number, count: number): { max: number; ticks: number[] } {
   if (peak <= 0) return { max: 0, ticks: [0] };
