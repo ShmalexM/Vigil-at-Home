@@ -96,14 +96,14 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
         { mode: 'block', actions: ['process.suspend'] },
       ],
       [
-        fileOpen(unsignedStealer, `${home}/.ssh/id_ed25519`),
-        { mode: 'block', actions: ['process.suspend'] },
-      ],
-      [
         fileOpen(
           unsignedStealer,
           `${home}/Library/Application Support/Google/Chrome/Default/Local Extension Settings/nkbihfbeogaeaoehlefnkodbefgpgknn/000003.log`,
         ),
+        { mode: 'block', actions: ['process.suspend'] },
+      ],
+      [
+        fileOpen(proc({ path: '/usr/bin/curl', signing: 'apple' }), `${home}/.ssh/id_ed25519`),
         { mode: 'block', actions: ['process.suspend'] },
       ],
     ],
@@ -111,6 +111,34 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
       fileOpen(chrome, `${home}/Library/Application Support/Google/Chrome/Default/Cookies`),
       fileOpen(proc({ path: '/usr/bin/ssh', signing: 'apple' }), `${home}/.ssh/id_ed25519`),
       fileOpen(unsignedStealer, `${home}/.ssh/known_hosts`),
+      // SSH keys are ssh-key-read-untrusted's, which alerts instead of blocking.
+      fileOpen(unsignedStealer, `${home}/.ssh/id_ed25519`),
+    ],
+  },
+  'ssh-key-read-untrusted': {
+    bad: [
+      [
+        fileOpen(unsignedStealer, `${home}/.ssh/id_ed25519`),
+        { mode: 'alert', actions: ['process.suspend'] },
+      ],
+      [
+        fileOpen(
+          proc({
+            path: '/opt/homebrew/Cellar/python@3.12/3.12.4/bin/python3.12',
+            signing: 'adhoc',
+          }),
+          `${home}/.ssh/id_rsa`,
+        ),
+        { mode: 'alert', actions: ['process.suspend'] },
+      ],
+    ],
+    good: [
+      fileOpen(proc({ path: '/usr/bin/ssh', signing: 'apple' }), `${home}/.ssh/id_ed25519`),
+      fileOpen(unsignedStealer, `${home}/.ssh/known_hosts`),
+      fileOpen(
+        unsignedStealer,
+        `${home}/Library/Application Support/Google/Chrome/Default/Cookies`,
+      ),
     ],
   },
   'fake-password-prompt': {
@@ -166,6 +194,145 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
         decision: 'allow',
         reason: 'ALLOW_CERTIFICATE',
         process: chrome,
+      }),
+    ],
+  },
+  'santa-protected-file-access': {
+    bad: [
+      // Audit-only reads as the sensors report them now: file activity from Santa.
+      [
+        ev({
+          kind: 'file',
+          source: 'santa',
+          op: 'open',
+          path: `${home}/Library/Application Support/Google/Chrome/Default/Login Data`,
+          process: proc({
+            path: '/Applications/PDF Tools.app/Contents/MacOS/PDF Tools',
+            signing: 'developer_id',
+            teamId: 'ZZZ999ZZZ9',
+          }),
+        }),
+        { mode: 'alert', actions: ['process.suspend'] },
+      ],
+      [
+        ev({
+          kind: 'file',
+          source: 'santa',
+          op: 'open',
+          path: `${home}/Library/Application Support/Firefox/Profiles/ab12.default/logins.json`,
+          process: { pid: 77, path: '/Users/Shared/.x/agent' },
+        }),
+        { mode: 'alert', actions: ['process.suspend'] },
+      ],
+      [
+        ev({
+          kind: 'santa.decision',
+          source: 'santa',
+          target: 'file_access',
+          decision: 'audit_only',
+          reason: 'Chrome passwords',
+          path: `${home}/Library/Application Support/Google/Chrome/Default/Login Data`,
+          process: unsignedStealer,
+        }),
+        { mode: 'alert', actions: ['process.suspend'] },
+      ],
+      [
+        ev({
+          kind: 'santa.decision',
+          source: 'santa',
+          target: 'file_access',
+          decision: 'block',
+          reason: 'SSH keys',
+          path: `${home}/.ssh/id_ed25519`,
+          process: devTool,
+        }),
+        { mode: 'alert', actions: ['process.suspend'] },
+      ],
+    ],
+    good: [
+      ev({
+        kind: 'santa.decision',
+        source: 'santa',
+        target: 'file_access',
+        decision: 'allow',
+        reason: 'Chrome passwords',
+        process: chrome,
+      }),
+      // Unsigned readers are credential-theft-untrusted's, so they alert once.
+      ev({
+        kind: 'file',
+        source: 'santa',
+        op: 'open',
+        path: `${home}/Library/Application Support/Google/Chrome/Default/Login Data`,
+        process: unsignedStealer,
+      }),
+      // The browser reading its own store.
+      fileOpen(chrome, `${home}/Library/Application Support/Google/Chrome/Default/Login Data`),
+      // A wallet app reading its own wallet, and Spotlight indexing.
+      fileOpen(
+        proc({ path: '/Applications/Exodus.app/Contents/MacOS/Exodus', signing: 'developer_id' }),
+        `${home}/Library/Application Support/Exodus/exodus.wallet/seed.seco`,
+      ),
+      fileOpen(
+        proc({ path: '/System/Library/Frameworks/CoreServices.framework/mds', signing: 'apple' }),
+        `${home}/Library/Application Support/Google/Chrome/Default/Cookies`,
+      ),
+      // Launch blocks belong to santa-blocked-launch, not this rule.
+      ev({
+        kind: 'santa.decision',
+        source: 'santa',
+        target: 'execution',
+        decision: 'audit_only',
+        reason: 'UNKNOWN',
+        process: devTool,
+      }),
+    ],
+  },
+  'xprotect-detected': {
+    bad: [
+      [
+        ev({
+          kind: 'system.alert',
+          source: 'santa',
+          subtype: 'xprotect_detected',
+          path: `${home}/Downloads/Installer.app`,
+          details: { malware: 'MACOS.ADLOAD' },
+        }),
+        { mode: 'alert' },
+      ],
+    ],
+    good: [
+      ev({
+        kind: 'system.alert',
+        source: 'santa',
+        subtype: 'gatekeeper_override',
+        details: {},
+      }),
+    ],
+  },
+  'tcc-changed-by-untrusted': {
+    bad: [
+      [
+        ev({
+          kind: 'system.alert',
+          source: 'santa',
+          subtype: 'tcc_modified',
+          process: unsignedStealer,
+          details: { service: 'kTCCServiceScreenCapture', identity: 'com.evil.helper' },
+        }),
+        { mode: 'alert', actions: ['process.suspend'] },
+      ],
+    ],
+    good: [
+      ev({
+        kind: 'system.alert',
+        source: 'santa',
+        subtype: 'tcc_modified',
+        process: proc({
+          path: '/System/Applications/System Settings.app/Contents/MacOS/System Settings',
+          signing: 'apple',
+        }),
+        details: { service: 'kTCCServiceMicrophone', identity: 'us.zoom.xos' },
       }),
     ],
   },

@@ -54,6 +54,27 @@ const SANTA_BLOCK_BINARY = {
   policy: 'block',
 } as const;
 
+/** Developer tools (Homebrew Python, Ansible, git helpers) read these every day. */
+const SSH_KEY_GLOBS = ['~/.ssh/id_*'];
+/** Tools that read a key only to send it somewhere. */
+const KEY_UPLOADERS = ['curl', 'nscurl', 'osascript'];
+
+/** Browser password and cookie stores, with the team ID of the browser that owns them. */
+const BROWSER_STORES = [
+  { teamId: 'EQHXZ8M8AV', root: '~/Library/Application Support/Google/Chrome' },
+  { teamId: 'KL8N8XSYF4', root: '~/Library/Application Support/BraveSoftware/Brave-Browser' },
+  { teamId: 'UBF8T346G9', root: '~/Library/Application Support/Microsoft Edge' },
+].map(({ teamId, root }) => ({
+  teamId,
+  globs: ['Cookies', 'Network/Cookies', 'Login Data', 'Web Data'].map((f) => `${root}/*/${f}`),
+}));
+BROWSER_STORES.push({
+  teamId: '43AQ936H96',
+  globs: ['cookies.sqlite', 'logins.json', 'key4.db'].map(
+    (f) => `~/Library/Application Support/Firefox/Profiles/*/${f}`,
+  ),
+});
+
 export const CREDENTIAL_STORE_GLOBS = [
   '~/Library/Application Support/Google/Chrome/**/Cookies',
   '~/Library/Application Support/Google/Chrome/**/Login Data',
@@ -72,7 +93,7 @@ export const CREDENTIAL_STORE_GLOBS = [
   '~/Library/Cookies/Cookies.binarycookies',
   '~/Library/Containers/com.apple.Safari/Data/Library/Cookies/**',
   '~/Library/Keychains/**',
-  '~/.ssh/id_*',
+  ...SSH_KEY_GLOBS,
   '~/Library/Application Support/Exodus/**',
   '~/Library/Application Support/Electrum/wallets/**',
   '~/Library/Application Support/atomic/**',
@@ -166,6 +187,14 @@ export const macosCoreRules: DetectionRuleInput[] = [
       all: [
         { field: 'op', op: 'in', value: ['open', 'write', 'rename'] },
         { field: 'path', op: 'glob', value: CREDENTIAL_STORE_GLOBS },
+        // Developer tools read SSH keys daily, so those only alert
+        // (ssh-key-read-untrusted). Uploaders never need a key and still block.
+        {
+          any: [
+            { not: { field: 'path', op: 'glob', value: SSH_KEY_GLOBS } },
+            { field: 'process.name', op: 'in', value: KEY_UPLOADERS, nocase: true },
+          ],
+        },
         {
           any: [
             { field: 'process.signing', op: 'in', value: UNTRUSTED_SIGNING },
@@ -181,6 +210,36 @@ export const macosCoreRules: DetectionRuleInput[] = [
     ],
     santa: { ruleType: 'binary', from: 'process.sha256' },
     tags: ['attack.credential_access', 'attack.t1555'],
+  }),
+  rule({
+    id: 'ssh-key-read-untrusted',
+    name: 'Untrusted program reading an SSH key',
+    description:
+      'An unsigned program or a script tool opened one of your SSH private keys. Stealers take these, but so do developer tools like Homebrew Python and Ansible, so Vigil asks instead of blocking.',
+    mode: 'alert',
+    severity: 'high',
+    fidelity: 'medium',
+    eventKinds: ['file'],
+    condition: {
+      all: [
+        { field: 'op', op: 'in', value: ['open', 'write', 'rename'] },
+        { field: 'path', op: 'glob', value: SSH_KEY_GLOBS },
+        {
+          any: [
+            { field: 'process.signing', op: 'in', value: UNTRUSTED_SIGNING },
+            { field: 'process.name', op: 'in', value: SCRIPT_RUNNERS, nocase: true },
+          ],
+        },
+        { not: { field: 'process.name', op: 'in', value: KEY_UPLOADERS, nocase: true } },
+      ],
+    },
+    response: [SUSPEND],
+    reasons: [
+      '{{process.name}} opened your SSH key {{pathName}}.',
+      'If you did not just run a tool that uses SSH, it may be copying the key.',
+    ],
+    dedupe: { key: ['process.path'], windowSec: 86_400 },
+    tags: ['attack.credential_access', 'attack.t1552.004'],
   }),
   rule({
     id: 'fake-password-prompt',
@@ -236,13 +295,111 @@ export const macosCoreRules: DetectionRuleInput[] = [
   rule({
     id: 'santa-blocked-launch',
     name: 'Blocked before it could run',
-    description: 'Santa stopped a program from launching or from opening a protected file.',
+    description: 'Santa stopped a program from launching.',
     mode: 'alert',
     severity: 'high',
     fidelity: 'high',
     eventKinds: ['santa.decision'],
-    condition: { field: 'decision', op: 'eq', value: 'block' },
+    condition: {
+      all: [
+        { field: 'target', op: 'eq', value: 'execution' },
+        { field: 'decision', op: 'eq', value: 'block' },
+      ],
+    },
     reasons: ['{{process.name}} was stopped by Santa ({{reason}}).'],
+  }),
+  rule({
+    id: 'santa-protected-file-access',
+    name: 'Program opened a protected password or key file',
+    description:
+      "Santa reported a program that isn't allowed to touch browser passwords, cookies, the keychain or SSH keys opening one of them. Santa only reports programs outside its allow list, so this is rarely a false alarm.",
+    mode: 'alert',
+    severity: 'critical',
+    fidelity: 'high',
+    eventKinds: ['santa.decision', 'file'],
+    condition: {
+      any: [
+        // Santa denied the read. Older builds also reported audit-only reads this way.
+        {
+          all: [
+            { field: 'kind', op: 'eq', value: 'santa.decision' },
+            { field: 'target', op: 'eq', value: 'file_access' },
+            { field: 'decision', op: 'in', value: ['audit_only', 'block'] },
+          ],
+        },
+        // An audit-only read arrives as file activity. This half covers a
+        // signed program (or one whose signing is unknown because it started
+        // before Vigil) reading another vendor's browser passwords or cookies.
+        // Unsigned programs and script tools are credential-theft-untrusted's,
+        // so one read raises one alert. Stores their own apps read (wallets,
+        // Arc, keychain files) are left out: those reports are mostly the app itself.
+        {
+          all: [
+            { field: 'kind', op: 'eq', value: 'file' },
+            { field: 'op', op: 'eq', value: 'open' },
+            {
+              any: BROWSER_STORES.map((b) => ({
+                all: [
+                  { field: 'path', op: 'glob', value: b.globs },
+                  { not: { field: 'process.teamId', op: 'eq', value: b.teamId } },
+                ],
+              })),
+            },
+            {
+              not: {
+                any: [
+                  { field: 'process.signing', op: 'in', value: ['apple', ...UNTRUSTED_SIGNING] },
+                  { field: 'process.name', op: 'in', value: SCRIPT_RUNNERS, nocase: true },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    },
+    response: [SUSPEND],
+    reasons: [
+      '{{process.name}} opened {{path}}, which holds saved passwords, cookies or keys.',
+      'Santa reported it because this program is not on the list allowed to read it.',
+    ],
+    santa: { ruleType: 'binary', from: 'process.sha256' },
+    tags: ['attack.credential_access', 'attack.t1555'],
+  }),
+  rule({
+    id: 'xprotect-detected',
+    name: 'macOS found malware',
+    description:
+      "XProtect, macOS's built-in malware scanner, matched a file against its signatures. macOS usually blocks or removes it; Vigil makes sure you hear about it.",
+    mode: 'alert',
+    severity: 'high',
+    fidelity: 'high',
+    eventKinds: ['system.alert'],
+    condition: { field: 'subtype', op: 'eq', value: 'xprotect_detected' },
+    reasons: ['macOS recognised {{path}} as malware ({{details.malware}}).'],
+    tags: ['attack.execution'],
+  }),
+  rule({
+    id: 'tcc-changed-by-untrusted',
+    name: 'Privacy permission changed by an untrusted program',
+    description:
+      'A camera, microphone, screen or file permission changed, and the change came from an unsigned or ad hoc signed program rather than System Settings.',
+    mode: 'alert',
+    severity: 'high',
+    fidelity: 'high',
+    eventKinds: ['system.alert'],
+    condition: {
+      all: [
+        { field: 'subtype', op: 'eq', value: 'tcc_modified' },
+        { field: 'process.signing', op: 'in', value: UNTRUSTED_SIGNING },
+      ],
+    },
+    response: [SUSPEND],
+    reasons: [
+      '{{process.name}} changed the {{details.service}} permission for {{details.identity}}.',
+      'Permissions are normally changed in System Settings, not by other programs.',
+    ],
+    santa: { ruleType: 'binary', from: 'process.sha256' },
+    tags: ['attack.defense_evasion', 'attack.t1548'],
   }),
 
   // ------------------------------------------------------------------ alert

@@ -93,6 +93,12 @@ export const KNOWN_FIELDS = new Set<string>([
   'permissions',
   // system.alert (details.* fields are subtype-specific)
   'subtype',
+  'details.malware', // xprotect_detected
+  'details.service', // tcc_modified
+  'details.identity',
+  'details.eventType',
+  'details.authRight',
+  'details.authReason',
   ...COMPUTED_FIELDS,
 ]);
 
