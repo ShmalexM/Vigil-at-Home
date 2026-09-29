@@ -99,14 +99,16 @@ export function osqueryConfig(opts: OsqueryConfigOptions = {}): string {
         interval: persist,
         description: 'Launch agents and daemons outside the read-only system volume',
       },
-      // A snapshot, so it logs every time: proof osquery is alive even when
-      // nothing changed, and whether any of Vigil's queries is denylisted.
+      // Logs every row on every run, even when nothing else changed: proof
+      // osquery is alive, and whether any of Vigil's queries is denylisted.
+      // checked_at makes each run's rows differ from the last. Not a snapshot
+      // query: the filesystem logger writes those to osqueryd.snapshots.log,
+      // which Vigil does not read.
       [QUERY_NAMES.health]: {
         query:
-          'SELECT name, denylisted, executions FROM osquery_schedule ' +
-          "WHERE name LIKE 'vigil_%';",
+          'SELECT name, denylisted, executions, (SELECT unix_time FROM time) AS checked_at ' +
+          "FROM osquery_schedule WHERE name LIKE 'vigil_%';",
         interval: persist * 5,
-        snapshot: true,
         description: 'That osquery runs and none of the queries above is switched off',
       },
       [QUERY_NAMES.crontab]: {

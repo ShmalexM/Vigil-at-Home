@@ -94,8 +94,8 @@ flag file that osquery's launchd job reads.
 osquery's watchdog kills its worker when it goes over the CPU or memory limit, and by
 default osquery then switches off whichever query was running for 24 hours. Every
 Vigil query sets `denylist: false`, so a kill on a busy Mac costs one run, not a day
-of connections. A `vigil_health` snapshot every 5 minutes reads `osquery_schedule`:
-it keeps `lastEventAt` fresh while nothing changes, and `SensorHub` reports any query
+of connections. A `vigil_health` query every 5 minutes reads `osquery_schedule` and
+logs every row each run: it keeps `lastEventAt` fresh while nothing changes, and `SensorHub` reports any query
 osquery has still switched off through `onError`.
 
 Installing osquery starts nothing. The helper (`packages/helper/src/osquery.ts`) writes

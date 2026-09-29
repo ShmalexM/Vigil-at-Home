@@ -14,15 +14,16 @@ describe('sensor hub', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('counts osquery’s health snapshot as activity and reports switched-off queries', async () => {
+  it('counts osquery’s health rows as activity and reports switched-off queries', async () => {
     dir = mkdtempSync(join(tmpdir(), 'vigil-hub-'));
     const log = join(dir, 'osqueryd.results.log');
     writeFileSync(
       log,
       JSON.stringify({
         name: QUERY_NAMES.health,
-        action: 'snapshot',
-        snapshot: [{ name: QUERY_NAMES.networkConnections, denylisted: '1' }],
+        action: 'added',
+        counter: 0,
+        columns: { name: QUERY_NAMES.networkConnections, denylisted: '1', executions: '3' },
       }) + '\n',
     );
     const events: SensorEvent[] = [];

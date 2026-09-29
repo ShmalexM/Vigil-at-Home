@@ -44,8 +44,8 @@ export class SensorHub {
       this.addTailer('osquery', osq, (line) => {
         const health = osqueryHealth(line);
         if (health) {
-          // Differential queries are silent when nothing changes; this
-          // snapshot is what shows osquery is still running.
+          // Differential queries are silent when nothing changes; the health
+          // query's rows are what show osquery is still running.
           this.activity.osquery = Date.now();
           if (health.denylisted.length > 0)
             opts.onError?.(

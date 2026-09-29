@@ -182,20 +182,19 @@ describe.skipIf(!enabled)('osquery on a real Mac', () => {
       expect([...kinds]).toContain('network.connection');
     }, 90_000);
 
-    it('logs the health snapshot, with every query still switched on', async () => {
+    it('logs the health rows, with every query still switched on', async () => {
       const log = join(dir, 'log', 'osqueryd.results.log');
-      let health: { denylisted: string[] } | undefined;
-      let raw = '';
-      for (let i = 0; i < 40 && !health && daemon?.exitCode === null; i++) {
+      let rows: string[] = [];
+      for (let i = 0; i < 40 && rows.length === 0 && daemon?.exitCode === null; i++) {
         await new Promise((r) => setTimeout(r, 1000));
         if (!existsSync(log)) continue;
-        for (const line of readFileSync(log, 'utf8').split('\n').filter(Boolean)) {
-          const h = osqueryHealth(line);
-          if (h) [health, raw] = [h, line];
-        }
+        rows = readFileSync(log, 'utf8')
+          .split('\n')
+          .filter((line) => osqueryHealth(line) !== undefined);
       }
-      expect(health, `no health snapshot:\n${daemonOutput}`).toEqual({ denylisted: [] });
-      expect(raw).toContain(QUERY_NAMES.networkConnections);
+      expect(rows.length, `no health rows:\n${daemonOutput}`).toBeGreaterThan(0);
+      expect(rows.flatMap((line) => osqueryHealth(line)!.denylisted)).toEqual([]);
+      expect(rows.join('\n')).toContain(QUERY_NAMES.networkConnections);
     }, 60_000);
   });
 });
