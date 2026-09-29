@@ -316,6 +316,23 @@ describe('AiBridge event labels', () => {
     expect(view!.label).toMatchObject({ label: 'unusual', by: 'model' });
   });
 
+  it('caps Apple tools at 30 command lines an hour', async () => {
+    const { core, ai, sent } = labelling((ids) => ({ labels: ids, deferred: [] }));
+    ai.labelEventsFrom(core);
+    for (let i = 0; i < 40; i++) {
+      const e = makeExec('/bin/zsh');
+      if (e.kind === 'process.exec') {
+        e.process.signing = 'apple';
+        e.process.args = ['zsh', '-c', `step-${'x'.repeat(i)}`];
+      }
+      core.ingest(e, unmatched);
+    }
+    core.ingest(makeExec('/tmp/other'), unmatched);
+    core.events.flush();
+    await ai.labelBatch(core.store);
+    expect(sent[0]).toHaveLength(31);
+  });
+
   it('puts events the model skipped back in the queue', async () => {
     let round = 0;
     const { core, ai, sent } = labelling((ids) =>

@@ -32,6 +32,7 @@ import type { AlertDetail, EventOutcome } from '../shared/ipc.js';
 import type { ApiKeyProvider, SetupMode } from '../shared/setup.js';
 import type { Store } from './db/store.js';
 import type { VigilCore } from './service.js';
+import { labelKey } from './label-filter.js';
 import { TEST_RULE } from './test-alert.js';
 import { monthStart, type UsageService } from './usage.js';
 
@@ -46,6 +47,11 @@ const LABEL_EVERY_MS = 60_000;
 /** The same program or destination is labelled at most once an hour. */
 const REPEAT_MS = 60 * 60_000;
 const MAX_LABEL_QUEUE = 200;
+/**
+ * Apple tools (shells, curl, osascript…) labelled per command line, at most
+ * this many an hour, so a busy build can't flood the labeller.
+ */
+const MAX_TOOL_LABELS_PER_HOUR = 30;
 const MAX_REMEMBERED = 5_000;
 /** How often to ask the rule reviewer whether a review is due. It runs about once a day. */
 const REVIEW_CHECK_MS = 60 * 60_000;
@@ -125,6 +131,8 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
   private cachedPrefs: AiPrefs | undefined;
   /** When each program or destination was last queued, so repeats aren't sent again. */
   private readonly lastQueued = new Map<string, number>();
+  /** When recent Apple-tool events were queued, for the hourly cap. */
+  private toolQueuedAt: number[] = [];
   /** The model behind recent runs, so an explanation can say who wrote it. */
   private readonly models = new Map<string, string>();
 
@@ -392,7 +400,8 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
 
   /**
    * Labels events no rule matched, a batch a minute, as hints in Activity.
-   * Apple's own programs and repeats within an hour are skipped; the
+   * Apple's own programs (except the tools attackers borrow, see
+   * label-filter.ts) and repeats within an hour are skipped; the
    * classifier keeps to its hourly and CPU budgets and waits while the Mac is
    * busy. A label never blocks, allows or raises anything.
    */
@@ -438,11 +447,17 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
   /** Queues an event for labelling when it's worth a model's look. Cheap: runs for every event. */
   consider(event: SensorEvent, outcome: EventOutcome | undefined): void {
     if (!outcome || outcome.matches.length > 0) return;
-    const key = labelKey(event);
-    if (!key || !this.prefs().labelling) return;
+    const found = labelKey(event);
+    if (!found || !this.prefs().labelling) return;
+    const { key, tool } = found;
     const at = this.now();
     const last = this.lastQueued.get(key);
     if (last !== undefined && at - last < REPEAT_MS) return;
+    if (tool) {
+      this.toolQueuedAt = this.toolQueuedAt.filter((t) => at - t < REPEAT_MS);
+      if (this.toolQueuedAt.length >= MAX_TOOL_LABELS_PER_HOUR) return;
+      this.toolQueuedAt.push(at);
+    }
     this.lastQueued.delete(key);
     this.lastQueued.set(key, at);
     if (this.lastQueued.size > MAX_REMEMBERED)
@@ -539,32 +554,6 @@ function providerView(s: ProviderStatus, codexShared: boolean, codexOnKey = fals
 }
 
 /** Claude Code reports how it's signed in, not who; say it in words. */
-/**
- * What makes two events the same for labelling: the program, plus where it
- * connected. Undefined for events not worth a model's look: Apple's own
- * programs, exits, file events and system alerts.
- */
-export function labelKey(e: SensorEvent): string | undefined {
-  switch (e.kind) {
-    case 'process.exec':
-      return e.process.signing === 'apple' ? undefined : `exec:${e.process.path}`;
-    case 'network.connection':
-      return e.process?.signing === 'apple'
-        ? undefined
-        : `net:${e.process?.path ?? '?'}>${e.remoteHost ?? e.remoteAddress}:${e.remotePort ?? ''}`;
-    case 'network.listen':
-      return e.process?.signing === 'apple'
-        ? undefined
-        : `listen:${e.process?.path ?? '?'}:${e.localPort}`;
-    case 'persistence':
-      return e.change === 'removed' ? undefined : `persist:${e.path}`;
-    case 'browser.extension':
-      return e.change === 'removed' ? undefined : `ext:${e.extensionId}`;
-    default:
-      return undefined;
-  }
-}
-
 function claudeAuth(method: string): string {
   const words: Record<string, string> = {
     'claude.ai': 'Signed in with your Claude account',
