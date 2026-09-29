@@ -437,8 +437,10 @@ function grade(s: Omit<RuleScore, 'grade' | 'why'>): { grade: Grade; why: string
   const devIdeal = s.falsePerDayIdeal.developer;
   if (s.mode === 'shadow' || s.mode === 'disabled')
     return { grade: 'untested', why: `in ${s.mode} mode, so it never alerts` };
-  if (s.canonical === 0) return { grade: 'untested', why: 'no simulated attack aims at it' };
-  if (s.caughtSensors === 0)
+  if (s.canonical === 0 && s.evasive === 0)
+    return { grade: 'untested', why: 'no simulated attack aims at it' };
+  // Rules added for a variation (no canonical attack of their own) are graded on that variation.
+  if (s.canonical > 0 && s.caughtSensors === 0)
     return {
       grade: 'blind',
       why: `catches ${s.caughtIdeal}/${s.canonical} with full telemetry but 0 through today's sensors`,
