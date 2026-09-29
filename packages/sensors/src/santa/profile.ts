@@ -90,63 +90,185 @@ export interface FileAccessOptions {
   enforce?: boolean;
   version?: string;
   eventDetailUrl?: string;
+  /**
+   * Report programs outside Apple's own opening files in Documents and
+   * Desktop. Off by default: every document a third-party app opens becomes a
+   * log line, which is more than a laptop should pay for on every Mac.
+   */
+  watchDocuments?: boolean;
 }
+
+type Process = Record<string, PlistValue>;
 
 interface WatchItem {
   paths: { path: string; prefix?: boolean }[];
-  allowed: Record<string, PlistValue>[];
+  processes: Process[];
+  /** Data-centric (only these processes may) or process-centric (these processes may not). */
+  ruleType?: 'PathsWithAllowedProcesses' | 'ProcessesWithDeniedPaths';
   allowRead?: boolean;
+  /** Never block, even when the user turns blocking on (the owning app's team ID is unconfirmed). */
+  alwaysAudit?: boolean;
 }
 
-// Files infostealers go after first. Only the listed programs may open them.
-// Signing IDs and team IDs come from the vendors' own code signatures.
+const apple = (signingId: string): Process => ({ PlatformBinary: true, SigningID: signingId });
+const team = (teamId: string): Process => ({ TeamID: teamId });
+// Spotlight indexes most files, browsers' included.
+const SPOTLIGHT = [apple('com.apple.mdworker_shared'), apple('com.apple.mds')];
+
+// A browser profile's stolen-from files. Chromium moved Cookies into Network/ in 2021.
+function chromiumProfile(root: string): WatchItem['paths'] {
+  return [
+    { path: `${root}/*/Cookies` },
+    { path: `${root}/*/Network/Cookies` },
+    { path: `${root}/*/Login Data` },
+    { path: `${root}/*/Web Data` },
+    { path: `${root}/*/Local Extension Settings/`, prefix: true },
+    { path: `${root}/Local State` },
+  ];
+}
+
+const U = '/Users/*/Library';
+const KEYCHAINS = { path: `${U}/Keychains/`, prefix: true };
+const SAFARI_COOKIES = [
+  { path: `${U}/Cookies/Cookies.binarycookies` },
+  { path: `${U}/Containers/com.apple.Safari/Data/Library/Cookies/`, prefix: true },
+];
+
+// Files infostealers go after first. Watch items log only processes they
+// don't allow, so each allowlist is as narrow as the owner's own signature.
+// Paths are glob(3) patterns: "*" is one path component and IsPrefix
+// matches everything below. Team IDs come from the vendors' code signatures.
 const WATCH_ITEMS: Record<string, WatchItem> = {
   ChromeCookies: {
-    paths: [
-      { path: '/Users/*/Library/Application Support/Google/Chrome/*/Cookies' },
-      { path: '/Users/*/Library/Application Support/Google/Chrome/*/Login Data' },
-      { path: '/Users/*/Library/Application Support/Google/Chrome/Local State' },
-    ],
-    allowed: [{ TeamID: 'EQHXZ8M8AV' }],
+    paths: chromiumProfile(`${U}/Application Support/Google/Chrome`),
+    processes: [team('EQHXZ8M8AV'), ...SPOTLIGHT],
     allowRead: false,
+  },
+  BraveCookies: {
+    paths: chromiumProfile(`${U}/Application Support/BraveSoftware/Brave-Browser`),
+    processes: [team('KL8N8XSYF4'), ...SPOTLIGHT],
+    allowRead: false,
+  },
+  EdgeCookies: {
+    paths: chromiumProfile(`${U}/Application Support/Microsoft Edge`),
+    processes: [team('UBF8T346G9'), ...SPOTLIGHT],
+    allowRead: false,
+  },
+  ArcCookies: {
+    paths: chromiumProfile(`${U}/Application Support/Arc/User Data`),
+    processes: SPOTLIGHT,
+    allowRead: false,
+    alwaysAudit: true,
   },
   FirefoxCookies: {
     paths: [
-      { path: '/Users/*/Library/Application Support/Firefox/Profiles/*/cookies.sqlite' },
-      { path: '/Users/*/Library/Application Support/Firefox/Profiles/*/logins.json' },
-      { path: '/Users/*/Library/Application Support/Firefox/Profiles/*/key4.db' },
+      { path: `${U}/Application Support/Firefox/Profiles/*/cookies.sqlite` },
+      { path: `${U}/Application Support/Firefox/Profiles/*/logins.json` },
+      { path: `${U}/Application Support/Firefox/Profiles/*/key4.db` },
     ],
-    allowed: [{ TeamID: '43AQ936H96' }],
+    processes: [team('43AQ936H96'), ...SPOTLIGHT],
     allowRead: false,
   },
+  // Safari's cookies are read by several Apple processes (WebKit, nsurlsessiond).
+  // Apple's script tools are caught by ScriptToolsReadingSecrets below.
+  SafariCookies: {
+    paths: SAFARI_COOKIES,
+    processes: [{ PlatformBinary: true }],
+    allowRead: false,
+  },
+  CryptoWallets: {
+    paths: [
+      { path: `${U}/Application Support/Exodus/`, prefix: true },
+      { path: `${U}/Application Support/Electrum/wallets/`, prefix: true },
+      { path: `${U}/Application Support/atomic/`, prefix: true },
+    ],
+    processes: SPOTLIGHT,
+    allowRead: false,
+    alwaysAudit: true,
+  },
+  // Only OpenSSH reads private keys (git goes through ssh). The wildcard
+  // covers ssh, ssh-add, ssh-agent and ssh-keygen.
   SSHKeys: {
     paths: [{ path: '/Users/*/.ssh/id_', prefix: true }],
-    // ssh, ssh-add, ssh-agent and git are Apple platform binaries.
-    allowed: [{ PlatformBinary: true }],
+    processes: [apple('com.apple.ssh*')],
     allowRead: false,
   },
+  // Every app that stores a password opens the keychain file itself, so this
+  // one allows Apple's binaries; Apple's script tools are caught below.
   UserKeychains: {
-    paths: [{ path: '/Users/*/Library/Keychains/', prefix: true }],
-    allowed: [{ PlatformBinary: true }],
+    paths: [KEYCHAINS],
+    processes: [{ PlatformBinary: true }],
     allowRead: false,
+  },
+  // Process-centric: Apple's own interpreters and copy tools are what
+  // infostealer scripts use, and they are platform binaries the two items
+  // above let through.
+  ScriptToolsReadingSecrets: {
+    ruleType: 'ProcessesWithDeniedPaths',
+    paths: [KEYCHAINS, ...SAFARI_COOKIES],
+    processes: [
+      'com.apple.curl',
+      'com.apple.osascript',
+      'com.apple.python*',
+      'com.apple.perl*',
+      'com.apple.ruby',
+      'com.apple.sqlite3',
+      'com.apple.bash',
+      'com.apple.zsh',
+      'com.apple.sh',
+      'com.apple.dash',
+      'com.apple.ksh',
+      'com.apple.cat',
+      'com.apple.cp',
+      'com.apple.ditto',
+      'com.apple.zip',
+    ].map(apple),
+    allowRead: false,
+  },
+  // Only writes are reported (the name's "Writes" suffix tells the log parser).
+  // tccd and System Settings are Apple's; anything else changing app
+  // permissions behind the user's back is what tcc-database-tamper looks for.
+  // Santa logs file writes only through watch items like this: Vigil sets no
+  // FileChangesRegex, which would log every Apple write too.
+  TCCDatabaseWrites: {
+    paths: [
+      { path: '/Library/Application Support/com.apple.TCC/TCC.db', prefix: true },
+      { path: `${U}/Application Support/com.apple.TCC/TCC.db`, prefix: true },
+    ],
+    processes: [{ PlatformBinary: true }],
+    allowRead: true,
+  },
+};
+
+// mass-document-reads counts these. Apple's apps and Spotlight are left out.
+const DOCUMENT_ITEMS: Record<string, WatchItem> = {
+  UserDocuments: {
+    paths: [
+      { path: '/Users/*/Documents/', prefix: true },
+      { path: '/Users/*/Desktop/', prefix: true },
+    ],
+    processes: [{ PlatformBinary: true }],
+    allowRead: false,
+    alwaysAudit: true,
   },
 };
 
 export function fileAccessPolicy(opts: FileAccessOptions = {}): string {
+  const items = opts.watchDocuments ? { ...WATCH_ITEMS, ...DOCUMENT_ITEMS } : WATCH_ITEMS;
   const watchItems: Record<string, PlistValue> = {};
-  for (const [name, item] of Object.entries(WATCH_ITEMS)) {
+  for (const [name, item] of Object.entries(items)) {
     watchItems[name] = {
       Paths: item.paths.map((p) => ({ Path: p.path, IsPrefix: p.prefix ?? false })),
       Options: {
-        RuleType: 'PathsWithAllowedProcesses',
+        RuleType: item.ruleType ?? 'PathsWithAllowedProcesses',
         AllowReadAccess: item.allowRead ?? true,
-        AuditOnly: !opts.enforce,
+        AuditOnly: item.alwaysAudit || !opts.enforce,
       },
-      Processes: item.allowed,
+      Processes: item.processes,
     };
   }
   return toPlist({
-    Version: opts.version ?? 'vigil-1',
+    Version: opts.version ?? 'vigil-2',
     ...(opts.eventDetailUrl
       ? { EventDetailURL: opts.eventDetailUrl, EventDetailText: 'Open Vigil' }
       : {}),

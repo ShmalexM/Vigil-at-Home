@@ -6,6 +6,7 @@ import { assertUserOrigin, type UserOrigin } from '../origin.js';
 import { lintRule, type LintResult } from '../rules/lint.js';
 import type { EventHistory } from '../state/stores.js';
 import { Condition, DetectionRule } from '../types.js';
+import { proveChange, type ImpactReport } from './prover.js';
 import { replayRule, type ReplayReport } from './replay.js';
 
 export type ProposalStatus =
@@ -13,7 +14,8 @@ export type ProposalStatus =
 
 export interface Proposal {
   id: string;
-  kind: 'new_rule' | 'tuning';
+  /** new_rule adds a rule; tuning adds an exclusion; retire turns a rule down (shadow or off). */
+  kind: 'new_rule' | 'tuning' | 'retire';
   createdAt: number;
   /** Which AI provider proposed it (e.g. "claude", "codex", "ollama"). */
   provider: string;
@@ -33,6 +35,10 @@ export interface Proposal {
     removed: number;
     removedConfirmedThreats: number;
   };
+  /** For retire: the quieter mode the rule would move to. */
+  retireTo?: 'shadow' | 'disabled';
+  /** What approving it would stop catching, including look-alikes that would slip through. */
+  impact?: ImpactReport;
   decidedAt?: number;
   decidedVia?: string;
   decisionNote?: string;
@@ -81,12 +87,27 @@ export const ProposeTuningInput = z
   .strict();
 export type ProposeTuningInput = z.input<typeof ProposeTuningInput>;
 
+/** What an AI may send when proposing to turn a noisy or stale rule down. */
+export const ProposeRetirementInput = z
+  .object({
+    ruleId: z.string().min(1).max(100),
+    toMode: z.enum(['shadow', 'disabled']),
+    rationale: z.string().min(1).max(2000),
+    evidence: z.array(z.string().max(500)).min(1).max(20),
+  })
+  .strict();
+export type ProposeRetirementInput = z.input<typeof ProposeRetirementInput>;
+
+const MODE_RANK: Record<RuleMode, number> = { disabled: 0, shadow: 1, alert: 2, block: 3 };
+
 export interface SubmitResult {
   ok: boolean;
   proposalId?: string;
   status?: ProposalStatus;
   /** Problems the AI can fix and resubmit. */
   errors: string[];
+  /** Resubmitting cannot help (a budget, or the same proposal already waiting). */
+  final?: boolean;
   warnings: string[];
   replay?: ReplayReport;
 }
@@ -103,6 +124,8 @@ export interface PipelineOptions {
   repository?: { save(rule: DetectionRule, ts: number): void };
 }
 
+/** More alerts a day than this from a new AI rule means it matches ordinary use. */
+const MAX_NEW_RULE_ALERTS_PER_DAY = 3;
 const DAY = 86_400_000;
 
 /**
@@ -153,6 +176,27 @@ export class RulePipeline {
     return undefined;
   }
 
+  private prove(
+    before: DetectionRule | undefined,
+    after: DetectionRule | undefined,
+    afterMode?: RuleMode,
+  ): ImpactReport {
+    const to = this.opts.now();
+    const input: Parameters<typeof proveChange>[0] = {
+      history: this.history,
+      lists: this.engine.stores.lists,
+      from: to - this.opts.replayDays * DAY,
+      to,
+    };
+    if (before) {
+      input.before = before;
+      input.beforeMode = this.engine.modeOf(before);
+    }
+    if (after) input.after = after;
+    if (afterMode) input.afterMode = afterMode;
+    return proveChange(input);
+  }
+
   private replay(rule: DetectionRule) {
     const to = this.opts.now();
     return replayRule(
@@ -173,7 +217,7 @@ export class RulePipeline {
       return { ok: false, errors: formatZod(parsedInput.error), warnings: [] };
     const input = parsedInput.data;
     const budget = this.budgetProblem(provider);
-    if (budget) return { ok: false, errors: [budget], warnings: [] };
+    if (budget) return { ok: false, errors: [budget], warnings: [], final: true };
 
     const now = this.opts.now();
     const draft: Record<string, unknown> = {
@@ -199,6 +243,14 @@ export class RulePipeline {
         warnings: [],
       };
     }
+    if (this.store.list().some((p) => p.status === 'awaiting_review' && p.rule.id === rule.id)) {
+      return {
+        ok: false,
+        errors: [`${rule.id} is already waiting for the user's review.`],
+        warnings: [],
+        final: true,
+      };
+    }
     return this.checkAndQueue({
       kind: 'new_rule',
       rule,
@@ -214,7 +266,7 @@ export class RulePipeline {
       return { ok: false, errors: formatZod(parsedInput.error), warnings: [] };
     const input = parsedInput.data;
     const budget = this.budgetProblem(provider);
-    if (budget) return { ok: false, errors: [budget], warnings: [] };
+    if (budget) return { ok: false, errors: [budget], warnings: [], final: true };
     const base = this.engine.getRule(input.ruleId);
     if (!base) return { ok: false, errors: [`No rule called ${input.ruleId}.`], warnings: [] };
     const tuned: DetectionRule = {
@@ -231,6 +283,73 @@ export class RulePipeline {
       rationale: input.rationale,
       evidence: input.evidence,
     });
+  }
+
+  /**
+   * Turn a rule down to shadow (still recorded, never alerts) or off. Refused
+   * when the rule caught something confirmed malicious in the replay window,
+   * so maintenance can never quietly remove real protection.
+   */
+  submitRetirement(raw: unknown, provider: string): SubmitResult {
+    const parsedInput = ProposeRetirementInput.safeParse(raw);
+    if (!parsedInput.success)
+      return { ok: false, errors: formatZod(parsedInput.error), warnings: [] };
+    const input = parsedInput.data;
+    const budget = this.budgetProblem(provider);
+    if (budget) return { ok: false, errors: [budget], warnings: [], final: true };
+    const base = this.engine.getRule(input.ruleId);
+    if (!base) return { ok: false, errors: [`No rule called ${input.ruleId}.`], warnings: [] };
+    const current = this.engine.modeOf(base);
+    if (MODE_RANK[input.toMode] >= MODE_RANK[current]) {
+      return {
+        ok: false,
+        errors: [
+          `${input.ruleId} is already in ${current} mode; ${input.toMode} would not turn it down.`,
+        ],
+        warnings: [],
+      };
+    }
+    const now = this.opts.now();
+    const before = this.replay(base);
+    const threats = this.countConfirmedThreats(
+      [...before.hitEventIds],
+      before.report.windowStart,
+      before.report.windowEnd,
+    );
+    const errors: string[] = [];
+    if (threats > 0)
+      errors.push(
+        `This rule caught ${threats} programs you or a threat list marked as malicious in the last ${this.opts.replayDays} days. It stays on.`,
+      );
+    const proposal: Proposal = {
+      id: newId(now),
+      kind: 'retire',
+      createdAt: now,
+      provider,
+      rationale: input.rationale,
+      evidence: input.evidence,
+      rule: base,
+      baseRuleId: base.id,
+      baseRuleVersion: base.version,
+      retireTo: input.toMode,
+      status: errors.length ? 'rejected_by_checks' : 'awaiting_review',
+      lint: { errors, warnings: [] },
+      replay: before.report,
+      impact: this.prove(
+        base,
+        input.toMode === 'disabled' ? undefined : base,
+        input.toMode === 'disabled' ? undefined : input.toMode,
+      ),
+    };
+    this.store.put(proposal);
+    return {
+      ok: errors.length === 0,
+      proposalId: proposal.id,
+      status: proposal.status,
+      errors,
+      warnings: [],
+      replay: before.report,
+    };
   }
 
   private checkAndQueue(p: {
@@ -269,6 +388,22 @@ export class RulePipeline {
     if (lint.errors.length === 0) {
       const after = this.replay(p.rule);
       proposal.replay = after.report;
+      if (!p.base) proposal.impact = this.prove(undefined, p.rule);
+      // A new AI rule that would pester the user goes back for narrowing rather than to them.
+      if (p.kind === 'new_rule' && after.report.popupsPerDay > MAX_NEW_RULE_ALERTS_PER_DAY) {
+        const seen = after.report.samples
+          .slice(0, 3)
+          .map((x) => x.subject)
+          .join('; ');
+        lint.errors.push(
+          `On this Mac's last ${this.opts.replayDays} days it would alert about ${after.report.popupsPerDay.toFixed(1)} times a day, mostly on ${after.report.topPrograms
+            .slice(0, 3)
+            .map((t) => t.program)
+            .join(
+              ', ',
+            )} (e.g. ${seen}). That is ordinary use here; narrow it to what only the attack does.`,
+        );
+      }
       if (p.base) {
         const before = this.replay(p.base);
         const removed = [...before.hitEventIds].filter((id) => !after.hitEventIds.has(id));
@@ -288,6 +423,13 @@ export class RulePipeline {
             `This exclusion would hide ${threats} detections of programs you or a threat list marked as malicious.`,
           );
         }
+        const impact = this.prove(p.base, p.rule, this.engine.modeOf(p.base));
+        proposal.impact = impact;
+        // Look-alikes go back to the AI as warnings so its fix-up can narrow the exclusion.
+        for (const l of impact.lookAlikes.slice(0, 3))
+          lint.warnings.push(
+            `Too broad: ${l.how} would also be skipped. Exclude by team ID and signing ID or by hash instead.`,
+          );
         if (before.report.hits > 0 && after.report.hits === 0 && before.report.hits >= 5) {
           lint.warnings.push(
             'This exclusion silences the rule completely on your history. Consider turning the rule off instead.',
@@ -332,17 +474,26 @@ export class RulePipeline {
     const p = this.store.get(id);
     if (!p) throw new Error(`no proposal ${id}`);
     if (p.status !== 'awaiting_review') throw new Error(`proposal ${id} is ${p.status}`);
-    if (p.kind === 'tuning') {
+    if (p.kind === 'tuning' || p.kind === 'retire') {
       const current = p.baseRuleId ? this.engine.getRule(p.baseRuleId) : undefined;
       if (!current || current.version !== p.baseRuleVersion) {
         throw new Error('The rule changed since this was proposed. Ask for a fresh proposal.');
       }
     }
-    const mode = opts.mode ?? (p.kind === 'tuning' ? this.engine.modeOf(p.rule) : 'alert');
     const now = this.opts.now();
-    const live = this.engine.upsertRule({ ...p.rule, mode, updatedAt: now });
-    this.engine._setMode(live.id, mode);
-    this.repository?.save(live, now);
+    let live: DetectionRule;
+    let mode: RuleMode;
+    if (p.kind === 'retire') {
+      // Only the mode changes; the rule itself stays as it is.
+      mode = p.retireTo ?? 'shadow';
+      live = this.engine.getRule(p.rule.id) ?? p.rule;
+      this.engine._setMode(live.id, mode);
+    } else {
+      mode = opts.mode ?? (p.kind === 'tuning' ? this.engine.modeOf(p.rule) : 'alert');
+      live = this.engine.upsertRule({ ...p.rule, mode, updatedAt: now });
+      this.engine._setMode(live.id, mode);
+      this.repository?.save(live, now);
+    }
     const decided: Proposal = {
       ...p,
       status: 'approved',

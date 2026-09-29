@@ -18,6 +18,8 @@ import { gunzipSync, inflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { defined, nonEmpty, pidOf, type SensorEvent, type SensorEventSink } from '../types.js';
 import type { RuleStore, StoredRule } from './ruleStore.js';
+import { santaSigning } from '../signing.js';
+import { WRITE_WATCH_SUFFIX } from './logParser.js';
 import {
   type ClientMode,
   type PreflightResponse,
@@ -258,6 +260,11 @@ export function uploadedExecToEvent(raw: unknown, _machineId: string): SensorEve
     cdhash: nonEmpty(e.cdhash),
     teamId: nonEmpty(e.team_id),
     signingId: nonEmpty(e.signing_id),
+    signing: santaSigning({
+      cert_cn: e.signing_chain?.[0]?.cn,
+      teamid: e.team_id,
+      signingid: e.signing_id,
+    }),
     user: nonEmpty(e.executing_user),
     parentPath: nonEmpty(e.parent_name),
   });
@@ -285,25 +292,42 @@ export function uploadedFileAccessToEvent(raw: unknown, _machineId: string): Sen
   const e = normalizeUploadedFileAccessEvent(raw);
   const p = e.process_chain?.[0];
   const decision = e.decision ?? 'FILE_ACCESS_DECISION_UNKNOWN';
-  return {
+  const base = {
     id: syncEventId('faa', raw),
     ts: e.access_time !== undefined ? Math.round(e.access_time * 1000) : Date.now(),
-    source: 'santa',
+    source: 'santa' as const,
     raw,
-    kind: 'santa.decision',
-    target: 'file_access',
-    decision: decision.includes('DENIED') ? 'block' : 'audit_only',
-    reason: e.rule_name ? `${decision}:${e.rule_name}` : decision,
-    path: e.target ?? '',
-    process: p
-      ? defined({
-          pid: pidOf(p.pid) ?? 0,
-          path: p.file_path ?? '',
-          sha256: nonEmpty(p.file_sha256),
-          cdhash: nonEmpty(p.cdhash),
-          teamId: nonEmpty(p.team_id),
-          signingId: nonEmpty(p.signing_id),
-        })
-      : { pid: 0, path: '' },
+  };
+  const path = e.target ?? '';
+  const process = p
+    ? defined({
+        pid: pidOf(p.pid) ?? 0,
+        path: p.file_path ?? '',
+        sha256: nonEmpty(p.file_sha256),
+        cdhash: nonEmpty(p.cdhash),
+        teamId: nonEmpty(p.team_id),
+        signingId: nonEmpty(p.signing_id),
+        signing: santaSigning({ teamid: p.team_id, signingid: p.signing_id }),
+      })
+    : undefined;
+  if (decision.includes('DENIED')) {
+    return {
+      ...base,
+      kind: 'santa.decision',
+      target: 'file_access',
+      decision: 'block',
+      reason: e.rule_name ? `${decision}:${e.rule_name}` : decision,
+      path,
+      process: process ?? { pid: 0, path: '' },
+    };
+  }
+  // Santa uploads only what a watch item matched, so an access it let through
+  // was audit-only: file activity for the rules, like the event log's.
+  return {
+    ...base,
+    kind: 'file',
+    op: e.rule_name?.endsWith(WRITE_WATCH_SUFFIX) ? 'write' : 'open',
+    path,
+    ...defined({ process }),
   };
 }

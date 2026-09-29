@@ -74,7 +74,7 @@ describe('AI rule proposals', () => {
     });
   });
 
-  it('flags a rule that would interrupt the user all day as noisy', () => {
+  it('sends a rule that would interrupt the user all day back to the AI', () => {
     const { pipeline } = twoWeeks();
     const res = pipeline.submitRule(
       {
@@ -87,9 +87,10 @@ describe('AI rule proposals', () => {
       },
       'codex',
     );
-    expect(res.ok).toBe(true);
+    expect(res.ok).toBe(false);
+    expect(res.status).toBe('rejected_by_checks');
     expect(res.replay!.verdict).toBe('noisy');
-    expect(res.replay!.notes.join(' ')).toMatch(/times a day/);
+    expect(res.errors.join(' ')).toMatch(/alert about [\d.]+ times a day, mostly on .*Chrome/);
   });
 
   it('refuses to let the AI block on behaviour alone', () => {

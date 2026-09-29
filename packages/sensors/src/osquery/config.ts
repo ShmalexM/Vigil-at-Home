@@ -70,9 +70,17 @@ export function osqueryConfig(opts: OsqueryConfigOptions = {}): string {
         description: 'Outbound connections with the owning program',
       },
       [QUERY_NAMES.listeningPorts]: {
+        // The signature join lets rules tell Apple's own listeners from others.
+        // Skipping the resource and executable hashes keeps it to reading the
+        // signature (the full check hashes every file in an app), and there are
+        // only a handful of listening programs. GROUP BY folds the row osquery
+        // returns for each architecture of a universal binary.
         query:
-          'SELECT DISTINCT l.pid, p.path, p.name, p.uid, l.port, l.address, l.protocol FROM listening_ports l ' +
-          "JOIN processes p USING (pid) WHERE l.port != 0 AND l.address NOT IN ('127.0.0.1', '::1');",
+          'SELECT l.pid, p.path, p.name, p.uid, l.port, l.address, l.protocol, s.signed, s.authority, ' +
+          's.team_identifier, s.identifier FROM listening_ports l JOIN processes p USING (pid) ' +
+          'LEFT JOIN signature s ON s.path = p.path AND s.hash_resources = 0 AND s.hash_executable = 0 ' +
+          "WHERE l.port != 0 AND l.address NOT IN ('127.0.0.1', '::1') " +
+          'GROUP BY l.pid, l.port, l.address, l.protocol;',
         interval: persist,
         description: 'Programs accepting connections from the network',
       },

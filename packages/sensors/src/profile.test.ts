@@ -42,23 +42,66 @@ describe('Santa profile', () => {
   });
 
   it('file access policy starts audit-only and can enforce', () => {
-    const audit = parsePlist(fileAccessPolicy());
-    expect(Object.keys(audit.WatchItems)).toEqual([
+    type Item = {
+      Paths: { Path: string; IsPrefix: boolean }[];
+      Options: { AuditOnly: boolean; RuleType: string; AllowReadAccess: boolean };
+      Processes: Record<string, unknown>[];
+    };
+    const audit = parsePlist(fileAccessPolicy()) as { WatchItems: Record<string, Item> };
+    const items = audit.WatchItems;
+    expect(Object.keys(items)).toEqual([
       'ChromeCookies',
+      'BraveCookies',
+      'EdgeCookies',
+      'ArcCookies',
       'FirefoxCookies',
+      'SafariCookies',
+      'CryptoWallets',
       'SSHKeys',
       'UserKeychains',
+      'ScriptToolsReadingSecrets',
+      'TCCDatabaseWrites',
     ]);
-    for (const item of Object.values<{ Options: { AuditOnly: boolean; RuleType: string } }>(
-      audit.WatchItems,
-    )) {
-      expect(item.Options.AuditOnly).toBe(true);
-      expect(item.Options.RuleType).toBe('PathsWithAllowedProcesses');
-    }
-    for (const name of Object.keys(audit.WatchItems))
+    for (const [name, item] of Object.entries(items)) {
       expect(name).toMatch(/^[A-Za-z0-9._:-]{1,64}$/);
-    const enforce = parsePlist(fileAccessPolicy({ enforce: true }));
-    expect(enforce.WatchItems.SSHKeys.Options.AuditOnly).toBe(false);
+      expect(item.Options.AuditOnly).toBe(true);
+      // Santa's globs are glob(3): no globstar.
+      for (const p of item.Paths) expect(p.Path).not.toContain('**');
+      // A signing ID alone matches nothing; Santa wants a team ID or PlatformBinary with it.
+      for (const proc of item.Processes)
+        if ('SigningID' in proc)
+          expect('TeamID' in proc || proc.PlatformBinary === true).toBe(true);
+    }
+    // Only OpenSSH may read private keys, so curl or python3 reading one is reported.
+    expect(items.SSHKeys!.Processes).toEqual([
+      { PlatformBinary: true, SigningID: 'com.apple.ssh*' },
+    ]);
+    expect(items.ScriptToolsReadingSecrets!.Options.RuleType).toBe('ProcessesWithDeniedPaths');
+    expect(items.ScriptToolsReadingSecrets!.Processes).toContainEqual({
+      PlatformBinary: true,
+      SigningID: 'com.apple.curl',
+    });
+    expect(items.ChromeCookies!.Paths.map((p) => p.Path)).toContain(
+      '/Users/*/Library/Application Support/Google/Chrome/*/Network/Cookies',
+    );
+    expect(items.TCCDatabaseWrites!.Options.AllowReadAccess).toBe(true);
+
+    const enforce = parsePlist(fileAccessPolicy({ enforce: true })) as typeof audit;
+    expect(enforce.WatchItems.SSHKeys!.Options.AuditOnly).toBe(false);
+    // Items whose owning app isn't confirmed yet never block it.
+    expect(enforce.WatchItems.ArcCookies!.Options.AuditOnly).toBe(true);
+    expect(enforce.WatchItems.CryptoWallets!.Options.AuditOnly).toBe(true);
+  });
+
+  it('watches Documents and Desktop only when asked', () => {
+    const on = parsePlist(fileAccessPolicy({ watchDocuments: true })) as {
+      WatchItems: Record<string, { Options: { AllowReadAccess: boolean; AuditOnly: boolean } }>;
+    };
+    expect(on.WatchItems.UserDocuments!.Options).toMatchObject({
+      AllowReadAccess: false,
+      AuditOnly: true,
+    });
+    expect(fileAccessPolicy()).not.toContain('UserDocuments');
   });
 
   it('escapes XML', () => {

@@ -18,6 +18,7 @@ import {
   type VigilAiOptions,
 } from '@vigil/ai';
 import type { AiAssessment, Alert, SensorEvent } from '@vigil/core';
+import type { AnalyzeRunner } from '@vigil/detection';
 import {
   AiPrefs,
   AiPrefsPatch,
@@ -46,6 +47,13 @@ const LABEL_EVERY_MS = 60_000;
 const REPEAT_MS = 60 * 60_000;
 const MAX_LABEL_QUEUE = 200;
 const MAX_REMEMBERED = 5_000;
+/** How often to ask the rule reviewer whether a review is due. It runs about once a day. */
+const REVIEW_CHECK_MS = 60 * 60_000;
+/**
+ * Rule reviews need a capable model with tools: the user's Claude or Codex,
+ * or the API connection. Never Jev (it only picks labels) or the small local model.
+ */
+const REVIEW_PROVIDERS: ProviderId[] = ['claude', 'codex', 'api'];
 
 /**
  * Alerts without a popup waiting for an explanation at once. More than this
@@ -172,7 +180,7 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
       ...base,
       mode: this.o.mode() ?? base.mode,
       claude: { ...base.claude, enabled: prefs.claude, mode: prefs.claudeUses },
-      codex: { ...base.codex, enabled: prefs.codex },
+      codex: { ...base.codex, enabled: prefs.codex, mode: prefs.codexUses },
       ollama: { ...base.ollama, enabled: prefs.ollama },
       api: api
         ? {
@@ -200,6 +208,8 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
       log: { record: (entry) => this.record(entry) },
       pins: this.pins(),
       getAnthropicApiKey: keyOf('anthropic'),
+      // Codex sends this only to api.openai.com, so only an OpenAI key is offered.
+      getOpenAiApiKey: keyOf('openai'),
       ...(api ? { getApiKey: keyOf(api.provider) } : {}),
       ...(this.o.keys.list().typesafe ? { getJevApiKey: keyOf('typesafe') } : {}),
       spentThisMonthUsd: async (p) => this.spentThisMonthUsd(p),
@@ -255,6 +265,7 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
               api: cap,
               jev: cap,
               ...(settings.claude.mode === 'apiKey' ? { claude: cap } : {}),
+              ...(settings.codex.mode === 'apiKey' ? { codex: cap } : {}),
             },
           }
         : {}),
@@ -270,7 +281,7 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
       // so to the user it's an optional extra, not a problem.
       s.provider === 'api' && !this.apiConnection() && this.prefs().api && settings.mode !== 'local'
         ? { ...providerView({ provider: 'api', state: 'disabled' }, shared), state: 'optional' }
-        : providerView(s, shared),
+        : providerView(s, shared, settings.codex.mode === 'apiKey'),
     );
     // Jev isn't a runner provider; it rides on the keys.
     const saved = this.o.keys.list();
@@ -394,6 +405,36 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
     });
   }
 
+  /**
+   * About once a day the signed-in AI reads a redacted summary of this Mac's
+   * activity and proposes new rules, narrow exclusions for noisy ones, or
+   * turning a broken rule down. Each proposal is checked and replayed on 14
+   * days of history, then waits on the Rules page for the user. Nothing here
+   * changes a live rule, and nothing can allow anything.
+   */
+  reviewRulesFrom(core: Pick<VigilCore, 'scheduler' | 'detector'>): void {
+    const detector = core.detector;
+    if (!detector) return;
+    detector.attachReviewer(() => this.ruleReviewRunner(), this.o.isBusy);
+    core.scheduler.every('rule-review', REVIEW_CHECK_MS, async () => {
+      const out = await detector.reviewRules();
+      if (out.ran) this.emit('changed');
+    });
+  }
+
+  /** The runner for rule reviews, or undefined when no cloud AI may run them. */
+  ruleReviewRunner(): AnalyzeRunner | undefined {
+    const prefs = this.prefs();
+    if (this.o.mode() === 'local' || !(prefs.claude || prefs.codex || prefs.api)) return undefined;
+    return {
+      run: async (req) => {
+        const r = await this.ai().run({ ...req, providers: REVIEW_PROVIDERS });
+        if (r.ok) return { ok: true, value: r.value, provider: r.provider };
+        return { ok: false, reason: r.reason, ...(r.detail ? { detail: r.detail } : {}) };
+      },
+    };
+  }
+
   /** Queues an event for labelling when it's worth a model's look. Cheap: runs for every event. */
   consider(event: SensorEvent, outcome: EventOutcome | undefined): void {
     if (!outcome || outcome.matches.length > 0) return;
@@ -479,8 +520,10 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
   }
 }
 
-function providerView(s: ProviderStatus, codexShared: boolean): AiProviderView {
+function providerView(s: ProviderStatus, codexShared: boolean, codexOnKey = false): AiProviderView {
   const provider = s.provider as Exclude<ProviderId, 'jev'>;
+  // On an OpenAI API key, Codex's sign-in buttons don't apply.
+  const noSignIn = provider === 'codex' && codexOnKey;
   return {
     provider,
     name: NAMES[provider],
@@ -489,9 +532,9 @@ function providerView(s: ProviderStatus, codexShared: boolean): AiProviderView {
     ...(s.version ? { version: s.version } : {}),
     ...(s.account ? { account: provider === 'claude' ? claudeAuth(s.account) : s.account } : {}),
     ...(s.detail ? { detail: s.detail } : {}),
-    canSignIn: s.canSignIn === true,
-    canShareSignIn: s.canShareSignIn === true,
-    signInShared: provider === 'codex' && codexShared,
+    canSignIn: !noSignIn && s.canSignIn === true,
+    canShareSignIn: !noSignIn && s.canShareSignIn === true,
+    signInShared: !noSignIn && provider === 'codex' && codexShared,
   };
 }
 

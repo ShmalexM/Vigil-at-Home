@@ -1,0 +1,134 @@
+/**
+ * How well the event labeller separates attacks the rules missed from normal
+ * activity. Advisory only in Vigil (a label never blocks), so the questions
+ * are: does it flag the misses, and how often does it cry wolf?
+ *
+ *   VIGIL_BENCH_LABELLER=ollama VIGIL_OLLAMA_MODEL=qwen2.5:0.5b pnpm --filter @vigil/bench bench:labels
+ *   VIGIL_BENCH_LABELLER=jev TYPESAFE_API_KEY=... pnpm --filter @vigil/bench bench:labels
+ *
+ * Without VIGIL_BENCH_LABELLER it only writes the coverage table (which
+ * missed attacks would reach the labeller at all).
+ */
+import {
+  classifierRuntime,
+  createAiRunner,
+  createEventClassifier,
+  createJevClient,
+  createOllamaAdapter,
+  defaultAiSettings,
+  eventLine,
+  type LabelledEvent,
+  type PromptLogEntry,
+} from '@vigil/ai';
+import { describe, expect, it } from 'vitest';
+import { labelSet } from './labels.js';
+import { writeResult } from './report.js';
+
+const which = process.env['VIGIL_BENCH_LABELLER'] ?? '';
+const BATCH = 20; // the app's maxEventsPerBatch
+
+function classifier(log: PromptLogEntry[]) {
+  const record = { record: (e: PromptLogEntry) => void log.push(e) };
+  if (which === 'jev') {
+    return createEventClassifier({
+      jev: createJevClient({
+        getApiKey: async () => process.env['TYPESAFE_API_KEY'] || undefined,
+        getOpenRouterApiKey: async () => process.env['OPENROUTER_API_KEY'] || undefined,
+        log: record,
+        timeoutMs: 60_000,
+      }),
+      maxEventsPerBatch: BATCH,
+      maxBatchesPerHour: 10_000,
+    });
+  }
+  const runtime = classifierRuntime();
+  return createEventClassifier({
+    runner: createAiRunner({
+      settings: { ...defaultAiSettings('/tmp/vigil-bench'), mode: 'local', order: ['ollama'] },
+      adapters: [
+        createOllamaAdapter({
+          baseUrl: process.env['OLLAMA_HOST'] ?? 'http://127.0.0.1:11434',
+          model: process.env['VIGIL_OLLAMA_MODEL'] ?? 'qwen2.5:0.5b',
+          runtime,
+        }),
+      ],
+      log: record,
+    }),
+    maxEventsPerBatch: BATCH,
+    maxBatchesPerHour: 10_000,
+    deadlineMs: 300_000,
+  });
+}
+
+describe('event labelling benchmark', () => {
+  const set = labelSet();
+
+  it('writes which missed attacks reach the labeller', () => {
+    writeResult('label-coverage', {
+      at: new Date().toISOString(),
+      coverage: set.coverage,
+    });
+  });
+
+  it.skipIf(!which)(
+    `labels the test set with ${which || 'nothing'}`,
+    async () => {
+      const log: PromptLogEntry[] = [];
+      const c = classifier(log);
+      const labels = new Map<string, LabelledEvent>();
+      const batches: Array<{ seconds: number; ok: boolean; detail?: string }> = [];
+      for (let i = 0; i < set.cases.length; i += BATCH) {
+        const batch = set.cases.slice(i, i + BATCH).map((x) => x.event);
+        const t0 = Date.now();
+        const r = await c.classify(batch);
+        batches.push({
+          seconds: (Date.now() - t0) / 1000,
+          ok: r.ok,
+          ...(!r.ok && r.detail ? { detail: r.detail } : {}),
+        });
+        if (r.ok) for (const l of r.labels) labels.set(l.eventId, l);
+      }
+      const rows = set.cases.map((x) => ({
+        source: x.source,
+        truth: x.truth,
+        appSends: x.appSends,
+        kind: x.event.kind,
+        line: eventLine(x.event).slice(0, 200),
+        label: labels.get(x.event.id)?.label ?? null,
+      }));
+      const labelled = rows.filter((r) => r.label !== null);
+      const attacks = labelled.filter((r) => r.truth === 'attack');
+      const benign = labelled.filter((r) => r.truth === 'benign');
+      const flagged = (xs: typeof rows) => xs.filter((r) => r.label && r.label !== 'benign').length;
+      const suspicious = (xs: typeof rows) => xs.filter((r) => r.label === 'suspicious').length;
+      const model = which === 'jev' ? 'jev' : (process.env['VIGIL_OLLAMA_MODEL'] ?? 'qwen2.5:0.5b');
+      const tp = flagged(attacks);
+      const fp = flagged(benign);
+      writeResult(`labels-${model.replace(/[^a-z0-9.]+/gi, '-')}`, {
+        at: new Date().toISOString(),
+        model,
+        platform: `${process.platform}-${process.arch}`,
+        cases: rows.length,
+        labelled: labelled.length,
+        attacks: attacks.length,
+        benign: benign.length,
+        // "Flagged" means unusual or suspicious: anything shown as a hint.
+        recall: attacks.length ? tp / attacks.length : null,
+        recallSuspicious: attacks.length ? suspicious(attacks) / attacks.length : null,
+        falseFlagRate: benign.length ? fp / benign.length : null,
+        falseSuspiciousRate: benign.length ? suspicious(benign) / benign.length : null,
+        precision: tp + fp ? tp / (tp + fp) : null,
+        batches,
+        secondsPerBatch: batches.reduce((a, b) => a + b.seconds, 0) / Math.max(1, batches.length),
+        tokens: {
+          input: log.reduce((a, e) => a + (e.usage?.inputTokens ?? 0), 0),
+          output: log.reduce((a, e) => a + (e.usage?.outputTokens ?? 0), 0),
+        },
+        costUsd: log.reduce((a, e) => a + (e.usage?.costUsd ?? 0), 0),
+        rows,
+      });
+      expect(labelled.length, JSON.stringify(batches)).toBeGreaterThan(0);
+    },
+    60 * 60_000,
+  );
+});

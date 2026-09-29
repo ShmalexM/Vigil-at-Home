@@ -59,6 +59,11 @@ describe('Rule editing from the app', () => {
     const p = editing.preview(edited);
     expect(p.ok).toBe(true);
     expect(p.replay?.verdict).toBe('never_fired');
+    expect(p.impact?.verdict).toBe('no_loss');
+    // Turning it off is flagged before saving.
+    const off = editing.preview(JSON.stringify({ ...json, mode: 'disabled' }));
+    expect(off.impact?.verdict).toBe('broad');
+    expect(off.impact?.findings[0]).toMatch(/Turns the rule off/);
     expect(editing.save(edited).ok).toBe(true);
     expect(core.rules().find((r) => r.rule.id === RULE)?.rule.name).toBe('Pasted install script');
     expect(editing.view(RULE)!.edited).toBe(true);

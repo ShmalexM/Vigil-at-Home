@@ -33,7 +33,40 @@ describe('Santa log parser', () => {
       path: 'execpath|',
       sha256: '1234_hash',
       args: ['exec|path', '-l\n-t', '-v\r--foo'],
+      // A certificate without a common name says nothing Gatekeeper would trust.
+      signing: 'unknown',
+      quarantine: { originUrl: 'google.com' },
     });
+  });
+
+  it('works out the signature from the certificate Santa logs', () => {
+    const exec = (fields: string) =>
+      ev(
+        P +
+          `action=EXEC|decision=ALLOW|reason=UNKNOWN|sha256=ab|${fields}pid=7|ppid=1|uid=501|user=a|mode=M|path=/x|args=x|machineid=m`,
+      );
+    const signing = (fields: string) => {
+      const e = exec(fields);
+      if (e.kind !== 'process.exec') throw new Error();
+      return e.process.signing;
+    };
+    expect(signing('cert_sha256=c|cert_cn=Software Signing|')).toBe('apple');
+    expect(signing('cert_sha256=c|cert_cn=Apple Mac OS Application Signing|teamid=T1|')).toBe(
+      'app_store',
+    );
+    expect(
+      signing(
+        'cert_sha256=c|cert_cn=Developer ID Application: Google LLC (EQHXZ8M8AV)|teamid=EQHXZ8M8AV|',
+      ),
+    ).toBe('developer_id');
+    expect(signing('cert_sha256=c|cert_cn=Apple Development: Sam (X)|teamid=X|')).toBe('unknown');
+    // No certificate: unsigned or ad hoc, which Santa's log doesn't tell apart.
+    expect(signing('')).toBe('unsigned');
+    expect(signing('quarantine_url=https://evil.example/a.dmg|')).toBe('unsigned');
+    const q = exec('quarantine_url=https://evil.example/a.dmg|');
+    if (q.kind !== 'process.exec') throw new Error();
+    expect(q.process.quarantine).toEqual({ originUrl: 'https://evil.example/a.dmg' });
+    expect(exec('')).not.toHaveProperty('process.quarantine');
   });
 
   it('maps DENY to a Santa block decision', () => {
@@ -111,10 +144,10 @@ describe('Santa log parser', () => {
     });
   });
 
-  it('reports denied and audited file access but not allowed access', () => {
-    const line = (d: string) =>
+  it('reports blocked access as a decision and audited access as file activity', () => {
+    const line = (d: string, type = 'OPEN', policy = 'ChromeCookies') =>
       P +
-      `action=FILE_ACCESS|policy_version=v1|policy_name=ChromeCookies|path=/Users/a/Cookies|access_type=OPEN|decision=${d}|operation_id=1|pid=9|ppid=1|process=x|processpath=/tmp/x|uid=501|user=a|machineid=m`;
+      `action=FILE_ACCESS|policy_version=v1|policy_name=${policy}|path=/Users/a/Cookies|access_type=${type}|decision=${d}|operation_id=1|pid=9|ppid=1|process=x|processpath=/tmp/x|uid=501|user=a|machineid=m`;
     expect(ev(line('DENIED'))).toMatchObject({
       kind: 'santa.decision',
       target: 'file_access',
@@ -123,7 +156,17 @@ describe('Santa log parser', () => {
       path: '/Users/a/Cookies',
       process: { pid: 9, path: '/tmp/x' },
     });
-    expect(ev(line('AUDIT_ONLY'))).toMatchObject({ decision: 'audit_only' });
+    expect(ev(line('AUDIT_ONLY'))).toMatchObject({
+      kind: 'file',
+      op: 'open',
+      path: '/Users/a/Cookies',
+      process: { pid: 9, path: '/tmp/x' },
+    });
+    expect(ev(line('AUDIT_ONLY', 'RENAME'))).toMatchObject({ kind: 'file', op: 'rename' });
+    expect(ev(line('AUDIT_ONLY', 'UNLINK'))).toMatchObject({ kind: 'file', op: 'delete' });
+    expect(ev(line('AUDIT_ONLY', 'TRUNCATE'))).toMatchObject({ kind: 'file', op: 'write' });
+    // Write-only watch items report write-mode opens.
+    expect(ev(line('AUDIT_ONLY', 'OPEN', 'TCCDatabaseWrites'))).toMatchObject({ op: 'write' });
     expect(santaLogLineToEvent(line('ALLOWED'))).toBeUndefined();
   });
 

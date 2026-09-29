@@ -142,6 +142,7 @@ function start(): void {
   ai.on('changed', () => windows.broadcast('changed'));
   ai.explainAlertsFrom(core);
   ai.labelEventsFrom(core);
+  ai.reviewRulesFrom(core);
 
   // Tells the user when a newer release is out. Unsigned builds can't update
   // themselves, so it offers the DMG; nothing installs without the user.

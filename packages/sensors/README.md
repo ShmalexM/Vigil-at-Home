@@ -4,9 +4,9 @@ What Vigil sees on a Mac, turned into `@vigil/core` `SensorEvent`s.
 
 ```
 Santa (Endpoint Security)
-  ├─ /var/db/santa/santa.log ──► santaLogLineToEvent ──┐   every launch, block, file write,
-  │                                                     │   launch item, XProtect/TCC/Gatekeeper
-  │                                                     │   alert, in real time
+  ├─ /var/db/santa/santa.log ──► santaLogLineToEvent ──┐   every launch, block, watched-file
+  │                                                     │   access, launch item, XProtect/TCC/
+  │                                                     │   Gatekeeper alert, in real time
   └─ sync HTTPS (preflight, eventupload, ruledownload,  │
      postflight) ◄──► SantaSyncServer ─── blocks ───────┤
                          ▲                              ├─► SensorHub ─► sink (the helper
@@ -37,10 +37,36 @@ is its sync server on the same Mac:
   removals. Each sync sends only what changed since Santa last confirmed a sync. It
   sends a clean sync the first time, when Santa asks, or when Santa's rule count no
   longer matches Vigil's.
-- **File protection.** `fileAccessPolicy()` watches Chrome and Firefox cookies and saved
-  logins, SSH private keys and the user's keychains. Only the owning vendor, or Apple's
-  own binaries, may open them. It starts **audit-only**, so a wrong rule never breaks
-  an app. Blocking is a later switch.
+- **File protection.** `fileAccessPolicy()` watches browser cookies and saved logins
+  (Chrome, Brave, Edge, Arc, Firefox, Safari), crypto wallets (Exodus, Electrum, Atomic),
+  SSH private keys, the user's keychains, and writes to the privacy (TCC) database.
+  Each item reports only programs it doesn't allow, and the allowlists are narrow: the
+  browser's own team ID, only OpenSSH for SSH keys, only Apple's binaries for keychains
+  and TCC.db. A process-centric item also reports Apple's script tools (curl, osascript,
+  python3, sqlite3, shells, cp, ditto…) opening keychains or Safari cookies, which the
+  Apple-only allowlists would let through. It starts **audit-only**, so a wrong rule
+  never breaks an app; Arc and the wallets stay audit-only even with blocking on until
+  their team IDs are confirmed. `watchDocuments` adds Documents and Desktop (off by
+  default: every document a third-party app opens would be a log line).
+- **No FileChangesRegex.** Santa logs file writes only through the watch items above.
+  A change regex would log Apple's own writes too, from processes Vigil often can't vouch
+  for (they started before it), which reads as tampering.
+
+## What each event says about the program
+
+Rules treat unsigned and ad hoc programs as untrusted, so every event needs a
+`process.signing`:
+
+- **Santa launches** carry the leaf certificate's name (`cert_cn`): "Software Signing" is
+  Apple, "Apple Mac OS Application Signing" the App Store, "Developer ID Application" an
+  identified developer. No certificate means unsigned or ad hoc (Santa's log doesn't say
+  which). `quarantine_url` becomes `process.quarantine.originUrl`.
+- **osquery listeners** join osquery's `signature` table without hashing the program, so
+  it reads the signature only.
+- **Everything else** (Santa file-access lines, osquery connections) names just a pid and
+  a path. `SensorHub` fills in the signature from the program's launch through
+  `ProcessEnricher`: by pid while the path still matches, otherwise by path. A program
+  that started before Vigil stays without one.
 
 ## Installing Santa without MDM
 

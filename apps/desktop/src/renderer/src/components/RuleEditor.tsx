@@ -1,6 +1,12 @@
 import { Check, Pencil, Plus, RotateCcw, Trash2, X } from 'lucide-react';
 import { useState } from 'react';
-import type { ExclusionInput, RuleCheck, RuleEditorView } from '../../../shared/ipc';
+import type {
+  ExclusionInput,
+  ImpactPreview,
+  ReplayPreview,
+  RuleCheck,
+  RuleEditorView,
+} from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
 import { timeAgo } from '../format';
 import { HoldButton } from './HoldButton';
@@ -246,7 +252,8 @@ function JsonEditor({
         onChange={(e) => setText(e.target.value)}
       />
       {current && <Issues check={current} />}
-      {current?.replay && <ReplaySummary check={current} />}
+      {current?.impact && <ImpactSummary impact={current.impact} />}
+      {current?.replay && <ReplaySummary replay={current.replay} />}
       <div className="row" style={{ flexWrap: 'wrap' }}>
         <Button icon={<Check size={14} />} disabled={busy} onClick={() => void check()}>
           {busy ? 'Checking…' : 'Check'}
@@ -329,8 +336,41 @@ const VERDICT: Record<string, { label: string; tone?: 'good' | 'fair' | 'poor' }
   noisy: { label: 'Noisy', tone: 'poor' },
 };
 
-function ReplaySummary({ check }: { check: RuleCheck }) {
-  const r = check.replay!;
+const IMPACT: Record<ImpactPreview['verdict'], { label: string; tone: 'good' | 'fair' | 'poor' }> =
+  {
+    no_loss: { label: 'Loses nothing', tone: 'good' },
+    narrow: { label: 'Narrow', tone: 'good' },
+    broad: { label: 'Check before approving', tone: 'poor' },
+  };
+
+/** What approving would stop catching, above the replay, so the cost is read first. */
+export function ImpactSummary({ impact }: { impact: ImpactPreview }) {
+  const v = IMPACT[impact.verdict];
+  return (
+    <div className="col impact" style={{ gap: 6 }}>
+      <div className="row">
+        <Chip tone={v.tone}>{v.label}</Chip>
+        <span className="t-small">What this change would stop catching</span>
+      </div>
+      {impact.findings.map((f) => (
+        <span key={f} className={impact.verdict === 'broad' ? 't-small warn-text' : 't-small'}>
+          {f}
+        </span>
+      ))}
+      {impact.stopsAlertingOn.slice(0, 5).map((s) => (
+        <div key={s.what} className="excl-row">
+          <span className="grow mono ellipsis">{s.what}</span>
+          {s.untrusted && <Chip tone="fair">unsigned</Chip>}
+          <span className="t-small nowrap">
+            {s.events} event{s.events === 1 ? '' : 's'}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function ReplaySummary({ replay: r }: { replay: ReplayPreview }) {
   const v = VERDICT[r.verdict] ?? { label: r.verdict };
   return (
     <div className="col" style={{ gap: 6 }}>

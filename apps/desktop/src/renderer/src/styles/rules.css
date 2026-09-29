@@ -60,3 +60,21 @@
 .issues.warnings {
   color: var(--fair);
 }
+
+.suggestion {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 0;
+  border-top: 1px solid var(--ln);
+}
+.suggestion:first-of-type {
+  border-top: 0;
+}
+.suggestion .evidence {
+  margin: 0;
+  padding-left: 18px;
+}
+.warn-text {
+  color: var(--fair);
+}

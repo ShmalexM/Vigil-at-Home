@@ -66,3 +66,18 @@
   padding: 12px 0;
   border-top: 1px solid var(--ln0);
 }
+.ai-group {
+  margin: 16px 0 2px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.ai-group-sub {
+  margin: 0 0 4px;
+}
+.ai-used {
+  color: var(--tx1);
+  font-size: 12px;
+}
+.ai-list-bordered .ai-row:first-child {
+  border-top: 1px solid var(--ln0);
+}

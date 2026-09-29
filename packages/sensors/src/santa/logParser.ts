@@ -9,8 +9,9 @@
 // Source/santad/Logs/EndpointSecurity/Serializers/BasicString.mm.
 
 import { createHash } from 'node:crypto';
-import type { EventOfKind, SensorEvent } from '@vigil/core';
+import type { EventOfKind, FileOp, SensorEvent } from '@vigil/core';
 import { defined, nonEmpty, num, pidOf, type ProcessRef } from '../types.js';
+import { santaSigning } from '../signing.js';
 
 const LINE_RE = /^\[([^\]]+)\]\s+\S+\s+santad:\s+(action=.*)$/;
 
@@ -93,6 +94,26 @@ function actor(f: SantaLogFields, prefix = ''): ProcessRef | undefined {
 
 const UNKNOWN_PROCESS: ProcessRef = { pid: 0, path: '' };
 
+/** Watch items whose name ends in this only report writes (AllowReadAccess is on). */
+export const WRITE_WATCH_SUFFIX = 'Writes';
+
+function fileAccessOp(accessType: string | undefined, policy: string | undefined): FileOp {
+  switch (accessType) {
+    case 'RENAME':
+      return 'rename';
+    case 'UNLINK':
+      return 'delete';
+    case 'CREATE':
+      return 'create';
+    case 'OPEN':
+      // Santa logs a write-mode open as OPEN too; on a write-only item that's all it reports.
+      return policy?.endsWith(WRITE_WATCH_SUFFIX) ? 'write' : 'open';
+    default:
+      // TRUNCATE, LINK, CLONE, COPYFILE, EXCHANGEDATA
+      return 'write';
+  }
+}
+
 /**
  * Turn one Santa log line into a SensorEvent. Returns undefined for lines we
  * don't map (FORK, login window events, junk).
@@ -117,8 +138,10 @@ export function santaLogLineToEvent(
         sha256: nonEmpty(f.sha256),
         teamId: nonEmpty(f.teamid),
         signingId: nonEmpty(f.signingid),
+        signing: santaSigning(f),
         uid: num(f.uid),
         user: nonEmpty(f.user),
+        quarantine: nonEmpty(f.quarantine_url) ? { originUrl: f.quarantine_url! } : undefined,
       });
       if (f.decision === 'DENY') {
         return {
@@ -163,16 +186,27 @@ export function santaLogLineToEvent(
       };
     case 'FILE_ACCESS': {
       const decision = f.decision ?? '';
-      const blocked = decision.startsWith('DENIED');
-      if (!blocked && decision !== 'AUDIT_ONLY') return undefined;
+      const path = f.path ?? '';
+      if (decision.startsWith('DENIED')) {
+        return {
+          ...base,
+          kind: 'santa.decision',
+          target: 'file_access',
+          decision: 'block',
+          reason: f.policy_name ? `${decision}:${f.policy_name}` : decision,
+          path,
+          process: actor(f) ?? UNKNOWN_PROCESS,
+        };
+      }
+      // Audit-only watch items report the access without stopping it, so the
+      // rules see it as the file activity it is.
+      if (decision !== 'AUDIT_ONLY') return undefined;
       return {
         ...base,
-        kind: 'santa.decision',
-        target: 'file_access',
-        decision: blocked ? 'block' : 'audit_only',
-        reason: f.policy_name ? `${decision}:${f.policy_name}` : decision,
-        path: f.path ?? '',
-        process: actor(f) ?? UNKNOWN_PROCESS,
+        kind: 'file',
+        op: fileAccessOp(f.access_type, f.policy_name),
+        path,
+        ...defined({ process: actor(f) }),
       };
     }
     case 'LAUNCH_ITEM_ADD':

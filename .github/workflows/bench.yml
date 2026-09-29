@@ -1,0 +1,146 @@
+name: Benchmarks
+
+# How well Vigil works, rerun on every change that could move the numbers:
+#   detection  simulated attacks and four weeks of normal use through the
+#              rules, with full telemetry and through the real sensor parsers
+#   labels     how well the local labelling model spots what the rules missed
+#   flow       the whole response path on a real Mac: the real helper and
+#              osquery, the popup, Keep blocked / Allow, block and undo
+# Results are in each job's summary and log (lines starting VIGIL_BENCH) and
+# in the run's artifacts. Only a regression fails: a canonical attack the
+# rules stop catching, or a broken step in the flow.
+
+on:
+  pull_request:
+    paths:
+      - 'packages/**'
+      - 'apps/desktop/src/main/**'
+      - 'apps/desktop/src/renderer/src/views/Popup.tsx'
+      - 'apps/desktop/e2e/flow.e2e.mjs'
+      - '.github/workflows/bench.yml'
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detection:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - run: pnpm --filter @vigil/bench bench
+        env:
+          BENCH_OUT: ${{ github.workspace }}/bench-results
+      - if: always()
+        run: node packages/bench/scripts/summary.mjs bench-results >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-detection
+          path: bench-results
+
+  labels:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # What Macs under 16 GB and over 16 GB label with (packages/ai classifier.ts).
+        model: ['qwen2.5:0.5b', 'qwen2.5:1.5b']
+    name: labels (${{ matrix.model }})
+    env:
+      VIGIL_BENCH_LABELLER: ollama
+      VIGIL_OLLAMA_MODEL: ${{ matrix.model }}
+      OLLAMA_MODELS: /home/runner/.ollama-models
+      BENCH_OUT: ${{ github.workspace }}/bench-results
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - uses: actions/cache@v4
+        with:
+          path: /home/runner/.ollama-models
+          key: ollama-${{ matrix.model }}
+      - name: Install and start Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          sudo systemctl stop ollama || true
+          nohup ollama serve > "$RUNNER_TEMP/ollama.log" 2>&1 &
+          for _ in $(seq 1 30); do curl -sf http://127.0.0.1:11434/api/version && break; sleep 1; done
+          ollama pull "$VIGIL_OLLAMA_MODEL"
+      - run: pnpm --filter @vigil/bench bench:labels
+      - if: always()
+        run: node packages/bench/scripts/summary.mjs bench-results >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-labels-${{ strategy.job-index }}
+          path: bench-results
+
+  flow:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Download Electron
+        working-directory: apps/desktop
+        run: node node_modules/electron/install.js
+      - run: pnpm --filter @vigil/desktop build
+      # osquery first, so the helper finds it and runs it.
+      - run: brew install --cask osquery
+      - name: Install the helper
+        working-directory: apps/desktop
+        run: |
+          node scripts/build-helper.mjs --arch arm64
+          h="$RUNNER_TEMP/Vigil at Home.app/Contents/Resources/helper"
+          mkdir -p "$h"
+          cp build/helper/common/* build/helper/darwin-arm64/node "$h/"
+          sudo "$h/install.sh"
+          test -S /var/run/vigil-helper.sock
+          # Let osquery finish its first (baseline) run before the test.
+          sleep 20
+      - name: Run the flow
+        working-directory: apps/desktop
+        run: node e2e/flow.e2e.mjs "$GITHUB_WORKSPACE/bench-results"
+      - if: always()
+        run: node packages/bench/scripts/summary.mjs bench-results >> "$GITHUB_STEP_SUMMARY"
+      - name: Helper log
+        if: always()
+        run: sudo tail -n 80 /Library/Logs/Vigil/helper.log || true
+      - name: Remove the helper
+        if: always()
+        run: sudo "$RUNNER_TEMP/Vigil at Home.app/Contents/Resources/helper/uninstall.sh" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-flow
+          path: bench-results
