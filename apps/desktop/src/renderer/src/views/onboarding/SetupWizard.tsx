@@ -11,10 +11,10 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import type { SetupMode, SetupStepView, SetupView } from '../../../../shared/setup';
-import { vigil } from '../../api';
+import { useLive, vigil } from '../../api';
 import { Shield } from '../../components/Shield';
 import { useToast } from '../../components/Toasts';
-import { Button, Card, Chip, StatusMark, type MarkState } from '../../components/ui';
+import { Button, Card, Chip, Segmented, StatusMark, type MarkState } from '../../components/ui';
 import { ApiKeys, cleanError } from './ApiKeys';
 import './onboarding.css';
 
@@ -41,7 +41,7 @@ const MODES: { id: SetupMode; icon: ReactNode; title: string; body: string; cost
     id: 'cloud',
     icon: <Cloud size={20} />,
     title: 'Cloud AI',
-    body: 'Your Claude or ChatGPT plan, or an API key, explains alerts. Vigil sends it redacted event summaries only.',
+    body: 'Your ChatGPT plan or an API key explains alerts, and your Claude plan can too when you ask. Vigil sends redacted event summaries only.',
     cost: 'Lightest on your Mac. Uses a small share of your plan.',
   },
   {
@@ -367,6 +367,7 @@ export function StepCard({
           </Button>
         )}
       </div>
+      {step.id === 'claude' && <ClaudePlanSwitch />}
       {open && (
         <div className="col step-body">
           {step.action && <StepAction action={step.action} setView={setView} />}
@@ -391,6 +392,33 @@ export function StepCard({
         </div>
       )}
     </Card>
+  );
+}
+
+/**
+ * The Claude plan is opt-in and off by default. When on, it's used only when
+ * the user asks Vigil to explain an alert.
+ */
+function ClaudePlanSwitch() {
+  const [plan, reload] = useLive(async () => (await vigil.getAiPrefs()).claudePlan);
+  return (
+    <div className="row spread step-plan">
+      <span className="t-small">
+        Use my Claude plan, only when I ask Vigil to explain an alert.
+      </span>
+      <Segmented
+        label="Use my Claude plan"
+        value={plan ? 'on' : 'off'}
+        options={[
+          { value: 'off', label: 'Off' },
+          { value: 'on', label: 'On' },
+        ]}
+        onChange={async (v) => {
+          await vigil.setAiPrefs({ claudePlan: v === 'on' });
+          reload();
+        }}
+      />
+    </div>
   );
 }
 

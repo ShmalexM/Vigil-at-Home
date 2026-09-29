@@ -190,3 +190,9 @@ a.btn {
 .spin {
   animation: spin 1.1s linear infinite;
 }
+
+.step-plan {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--ln0);
+}

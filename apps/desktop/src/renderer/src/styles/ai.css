@@ -81,3 +81,11 @@
 .ai-list-bordered .ai-row:first-child {
   border-top: 1px solid var(--ln0);
 }
+
+.ai-plan {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  align-items: flex-start;
+}

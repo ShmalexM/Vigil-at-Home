@@ -105,7 +105,9 @@ export function registerIpc(
     dismissUpdate: () => updates.dismiss(),
     downloadUpdate: () => updates.download(),
     getAi: () => ai.view(),
+    getAiPrefs: () => ai.prefs(),
     setAiPrefs: (patch) => ai.setPrefs(patch),
+    explainAlert: (id) => ai.explainOnRequest(core, id),
     signInAi: (provider) => ai.signIn(provider),
     shareCodexSignIn: async () => {
       const r = await ai.shareCodexSignIn();

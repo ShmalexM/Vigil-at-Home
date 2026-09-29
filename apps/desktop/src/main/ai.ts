@@ -187,7 +187,14 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
     return {
       ...base,
       mode: this.o.mode() ?? base.mode,
-      claude: { ...base.claude, enabled: prefs.claude, mode: prefs.claudeUses },
+      // Automatic Claude work always uses an Anthropic API key. The plan is
+      // opt-in and only ever answers an explanation the user asked for.
+      claude: {
+        ...base.claude,
+        enabled: prefs.claude,
+        mode: 'apiKey',
+        allowPlan: prefs.claudePlan,
+      },
       codex: { ...base.codex, enabled: prefs.codex, mode: prefs.codexUses },
       ollama: { ...base.ollama, enabled: prefs.ollama },
       api: api
@@ -328,6 +335,7 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
       prefs: this.prefs(),
       providers,
       ...(api ? { api: { name: api.name, last4: api.last4 } } : {}),
+      anthropicKey: !!saved.anthropic,
       jevVia,
       checkedAt: this.now(),
     };
@@ -500,18 +508,40 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
   }
 
   /**
+   * The user asked Vigil to explain this alert (the Explain button). The only
+   * path that may use their Claude plan, when they've turned it on.
+   */
+  async explainOnRequest(
+    core: Pick<VigilCore, 'alerts' | 'alertDetail'>,
+    alertId: string,
+  ): Promise<AiActionResult> {
+    const detail = core.alertDetail(alertId);
+    if (!detail) return { ok: false, error: 'That alert is gone' };
+    const assessment = await this.explain(detail.alert, detail, true);
+    if (!assessment) return { ok: false, error: 'No AI could explain it right now' };
+    core.alerts.recordAssessment(alertId, assessment);
+    return { ok: true };
+  }
+
+  /**
    * Asks the AI to explain a new alert in plain words. Advisory: the response
    * already ran, and nothing here changes it. Popups ask right away; other
    * alerts wait for quota headroom.
    */
-  async explain(alert: Alert, detail: AlertDetail | null): Promise<AiAssessment | undefined> {
-    if (!detail || alert.ai || this.explaining.has(alert.id)) return undefined;
+  async explain(
+    alert: Alert,
+    detail: AlertDetail | null,
+    asked = false,
+  ): Promise<AiAssessment | undefined> {
+    if (!detail || (alert.ai && !asked) || this.explaining.has(alert.id)) return undefined;
     this.explaining.add(alert.id);
     try {
-      const urgent = alert.notify === 'popup';
+      const urgent = asked || alert.notify === 'popup';
       const result = await this.ai().run({
         purpose: 'explain',
         urgency: urgent ? 'now' : 'background',
+        // Only an explanation the user asked for may use their Claude plan.
+        ...(asked ? { requestedByUser: true } : {}),
         instructions: EXPLAIN_INSTRUCTIONS,
         data: explainData(detail),
         output: Explanation,

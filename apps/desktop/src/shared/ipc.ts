@@ -172,7 +172,11 @@ export const calls = {
   getUsageLimits: z.tuple([z.boolean().optional()]),
   // AI (main/ai.ts).
   getAi: z.tuple([]),
+  /** The saved AI switches only, without probing the vendors' CLIs. */
+  getAiPrefs: z.tuple([]),
   setAiPrefs: z.tuple([AiPrefsPatch]),
+  /** The user asked for an explanation of this alert (may use their Claude plan). */
+  explainAlert: z.tuple([Id]),
   signInAi: z.tuple([AiProvider]),
   shareCodexSignIn: z.tuple([]),
   stopSharingCodexSignIn: z.tuple([]),
@@ -441,7 +445,9 @@ export interface CallResults {
   getUsage: UsageReport;
   getUsageLimits: UsageLimitsView;
   getAi: AiView;
+  getAiPrefs: AiView['prefs'];
   setAiPrefs: AiView['prefs'];
+  explainAlert: AiActionResult;
   signInAi: AiActionResult;
   shareCodexSignIn: AiActionResult;
   stopSharingCodexSignIn: void;

@@ -17,8 +17,13 @@ export const AiPrefs = z.object({
   jev: z.boolean(),
   /** A model labels events no rule matched, as hints in Activity. */
   labelling: z.boolean(),
-  /** Claude through the user's own Claude Code sign-in, or a saved Anthropic API key. */
-  claudeUses: z.enum(['subscription', 'apiKey']),
+  /**
+   * Opt-in, off by default: the user's own Claude plan (through their Claude
+   * Code sign-in) may explain an alert, but only when they ask for it. All
+   * automatic Claude work (explaining new alerts, labelling, rule review)
+   * uses a saved Anthropic API key.
+   */
+  claudePlan: z.boolean(),
   /** Codex through the user's ChatGPT plan sign-in, or a saved OpenAI API key. */
   codexUses: z.enum(['subscription', 'apiKey']),
   /** Vigil stops using paid keys (API, Jev, Claude on a key) for the month past this. */
@@ -33,7 +38,7 @@ export const DEFAULT_AI_PREFS: AiPrefs = {
   ollama: true,
   jev: true,
   labelling: true,
-  claudeUses: 'subscription',
+  claudePlan: false,
   codexUses: 'subscription',
 };
 
@@ -80,6 +85,8 @@ export interface AiView {
   providers: AiProviderView[];
   /** The OpenAI-style API Vigil uses, from the saved keys. */
   api?: { name: string; last4: string };
+  /** An Anthropic API key is saved, so Claude can work on its own (and label with Haiku). */
+  anthropicKey: boolean;
   /** How Jev is reached: the OpenRouter key, its own TypeSafe key, or not at all. */
   jevVia: 'openrouter' | 'typesafe' | null;
   checkedAt: number;
