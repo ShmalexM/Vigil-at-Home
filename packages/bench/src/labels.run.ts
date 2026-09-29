@@ -47,7 +47,7 @@ function classifier(log: PromptLogEntry[], instructions?: string) {
     });
   }
   if (which === 'claude') {
-    // A signed-in Claude as the labeller (cloud-only mode), for a reference point.
+    // Claude on an API key (ANTHROPIC_API_KEY) as the labeller, for a reference point.
     const model = process.env['VIGIL_CLAUDE_MODEL'] || undefined;
     return createEventClassifier({
       runner: createAiRunner({
@@ -59,7 +59,10 @@ function classifier(log: PromptLogEntry[], instructions?: string) {
         },
         adapters: [
           createClaudeAdapter({
-            mode: 'subscription',
+            // Unattended runs need an API key: a Claude plan only explains alerts the
+            // user asks about (see mayUsePlan in packages/ai).
+            mode: 'apiKey',
+            getApiKey: async () => process.env['ANTHROPIC_API_KEY'],
             pins: memoryPinStore(),
             ...(model ? { model } : {}),
           }),

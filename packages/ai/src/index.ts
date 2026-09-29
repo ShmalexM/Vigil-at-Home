@@ -125,6 +125,7 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
   const adapters: ProviderAdapter[] = [
     createClaudeAdapter({
       mode: settings.claude.mode,
+      ...(settings.claude.allowPlan !== undefined ? { allowPlan: settings.claude.allowPlan } : {}),
       pins: options.pins,
       ...(settings.claude.executablePath ? { executablePath: settings.claude.executablePath } : {}),
       ...(options.getAnthropicApiKey ? { getApiKey: options.getAnthropicApiKey } : {}),
@@ -189,20 +190,24 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
       (options.getJevApiKey !== undefined || openRouterKey !== undefined);
     const cap = settings.quota.apiKeyMonthlyCapUsd;
     const spent = options.spentThisMonthUsd;
-    // Claude Haiku labels first whenever Claude is signed in and allowed: on a
-    // held-out set it flagged 16 of 16 attacks with 1% of normal events flagged,
-    // where the local models flagged 1 to 5 of 16 (packages/bench, #50). It runs
-    // inside Claude's background share, and Jev then the local model take over
+    // Claude Haiku labels first when Claude runs on an API key: on a held-out
+    // set it flagged 16 of 16 attacks with 1% of normal events flagged, where
+    // the local models flagged 1 to 5 of 16 (packages/bench, #50). Never on a
+    // Claude plan, which serves only explanations the user asks for (mayUsePlan).
+    // It counts toward the monthly cap, and Jev then the local model take over
     // when it can't answer.
     const haiku =
       settings.claude.enabled &&
+      settings.claude.mode === 'apiKey' &&
+      options.getAnthropicApiKey !== undefined &&
       allowedByMode(settings, 'claude') &&
       !settings.pausedByVigil.includes('claude')
         ? createAiRunner({
             settings: { ...settings, order: ['claude'] },
             adapters: [
               createClaudeAdapter({
-                mode: settings.claude.mode,
+                mode: 'apiKey',
+                allowPlan: false,
                 pins: options.pins,
                 model: CLASSIFIER_CLAUDE_MODEL,
                 ...(settings.claude.executablePath

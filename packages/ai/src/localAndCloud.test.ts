@@ -705,7 +705,7 @@ describe('Jev as the event labeller', () => {
   });
 });
 
-describe('Claude Haiku as the first event labeller', () => {
+describe('Claude Haiku as the first event labeller (on an API key)', () => {
   const runnerOf = (adapter: ProviderAdapter) =>
     createAiRunner({
       settings: { ...defaultAiSettings('/tmp/v'), order: [adapter.id] },
@@ -755,6 +755,51 @@ describe('Claude Haiku as the first event labeller', () => {
     });
     expect(jevLabel).toHaveBeenCalledTimes(1);
     expect(local.runs).toBe(1);
+  });
+
+  it('is never built on a Claude plan, so labelling goes to Jev', async () => {
+    const hosts: string[] = [];
+    vi.stubGlobal('fetch', async (url: string) => {
+      hosts.push(new URL(url).host);
+      return new URL(url).host === 'api.typesafe.ai'
+        ? Response.json({
+            model: 'jev-1.13.0',
+            answers: {
+              e1: {
+                type: 'choice',
+                choice: 'unusual',
+                probabilities: { benign: 0.2, unusual: 0.7, suspicious: 0.1 },
+                confidence: 0.6,
+              },
+            },
+          })
+        : new Response('{}', { status: 503 });
+    });
+    try {
+      const defaults = defaultAiSettings('/tmp/v');
+      const events = [exec('evt-a', '/Users/Shared/.x/run')];
+      const opts = {
+        log: { record: () => {} },
+        pins: memoryPinStore(),
+        getJevApiKey: async () => 'k',
+      };
+      for (const claude of [
+        // Plan only, even with a key the app could hand over.
+        { ...defaults.claude, mode: 'subscription' as const },
+        // Plan allowed alongside key mode, but no key.
+        { ...defaults.claude, allowPlan: true },
+      ]) {
+        const ai = createVigilAi({
+          ...opts,
+          ...(claude.mode === 'subscription' ? { getAnthropicApiKey: async () => 'sk' } : {}),
+          settings: { ...defaults, claude },
+        });
+        const result = await ai.classifier!.classify(events);
+        expect(result).toMatchObject({ ok: true, labels: [{ by: 'jev' }] });
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("runs inside the main runner's background share", () => {
