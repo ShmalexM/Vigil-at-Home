@@ -96,10 +96,15 @@ function startTime(pid) {
   return Date.parse(lstart.replace(/\s+/g, ' ').trim());
 }
 
-/** Whether osquery has written any results for the named scheduled query yet. */
+/**
+ * Whether osquery has written any results for the named scheduled query yet.
+ * Anchored to the start of the line: vigil_health rows carry every query's
+ * name in their columns, and matching those let the launch agent be written
+ * before the startup-item baseline run, which then swallowed it.
+ */
 function osqueryHasRun(query) {
   try {
-    execFileSync('sudo', ['-n', 'grep', '-q', `"name":"${query}"`, OSQUERY_RESULTS], {
+    execFileSync('sudo', ['-n', 'grep', '-qE', `^\\{"name":"${query}"`, OSQUERY_RESULTS], {
       stdio: 'ignore',
     });
     return true;
@@ -117,7 +122,8 @@ function osqueryWatchdogLog() {
         '-n',
         'sh',
         '-c',
-        'grep -hiE "watchdog|denylist|blacklist|sustainable|stopping worker" /var/log/osquery/osqueryd.* 2>/dev/null | tail -n 15',
+        // Skip JSON result lines: vigil_health rows have a denylisted column.
+        'grep -hiE "watchdog|denylist|blacklist|sustainable|stopping worker" /var/log/osquery/osqueryd.* 2>/dev/null | grep -v "^{" | tail -n 15',
       ],
       { encoding: 'utf8' },
     )
