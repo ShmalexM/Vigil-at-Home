@@ -9,6 +9,8 @@
  * Without VIGIL_BENCH_LABELLER it only writes the coverage table (which
  * missed attacks would reach the labeller at all).
  */
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   classifierRuntime,
   createAiRunner,
@@ -21,13 +23,13 @@ import {
   type PromptLogEntry,
 } from '@vigil/ai';
 import { describe, expect, it } from 'vitest';
-import { labelSet } from './labels.js';
+import { labelSet, type LabelSet } from './labels.js';
 import { writeResult } from './report.js';
 
 const which = process.env['VIGIL_BENCH_LABELLER'] ?? '';
 const BATCH = 20; // the app's maxEventsPerBatch
 
-function classifier(log: PromptLogEntry[]) {
+function classifier(log: PromptLogEntry[], instructions?: string) {
   const record = { record: (e: PromptLogEntry) => void log.push(e) };
   if (which === 'jev') {
     return createEventClassifier({
@@ -39,6 +41,7 @@ function classifier(log: PromptLogEntry[]) {
       }),
       maxEventsPerBatch: BATCH,
       maxBatchesPerHour: 10_000,
+      ...(instructions ? { instructions } : {}),
     });
   }
   const runtime = classifierRuntime();
@@ -57,78 +60,125 @@ function classifier(log: PromptLogEntry[]) {
     maxEventsPerBatch: BATCH,
     maxBatchesPerHour: 10_000,
     deadlineMs: 300_000,
+    ...(instructions ? { instructions } : {}),
   });
+}
+
+/**
+ * Prompt variants to compare with the shipped one: every .txt in
+ * VIGIL_LABEL_PROMPTS (a folder), or in prompts/labeller when that exists.
+ * Each runs on the train and held-out sets.
+ */
+function variants(): Array<{ name: string; instructions?: string }> {
+  const dir =
+    process.env['VIGIL_LABEL_PROMPTS'] ?? join(import.meta.dirname, '../prompts/labeller');
+  const extra = existsSync(dir)
+    ? readdirSync(dir)
+        .filter((f) => f.endsWith('.txt'))
+        .sort()
+        .map((f) => ({
+          name: f.slice(0, -4),
+          instructions: readFileSync(join(dir, f), 'utf8').trim(),
+        }))
+    : [];
+  return [{ name: 'shipped' }, ...extra];
+}
+
+async function labelAll(set: LabelSet, instructions?: string) {
+  const log: PromptLogEntry[] = [];
+  const c = classifier(log, instructions);
+  const labels = new Map<string, LabelledEvent>();
+  const batches: Array<{ seconds: number; ok: boolean; detail?: string }> = [];
+  for (let i = 0; i < set.cases.length; i += BATCH) {
+    const batch = set.cases.slice(i, i + BATCH).map((x) => x.event);
+    const t0 = Date.now();
+    const r = await c.classify(batch);
+    batches.push({
+      seconds: (Date.now() - t0) / 1000,
+      ok: r.ok,
+      ...(!r.ok && r.detail ? { detail: r.detail } : {}),
+    });
+    if (r.ok) for (const l of r.labels) labels.set(l.eventId, l);
+  }
+  const rows = set.cases.map((x) => ({
+    source: x.source,
+    truth: x.truth,
+    appSends: x.appSends,
+    kind: x.event.kind,
+    line: eventLine(x.event).slice(0, 200),
+    label: labels.get(x.event.id)?.label ?? null,
+  }));
+  const labelled = rows.filter((r) => r.label !== null);
+  const attacks = labelled.filter((r) => r.truth === 'attack');
+  const benign = labelled.filter((r) => r.truth === 'benign');
+  const flagged = (xs: typeof rows) => xs.filter((r) => r.label && r.label !== 'benign').length;
+  const suspicious = (xs: typeof rows) => xs.filter((r) => r.label === 'suspicious').length;
+  const tp = flagged(attacks);
+  const fp = flagged(benign);
+  return {
+    cases: rows.length,
+    labelled: labelled.length,
+    attacks: attacks.length,
+    benign: benign.length,
+    // "Flagged" means unusual or suspicious: anything shown as a hint.
+    recall: attacks.length ? tp / attacks.length : null,
+    recallSuspicious: attacks.length ? suspicious(attacks) / attacks.length : null,
+    falseFlagRate: benign.length ? fp / benign.length : null,
+    falseSuspiciousRate: benign.length ? suspicious(benign) / benign.length : null,
+    precision: tp + fp ? tp / (tp + fp) : null,
+    batches,
+    secondsPerBatch: batches.reduce((a, b) => a + b.seconds, 0) / Math.max(1, batches.length),
+    tokens: {
+      input: log.reduce((a, e) => a + (e.usage?.inputTokens ?? 0), 0),
+      output: log.reduce((a, e) => a + (e.usage?.outputTokens ?? 0), 0),
+    },
+    costUsd: log.reduce((a, e) => a + (e.usage?.costUsd ?? 0), 0),
+    rows,
+  };
 }
 
 describe('event labelling benchmark', () => {
   const set = labelSet();
+  const heldout = labelSet({ split: 'heldout' });
 
   it('writes which missed attacks reach the labeller', () => {
     writeResult('label-coverage', {
       at: new Date().toISOString(),
       coverage: set.coverage,
+      heldoutCoverage: heldout.coverage,
     });
   });
 
   it.skipIf(!which)(
-    `labels the test set with ${which || 'nothing'}`,
+    `labels the test sets with ${which || 'nothing'}`,
     async () => {
-      const log: PromptLogEntry[] = [];
-      const c = classifier(log);
-      const labels = new Map<string, LabelledEvent>();
-      const batches: Array<{ seconds: number; ok: boolean; detail?: string }> = [];
-      for (let i = 0; i < set.cases.length; i += BATCH) {
-        const batch = set.cases.slice(i, i + BATCH).map((x) => x.event);
-        const t0 = Date.now();
-        const r = await c.classify(batch);
-        batches.push({
-          seconds: (Date.now() - t0) / 1000,
-          ok: r.ok,
-          ...(!r.ok && r.detail ? { detail: r.detail } : {}),
-        });
-        if (r.ok) for (const l of r.labels) labels.set(l.eventId, l);
-      }
-      const rows = set.cases.map((x) => ({
-        source: x.source,
-        truth: x.truth,
-        appSends: x.appSends,
-        kind: x.event.kind,
-        line: eventLine(x.event).slice(0, 200),
-        label: labels.get(x.event.id)?.label ?? null,
-      }));
-      const labelled = rows.filter((r) => r.label !== null);
-      const attacks = labelled.filter((r) => r.truth === 'attack');
-      const benign = labelled.filter((r) => r.truth === 'benign');
-      const flagged = (xs: typeof rows) => xs.filter((r) => r.label && r.label !== 'benign').length;
-      const suspicious = (xs: typeof rows) => xs.filter((r) => r.label === 'suspicious').length;
       const model = which === 'jev' ? 'jev' : (process.env['VIGIL_OLLAMA_MODEL'] ?? 'qwen2.5:0.5b');
-      const tp = flagged(attacks);
-      const fp = flagged(benign);
-      writeResult(`labels-${model.replace(/[^a-z0-9.]+/gi, '-')}`, {
-        at: new Date().toISOString(),
-        model,
-        platform: `${process.platform}-${process.arch}`,
-        cases: rows.length,
-        labelled: labelled.length,
-        attacks: attacks.length,
-        benign: benign.length,
-        // "Flagged" means unusual or suspicious: anything shown as a hint.
-        recall: attacks.length ? tp / attacks.length : null,
-        recallSuspicious: attacks.length ? suspicious(attacks) / attacks.length : null,
-        falseFlagRate: benign.length ? fp / benign.length : null,
-        falseSuspiciousRate: benign.length ? suspicious(benign) / benign.length : null,
-        precision: tp + fp ? tp / (tp + fp) : null,
-        batches,
-        secondsPerBatch: batches.reduce((a, b) => a + b.seconds, 0) / Math.max(1, batches.length),
-        tokens: {
-          input: log.reduce((a, e) => a + (e.usage?.inputTokens ?? 0), 0),
-          output: log.reduce((a, e) => a + (e.usage?.outputTokens ?? 0), 0),
-        },
-        costUsd: log.reduce((a, e) => a + (e.usage?.costUsd ?? 0), 0),
-        rows,
-      });
-      expect(labelled.length, JSON.stringify(batches)).toBeGreaterThan(0);
+      const slug = model.replace(/[^a-z0-9.]+/gi, '-');
+      let labelled = 0;
+      for (const v of variants()) {
+        const suffix = v.name === 'shipped' ? '' : `-${v.name}`;
+        const train = await labelAll(set, v.instructions);
+        labelled += train.labelled;
+        writeResult(`labels-${slug}${suffix}`, {
+          at: new Date().toISOString(),
+          model,
+          prompt: v.name,
+          split: 'train',
+          platform: `${process.platform}-${process.arch}`,
+          ...train,
+        });
+        // Held-out: totals only. Tuning reads train rows, never these.
+        const { rows: _rows, ...ho } = await labelAll(heldout, v.instructions);
+        writeResult(`labels-${slug}${suffix}-heldout`, {
+          at: new Date().toISOString(),
+          model,
+          prompt: v.name,
+          split: 'heldout',
+          ...ho,
+        });
+      }
+      expect(labelled).toBeGreaterThan(0);
     },
-    60 * 60_000,
+    90 * 60_000,
   );
 });

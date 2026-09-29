@@ -90,7 +90,8 @@ const Output = z.strictObject({
 // Output tokens are nearly all of a small model's time on a CPU, and a small
 // model writing prose runs long and breaks its JSON. So the answer is just two
 // lists of short keys; everything not listed is benign.
-const INSTRUCTIONS = [
+/** What the labelling model is told. Exported for the benchmark, which compares variants. */
+export const LABEL_INSTRUCTIONS = [
   "Each line in the data is one event from this Mac, starting with its key (e1, e2...). Vigil's rules did not match these events.",
   'Most are normal. Put the key of each event that looks like malware or an attacker in "suspicious"',
   '(hidden or unsigned programs in odd places, new login items, reading browser or keychain data,',
@@ -165,6 +166,8 @@ export interface EventClassifierOptions {
   readonly isBusy?: () => boolean;
   readonly deadlineMs?: number;
   readonly now?: () => number;
+  /** A candidate prompt in place of LABEL_INSTRUCTIONS (benchmark only). */
+  readonly instructions?: string;
 }
 
 /**
@@ -229,7 +232,7 @@ export function createEventClassifier(options: EventClassifierOptions) {
       const result = await options.runner.run({
         purpose: 'classify',
         urgency: 'background',
-        instructions: INSTRUCTIONS,
+        instructions: options.instructions ?? LABEL_INSTRUCTIONS,
         data: batch.map((e, i) => `e${i + 1} ${eventLine(e)}`),
         output: Output,
         deadlineMs: options.deadlineMs ?? 60_000,
