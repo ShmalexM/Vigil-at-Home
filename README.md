@@ -2,7 +2,7 @@
 
 Your own security operations center, running on your Mac.
 
-Vigil at Home watches what runs on your laptop, blocks malicious activity as it happens, and pops up to tell you when it does. It uses the AI subscription you already have (Claude, ChatGPT/Codex or GitHub Copilot) to explain what it found and help you decide, but it never waits on the AI to block, and only you can allow or release something.
+Vigil at Home watches what runs on your laptop, blocks malicious activity as it happens, and pops up to tell you when it does. It uses AI you already have (an API key, your ChatGPT plan through Codex, a local model, or your Claude plan when you ask it about an alert) to explain what it found and help you decide, but it never waits on the AI to block, and only you can allow or release something.
 
 > Status: early alpha. The app, popup and alert pipeline work, but the sensors, detection rules and AI connection are still being merged in. Until then the app has nothing real to watch, and blocks are simulated and labelled that way.
 
@@ -56,7 +56,7 @@ Maintainers: run the **Release** workflow by hand with a version (like `0.1.0-al
                   popup + menu-bar "Needs you" badge
                                   │
                                   ▼
-                AI explains and recommends (your subscription)
+                AI explains and recommends (your AI)
                                   │
                                   ▼
                    you decide: keep blocked, allow, undo

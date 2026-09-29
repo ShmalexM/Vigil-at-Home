@@ -200,9 +200,12 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
             title="AI opinion"
             sub={`${alert.ai.provider}${alert.ai.model ? ` · ${alert.ai.model}` : ''} · advisory, may be wrong`}
             right={
-              <Chip tone="ai">
-                <Sparkles size={12} /> {alert.ai.verdict.replace('_', ' ')}
-              </Chip>
+              <div className="row">
+                <ExplainButton alertId={alert.id} again />
+                <Chip tone="ai">
+                  <Sparkles size={12} /> {alert.ai.verdict.replace('_', ' ')}
+                </Chip>
+              </div>
             }
           />
           <p style={{ margin: 0 }}>{alert.ai.summary}</p>
@@ -211,6 +214,15 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
               {alert.ai.details}
             </p>
           )}
+        </Card>
+      )}
+      {!alert.ai && (
+        <Card>
+          <SectionHead
+            title="AI opinion"
+            sub="None yet. Ask for one: advisory only, it never changes the response."
+            right={<ExplainButton alertId={alert.id} />}
+          />
         </Card>
       )}
 
@@ -374,5 +386,35 @@ function EventBlock({ event }: { event: SensorEvent }) {
         )}
       </dl>
     </div>
+  );
+}
+
+/**
+ * Asks Vigil to explain this alert now. The one place Vigil may use the
+ * user's Claude plan, and only when they've turned it on in Settings › AI.
+ */
+function ExplainButton({ alertId, again = false }: { alertId: string; again?: boolean }) {
+  const [plan] = useLive(async () => (await vigil.getAiPrefs()).claudePlan);
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const label = plan ? 'Explain with my Claude plan' : again ? 'Ask again' : 'Explain';
+  return (
+    <Button
+      size="sm"
+      kind="ghost"
+      icon={<Sparkles size={13} />}
+      disabled={busy}
+      onClick={async () => {
+        setBusy(true);
+        try {
+          const r = await vigil.explainAlert(alertId);
+          if (!r.ok) toast({ text: r.error ?? 'No AI could explain it right now' });
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      {busy ? 'Asking…' : label}
+    </Button>
   );
 }

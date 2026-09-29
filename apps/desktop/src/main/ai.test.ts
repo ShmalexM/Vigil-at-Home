@@ -156,7 +156,7 @@ describe('AiBridge settings', () => {
   it('rejects prefs the renderer made up', () => {
     const { ai } = setup();
     expect(() => ai.setPrefs({ monthlyCapUsd: -1 })).toThrow();
-    expect(() => ai.setPrefs({ claudeUses: 'free' as never })).toThrow();
+    expect(() => ai.setPrefs({ claudePlan: 'yes' as never })).toThrow();
   });
 });
 
@@ -177,6 +177,20 @@ describe('AiBridge explanations', () => {
     });
     expect(core.usage.report(1).totals.runs).toBe(1);
     expect(ai.spentThisMonthUsd('claude')).toBeCloseTo(0.01);
+  });
+
+  it('uses the Claude plan only for an explanation the user asks for', async () => {
+    const { core, ai, calls } = setup();
+    expect(ai.settings().claude).toMatchObject({ mode: 'apiKey', allowPlan: false });
+    ai.setPrefs({ claudePlan: true });
+    expect(ai.settings().claude).toMatchObject({ mode: 'apiKey', allowPlan: true });
+    ai.explainAlertsFrom(core);
+    const alert = await core.alerts.raise({ rule: makeRule(), events: [makeExec()], actions: [] });
+    await settle();
+    expect(calls[0]).not.toHaveProperty('requestedByUser');
+    expect(await ai.explainOnRequest(core, alert.id)).toEqual({ ok: true });
+    expect(calls[1]).toMatchObject({ purpose: 'explain', urgency: 'now', requestedByUser: true });
+    expect(await ai.explainOnRequest(core, 'gone')).toMatchObject({ ok: false });
   });
 
   it('never sends the test alert', async () => {
@@ -241,14 +255,15 @@ describe('AiBridge view', () => {
     expect(await ai.limits()).toEqual({
       plans: [],
       backgroundSharePercent: 10,
-      caps: { api: 20, jev: 20 },
+      // Claude's own work always runs on an Anthropic key now, so the cap covers it.
+      caps: { api: 20, jev: 20, claude: 20 },
     });
   });
 
   it('caps Codex runs on an OpenAI key too', async () => {
     const { ai } = setup();
     ai.setPrefs({ monthlyCapUsd: 20, codexUses: 'apiKey' });
-    expect((await ai.limits()).caps).toEqual({ api: 20, jev: 20, codex: 20 });
+    expect((await ai.limits()).caps).toEqual({ api: 20, jev: 20, claude: 20, codex: 20 });
   });
 });
 
@@ -376,6 +391,7 @@ describe('AiBridge event labels', () => {
       dataDir: '/tmp/vigil-test',
       openExternal: async () => {},
     });
-    expect(ai.prefs()).toMatchObject({ claude: false, labelling: true });
+    // A plan picked before it became opt-in doesn't carry over.
+    expect(ai.prefs()).toMatchObject({ claude: false, labelling: true, claudePlan: false });
   });
 });

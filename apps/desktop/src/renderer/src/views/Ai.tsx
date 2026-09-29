@@ -89,15 +89,21 @@ export function AiSection() {
         <div className="ai-used">{usedFor(p, view)}</div>
         <div className="ai-sub">{describe(p, view)}</div>
         {p.provider === 'claude' && view.prefs.claude && (
-          <Segmented
-            label="How Claude is paid for"
-            value={view.prefs.claudeUses}
-            options={[
-              { value: 'subscription', label: 'My Claude plan' },
-              { value: 'apiKey', label: 'Anthropic API key' },
-            ]}
-            onChange={(v) => void setPref({ claudeUses: v })}
-          />
+          <div className="ai-plan">
+            <Segmented
+              label="Use my Claude plan"
+              value={view.prefs.claudePlan ? 'on' : 'off'}
+              options={[
+                { value: 'off', label: 'Off' },
+                { value: 'on', label: 'My Claude plan' },
+              ]}
+              onChange={(v) => void setPref({ claudePlan: v === 'on' })}
+            />
+            <span className="ai-sub">
+              Your Claude plan is used only when you ask Vigil to explain an alert. Everything Vigil
+              does on its own uses an Anthropic API key.
+            </span>
+          </div>
         )}
         {p.provider === 'codex' && view.prefs.codex && (
           <Segmented
@@ -217,15 +223,15 @@ export function AiSection() {
   );
 }
 
-/** Claude Haiku labels first whenever Claude is on and AI may run in the cloud. */
+/** Claude Haiku labels first when Claude is on with an Anthropic API key, outside local mode. */
 function haikuLabels(view: AiView): boolean {
-  return view.prefs.labelling && view.prefs.claude && view.mode !== 'local';
+  return view.prefs.labelling && view.prefs.claude && view.anthropicKey && view.mode !== 'local';
 }
 
 /**
  * What Vigil uses this app or key for, given where AI runs. Mirrors the
  * routing in @vigil/ai: explanations go down the list in order; labels go to
- * Claude Haiku (when Claude is signed in), then Jev, then the small local
+ * Claude Haiku (with an Anthropic API key), then Jev, then the small local
  * model (or, cloud only, the other apps above).
  */
 function usedFor(p: AiProviderView, view: AiView): string {
@@ -246,8 +252,15 @@ function usedFor(p: AiProviderView, view: AiView): string {
       : `Used for: ${explain}, and labelling events with a small model.`;
   }
   if (view.mode === 'local') return 'Not used while Vigil runs AI on this Mac only.';
-  if (p.provider === 'claude' && haiku)
-    return 'Used for: explaining alerts, and labelling events with Claude Haiku.';
+  if (p.provider === 'claude') {
+    if (!view.anthropicKey)
+      return view.prefs.claudePlan
+        ? 'Used for: explaining an alert when you ask, with your Claude plan.'
+        : 'Not used yet: add an Anthropic API key in Setup, or turn on your Claude plan below.';
+    return haiku
+      ? 'Used for: explaining alerts, and labelling events with Claude Haiku.'
+      : 'Used for: explaining alerts.';
+  }
   return view.mode === 'cloud' && labels && (view.jevVia || haiku)
     ? `Used for: explaining alerts, and labelling events when ${before} can’t.`
     : view.mode === 'cloud' && labels
@@ -267,14 +280,18 @@ function labellingText(view: AiView): string {
         ? 'Jev, then the model on this Mac, take over'
         : 'The model on this Mac takes over';
   if (haikuLabels(view))
-    return `Claude Haiku labels unusual programs and connections in Activity when Claude is signed in. ${fallback} when it can’t.`;
+    return `Claude Haiku labels unusual programs and connections in Activity, using your Anthropic API key. ${fallback} when it can’t.`;
+  const addHaiku =
+    view.prefs.claude && !view.anthropicKey
+      ? ' An Anthropic API key would let Claude Haiku label first.'
+      : '';
   if (view.jevVia)
     return `Jev labels unusual programs and connections in Activity. ${
       view.mode === 'cloud' ? 'The apps above take over' : 'The model on this Mac takes over'
-    } when it can’t.`;
+    } when it can’t.${addHaiku}`;
   return view.mode === 'cloud'
-    ? 'The apps above label unusual programs and connections in Activity, within their background share. An OpenRouter or TypeSafe key adds Jev.'
-    : 'A small model on this Mac labels unusual programs and connections in Activity. An OpenRouter or TypeSafe key adds Jev.';
+    ? `The apps above label unusual programs and connections in Activity, within their background share. An OpenRouter or TypeSafe key adds Jev.${addHaiku}`
+    : `A small model on this Mac labels unusual programs and connections in Activity. An OpenRouter or TypeSafe key adds Jev.${addHaiku}`;
 }
 
 function describe(p: AiProviderView, view: AiView): string {

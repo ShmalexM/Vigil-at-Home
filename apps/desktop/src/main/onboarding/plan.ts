@@ -208,7 +208,7 @@ export function setupPlan(inputs: PlanInputs = {}): StepDef[] {
       id: 'claude',
       group: 'ai',
       title: 'Claude Code',
-      why: 'Uses your Claude plan. Vigil runs your own Claude Code with no file or shell access and never sees your login.',
+      why: 'Off unless you turn it on. Lets Vigil use your Claude plan, but only when you ask it to explain an alert; everything Vigil does on its own uses an API key, Jev or the local model. Vigil runs your own Claude Code with no file or shell access and never sees your login.',
       modes: CLOUD_AI,
       optional: true,
       commands: [
@@ -249,8 +249,8 @@ export interface KeyDef {
 }
 
 /**
- * API keys the cloud setup asks for. All optional: a signed-in Claude Code or
- * Codex needs none. OpenRouter is the main path, since it also carries Jev;
+ * API keys the cloud setup asks for. All optional: a signed-in Codex needs
+ * none, and a Claude plan only answers alerts the user asks about. OpenRouter is the main path, since it also carries Jev;
  * the rest sit under "More options".
  */
 export const API_KEYS: readonly KeyDef[] = [
@@ -265,7 +265,7 @@ export const API_KEYS: readonly KeyDef[] = [
     provider: 'anthropic',
     name: 'Anthropic API',
     url: 'https://console.anthropic.com/settings/keys',
-    use: 'Claude billed per use, instead of your Claude plan.',
+    use: 'Claude billed per use. Lets Claude explain new alerts on its own and label events with Claude Haiku; your Claude plan is only for alerts you ask about.',
     prefix: 'sk-ant-',
     more: true,
   },
