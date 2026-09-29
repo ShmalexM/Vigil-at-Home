@@ -75,6 +75,7 @@ export {
   classifierRuntime,
   createEventClassifier,
   eventLine,
+  LABEL_INSTRUCTIONS,
   pickClassifierModel,
   recommendedClassifierModel,
   type ClassifyResult,

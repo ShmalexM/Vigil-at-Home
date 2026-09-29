@@ -2,6 +2,7 @@ import type { SensorEvent } from '@vigil/core';
 import { DetectionEngine, macosCoreRules, memoryStores } from '@vigil/detection';
 import { ATTACKS, type AttackScenario } from './attacks.js';
 import { START, type Telemetry } from './detection.js';
+import { HELDOUT_ATTACKS, HELDOUT_LOOKALIKES } from './heldout.js';
 import { rng } from './rng.js';
 import { throughSensors } from './sensors.js';
 import { workday, type Profile } from './workday.js';
@@ -74,15 +75,24 @@ function engineAt(at: number, learning: boolean, lists: AttackScenario['lists'] 
   });
 }
 
-/** Builds the model test set and the coverage table. */
-export function labelSet(opts: { benign?: number; seed?: number } = {}): LabelSet {
-  const r = rng(opts.seed ?? 7);
+/**
+ * Builds the model test set and the coverage table.
+ *
+ * `train` is the set prompts may be tuned on. `heldout` uses the held-out
+ * attacks, the held-out look-alikes and a different fortnight of normal use,
+ * and only its totals should be read when deciding whether a prompt is better.
+ */
+export function labelSet(
+  opts: { benign?: number; seed?: number; split?: 'train' | 'heldout' } = {},
+): LabelSet {
+  const heldout = opts.split === 'heldout';
+  const r = rng(opts.seed ?? (heldout ? 1307 : 7));
   const cases: LabelCase[] = [];
   const coverage: LabelCoverage[] = [];
   const at = START + 10 * DAY;
 
   for (const telemetry of ['ideal', 'sensors'] as const)
-    for (const s of ATTACKS) {
+    for (const s of heldout ? HELDOUT_ATTACKS : ATTACKS) {
       const engine = engineAt(at, false, s.lists);
       const raw = s.events(at);
       const events = telemetry === 'ideal' ? raw : raw.flatMap((e) => throughSensors(e));
@@ -120,7 +130,20 @@ export function labelSet(opts: { benign?: number; seed?: number } = {}): LabelSe
   const seen = new Set<string>();
   const engine = engineAt(START + 7 * DAY, false);
   const pool: LabelCase[] = [];
-  for (let day = 0; day < 14; day++)
+  if (heldout)
+    for (const l of HELDOUT_LOOKALIKES)
+      for (const e of l.events(at))
+        if (engine.evaluate(e).length === 0) {
+          cases.push({
+            event: e,
+            truth: 'benign',
+            source: l.id,
+            appSends: labelKey(e) !== undefined,
+          });
+          break;
+        }
+  const firstDay = heldout ? 14 : 0;
+  for (let day = firstDay; day < firstDay + 14; day++)
     for (const profile of ['developer', 'everyday'] as Profile[])
       for (const w of workday(profile, START + day * DAY, r)) {
         if (engine.evaluate(w.event).length > 0) continue;

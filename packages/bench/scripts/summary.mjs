@@ -44,7 +44,10 @@ for (const f of readdirSync(dir)
       );
     lines.push('');
   } else if (f.startsWith('labels-')) {
-    lines.push(`### Labels: ${d.model}`, '');
+    lines.push(
+      `### Labels: ${d.model}${d.prompt && d.prompt !== 'shipped' ? ` (${d.prompt})` : ''}${d.split === 'heldout' ? ', held-out' : ''}`,
+      '',
+    );
     lines.push(
       `Attacks flagged ${pct(d.recall)} (${d.attacks}), normal events flagged ${pct(d.falseFlagRate)} (${d.benign}), ${d.secondsPerBatch.toFixed(1)} s per 20-event batch.`,
       '',

@@ -40,6 +40,8 @@ export interface ClaudeAdapterOptions {
   readonly pins: PinStore;
   /** Only used in apiKey mode. Reads the key from the Keychain at run time. */
   readonly getApiKey?: () => Promise<string | undefined>;
+  /** A model other than Claude Code's default (the benchmark compares models). */
+  readonly model?: string;
 }
 
 export function vigilToolName(name: string): string {
@@ -74,6 +76,7 @@ export function claudeQueryOptions(params: {
   tools: readonly ReadTool[];
   canUseTool: CanUseTool;
   abortController: AbortController;
+  model?: string;
 }): Options {
   const mcpServers: Options['mcpServers'] =
     params.tools.length === 0
@@ -115,6 +118,7 @@ export function claudeQueryOptions(params: {
     outputFormat: { type: 'json_schema', schema: params.jsonSchema },
     maxTurns: params.tools.length === 0 ? 3 : 10,
     abortController: params.abortController,
+    ...(params.model ? { model: params.model } : {}),
   };
 }
 
@@ -273,6 +277,7 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions): ProviderAdap
             tools: input.tools,
             canUseTool: makeCanUseTool(input.tools, audit.denied),
             abortController,
+            ...(options.model ? { model: options.model } : {}),
           }),
         });
         for await (const message of q) {
