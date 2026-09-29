@@ -5,6 +5,7 @@ import { createAiRunner } from './runner.js';
 import { defaultAiSettings, type AiSettings } from './settings.js';
 import { readTool } from './tools.js';
 import { watchAiApps, type AiAppsSnapshot } from './watch.js';
+import { mayUsePlan } from './types.js';
 import type {
   AdapterRunInput,
   AdapterRunOutput,
@@ -69,6 +70,46 @@ describe('runner', () => {
       type: 'object',
       required: ['verdict', 'summary'],
     });
+  });
+
+  it('lets a Claude plan take only an explanation the user asked for', async () => {
+    expect(mayUsePlan({ purpose: 'explain', requestedByUser: true })).toBe(true);
+    expect(mayUsePlan({ purpose: 'explain' })).toBe(false);
+    expect(mayUsePlan({ purpose: 'classify', requestedByUser: true })).toBe(false);
+    expect(mayUsePlan({ purpose: 'analyze', requestedByUser: true })).toBe(false);
+
+    const answer = () => ({
+      kind: 'ok' as const,
+      json: { verdict: 'benign', summary: 'ok' },
+      audit: audit(),
+    });
+    // A plan with no API key: it can serve only runs that may use the plan.
+    const plan = { ...fake('claude', answer), canServe: async (ok: boolean) => ok };
+    const codex = fake('codex', answer);
+    const { runner } = setup([plan, codex], { order: ['claude', 'codex'] });
+
+    const asked = await runner.run({ ...request, requestedByUser: true });
+    expect(asked).toMatchObject({ ok: true, provider: 'claude' });
+    expect(plan.inputs[0]?.mayUsePlan).toBe(true);
+
+    // Automatic explanations, labelling and rule reviews go past it.
+    for (const r of [
+      { ...request },
+      { ...request, purpose: 'classify' as const, requestedByUser: true },
+      {
+        ...request,
+        purpose: 'analyze' as const,
+        requestedByUser: true,
+        urgency: 'background' as const,
+      },
+    ]) {
+      expect(await runner.run(r)).toMatchObject({ ok: true, provider: 'codex' });
+      expect(codex.inputs.at(-1)?.mayUsePlan).toBe(false);
+    }
+    // Naming Claude outright doesn't get around it.
+    const only = await runner.run({ ...request, purpose: 'analyze', providers: ['claude'] });
+    expect(only).toMatchObject({ ok: false, reason: 'no_provider' });
+    expect(plan.inputs).toHaveLength(1);
   });
 
   it('skips providers that are not ready, disabled or paused by Vigil', async () => {

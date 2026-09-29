@@ -24,8 +24,17 @@ export interface AiSettings {
   readonly order: readonly ProviderId[];
   readonly claude: {
     readonly enabled: boolean;
-    /** "subscription" uses the user's own signed-in Claude Code. "apiKey" uses a key from the Keychain. */
+    /**
+     * "apiKey" (the default) uses a key from the Keychain. "subscription" means
+     * no key, only the user's own signed-in plan (and implies `allowPlan`).
+     */
     readonly mode: 'subscription' | 'apiKey';
+    /**
+     * The user opted in to their Claude plan (off by default). Even then it
+     * serves only explanations the user asks for (`mayUsePlan`); automatic
+     * explanations, labelling and rule reviews need the API key.
+     */
+    readonly allowPlan?: boolean;
     readonly executablePath?: string;
   };
   readonly codex: {
@@ -97,14 +106,14 @@ export interface AiSettings {
 }
 
 /**
- * Shown in setup next to the Claude option. Claude subscription mode is on by
- * default and can be switched to an API key or turned off.
+ * Shown in setup next to the Claude option. Claude runs on an API key by
+ * default; using a Claude plan is opt-in and covers alert explanations only.
  */
 export const CLAUDE_SUBSCRIPTION_NOTE =
   'Vigil runs your own Claude Code, signed in with your own account, and never sees your login. ' +
-  "Anthropic's terms allow using your subscription with the unmodified Claude Code app, but they also say apps " +
-  'built on it should use an API key, so this could change. Sign in yourself with `claude auth login`. ' +
-  'You can switch to an API key or turn Claude off at any time.';
+  "Anthropic's terms say apps built on Claude Code should use an API key, so your plan only explains " +
+  'alerts you ask about. Automatic explanations, event labelling and rule reviews need an API key. ' +
+  'Sign in yourself with `claude auth login`. You can turn this off at any time.';
 
 /**
  * Everything is on by default: Vigil uses whichever of these it finds installed
@@ -114,7 +123,7 @@ export function defaultAiSettings(appSupportDir: string): AiSettings {
   return {
     mode: 'both',
     order: ['claude', 'codex', 'api', 'ollama'],
-    claude: { enabled: true, mode: 'subscription' },
+    claude: { enabled: true, mode: 'apiKey', allowPlan: false },
     codex: { enabled: true, codexHome: join(appSupportDir, 'codex') },
     ollama: { enabled: true, baseUrl: 'http://127.0.0.1:11434' },
     api: { enabled: true, preset: 'openrouter', baseUrl: API_PRESETS.openrouter.baseUrl },

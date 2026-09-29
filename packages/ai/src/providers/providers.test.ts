@@ -17,6 +17,7 @@ import {
   vigilToolName,
 } from './claude.js';
 import { memoryPinStore } from '../executable.js';
+import { defaultAiSettings } from '../settings.js';
 import {
   CODEX_DISABLED_FEATURES,
   CODEX_API_KEY_ENV,
@@ -334,6 +335,36 @@ describe.skipIf(!bundledClaude() || !bundledCodex())('Plan usage from the real C
     expect(await codex.readUsage!()).toBeUndefined();
     expect(Date.now() - started).toBeLessThan(40_000);
   }, 60_000);
+});
+
+describe('Claude plan opt-in', () => {
+  const pins = memoryPinStore();
+  const key = async () => 'sk-ant-test';
+
+  it('is off by default', () => {
+    const d = defaultAiSettings('/tmp/v').claude;
+    expect(d).toMatchObject({ mode: 'apiKey', allowPlan: false });
+  });
+
+  it('serves runs that may not use the plan only with an API key', async () => {
+    const cases = [
+      // [adapter, may-use-plan runs, other runs]
+      [createClaudeAdapter({ mode: 'subscription', pins, getApiKey: key }), true, false],
+      [createClaudeAdapter({ mode: 'apiKey', allowPlan: true, pins }), true, false],
+      [createClaudeAdapter({ mode: 'apiKey', allowPlan: true, pins, getApiKey: key }), true, true],
+      [createClaudeAdapter({ mode: 'apiKey', pins, getApiKey: key }), true, true],
+      [createClaudeAdapter({ mode: 'apiKey', pins }), false, false],
+    ] as const;
+    for (const [adapter, planRuns, otherRuns] of cases) {
+      expect(await adapter.canServe!(true)).toBe(planRuns);
+      expect(await adapter.canServe!(false)).toBe(otherRuns);
+    }
+  });
+
+  it('reads plan windows only when the plan is allowed', async () => {
+    const adapter = createClaudeAdapter({ mode: 'apiKey', pins, getApiKey: key });
+    expect(await adapter.readUsage!()).toBeUndefined();
+  });
 });
 
 describe('Codex with an OpenAI API key', () => {
