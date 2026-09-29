@@ -5,33 +5,13 @@ import { START, type Telemetry } from './detection.js';
 import { rng } from './rng.js';
 import { throughSensors } from './sensors.js';
 import { workday, type Profile } from './workday.js';
+import { labelKey as appLabelKey } from '../../../apps/desktop/src/main/label-filter.js';
 
 const DAY = 86_400_000;
 
-/**
- * Which events the app sends to the labeller, and how it dedupes them.
- * Mirrors labelKey in apps/desktop/src/main/ai.ts: Apple programs, exits,
- * file events, Santa decisions and macOS alerts are never labelled.
- */
+/** Which events the app sends to the labeller: the app's own filter. */
 export function labelKey(e: SensorEvent): string | undefined {
-  switch (e.kind) {
-    case 'process.exec':
-      return e.process.signing === 'apple' ? undefined : `exec:${e.process.path}`;
-    case 'network.connection':
-      return e.process?.signing === 'apple'
-        ? undefined
-        : `net:${e.process?.path ?? '?'}>${e.remoteHost ?? e.remoteAddress}:${e.remotePort ?? ''}`;
-    case 'network.listen':
-      return e.process?.signing === 'apple'
-        ? undefined
-        : `listen:${e.process?.path ?? '?'}:${e.localPort}`;
-    case 'persistence':
-      return e.change === 'removed' ? undefined : `persist:${e.path}`;
-    case 'browser.extension':
-      return e.change === 'removed' ? undefined : `ext:${e.extensionId}`;
-    default:
-      return undefined;
-  }
+  return appLabelKey(e)?.key;
 }
 
 export interface LabelCase {

@@ -2,6 +2,7 @@ import type { SensorEvent } from '@vigil/core';
 import { globToRegExp } from '@vigil/detection';
 import {
   QUERY_NAMES,
+  ProcessEnricher,
   fileAccessPolicy,
   osqueryLineToEvents,
   santaLogLineToEvent,
@@ -30,12 +31,19 @@ export interface SensorOptions {
   enforceFileAccess?: boolean;
 }
 
+interface ProcMatch {
+  teamId?: string;
+  platform?: boolean;
+  signingId?: RegExp;
+}
 interface WatchItem {
   name: string;
   paths: Array<{ re: RegExp; prefix: string | undefined }>;
-  allowTeamIds: string[];
-  allowPlatform: boolean;
+  processes: ProcMatch[];
+  denied: boolean;
+  allowRead: boolean;
 }
+const enricher = new ProcessEnricher();
 
 let watchItems: WatchItem[] | undefined;
 
@@ -57,13 +65,28 @@ export function santaWatchItems(): WatchItem[] {
         ? { re: globToRegExp(`${path}**`), prefix: path }
         : { re: globToRegExp(path), prefix: undefined };
     });
+    const optsXml = xml.slice(m.index!, m.index! + m[0].length);
+    const processes: ProcMatch[] = m[3]!
+      .split('<dict>')
+      .slice(1)
+      .map((d) => {
+        const pm: ProcMatch = {};
+        const t = /<key>TeamID<\/key>\s*<string>([^<]*)<\/string>/.exec(d);
+        if (t) pm.teamId = t[1]!;
+        if (/<key>PlatformBinary<\/key>\s*<true\/>/.test(d)) pm.platform = true;
+        const sid = /<key>SigningID<\/key>\s*<string>([^<]*)<\/string>/.exec(d);
+        if (sid)
+          pm.signingId = new RegExp(
+            '^' + sid[1]!.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$',
+          );
+        return pm;
+      });
     items.push({
       name: m[1]!,
       paths,
-      allowTeamIds: [...m[3]!.matchAll(/<key>TeamID<\/key>\s*<string>([^<]*)<\/string>/g)].map(
-        (t) => t[1]!,
-      ),
-      allowPlatform: /<key>PlatformBinary<\/key>\s*<true\/>/.test(m[3]!),
+      processes,
+      denied: /ProcessesWithDeniedPaths/.test(optsXml),
+      allowRead: /<key>AllowReadAccess<\/key>\s*<true\/>/.test(optsXml),
     });
   }
   if (items.length === 0) throw new Error('Could not read the Santa file-access policy');
@@ -111,11 +134,24 @@ function osqueryLine(
 
 type Proc = NonNullable<Extract<SensorEvent, { kind: 'process.exec' }>['process']>;
 
+function certCn(p: Proc): Record<string, string | undefined> {
+  switch (p.signing) {
+    case 'apple':
+      return { cert_sha256: 'c', cert_cn: 'Software Signing' };
+    case 'app_store':
+      return { cert_sha256: 'c', cert_cn: 'Apple Mac OS Application Signing' };
+    case 'developer_id':
+      return { cert_sha256: 'c', cert_cn: `Developer ID Application: Vendor (${p.teamId ?? 'X'})` };
+    default:
+      return {};
+  }
+}
+
 function santaProcessFields(p: Proc) {
-  const platform = p.signing === 'apple';
   const name = p.path.split('/').pop() ?? '';
   return {
     sha256: p.sha256,
+    ...certCn(p),
     pid: p.pid,
     ppid: p.ppid,
     uid: p.uid ?? 501,
@@ -123,21 +159,37 @@ function santaProcessFields(p: Proc) {
     path: p.path,
     args: (p.args ?? [name]).join(' '),
     teamid: p.teamId,
-    signingid: platform ? `platform:com.apple.${name}` : p.signingId,
     quarantine_url: p.quarantine?.originUrl,
   };
 }
 
-function watchedBy(path: string): WatchItem | undefined {
-  return santaWatchItems().find((w) =>
-    w.paths.some((p) => p.re.test(path) || (p.prefix !== undefined && path.startsWith(p.prefix))),
+function matchesPath(w: WatchItem, path: string): boolean {
+  return w.paths.some(
+    (p) => p.re.test(path) || (p.prefix !== undefined && path.startsWith(p.prefix)),
   );
 }
 
-function allowed(w: WatchItem, p: Proc | undefined): boolean {
-  if (!p) return false;
-  if (w.allowPlatform && p.signing === 'apple') return true;
-  return p.teamId !== undefined && w.allowTeamIds.includes(p.teamId);
+function matchesProc(m: ProcMatch, p: Proc): boolean {
+  const name = p.path.split('/').pop() ?? '';
+  const sid = p.signing === 'apple' ? `com.apple.${name}` : p.signingId?.replace(/^[^:]*:/, '');
+  if (m.platform && p.signing !== 'apple') return false;
+  if (m.teamId && p.teamId !== m.teamId) return false;
+  if (m.signingId && !(sid && m.signingId.test(sid))) return false;
+  return m.platform === true || m.teamId !== undefined;
+}
+
+/** The watch item that reports this access, if any (Santa logs only what an item reports). */
+function reportedBy(path: string, p: Proc | undefined, op: string): WatchItem | undefined {
+  if (!p) return undefined;
+  const items = santaWatchItems();
+  for (const w of items) {
+    if (!w.denied || !matchesPath(w, path)) continue;
+    if (op === 'open' && w.allowRead) continue;
+    if (w.processes.some((m) => matchesProc(m, p))) return w;
+  }
+  const w = items.find((i) => !i.denied && matchesPath(i, path));
+  if (!w || (op === 'open' && w.allowRead)) return undefined;
+  return w.processes.some((m) => matchesProc(m, p)) ? undefined : w;
 }
 
 /** The events Vigil would receive for this activity, or [] when no sensor sees it. */
@@ -168,17 +220,36 @@ export function throughSensors(e: SensorEvent, opts: SensorOptions = {}): Sensor
         ]);
       break;
     case 'file': {
-      if (e.op !== 'open') break; // no FileChangesRegex: writes and renames are not logged
-      const w = watchedBy(e.path);
-      if (!w || allowed(w, e.process)) break;
+      // Santa logged this program's launch earlier (the corpus leaves it out).
+      if (e.process)
+        enricher.enrich(
+          santaLogLineToEvent(
+            santaLine(e.ts, {
+              action: 'EXEC',
+              decision: 'ALLOW',
+              reason: 'UNKNOWN',
+              ...santaProcessFields(e.process),
+            }),
+          )!,
+        );
+      const w = reportedBy(e.path, e.process, e.op);
+      if (!w) break;
+      const access =
+        e.op === 'rename'
+          ? 'RENAME'
+          : e.op === 'delete'
+            ? 'UNLINK'
+            : e.op === 'create'
+              ? 'CREATE'
+              : 'OPEN';
       lines.push([
         'santa',
         santaLine(e.ts, {
           action: 'FILE_ACCESS',
-          policy_version: 'vigil-1',
+          policy_version: 'vigil-2',
           policy_name: w.name,
           path: e.path,
-          access_type: 'OPEN',
+          access_type: access,
           decision: opts.enforceFileAccess ? 'DENIED' : 'AUDIT_ONLY',
           pid: e.process?.pid,
           ppid: e.process?.ppid,
@@ -226,6 +297,19 @@ export function throughSensors(e: SensorEvent, opts: SensorOptions = {}): Sensor
           uid: '501',
           port: String(e.localPort),
           address: e.localAddress,
+          signed:
+            e.process?.signing === undefined
+              ? undefined
+              : ['unsigned', 'invalid'].includes(e.process.signing)
+                ? '0'
+                : '1',
+          authority:
+            e.process?.signing === 'apple'
+              ? 'Software Signing'
+              : e.process?.signing === 'developer_id'
+                ? 'Developer ID Application: Vendor (X)'
+                : '',
+          team_identifier: e.process?.teamId,
           protocol: e.protocol === 'udp' ? '17' : '6',
         }),
       ]);
@@ -268,5 +352,5 @@ export function throughSensors(e: SensorEvent, opts: SensorOptions = {}): Sensor
     } else out.push(...osqueryLineToEvents(line));
   }
   // Keep the corpus's timestamps so windows and learning periods line up.
-  return out.map((ev) => ({ ...ev, ts: e.ts }));
+  return out.map((ev) => enricher.enrich({ ...ev, ts: e.ts }));
 }
