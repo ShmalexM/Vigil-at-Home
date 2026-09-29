@@ -8,7 +8,7 @@ import {
   pickClassifierModel,
   recommendedClassifierModel,
 } from './classifier.js';
-import { createVigilAi } from './index.js';
+import { CLASSIFIER_CLAUDE_MODEL, createVigilAi } from './index.js';
 import { memoryPinStore } from './executable.js';
 import { createJevClient } from './providers/jev.js';
 import { createOllamaAdapter } from './providers/ollama.js';
@@ -644,7 +644,9 @@ describe('Jev as the event labeller', () => {
         : new Response('{}', { status: 503 });
     });
     try {
-      const base = defaultAiSettings('/tmp/v');
+      // Claude would label first when signed in; these check Jev's routing on its own.
+      const defaults = defaultAiSettings('/tmp/v');
+      const base = { ...defaults, claude: { ...defaults.claude, enabled: false } };
       const opts = {
         log: { record: () => {} },
         pins: memoryPinStore(),
@@ -681,7 +683,9 @@ describe('Jev as the event labeller', () => {
         : new Response('{}', { status: 503 });
     });
     try {
-      const base = defaultAiSettings('/tmp/v');
+      // Claude would label first when signed in; these check Jev's routing on its own.
+      const defaults = defaultAiSettings('/tmp/v');
+      const base = { ...defaults, claude: { ...defaults.claude, enabled: false } };
       const opts = {
         log: { record: () => {} },
         pins: memoryPinStore(),
@@ -698,5 +702,73 @@ describe('Jev as the event labeller', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe('Claude Haiku as the first event labeller', () => {
+  const runnerOf = (adapter: ProviderAdapter) =>
+    createAiRunner({
+      settings: { ...defaultAiSettings('/tmp/v'), order: [adapter.id] },
+      adapters: [adapter],
+      log: { record: () => {} },
+    });
+
+  it('labels before Jev and the local model when Claude answers', async () => {
+    const claude = ready('claude', { suspicious: ['e1'], unusual: [] });
+    const local = ready('ollama', { suspicious: [], unusual: [] });
+    const jevLabel = vi.fn();
+    const classifier = createEventClassifier({
+      first: runnerOf(claude),
+      jev: { label: jevLabel },
+      runner: runnerOf(local),
+      maxEventsPerBatch: 5,
+      maxBatchesPerHour: 5,
+    });
+    const result = await classifier.classify([exec('evt-a', '/Users/Shared/.x/run')]);
+    expect(result).toMatchObject({
+      ok: true,
+      labels: [{ eventId: 'evt-a', label: 'suspicious', by: 'model', score: 0.9 }],
+    });
+    expect(claude.runs).toBe(1);
+    expect(jevLabel).not.toHaveBeenCalled();
+    expect(local.runs).toBe(0);
+  });
+
+  it('hands over to Jev, then the local model, when Claude is not signed in', async () => {
+    const claude = {
+      ...ready('claude'),
+      probe: async () => ({ provider: 'claude' as const, state: 'needs_sign_in' as const }),
+    };
+    const local = ready('ollama', { suspicious: [], unusual: ['e1'] });
+    const jevLabel = vi.fn(async () => ({ ok: false as const, detail: 'Jev is busy.' }));
+    const classifier = createEventClassifier({
+      first: runnerOf(claude),
+      jev: { label: jevLabel },
+      runner: runnerOf(local),
+      maxEventsPerBatch: 5,
+      maxBatchesPerHour: 5,
+    });
+    const result = await classifier.classify([exec('evt-a', '/Users/Shared/.x/run')]);
+    expect(result).toMatchObject({
+      ok: true,
+      labels: [{ eventId: 'evt-a', label: 'unusual', score: 0 }],
+    });
+    expect(jevLabel).toHaveBeenCalledTimes(1);
+    expect(local.runs).toBe(1);
+  });
+
+  it("runs inside the main runner's background share", () => {
+    const main = runnerOf(ready('claude'));
+    const second = createAiRunner({
+      settings: defaultAiSettings('/tmp/v'),
+      adapters: [],
+      log: { record: () => {} },
+      quota: main.quota,
+    });
+    expect(second.quota).toBe(main.quota);
+  });
+
+  it('is Claude Haiku 4.5', () => {
+    expect(CLASSIFIER_CLAUDE_MODEL).toBe('claude-haiku-4-5-20251001');
   });
 });

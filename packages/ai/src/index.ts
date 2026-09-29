@@ -84,6 +84,9 @@ export {
   type LabelledEvent,
 } from './classifier.js';
 
+/** The Claude model that labels events when Claude is signed in. */
+export const CLASSIFIER_CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
+
 export interface VigilAiOptions {
   readonly settings: AiSettings;
   readonly log: PromptLog;
@@ -186,7 +189,35 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
       (options.getJevApiKey !== undefined || openRouterKey !== undefined);
     const cap = settings.quota.apiKeyMonthlyCapUsd;
     const spent = options.spentThisMonthUsd;
+    // Claude Haiku labels first whenever Claude is signed in and allowed: on a
+    // held-out set it flagged 16 of 16 attacks with 1% of normal events flagged,
+    // where the local models flagged 1 to 5 of 16 (packages/bench, #50). It runs
+    // inside Claude's background share, and Jev then the local model take over
+    // when it can't answer.
+    const haiku =
+      settings.claude.enabled &&
+      allowedByMode(settings, 'claude') &&
+      !settings.pausedByVigil.includes('claude')
+        ? createAiRunner({
+            settings: { ...settings, order: ['claude'] },
+            adapters: [
+              createClaudeAdapter({
+                mode: settings.claude.mode,
+                pins: options.pins,
+                model: CLASSIFIER_CLAUDE_MODEL,
+                ...(settings.claude.executablePath
+                  ? { executablePath: settings.claude.executablePath }
+                  : {}),
+                ...(options.getAnthropicApiKey ? { getApiKey: options.getAnthropicApiKey } : {}),
+              }),
+            ],
+            log: options.log,
+            quota: runner.quota,
+            ...(options.spentThisMonthUsd ? { spentThisMonthUsd: options.spentThisMonthUsd } : {}),
+          })
+        : undefined;
     classifier = createEventClassifier({
+      ...(haiku ? { first: haiku } : {}),
       runner: labelRunner,
       ...(useJev
         ? {

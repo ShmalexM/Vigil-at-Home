@@ -54,6 +54,8 @@ export interface AiRunnerDeps {
    * log. Needed only for the API-key monthly cap.
    */
   readonly spentThisMonthUsd?: (provider: ProviderId) => Promise<number>;
+  /** Another runner's quota, so a second runner on the same plans keeps within one share. */
+  readonly quota?: QuotaTracker;
 }
 
 export function jsonSchemaFor(output: z.ZodType): Record<string, unknown> {
@@ -75,7 +77,7 @@ function enabled(settings: AiSettings, id: ProviderId): boolean {
 
 export function createAiRunner(deps: AiRunnerDeps): AiRunner {
   const now = deps.now ?? Date.now;
-  const quota = new QuotaTracker(deps.settings.quota.backgroundSharePercent, now);
+  const quota = deps.quota ?? new QuotaTracker(deps.settings.quota.backgroundSharePercent, now);
   const adapters = new Map(deps.adapters.map((a) => [a.id, a]));
   const statusCache = new Map<ProviderId, { status: ProviderStatus; at: number }>();
   const redaction = deps.settings.redaction;
