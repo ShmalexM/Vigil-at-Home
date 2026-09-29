@@ -1,6 +1,6 @@
 /**
- * The AI rule review, graded: a few review runs with a real signed-in Claude,
- * on the train or held-out episode, each scored by gradeRules. For comparing
+ * The AI rule review, graded: a few review runs with a real Claude on an API
+ * key (ANTHROPIC_API_KEY), on the train or held-out episode, each scored by gradeRules. For comparing
  * prompts and models before changing RULE_REVIEW_PROMPT. Costs about what a
  * review costs in the app, per run, so it only runs when asked:
  *
@@ -52,7 +52,10 @@ describe.skipIf(!on)('AI rule review', () => {
       },
       adapters: [
         createClaudeAdapter({
-          mode: 'subscription',
+          // Unattended runs need an API key: a Claude plan only explains alerts the
+          // user asks about (see mayUsePlan in packages/ai).
+          mode: 'apiKey',
+          getApiKey: async () => process.env['ANTHROPIC_API_KEY'],
           pins: memoryPinStore(),
           ...(model ? { model } : {}),
         }),

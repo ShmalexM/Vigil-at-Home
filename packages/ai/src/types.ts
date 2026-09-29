@@ -40,6 +40,23 @@ export interface RunRequest<T> {
   readonly deadlineMs: number;
   /** Only these providers, in the usual order. Default: all the settings allow. */
   readonly providers?: readonly ProviderId[];
+  /**
+   * The user asked for this run themselves (an "Explain with my Claude plan"
+   * button, Ask Vigil). Only such an explanation may use a Claude plan; see
+   * `mayUsePlan`.
+   */
+  readonly requestedByUser?: boolean;
+}
+
+/**
+ * Anthropic's terms bar apps from running their own work through a user's
+ * Claude plan (Free, Pro or Max). So a plan serves only an explanation the user
+ * asked for; automatic explanations, labelling and rule reviews never reach it.
+ */
+export function mayUsePlan(
+  request: Pick<RunRequest<unknown>, 'purpose' | 'requestedByUser'>,
+): boolean {
+  return request.requestedByUser === true && request.purpose === 'explain';
 }
 
 export type RunFailureReason = 'quota' | 'timeout' | 'invalid_output' | 'no_provider' | 'error';
@@ -98,6 +115,8 @@ export interface AdapterRunInput {
   readonly tools: readonly ReadTool[];
   readonly signal: AbortSignal;
   readonly onUsage: (window: UsageWindow) => void;
+  /** Set by the runner from `mayUsePlan(request)`. A Claude plan runs only when true. */
+  readonly mayUsePlan?: boolean;
 }
 
 export interface ToolAudit {
@@ -150,6 +169,11 @@ export interface ProviderAdapter {
    * own login). Undefined when the account has none, such as an API key.
    */
   readUsage?(): Promise<PlanUsage | undefined>;
+  /**
+   * Whether this adapter can take a run with the given plan permission. The
+   * runner skips it when false. Absent means always (it has no plan rule).
+   */
+  canServe?(mayUsePlan: boolean): Promise<boolean>;
 }
 
 /** A sign-in the vendor runs. Vigil only opens the URL; the login stays with the vendor's CLI. */

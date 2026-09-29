@@ -35,7 +35,17 @@ const CLIENT_APP = 'vigil-at-home/0.1.0';
 const USAGE_TIMEOUT_MS = 30_000;
 
 export interface ClaudeAdapterOptions {
+  /**
+   * "apiKey" runs on a key from the Keychain. "subscription" has no key and
+   * runs only on the user's own plan, which implies `allowPlan`.
+   */
   readonly mode: 'subscription' | 'apiKey';
+  /**
+   * The user opted in to their Claude plan. Even then the plan takes only runs
+   * the runner marks `mayUsePlan` (an explanation the user asked for); every
+   * other run needs the API key.
+   */
+  readonly allowPlan?: boolean;
   readonly executablePath?: string;
   readonly pins: PinStore;
   /** Only used in apiKey mode. Reads the key from the Keychain at run time. */
@@ -211,36 +221,58 @@ function usageFromEvent(message: Extract<SDKMessage, { type: 'rate_limit_event' 
 }
 
 export function createClaudeAdapter(options: ClaudeAdapterOptions): ProviderAdapter {
-  async function childEnv(): Promise<Record<string, string> | undefined> {
+  const planAllowed = options.allowPlan ?? options.mode === 'subscription';
+
+  async function apiKey(): Promise<string | undefined> {
+    return options.mode === 'apiKey' ? await options.getApiKey?.() : undefined;
+  }
+
+  /** The child's environment: the key when there is one, else Claude Code's own login. */
+  function childEnv(key: string | undefined): Record<string, string> {
     const extra: Record<string, string | undefined> = { CLAUDE_AGENT_SDK_CLIENT_APP: CLIENT_APP };
-    if (options.mode === 'apiKey') {
-      const key = await options.getApiKey?.();
-      if (!key) return undefined;
-      extra.ANTHROPIC_API_KEY = key;
-    }
+    if (key) extra.ANTHROPIC_API_KEY = key;
     return buildChildEnv(extra);
+  }
+
+  /**
+   * Which login a run uses. The plan only for a run the runner allows it and
+   * only when the user opted in; otherwise the API key, or nothing.
+   */
+  async function route(mayUsePlan: boolean): Promise<Record<string, string> | undefined> {
+    if (mayUsePlan && planAllowed) return childEnv(undefined);
+    const key = await apiKey();
+    return key ? childEnv(key) : undefined;
   }
 
   return {
     id: 'claude',
 
+    async canServe(mayUsePlan: boolean): Promise<boolean> {
+      return (mayUsePlan && planAllowed) || (await apiKey()) !== undefined;
+    },
+
     async probe(): Promise<ProviderStatus> {
       const binary = await verifyBinary('claude', 'claude', options.pins, options.executablePath);
       if (binary.state !== 'ok') return { provider: 'claude', state: binary.state };
-      const env = await childEnv();
-      if (!env) return { provider: 'claude', state: 'needs_sign_in', detail: 'No API key saved.' };
+      const key = await apiKey();
+      if (!key && !planAllowed)
+        return { provider: 'claude', state: 'needs_sign_in', detail: 'No API key saved.' };
+      const env = childEnv(key);
       try {
         const [{ stdout: version }, { stdout: auth }] = await Promise.all([
           execFileAsync(binary.path, ['--version'], { env, timeout: 15_000 }),
           execFileAsync(binary.path, ['auth', 'status', '--json'], { env, timeout: 15_000 }),
         ]);
         const status = JSON.parse(auth) as { loggedIn?: boolean; authMethod?: string };
-        const signedIn = options.mode === 'apiKey' || status.loggedIn === true;
+        const signedIn = key !== undefined || status.loggedIn === true;
         return {
           provider: 'claude',
           state: signedIn ? 'ready' : 'needs_sign_in',
           version: version.trim(),
           ...(status.authMethod ? { account: status.authMethod } : {}),
+          ...(signedIn && !key
+            ? { detail: 'Your Claude plan explains only alerts you ask about.' }
+            : {}),
         };
       } catch (error) {
         return {
@@ -256,8 +288,15 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions): ProviderAdap
       const binary = await verifyBinary('claude', 'claude', options.pins, options.executablePath);
       if (binary.state !== 'ok')
         return { kind: 'error', message: `Claude Code: ${binary.state}`, audit };
-      const env = await childEnv();
-      if (!env) return { kind: 'error', message: 'No API key saved for Claude.', audit };
+      const env = await route(input.mayUsePlan === true);
+      if (!env)
+        return {
+          kind: 'error',
+          message: planAllowed
+            ? 'Your Claude plan only explains alerts you ask about; this needs a Claude API key.'
+            : 'No API key saved for Claude.',
+          audit,
+        };
 
       const cwd = await mkdtemp(join(tmpdir(), 'vigil-claude-'));
       const abortController = new AbortController();
@@ -338,11 +377,11 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions): ProviderAdap
      * the windows still arrive from `rate_limit_event` during runs.
      */
     async readUsage(): Promise<PlanUsage | undefined> {
-      if (options.mode === 'apiKey') return undefined;
+      // Only the plan has windows, and reading them calls no model.
+      if (!planAllowed) return undefined;
       const binary = await verifyBinary('claude', 'claude', options.pins, options.executablePath);
       if (binary.state !== 'ok') return undefined;
-      const env = await childEnv();
-      if (!env) return undefined;
+      const env = childEnv(undefined);
       const cwd = await mkdtemp(join(tmpdir(), 'vigil-claude-'));
       const abortController = new AbortController();
       const timer = setTimeout(() => abortController.abort(), USAGE_TIMEOUT_MS);

@@ -5,7 +5,7 @@ import { QuotaTracker } from './quota.js';
 import { redactAndSerialize, redactValue } from './redact.js';
 import type { AiSettings } from './settings.js';
 import { spendingDays, spendingLimits, spendingPlans, type SpendingSnapshot } from './spending.js';
-import { LOCAL_PROVIDERS } from './types.js';
+import { LOCAL_PROVIDERS, mayUsePlan } from './types.js';
 import type {
   AdapterRunOutput,
   PromptLog,
@@ -219,6 +219,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
           ...(usage?.model ? { model: usage.model } : {}),
         });
 
+      const planOk = mayUsePlan(request);
       let lastReason: RunFailureReason = 'no_provider';
       let lastDetail: string | undefined;
 
@@ -226,6 +227,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
         const adapter = adapters.get(id);
         if (!adapter || !enabled(deps.settings, id)) continue;
         if (request.providers && !request.providers.includes(id)) continue;
+        if (adapter.canServe && !(await adapter.canServe(planOk))) continue;
         const status = await statusOf(adapter);
         if (status.state !== 'ready') continue;
         const allowed =
@@ -241,7 +243,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
           const before = quota.snapshot(id);
           const out = await runWithDeadline(
             adapter,
-            { systemPrompt, userPrompt: prompt, jsonSchema, tools },
+            { systemPrompt, userPrompt: prompt, jsonSchema, tools, mayUsePlan: planOk },
             signal,
           );
           quota.attribute(id, before);

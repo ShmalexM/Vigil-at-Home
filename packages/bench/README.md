@@ -45,8 +45,8 @@ Run:
 ```
 pnpm --filter @vigil/bench bench                    # detection, ~40 s
 VIGIL_BENCH_LABELLER=ollama VIGIL_OLLAMA_MODEL=qwen2.5:0.5b pnpm --filter @vigil/bench bench:labels
-VIGIL_BENCH_LABELLER=claude VIGIL_CLAUDE_MODEL=claude-haiku-4-5-20251001 pnpm --filter @vigil/bench bench:labels
-VIGIL_BENCH_REVIEW=1 VIGIL_REVIEW_RUNS=3 [VIGIL_REVIEW_PROMPT=file] [VIGIL_REVIEW_MODEL=id] pnpm --filter @vigil/bench bench:review
+ANTHROPIC_API_KEY=... VIGIL_BENCH_LABELLER=claude VIGIL_CLAUDE_MODEL=claude-haiku-4-5-20251001 pnpm --filter @vigil/bench bench:labels
+ANTHROPIC_API_KEY=... VIGIL_BENCH_REVIEW=1 VIGIL_REVIEW_RUNS=3 [VIGIL_REVIEW_PROMPT=file] [VIGIL_REVIEW_MODEL=id] pnpm --filter @vigil/bench bench:review
 ```
 
 Results land in `bench-results/`. The Benchmarks workflow also runs the full
