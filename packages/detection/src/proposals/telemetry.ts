@@ -5,8 +5,9 @@ import type { RulePipeline } from './pipeline.js';
 
 /**
  * A compact, redacted digest of recent activity for rule-proposal runs.
- * The AI never sees raw events or command lines: only aggregates, program
- * paths with the home folder replaced by ~, and domains without URLs.
+ * The AI never sees raw events: only aggregates, program paths with the home
+ * folder replaced by ~, domains without URLs, and a few rare command lines of
+ * built-in tools with home folders, emails and token-like strings removed.
  */
 export interface TelemetrySummary {
   window: { from: string; to: string; events: number };
@@ -25,6 +26,12 @@ export interface TelemetrySummary {
     fromInternet: boolean;
   }>;
   newLoginItems: Array<{ item: string; program: string }>;
+  /**
+   * Built-in tools attackers lean on (osascript, security, curl, shells,
+   * interpreters) run with a command line seen only once or twice in the
+   * window. Gaps show up here even when no classifier labelled anything.
+   */
+  rareToolCommands: Array<{ program: string; example: string; count: number }>;
   listeners: Array<{ program: string; port?: number; address?: string }>;
   newExtensions: Array<{ browser: string; id: string; name?: string; permissions: string[] }>;
   rules: Array<{
@@ -35,12 +42,89 @@ export interface TelemetrySummary {
     markedSafe: number;
     confirmed: number;
   }>;
-  recentProposals: Array<{ id: string; ruleId: string; status: string; userNote?: string }>;
+  /**
+   * Activity no rule matched but the event classifier (a small local model or
+   * Jev) labelled unusual or suspicious. These are the gaps worth a rule.
+   */
+  flaggedByClassifier: Array<{
+    what: string;
+    kind: string;
+    label: 'unusual' | 'suspicious';
+    count: number;
+    reason?: string;
+    /** One redacted command line, so a proposed rule can name the exact arguments. */
+    example?: string;
+  }>;
+  recentProposals: Array<{
+    id: string;
+    kind: string;
+    ruleId: string;
+    status: string;
+    userNote?: string;
+  }>;
   lists: Array<{ name: string; size: number }>;
 }
 
+/** One event the classifier flagged and no rule explained. The app supplies these. */
+export interface FlaggedEvent {
+  kind: string;
+  /** Program path, host or item the label is about. Redacted here. */
+  subject: string;
+  label: 'unusual' | 'suspicious';
+  reason?: string;
+  /** The program's command line, when there is one. Redacted here. */
+  commandLine?: string;
+}
+
 const HOME = /^\/Users\/[^/]+/;
+const LIVING_OFF_THE_LAND = new Set([
+  'osascript',
+  'security',
+  'curl',
+  'nscurl',
+  'bash',
+  'sh',
+  'zsh',
+  'dash',
+  'python3',
+  'python',
+  'perl',
+  'ruby',
+  'base64',
+  'openssl',
+  'launchctl',
+  'xattr',
+  'sqlite3',
+  'ditto',
+  'screencapture',
+  'dscl',
+  'funzip',
+]);
+const RARE_MAX_COUNT = 2;
+/** macOS's own tool folders, protected by SIP. Some sensors don't report signing on launches. */
+const SYSTEM_TOOL_DIRS = [
+  '/bin/',
+  '/usr/bin/',
+  '/sbin/',
+  '/usr/sbin/',
+  '/usr/libexec/',
+  '/System/',
+];
+const isSystemTool = (p: string) => SYSTEM_TOOL_DIRS.some((d) => p.startsWith(d));
+const RARE_MAX_KEYS = 5000;
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+const HOME_ANYWHERE = /\/Users\/[^/\s'"]+/g;
+/** Long random-looking runs: API keys, bearer tokens, session ids. */
+const TOKEN = /[A-Za-z0-9+/_=-]{32,}/g;
+
+/** A command line with home folders, emails and anything token-like removed. */
+export function redactCommandLine(c: string): string {
+  return c
+    .replace(HOME_ANYWHERE, '~')
+    .replace(EMAIL, '<email>')
+    .replace(TOKEN, '<token>')
+    .slice(0, 240);
+}
 
 export function redactPath(p: string | undefined): string {
   if (!p) return 'unknown';
@@ -55,6 +139,7 @@ export function summarizeTelemetry(opts: {
   history: EventHistory;
   engine: DetectionEngine;
   pipeline?: RulePipeline;
+  flagged?: Iterable<FlaggedEvent>;
   from: number;
   to: number;
 }): TelemetrySummary {
@@ -70,6 +155,7 @@ export function summarizeTelemetry(opts: {
     string,
     { browser: string; id: string; name?: string; permissions: string[] }
   >();
+  const toolCmds = new Map<string, { program: string; count: number; last: number }>();
   let events = 0;
 
   const add = (e: DetectionEvent) => {
@@ -93,6 +179,17 @@ export function summarizeTelemetry(opts: {
         break;
       }
       case 'process.exec': {
+        const base = proc?.path.slice(proc.path.lastIndexOf('/') + 1) ?? '';
+        if (proc?.args?.length && isSystemTool(proc.path) && LIVING_OFF_THE_LAND.has(base)) {
+          const example = redactCommandLine(proc.args.join(' '));
+          const c = toolCmds.get(example);
+          if (c) {
+            c.count++;
+            c.last = e.ts;
+          } else if (toolCmds.size < RARE_MAX_KEYS) {
+            toolCmds.set(example, { program: prog, count: 1, last: e.ts });
+          }
+        }
         if (signing === 'unsigned' || signing === 'adhoc' || signing === 'invalid') {
           const u = untrusted.get(prog) ?? { signing, launches: 0, fromInternet: false };
           u.launches++;
@@ -147,9 +244,32 @@ export function summarizeTelemetry(opts: {
     };
   });
 
+  const flagged = new Map<string, TelemetrySummary['flaggedByClassifier'][number]>();
+  for (const f of opts.flagged ?? []) {
+    const what = redactPath(f.subject).slice(0, 200);
+    const key = `${f.kind}|${what}|${f.label}`;
+    const cur = flagged.get(key);
+    if (cur) cur.count++;
+    else {
+      const entry: TelemetrySummary['flaggedByClassifier'][number] = {
+        what,
+        kind: f.kind,
+        label: f.label,
+        count: 1,
+      };
+      if (f.reason) entry.reason = f.reason.replace(EMAIL, '<email>').slice(0, 200);
+      if (f.commandLine) entry.example = redactCommandLine(f.commandLine);
+      flagged.set(key, entry);
+    }
+  }
+  const flaggedByClassifier = [...flagged.values()]
+    .sort((a, b) => (a.label === b.label ? b.count - a.count : a.label === 'suspicious' ? -1 : 1))
+    .slice(0, 25);
+
   const recentProposals = (opts.pipeline?.list() ?? []).slice(0, 10).map((p) => {
     const r: TelemetrySummary['recentProposals'][number] = {
       id: p.id,
+      kind: p.kind,
       ruleId: p.rule.id,
       status: p.status,
     };
@@ -176,9 +296,15 @@ export function summarizeTelemetry(opts: {
       ...u,
     })),
     newLoginItems: [...loginItems.entries()].slice(0, 20).map(([item, v]) => ({ item, ...v })),
+    rareToolCommands: [...toolCmds.entries()]
+      .filter(([, c]) => c.count <= RARE_MAX_COUNT)
+      .sort((a, b) => b[1].last - a[1].last)
+      .slice(0, 25)
+      .map(([example, c]) => ({ program: c.program, example, count: c.count })),
     listeners: [...listeners.values()].slice(0, 20),
     newExtensions: [...exts.values()].slice(0, 20),
     rules,
+    flaggedByClassifier,
     recentProposals,
     lists: opts.engine.stores.lists
       .names()

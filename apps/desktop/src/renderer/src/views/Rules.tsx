@@ -5,6 +5,7 @@ import type { RuleView } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
 import { HoldButton } from '../components/HoldButton';
 import { NewRulePanel, RuleEditorPanel } from '../components/RuleEditor';
+import { RuleSuggestions } from '../components/RuleSuggestions';
 import { useToast } from '../components/Toasts';
 import { Button, Card, Chip, Segmented, SeverityMark } from '../components/ui';
 import '../styles/rules.css';
@@ -52,6 +53,7 @@ export function RulesView({
           </>
         }
       />
+      <RuleSuggestions />
       {creating && (
         <Card>
           <NewRulePanel onClose={() => setCreating(false)} />

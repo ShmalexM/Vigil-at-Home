@@ -9,6 +9,7 @@ import type { OnboardingService } from './onboarding/service.js';
 import type { VigilCore } from './service.js';
 import { sendTestAlert } from './test-alert.js';
 import { rendererOrigin, type Windows } from './windows.js';
+import { RuleSuggestions } from './rule-suggestions.js';
 
 export type Handlers = {
   [K in CallName]: (
@@ -35,6 +36,15 @@ export function registerIpc(
   updates: UpdateChecker,
   helper: HelperControl = noHelper,
 ): void {
+  let ruleSuggestions: RuleSuggestions | undefined;
+  const suggestions = () => {
+    if (!core.detector) throw new Error('Detection is not running');
+    ruleSuggestions ??= new RuleSuggestions(
+      core.detector,
+      () => ai.ruleReviewRunner() !== undefined,
+    );
+    return ruleSuggestions;
+  };
   const h: Handlers = {
     getStatus: () => core.status(),
     listAlerts: (status) => core.store.listAlerts(status ? { status } : {}),
@@ -55,6 +65,13 @@ export function registerIpc(
     removeExclusion: (id, index) => editing(core).removeExclusion(id, index),
     removeException: (id) => editing(core).removeException(id),
     excludeFromAlert: (id, scope) => editing(core).excludeFromAlert(id, scope),
+    listRuleSuggestions: () => suggestions().view(),
+    acceptRuleSuggestion: (id, mode) => {
+      suggestions().accept(id, mode);
+      windows.broadcast('changed');
+    },
+    dismissRuleSuggestion: (id, note) => suggestions().dismiss(id, note),
+    reviewRulesNow: () => suggestions().reviewNow(),
     listActions: () => core.store.listActions({ limit: 300 }),
     listEvents: (q) => core.store.listEventViews(stripUndefined(q)),
     eventStats: () => core.eventStats(),

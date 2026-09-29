@@ -34,18 +34,34 @@ export {
   type ReplayOptions,
   type ReplayContext,
 } from './proposals/replay.js';
+export { proveChange, type ImpactReport, type ProveInput } from './proposals/prover.js';
 export {
   RulePipeline,
   MemoryProposalStore,
   ProposeRuleInput,
   ProposeTuningInput,
+  ProposeRetirementInput,
   type Proposal,
   type ProposalStatus,
   type ProposalStore,
   type SubmitResult,
   type PipelineOptions,
 } from './proposals/pipeline.js';
-export { summarizeTelemetry, redactPath, type TelemetrySummary } from './proposals/telemetry.js';
+export {
+  summarizeTelemetry,
+  redactPath,
+  redactCommandLine,
+  type FlaggedEvent,
+  type TelemetrySummary,
+} from './proposals/telemetry.js';
+export {
+  RuleReviewer,
+  MemoryReviewStateStore,
+  type ReviewOutcome,
+  type ReviewState,
+  type ReviewStateStore,
+  type RuleReviewerOptions,
+} from './proposals/reviewer.js';
 export {
   detectionReadTools,
   ruleLanguageGuide,

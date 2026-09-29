@@ -137,6 +137,10 @@ export const calls = {
   removeExclusion: z.tuple([RuleId, z.number().int().min(0).max(100)]),
   removeException: z.tuple([z.string().min(1).max(100)]),
   excludeFromAlert: z.tuple([Id, ExcludeScope]),
+  listRuleSuggestions: z.tuple([]),
+  acceptRuleSuggestion: z.tuple([RuleId, RuleMode.optional()]),
+  dismissRuleSuggestion: z.tuple([RuleId, z.string().max(500).optional()]),
+  reviewRulesNow: z.tuple([]),
   listActions: z.tuple([]),
   listEvents: z.tuple([EventQuery]),
   eventStats: z.tuple([]),
@@ -269,6 +273,70 @@ export interface ReplayPreview {
   notes: string[];
 }
 
+/**
+ * What approving a change would stop catching (@vigil/detection's
+ * ImpactReport): real events it goes quiet on, and look-alikes an attacker
+ * could use that would slip through too.
+ */
+export interface ImpactPreview {
+  lostEvents: number;
+  stopsAlertingOn: { what: string; events: number; untrusted: boolean }[];
+  lookAlikes: { what: string; how: string }[];
+  findings: string[];
+  verdict: 'no_loss' | 'narrow' | 'broad';
+}
+
+/**
+ * A change the AI suggested for the rules, checked and replayed on this Mac's
+ * last 14 days. Nothing changes until the user accepts it.
+ */
+export interface RuleSuggestionView {
+  id: string;
+  /** new_rule adds a rule; tuning adds an exclusion; retire turns a rule down. */
+  kind: 'new_rule' | 'tuning' | 'retire';
+  createdAt: number;
+  provider: string;
+  rationale: string;
+  evidence: string[];
+  ruleId: string;
+  ruleName: string;
+  description: string;
+  severity: string;
+  /** New rule: what it matches, in words. */
+  condition?: string;
+  /** Tuning: the exclusion it adds, in words. */
+  exclusion?: string;
+  /** Retire: the quieter mode. */
+  retireTo?: 'shadow' | 'disabled';
+  /** New rule: the whole rule, for reading or copying into the editor. */
+  ruleJson?: string;
+  replay?: ReplayPreview;
+  tuning?: { hitsBefore: number; hitsAfter: number; removed: number };
+  impact?: ImpactPreview;
+  warnings: string[];
+}
+
+export interface RuleSuggestionsView {
+  pending: RuleSuggestionView[];
+  /** The last few decided suggestions. */
+  recent: {
+    id: string;
+    kind: RuleSuggestionView['kind'];
+    ruleName: string;
+    status: 'approved' | 'rejected' | 'rejected_by_checks' | 'withdrawn';
+    at: number;
+  }[];
+  review: {
+    /** A cloud AI is set up to run reviews. */
+    available: boolean;
+    lastRunAt?: number;
+    lastOkAt?: number;
+    lastError?: string;
+    lastSummary?: string;
+    nextDueAt?: number;
+  };
+}
+
 /** The result of checking or saving a rule draft. */
 export interface RuleCheck {
   ok: boolean;
@@ -276,6 +344,8 @@ export interface RuleCheck {
   warnings: string[];
   /** How the draft would have behaved on this Mac over the last 14 days. */
   replay?: ReplayPreview;
+  /** For an edit to an existing rule: what it would stop catching. */
+  impact?: ImpactPreview;
 }
 
 /**
@@ -341,6 +411,10 @@ export interface CallResults {
   removeExclusion: RuleCheck;
   removeException: void;
   excludeFromAlert: RuleCheck;
+  listRuleSuggestions: RuleSuggestionsView;
+  acceptRuleSuggestion: void;
+  dismissRuleSuggestion: void;
+  reviewRulesNow: RuleSuggestionsView;
   listActions: ActionRecord[];
   listEvents: EventView[];
   eventStats: EventStats;
