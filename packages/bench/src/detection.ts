@@ -9,6 +9,7 @@ import {
   type Stores,
 } from '@vigil/detection';
 import { ATTACKS, fakeHash, type AttackScenario, type Tactic, type Variant } from './attacks.js';
+import { HELDOUT_ATTACKS, HELDOUT_LOOKALIKES, type HeldoutLookalike } from './heldout.js';
 import { rng } from './rng.js';
 import { throughSensors, type SensorOptions } from './sensors.js';
 import { workday, workdayRates, type Profile } from './workday.js';
@@ -109,7 +110,8 @@ function runScenario(
   for (const ev of events) detections.push(...e.evaluate(ev));
   const raised = detections.filter((d) => d.alert && (d.mode === 'alert' || d.mode === 'block'));
   const firing = [...new Set(raised.map((d) => d.match.ruleId))];
-  const caught = firing.some((r) => s.expect.includes(r));
+  // A held-out attack aims at no rule: any alert catches it.
+  const caught = s.expect.length ? firing.some((r) => s.expect.includes(r)) : firing.length > 0;
   const notify = raised
     .map((d) => notifyLevel(e.getRule(d.match.ruleId)!, d.mode))
     .sort(
@@ -129,10 +131,11 @@ function runScenario(
 export function runAttacks(
   sensorOpts: SensorOptions = {},
   rules: RuleSet = macosCoreRules,
+  scenarios: readonly AttackScenario[] = ATTACKS,
 ): AttackResult[] {
   const out: AttackResult[] = [];
   for (const telemetry of ['ideal', 'sensors'] as const)
-    for (const s of ATTACKS) {
+    for (const s of scenarios) {
       const after = runScenario(s, telemetry, false, sensorOpts, rules);
       const during = runScenario(s, telemetry, true, sensorOpts, rules);
       out.push({
@@ -153,6 +156,93 @@ export function runAttacks(
       });
     }
   return out;
+}
+
+// ------------------------------------------------------------------ held-out
+
+export interface LookalikeResult {
+  id: string;
+  name: string;
+  who: string;
+  telemetry: Telemetry;
+  /** Rules that raised an alert: each one is a false alert. */
+  alertedBy: string[];
+  blocked: boolean;
+  notify: Notify | null;
+}
+
+function runLookalike(l: HeldoutLookalike, telemetry: Telemetry, rules: RuleSet): LookalikeResult {
+  const at = START + 10 * DAY + 3_600_000;
+  const stores = memoryStores();
+  seedLists(stores);
+  const e = engine(stores, at - DAY, rules);
+  const raw = l.events(at);
+  const events = telemetry === 'ideal' ? raw : raw.flatMap((ev) => throughSensors(ev));
+  const raised = events
+    .flatMap((ev) => e.evaluate(ev))
+    .filter((d) => d.alert && (d.mode === 'alert' || d.mode === 'block'));
+  const notify = raised
+    .map((d) => notifyLevel(e.getRule(d.match.ruleId)!, d.mode))
+    .sort(
+      (a, b) => ['popup', 'badge', 'silent'].indexOf(a) - ['popup', 'badge', 'silent'].indexOf(b),
+    )[0];
+  return {
+    id: l.id,
+    name: l.name,
+    who: l.who,
+    telemetry,
+    alertedBy: [...new Set(raised.map((d) => d.match.ruleId))],
+    blocked: raised.some((d) => d.mode === 'block' && d.execute.length > 0),
+    notify: notify ?? null,
+  };
+}
+
+export interface HeldoutResult {
+  attacks: AttackResult[];
+  lookalikes: LookalikeResult[];
+}
+
+/** The held-out set (heldout.ts): the score that counts, never used for tuning. */
+export function runHeldout(rules: RuleSet = macosCoreRules): HeldoutResult {
+  return {
+    attacks: runAttacks({}, rules, HELDOUT_ATTACKS),
+    lookalikes: (['ideal', 'sensors'] as const).flatMap((t) =>
+      HELDOUT_LOOKALIKES.map((l) => runLookalike(l, t, rules)),
+    ),
+  };
+}
+
+export interface HeldoutSummary {
+  attacks: number;
+  caughtIdeal: number;
+  caughtSensors: number;
+  /** Caught through today's sensors with a popup or badge, not just a silent entry. */
+  caughtSensorsNoticed: number;
+  lookalikes: number;
+  /** Look-alikes that raise a popup or badge (a silent log entry doesn't count). */
+  falseAlertsIdeal: number;
+  falseAlertsSensors: number;
+  /** Look-alikes that only leave a silent entry in Activity. */
+  silentSensors: number;
+  falseBlocksSensors: number;
+}
+
+const noticed = (n: Notify | null) => n === 'popup' || n === 'badge';
+
+export function summarizeHeldout(h: HeldoutResult): HeldoutSummary {
+  const a = (t: Telemetry) => h.attacks.filter((r) => r.telemetry === t);
+  const l = (t: Telemetry) => h.lookalikes.filter((r) => r.telemetry === t);
+  return {
+    attacks: a('ideal').length,
+    caughtIdeal: a('ideal').filter((r) => r.caught).length,
+    caughtSensors: a('sensors').filter((r) => r.caught).length,
+    caughtSensorsNoticed: a('sensors').filter((r) => r.caught && noticed(r.notify)).length,
+    lookalikes: l('ideal').length,
+    falseAlertsIdeal: l('ideal').filter((r) => noticed(r.notify)).length,
+    falseAlertsSensors: l('sensors').filter((r) => noticed(r.notify)).length,
+    silentSensors: l('sensors').filter((r) => r.notify === 'silent').length,
+    falseBlocksSensors: l('sensors').filter((r) => r.blocked).length,
+  };
 }
 
 // ------------------------------------------------------------------ workload
@@ -497,4 +587,29 @@ export function scoreCandidates(
       )
       .map((a) => `${a.id} (${a.telemetry})`),
   }));
+}
+
+/**
+ * The held-out grade for a set of candidate rules: held-out attacks they catch
+ * that the built-in pack doesn't, and look-alikes they alert on. Tuning loops
+ * use this only to accept or reject a change; its cases never go back to the AI.
+ */
+export function scoreCandidatesHeldout(candidates: RuleSet) {
+  const promoted = candidates.map((r) => ({ ...r, mode: 'alert' as const }));
+  const base = runHeldout();
+  const withThem = runHeldout([...macosCoreRules, ...promoted]);
+  const ids = new Set(promoted.map((r) => r.id));
+  const baseCaught = (id: string, t: Telemetry) =>
+    base.attacks.find((b) => b.id === id && b.telemetry === t)?.caught ?? false;
+  return {
+    summary: summarizeHeldout(withThem),
+    baseline: summarizeHeldout(base),
+    newlyCaught: withThem.attacks
+      .filter((a) => a.caughtBy.some((r) => ids.has(r)) && !baseCaught(a.id, a.telemetry))
+      .map((a) => `${a.id} (${a.telemetry})`),
+    // Candidates run as alerts, so any hit on a look-alike counts, silent or not.
+    falseAlerts: withThem.lookalikes
+      .filter((l) => l.alertedBy.some((r) => ids.has(r)))
+      .map((l) => `${l.id} (${l.telemetry})`),
+  };
 }

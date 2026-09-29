@@ -25,8 +25,15 @@ for (const f of readdirSync(dir)
     );
     lines.push(
       `| Evasive (${s.evasive.total}) | ${s.evasive.caughtIdeal} | ${s.evasive.caughtSensors} |`,
-      '',
     );
+    const h = d.heldoutSummary;
+    if (h)
+      lines.push(
+        `| **Held-out (${h.attacks})** | ${h.caughtIdeal} | ${h.caughtSensors} (${h.caughtSensorsNoticed} with a popup or badge) |`,
+        '',
+        `Held-out look-alikes: ${h.falseAlertsSensors} of ${h.lookalikes} raise a popup or badge through today's sensors (${h.falseAlertsIdeal} with full telemetry), ${h.silentSensors} leave a silent entry, ${h.falseBlocksSensors} blocked.`,
+      );
+    lines.push('');
     lines.push(
       '| Workload | Telemetry | Events/day | Alerts/day | Popups/day | Blocks/day | p99 µs/event |',
       '|---|---|---|---|---|---|---|',

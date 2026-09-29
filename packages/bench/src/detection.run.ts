@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { runAttacks, runWorkload, scoreRules, summarize } from './detection.js';
+import {
+  runAttacks,
+  runHeldout,
+  runWorkload,
+  scoreRules,
+  summarize,
+  summarizeHeldout,
+} from './detection.js';
 import { labelSet } from './labels.js';
 import { writeResult } from './report.js';
 
@@ -24,11 +31,14 @@ describe('detection benchmark', () => {
       },
     ];
     const summary = summarize(attacks);
+    const heldout = runHeldout();
     writeResult('detection', {
       at: new Date().toISOString(),
       platform: `${process.platform}-${process.arch}`,
       node: process.version,
       summary,
+      heldoutSummary: summarizeHeldout(heldout),
+      heldout,
       rules: scoreRules(attacks, workload),
       attacks,
       sensorsWithFileAccessEnforced: enforced.map((r) => ({

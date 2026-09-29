@@ -1,6 +1,7 @@
 import { SensorEvent } from '@vigil/core';
 import { describe, expect, it } from 'vitest';
 import { ATTACKS } from './attacks.js';
+import { HELDOUT_ATTACKS, HELDOUT_LOOKALIKES } from './heldout.js';
 import { runAttacks, runWorkload, START } from './detection.js';
 import { santaWatchItems, throughSensors } from './sensors.js';
 
@@ -10,6 +11,18 @@ describe('benchmark corpus', () => {
   it('only contains valid sensor events', () => {
     for (const s of ATTACKS)
       for (const e of s.events(START)) expect(() => SensorEvent.parse(e), s.id).not.toThrow();
+  });
+
+  it('keeps the held-out set valid and apart from the train set', () => {
+    const train = new Set(ATTACKS.map((s) => s.id));
+    for (const s of HELDOUT_ATTACKS) {
+      expect(train.has(s.id), s.id).toBe(false);
+      expect(s.variant, s.id).toBe('heldout');
+      for (const e of s.events(START)) expect(() => SensorEvent.parse(e), s.id).not.toThrow();
+    }
+    for (const l of HELDOUT_LOOKALIKES)
+      for (const e of l.events(START)) expect(() => SensorEvent.parse(e), l.id).not.toThrow();
+    expect(ATTACKS.some((s) => s.variant === 'heldout')).toBe(false);
   });
 
   it('reads the watch items from the Santa policy Vigil ships', () => {

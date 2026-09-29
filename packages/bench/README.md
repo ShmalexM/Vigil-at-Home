@@ -4,7 +4,8 @@ How well Vigil at Home works, measured the same way on every run.
 
 ```
 simulated attacks ──┬─► rules (full telemetry) ─────────────────► caught?
-(42 scenarios)      └─► Santa/osquery log lines ─► Vigil's parsers ─► rules ─► caught?
+train: 42 scenarios └─► Santa/osquery log lines ─► Vigil's parsers ─► rules ─► caught?
+held-out: 25 + 14 look-alikes, same two paths ─► the score that counts
 
 4 weeks of normal use ─► rules ─► false alerts, popups and blocks per day, µs per event
 (everyday, developer)
@@ -15,6 +16,14 @@ events the rules let through ─► local model or Jev ─► flagged? (vs. grou
 - `src/attacks.ts`: harmless stand-ins for real macOS threats (AMOS, ClickFix,
   Adload...), as the telemetry they produce. `canonical` ones must be caught;
   `evasive` ones measure gaps.
+- `src/heldout.ts`: the held-out set. Attacks written from public reports
+  without looking at the rules, plus legitimate look-alikes (Docker's helper,
+  `gh` reading its keychain token, Dropbox syncing Documents). No rule or AI
+  prompt is tuned on it: tuning loops only see train results and use held-out
+  scores to keep or drop a change (`scoreCandidatesHeldout`). A train score far
+  above the held-out score means the rules fit the test, not the threats. When
+  a held-out case becomes a rule's target, move it to `attacks.ts` and write a
+  new one.
 - `src/sensors.ts`: renders each activity as the Santa or osquery log line it
   would produce with Vigil's shipped configuration and runs Vigil's own parser
   on it, so the benchmark shows what the rules actually get to see.

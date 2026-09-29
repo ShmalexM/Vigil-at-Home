@@ -13,7 +13,8 @@ import type { ProcessRef, SensorEvent } from '@vigil/core';
  *   are findings, not failures.
  */
 
-export type Variant = 'canonical' | 'evasive';
+/** `heldout` scenarios live in heldout.ts: no rule was written for them. */
+export type Variant = 'canonical' | 'evasive' | 'heldout';
 
 export interface AttackScenario {
   id: string;
