@@ -1,14 +1,33 @@
 import { describe, expect, it } from 'vitest';
 import { SensorEvent } from '@vigil/core';
 import { osqueryConfig, QUERY_NAMES } from './osquery/config.js';
-import { osqueryLineToEvents } from './osquery/resultParser.js';
+import { osqueryHealth, osqueryLineToEvents } from './osquery/resultParser.js';
 
 describe('osquery', () => {
   it('generates a config with every query Vigil parses', () => {
     const cfg = JSON.parse(osqueryConfig());
-    for (const name of Object.values(QUERY_NAMES))
+    for (const name of Object.values(QUERY_NAMES)) {
       expect(cfg.schedule[name].query).toMatch(/^SELECT/);
+      // A watchdog kill must not silence a query for a day.
+      expect(cfg.schedule[name].denylist).toBe(false);
+    }
     expect(cfg.options.logger_event_type).toBe(true);
+  });
+
+  it('reads the health rows, naming any query osquery switched off', () => {
+    const line = (columns: Record<string, string>, action = 'added') =>
+      JSON.stringify({ name: QUERY_NAMES.health, action, counter: 2, columns });
+    const off = { name: QUERY_NAMES.networkConnections, denylisted: '1', executions: '40' };
+    expect(osqueryHealth(line(off))).toEqual({ denylisted: [QUERY_NAMES.networkConnections] });
+    expect(osqueryHealth(line({ ...off, denylisted: '0' }))).toEqual({ denylisted: [] });
+    // The row a later run replaced says nothing new.
+    expect(osqueryHealth(line(off, 'removed'))).toEqual({ denylisted: [] });
+    expect(osqueryHealth(JSON.stringify({ name: QUERY_NAMES.launchd, columns: {} }))).toBe(
+      undefined,
+    );
+    expect(osqueryHealth('not json')).toBeUndefined();
+    // Not a sensor event.
+    expect(osqueryLineToEvents(line(off))).toEqual([]);
   });
 
   it('parses connection rows into the shared schema', () => {

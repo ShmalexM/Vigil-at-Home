@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SensorEvent } from '@vigil/core';
 import { osqueryConfig, osqueryFlags, QUERY_NAMES } from './osquery/config.js';
-import { osqueryLineToEvents } from './osquery/resultParser.js';
+import { osqueryHealth, osqueryLineToEvents } from './osquery/resultParser.js';
 
 const enabled = process.platform === 'darwin' && process.env.VIGIL_MAC_INTEGRATION === '1';
 const bin = (name: string) =>
@@ -181,5 +181,20 @@ describe.skipIf(!enabled)('osquery on a real Mac', () => {
       expect(seenListen).toBe(true);
       expect([...kinds]).toContain('network.connection');
     }, 90_000);
+
+    it('logs the health rows, with every query still switched on', async () => {
+      const log = join(dir, 'log', 'osqueryd.results.log');
+      let rows: string[] = [];
+      for (let i = 0; i < 40 && rows.length === 0 && daemon?.exitCode === null; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        if (!existsSync(log)) continue;
+        rows = readFileSync(log, 'utf8')
+          .split('\n')
+          .filter((line) => osqueryHealth(line) !== undefined);
+      }
+      expect(rows.length, `no health rows:\n${daemonOutput}`).toBeGreaterThan(0);
+      expect(rows.flatMap((line) => osqueryHealth(line)!.denylisted)).toEqual([]);
+      expect(rows.join('\n')).toContain(QUERY_NAMES.networkConnections);
+    }, 60_000);
   });
 });

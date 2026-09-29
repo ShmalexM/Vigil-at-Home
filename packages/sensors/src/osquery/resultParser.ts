@@ -9,7 +9,7 @@ import { osquerySigning } from '../signing.js';
 interface OsqueryResultLine {
   name?: string;
   unixTime?: number | string;
-  action?: 'added' | 'removed' | 'snapshot';
+  action?: 'added' | 'removed';
   /** 0 on the first run of a query, when every existing row is reported as "added". */
   counter?: number | string;
   columns?: Record<string, string>;
@@ -154,4 +154,22 @@ export function osqueryLineToEvents(line: string, opts: OsqueryParseOptions = {}
     default:
       return [];
   }
+}
+
+/**
+ * A row of the health query: undefined for any other line, otherwise the
+ * query it names if osquery has denylisted it (empty when all is well). The
+ * rows a run replaces come back as "removed" and say nothing new.
+ */
+export function osqueryHealth(line: string): { denylisted: string[] } | undefined {
+  let parsed: OsqueryResultLine;
+  try {
+    parsed = JSON.parse(line) as OsqueryResultLine;
+  } catch {
+    return undefined;
+  }
+  if (parsed.name !== QUERY_NAMES.health) return undefined;
+  const c = parsed.columns;
+  const off = parsed.action !== 'removed' && c?.denylisted === '1' && c.name;
+  return { denylisted: off ? [c.name!] : [] };
 }
