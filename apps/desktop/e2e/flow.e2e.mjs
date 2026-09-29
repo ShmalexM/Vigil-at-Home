@@ -43,6 +43,7 @@ const HOME = homedir();
 const STAND_IN_DIR = '/private/tmp/vigil-e2e';
 const C2 = '1.1.1.1';
 const AGENT_PLIST = join(HOME, 'Library/LaunchAgents/com.apple.vigil-e2e-lookalike.plist');
+const OSQUERY_RESULTS = '/var/log/osquery/osqueryd.results.log';
 
 if (process.platform !== 'darwin') {
   console.log('The flow check needs macOS.');
@@ -93,6 +94,18 @@ function procState(pid) {
 function startTime(pid) {
   const lstart = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' });
   return Date.parse(lstart.replace(/\s+/g, ' ').trim());
+}
+
+/** Whether osquery has written results for its startup-item (launchd) query yet. */
+function launchdBaselineDone() {
+  try {
+    execFileSync('sudo', ['-n', 'grep', '-q', '"name":"vigil_launchd"', OSQUERY_RESULTS], {
+      stdio: 'ignore',
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function waitUntil(fn, timeout, step = 100) {
@@ -451,8 +464,15 @@ try {
   // ---------------------------------------------------------------- 4
   {
     const s = { name: 'Launch agent named like Apple', sensor: 'real osquery' };
+    const scenarioStart = Date.now();
     results.scenarios.persistence = s;
     await main(() => globalThis.vigil.windows.main?.close());
+    // osquery reports every existing startup item on its first run of the
+    // query, and Vigil treats that run as the baseline. Write the plist only
+    // after that run, or it lands in the baseline and is never reported.
+    const baselined = await waitUntil(launchdBaselineDone, 90000, 1000);
+    s.osqueryBaselineWaitedMs = Date.now() - scenarioStart;
+    if (!baselined) console.log('osquery had not run its startup-item query after 90 s');
     const t0 = Date.now();
     mkdirSync(dirname(AGENT_PLIST), { recursive: true });
     writeFileSync(
