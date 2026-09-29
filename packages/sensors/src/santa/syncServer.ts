@@ -29,6 +29,14 @@ import {
   pick,
 } from './syncProtocol.js';
 
+/** Sent alone on a clean sync when Vigil has no rules; see preflight(). */
+export const CLEAN_SYNC_SENTINEL: StoredRule = {
+  rule: { identifier: '0'.repeat(64), policy: 'REMOVE', rule_type: 'BINARY' },
+  rev: 0,
+  removed: true,
+  updatedAt: 0,
+};
+
 export interface SyncServerOptions {
   store: RuleStore;
   onEvent?: SensorEventSink;
@@ -144,7 +152,12 @@ export class SantaSyncServer {
     const clean = requestedClean || store.cleanSyncPending || drifted;
 
     const snapshotRev = store.rev;
-    const rules = clean ? active : store.changesSince(store.syncedRev);
+    let rules = clean ? active : store.changesSince(store.syncedRev);
+    // Santa wipes its rules on a clean sync only when the download holds at
+    // least one rule (SNTSyncRuleDownload returns early on an empty one), so
+    // an empty clean sync would leave whatever Santa already had. A REMOVE for
+    // a hash no program has makes the wipe happen and changes nothing else.
+    if (clean && rules.length === 0) rules = [CLEAN_SYNC_SENTINEL];
     this.sessions.set(machineId, { clean, rules, snapshotRev, startedAt: Date.now() });
 
     const resp: PreflightResponse = {
