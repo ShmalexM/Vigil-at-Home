@@ -30,13 +30,16 @@ events the rules let through ─► local model or Jev ─► flagged? (vs. grou
 - `src/workday.ts`: a seeded normal-use workload, including legitimate
   activity that looks like an attack (install one-liners, `xattr -cr`, test
   binaries in /tmp). The daily rates are estimates and are listed in the file.
-- `src/labels.ts`: the test set for the event labeller.
+- `src/labels.ts`: the test sets for the event labeller (train, and a held-out
+  set from `heldout.ts`). `bench:labels` also runs every prompt in
+  `prompts/labeller/*.txt` (or `VIGIL_LABEL_PROMPTS`) next to the shipped one.
 
 Run:
 
 ```
 pnpm --filter @vigil/bench bench                    # detection, ~40 s
 VIGIL_BENCH_LABELLER=ollama VIGIL_OLLAMA_MODEL=qwen2.5:0.5b pnpm --filter @vigil/bench bench:labels
+VIGIL_BENCH_LABELLER=claude VIGIL_CLAUDE_MODEL=claude-haiku-4-5-20251001 pnpm --filter @vigil/bench bench:labels
 ```
 
 Results land in `bench-results/`. The Benchmarks workflow also runs the full

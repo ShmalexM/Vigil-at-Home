@@ -14,11 +14,13 @@ import { join } from 'node:path';
 import {
   classifierRuntime,
   createAiRunner,
+  createClaudeAdapter,
   createEventClassifier,
   createJevClient,
   createOllamaAdapter,
   defaultAiSettings,
   eventLine,
+  memoryPinStore,
   type LabelledEvent,
   type PromptLogEntry,
 } from '@vigil/ai';
@@ -41,6 +43,32 @@ function classifier(log: PromptLogEntry[], instructions?: string) {
       }),
       maxEventsPerBatch: BATCH,
       maxBatchesPerHour: 10_000,
+      ...(instructions ? { instructions } : {}),
+    });
+  }
+  if (which === 'claude') {
+    // A signed-in Claude as the labeller (cloud-only mode), for a reference point.
+    const model = process.env['VIGIL_CLAUDE_MODEL'] || undefined;
+    return createEventClassifier({
+      runner: createAiRunner({
+        settings: {
+          ...defaultAiSettings('/tmp/vigil-bench'),
+          mode: 'both',
+          order: ['claude'],
+          quota: { backgroundSharePercent: 100 },
+        },
+        adapters: [
+          createClaudeAdapter({
+            mode: 'subscription',
+            pins: memoryPinStore(),
+            ...(model ? { model } : {}),
+          }),
+        ],
+        log: record,
+      }),
+      maxEventsPerBatch: BATCH,
+      maxBatchesPerHour: 10_000,
+      deadlineMs: 300_000,
       ...(instructions ? { instructions } : {}),
     });
   }
@@ -152,7 +180,12 @@ describe('event labelling benchmark', () => {
   it.skipIf(!which)(
     `labels the test sets with ${which || 'nothing'}`,
     async () => {
-      const model = which === 'jev' ? 'jev' : (process.env['VIGIL_OLLAMA_MODEL'] ?? 'qwen2.5:0.5b');
+      const model =
+        which === 'jev'
+          ? 'jev'
+          : which === 'claude'
+            ? `claude-${process.env['VIGIL_CLAUDE_MODEL'] || 'default'}`
+            : (process.env['VIGIL_OLLAMA_MODEL'] ?? 'qwen2.5:0.5b');
       const slug = model.replace(/[^a-z0-9.]+/gi, '-');
       let labelled = 0;
       for (const v of variants()) {
