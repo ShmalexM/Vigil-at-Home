@@ -96,15 +96,36 @@ function startTime(pid) {
   return Date.parse(lstart.replace(/\s+/g, ' ').trim());
 }
 
-/** Whether osquery has written results for its startup-item (launchd) query yet. */
-function launchdBaselineDone() {
+/** Whether osquery has written any results for the named scheduled query yet. */
+function osqueryHasRun(query) {
   try {
-    execFileSync('sudo', ['-n', 'grep', '-q', '"name":"vigil_launchd"', OSQUERY_RESULTS], {
+    execFileSync('sudo', ['-n', 'grep', '-q', `"name":"${query}"`, OSQUERY_RESULTS], {
       stdio: 'ignore',
     });
     return true;
   } catch {
     return false;
+  }
+}
+
+/** osquery's own log lines about its watchdog, for when a real-osquery check misses. */
+function osqueryWatchdogLog() {
+  try {
+    return execFileSync(
+      'sudo',
+      [
+        '-n',
+        'sh',
+        '-c',
+        'grep -hiE "watchdog|denylist|blacklist|sustainable|stopping worker" /var/log/osquery/osqueryd.* 2>/dev/null | tail -n 15',
+      ],
+      { encoding: 'utf8' },
+    )
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+  } catch {
+    return [];
   }
 }
 
@@ -394,6 +415,14 @@ try {
     s.osquery = osquery ?? null;
     check('osquery is installed and run by the helper', osquery?.installed);
     check('1.1.1.1 is reachable before the test', reachable(C2));
+    // A fresh osquery on a runner can take a while before its first scheduled
+    // results (the first run of every query lands at once). Start the beacon
+    // only once connection snapshots are flowing, so the wait below measures
+    // the 10 s snapshot interval rather than osquery's start-up.
+    const g0 = Date.now();
+    const flowing = await waitUntil(() => osqueryHasRun('vigil_network_connections'), 150000, 1000);
+    s.osqueryReadyWaitedMs = Date.now() - g0;
+    if (!flowing) console.log('osquery had written no connection results after 150 s');
     await main(
       (_e, ip) =>
         globalThis.vigil.core.detector.stores.lists.add('known_bad_ips', ip, {
@@ -411,10 +440,11 @@ try {
         `const go=()=>https.get({host:'${C2}',path:'/',agent,timeout:5000},(r)=>r.resume()).on('error',()=>{});` +
         `go();setInterval(go,2000)`,
     );
-    let alert = await waitUntil(() => alertFor('known-bad-destination', t0), 60000, 500);
+    let alert = await waitUntil(() => alertFor('known-bad-destination', t0), 90000, 500);
     if (!alert) {
       // osquery didn't report it in time; keep the rest of the path covered.
-      s.sensor = 'simulated event (osquery did not report the connection in 60 s)';
+      s.sensor = 'simulated event (osquery did not report the connection in 90 s)';
+      s.osqueryLog = osqueryWatchdogLog();
       const t1 = await inject({
         id: `e2e-beacon-${beacon.pid}`,
         source: 'osquery',
@@ -470,9 +500,9 @@ try {
     // osquery reports every existing startup item on its first run of the
     // query, and Vigil treats that run as the baseline. Write the plist only
     // after that run, or it lands in the baseline and is never reported.
-    const baselined = await waitUntil(launchdBaselineDone, 90000, 1000);
+    const baselined = await waitUntil(() => osqueryHasRun('vigil_launchd'), 150000, 1000);
     s.osqueryBaselineWaitedMs = Date.now() - scenarioStart;
-    if (!baselined) console.log('osquery had not run its startup-item query after 90 s');
+    if (!baselined) console.log('osquery had not run its startup-item query after 150 s');
     const t0 = Date.now();
     mkdirSync(dirname(AGENT_PLIST), { recursive: true });
     writeFileSync(
@@ -485,9 +515,11 @@ try {
 </dict></plist>
 `,
     );
-    let alert = await waitUntil(() => alertFor('persistence-apple-lookalike', t0), 100000, 1000);
+    // The startup-item query runs every 60 s (plus up to 10% splay); allow three runs.
+    let alert = await waitUntil(() => alertFor('persistence-apple-lookalike', t0), 200000, 1000);
     if (!alert) {
-      s.sensor = 'simulated event (osquery did not report the plist in 100 s)';
+      s.sensor = 'simulated event (osquery did not report the plist in 200 s)';
+      s.osqueryLog = osqueryWatchdogLog();
       const t1 = await inject({
         id: `e2e-agent-${t0}`,
         source: 'osquery',
