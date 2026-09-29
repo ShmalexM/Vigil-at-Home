@@ -186,6 +186,25 @@ describe('Santa sync server over pinned TLS', () => {
     expect(drift.rules).toHaveLength(3);
   });
 
+  it('still clears Santa when a clean sync has no rules to send', async () => {
+    // Santa ignores an empty download, clean or not, so rules it already had
+    // (here one Vigil never sent) would survive. The sentinel forces the wipe.
+    const empty = new RuleStore(join(dir, 'empty-rules.json'));
+    const s = new SantaSyncServer({ store: empty });
+    const call = async (stage: string, body: unknown) => s.dispatch(stage, 'M2', body);
+    const pre = (await call('preflight', { binaryRuleCount: 1 })) as { sync_type: string };
+    expect(pre.sync_type).toBe('CLEAN');
+    const down = (await call('ruledownload', { cursor: '' })) as { rules: unknown[] };
+    expect(down.rules).toEqual([
+      { identifier: '0'.repeat(64), policy: 'REMOVE', rule_type: 'BINARY' },
+    ]);
+    await call('postflight', { rules_received: 1, rules_processed: 1 });
+    expect(empty.cleanSyncPending).toBe(false);
+    // Once Santa matches (no rules), nothing more is sent.
+    await call('preflight', { binaryRuleCount: 0 });
+    expect(await call('ruledownload', { cursor: '' })).toEqual({ rules: [] });
+  });
+
   it('does not advance when Santa failed to apply rules', async () => {
     store.upsert({ ruleType: 'CDHASH', identifier: 'c'.repeat(40), policy: 'BLOCKLIST' });
     const before = store.syncedRev;
