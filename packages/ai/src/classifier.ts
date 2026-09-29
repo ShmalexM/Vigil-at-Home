@@ -143,6 +143,11 @@ export function eventLine(e: SensorEvent): string {
 }
 
 export interface EventClassifierOptions {
+  /**
+   * Tried before Jev and `runner`: Claude Haiku when Claude is signed in (see
+   * `createVigilAi`). When it can't answer, labelling carries on as without it.
+   */
+  readonly first?: AiRunner;
   /** A runner limited to where labelling may run (see `createVigilAi`). */
   readonly runner?: AiRunner;
   /**
@@ -210,63 +215,62 @@ export function createEventClassifier(options: EventClassifierOptions) {
         };
       };
 
-      let jevDetail: string | undefined;
+      const keyOf = new Map(batch.map((e, i) => [`e${i + 1}`, e.id]));
+      /** One run on a runner; the labels land in `labels`, or the reason it failed comes back. */
+      const labelWith = async (runner: AiRunner): Promise<string | undefined> => {
+        const started = now();
+        const result = await runner.run({
+          purpose: 'classify',
+          urgency: 'background',
+          instructions: options.instructions ?? LABEL_INSTRUCTIONS,
+          data: batch.map((e, i) => `e${i + 1} ${eventLine(e)}`),
+          output: Output,
+          deadlineMs: options.deadlineMs ?? 60_000,
+        });
+        // A cloud provider costs this Mac nothing; failed local runs used the CPU too.
+        if (!result.ok ? runner === options.runner : LOCAL_PROVIDERS.includes(result.provider))
+          cpu.push({ at: now(), seconds: ((now() - started) / 1000) * (options.cpuThreads ?? 1) });
+        if (!result.ok) return result.detail ?? result.reason;
+
+        // A small local model flagged half the Apple binaries in a 20-event test,
+        // so its labels are shown as hints and don't reorder the feed (score 0).
+        const hintOnly = LOCAL_PROVIDERS.includes(result.provider);
+        // Suspicious first, so a key in both lists keeps the stronger label.
+        for (const label of ['suspicious', 'unusual'] as const)
+          for (const key of result.value[label]) {
+            const id = keyOf.get(key.trim());
+            if (!id || labels.has(id)) continue;
+            labels.set(id, {
+              eventId: id,
+              label,
+              score: hintOnly ? 0 : SCORE[label],
+              reason: hintOnly ? `Local model hint: ${label}` : `Cloud model: ${label}`,
+              by: 'model',
+            });
+          }
+        for (const id of ids)
+          if (!labels.has(id))
+            labels.set(id, { eventId: id, label: 'benign', score: 0, reason: '', by: 'model' });
+        return undefined;
+      };
+
+      let detail: string | undefined;
+      if (options.first) {
+        detail = await labelWith(options.first);
+        if (detail === undefined) return done();
+      }
       if (options.jev && (await (options.jevAllowed?.() ?? Promise.resolve(true)))) {
         const jev = await options.jev.label(batch.map((e) => ({ id: e.id, line: eventLine(e) })));
         if (jev.ok) {
           for (const a of jev.answers) if (ids.has(a.id)) labels.set(a.id, fromJev(a));
           return done();
         }
-        jevDetail = jev.detail;
+        detail = jev.detail;
       }
       if (!options.runner)
-        return {
-          ok: false,
-          reason: 'failed',
-          deferred: all,
-          detail: jevDetail ?? 'No model set up.',
-        };
-
-      const keyOf = new Map(batch.map((e, i) => [`e${i + 1}`, e.id]));
-      const started = now();
-      const result = await options.runner.run({
-        purpose: 'classify',
-        urgency: 'background',
-        instructions: options.instructions ?? LABEL_INSTRUCTIONS,
-        data: batch.map((e, i) => `e${i + 1} ${eventLine(e)}`),
-        output: Output,
-        deadlineMs: options.deadlineMs ?? 60_000,
-      });
-      // A cloud provider costs this Mac nothing; failed local runs used the CPU too.
-      if (!result.ok || LOCAL_PROVIDERS.includes(result.provider))
-        cpu.push({ at: now(), seconds: ((now() - started) / 1000) * (options.cpuThreads ?? 1) });
-      if (!result.ok)
-        return {
-          ok: false,
-          reason: 'failed',
-          deferred: all,
-          ...(result.detail ? { detail: result.detail } : { detail: result.reason }),
-        };
-
-      // A small local model flagged half the Apple binaries in a 20-event test,
-      // so its labels are shown as hints and don't reorder the feed (score 0).
-      const hintOnly = LOCAL_PROVIDERS.includes(result.provider);
-      // Suspicious first, so a key in both lists keeps the stronger label.
-      for (const label of ['suspicious', 'unusual'] as const)
-        for (const key of result.value[label]) {
-          const id = keyOf.get(key.trim());
-          if (!id || labels.has(id)) continue;
-          labels.set(id, {
-            eventId: id,
-            label,
-            score: hintOnly ? 0 : SCORE[label],
-            reason: hintOnly ? `Local model hint: ${label}` : `Cloud model: ${label}`,
-            by: 'model',
-          });
-        }
-      for (const id of ids)
-        if (!labels.has(id))
-          labels.set(id, { eventId: id, label: 'benign', score: 0, reason: '', by: 'model' });
+        return { ok: false, reason: 'failed', deferred: all, detail: detail ?? 'No model set up.' };
+      detail = await labelWith(options.runner);
+      if (detail !== undefined) return { ok: false, reason: 'failed', deferred: all, detail };
       return done();
     },
   };
