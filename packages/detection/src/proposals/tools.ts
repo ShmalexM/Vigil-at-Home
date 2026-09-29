@@ -217,7 +217,11 @@ export interface AnalyzeRunner {
 export async function runRuleReview(
   runner: AnalyzeRunner,
   ctx: DetectionToolContext,
-  opts: { deadlineMs?: number } = {},
+  opts: {
+    deadlineMs?: number;
+    /** A candidate prompt (benchmark only). */
+    instructions?: string;
+  } = {},
 ): Promise<{ ok: boolean; submissions: ReviewSubmission[]; summary?: string; error?: string }> {
   const tools = detectionReadTools(ctx);
   const deadlineMs = opts.deadlineMs ?? 5 * 60_000;
@@ -228,7 +232,7 @@ export async function runRuleReview(
     const res = await runner.run({
       purpose: 'analyze',
       urgency: 'background',
-      instructions: RULE_REVIEW_PROMPT,
+      instructions: opts.instructions ?? RULE_REVIEW_PROMPT,
       data,
       output: RuleReviewOutput,
       tools,
