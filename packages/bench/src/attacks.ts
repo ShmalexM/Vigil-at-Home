@@ -343,8 +343,8 @@ export const ATTACKS: AttackScenario[] = [
     mimics: 'AMOS and Cuckoo samples signed with stolen or throwaway Developer IDs',
     tactic: 'credential-access',
     variant: 'evasive',
-    expect: ['credential-theft-untrusted'],
-    note: 'The rule trusts any valid Developer ID until Apple revokes it.',
+    expect: ['credential-theft-untrusted', 'santa-protected-file-access'],
+    note: 'credential-theft-untrusted trusts any valid Developer ID; the Santa protected-file rule still alerts.',
     events: (at) => [
       file(
         at,
@@ -614,8 +614,7 @@ export const ATTACKS: AttackScenario[] = [
     mimics: "macOS's own malware signatures firing",
     tactic: 'defense-evasion',
     variant: 'evasive',
-    expect: ['(none)'],
-    note: 'No rule turns macOS security alerts (XProtect, TCC changes) into an alert yet.',
+    expect: ['xprotect-detected'],
     events: (at) => [
       {
         id: id('atk'),
