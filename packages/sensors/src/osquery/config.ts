@@ -39,6 +39,7 @@ export const QUERY_NAMES = {
   browserExtensions: 'vigil_browser_extensions',
   launchd: 'vigil_launchd',
   crontab: 'vigil_crontab',
+  health: 'vigil_health',
 } as const;
 
 export interface OsqueryConfigOptions {
@@ -98,6 +99,16 @@ export function osqueryConfig(opts: OsqueryConfigOptions = {}): string {
         interval: persist,
         description: 'Launch agents and daemons outside the read-only system volume',
       },
+      // A snapshot, so it logs every time: proof osquery is alive even when
+      // nothing changed, and whether any of Vigil's queries is denylisted.
+      [QUERY_NAMES.health]: {
+        query:
+          'SELECT name, denylisted, executions FROM osquery_schedule ' +
+          "WHERE name LIKE 'vigil_%';",
+        interval: persist * 5,
+        snapshot: true,
+        description: 'That osquery runs and none of the queries above is switched off',
+      },
       [QUERY_NAMES.crontab]: {
         query: 'SELECT command, path, minute, hour, day_of_month, month, day_of_week FROM crontab;',
         interval: persist * 5,
@@ -105,5 +116,12 @@ export function osqueryConfig(opts: OsqueryConfigOptions = {}): string {
       },
     },
   };
+  // When the watchdog kills osquery's worker (over its CPU or memory limit),
+  // osquery denylists whichever query was running for 24 hours
+  // (Config::recordQueryStart / denylistExpired in osquery's config.cpp). On a
+  // busy Mac that would silently stop, say, connection reporting for a day.
+  // The watchdog still keeps osquery within budget; the query just runs again
+  // on its next interval.
+  for (const q of Object.values(config.schedule)) Object.assign(q, { denylist: false });
   return JSON.stringify(config, null, 2) + '\n';
 }

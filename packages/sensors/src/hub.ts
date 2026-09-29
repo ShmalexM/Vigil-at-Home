@@ -4,7 +4,7 @@
 
 import { FileTailer, type TailPosition } from './tail.js';
 import { santaLogLineToEvent } from './santa/logParser.js';
-import { osqueryLineToEvents } from './osquery/resultParser.js';
+import { osqueryHealth, osqueryLineToEvents } from './osquery/resultParser.js';
 import { DEFAULT_PATHS } from './santa/profile.js';
 import { OSQUERY_RESULTS_LOG } from './osquery/config.js';
 import type { SensorEvent, SensorEventSink } from './types.js';
@@ -42,6 +42,18 @@ export class SensorHub {
     const osq = opts.osqueryResultsPath ?? OSQUERY_RESULTS_LOG;
     if (osq)
       this.addTailer('osquery', osq, (line) => {
+        const health = osqueryHealth(line);
+        if (health) {
+          // Differential queries are silent when nothing changes; this
+          // snapshot is what shows osquery is still running.
+          this.activity.osquery = Date.now();
+          if (health.denylisted.length > 0)
+            opts.onError?.(
+              'osquery',
+              new Error(`osquery switched off ${health.denylisted.join(', ')}`),
+            );
+          return;
+        }
         for (const e of osqueryLineToEvents(line)) this.emit(e);
       });
   }

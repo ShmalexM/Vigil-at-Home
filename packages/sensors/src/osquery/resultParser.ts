@@ -8,6 +8,8 @@ import { osquerySigning } from '../signing.js';
 
 interface OsqueryResultLine {
   name?: string;
+  /** Rows of a snapshot query, all at once. */
+  snapshot?: Record<string, string>[];
   unixTime?: number | string;
   action?: 'added' | 'removed' | 'snapshot';
   /** 0 on the first run of a query, when every existing row is reported as "added". */
@@ -154,4 +156,22 @@ export function osqueryLineToEvents(line: string, opts: OsqueryParseOptions = {}
     default:
       return [];
   }
+}
+
+/**
+ * The health snapshot: undefined for any other line, otherwise the names of
+ * Vigil's queries osquery has denylisted (empty when all is well).
+ */
+export function osqueryHealth(line: string): { denylisted: string[] } | undefined {
+  let parsed: OsqueryResultLine;
+  try {
+    parsed = JSON.parse(line) as OsqueryResultLine;
+  } catch {
+    return undefined;
+  }
+  if (parsed.name !== QUERY_NAMES.health) return undefined;
+  const rows = Array.isArray(parsed.snapshot) ? parsed.snapshot : [];
+  return {
+    denylisted: rows.filter((r) => r.denylisted === '1' && r.name).map((r) => r.name!),
+  };
 }
