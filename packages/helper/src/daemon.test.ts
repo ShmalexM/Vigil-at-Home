@@ -12,6 +12,7 @@ import { request } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SensorEvent } from '@vigil/sensors';
+import { fileAccessPolicy } from '@vigil/sensors';
 import { HelperClient } from './client.js';
 import { defaultPaths, type HelperPaths } from './config.js';
 import { runDaemon, type SensorHealth } from './daemon.js';
@@ -36,6 +37,11 @@ beforeAll(async () => {
   writeFileSync(paths.osqueryResults as string, '');
   // As earlier versions left it; the daemon must open it up on start.
   mkdirSync(paths.supportDir, { mode: 0o700 });
+  // An older policy with blocking turned on: newer watch items must reach it, blocking kept.
+  writeFileSync(
+    paths.fileAccessPolicy,
+    '<plist><dict><key>Version</key><string>vigil-1</string><key>AuditOnly</key>\n<false/></dict></plist>',
+  );
   // Handing the socket to the console user needs root; CI runs as a normal
   // user, where the socket simply stays with the current user.
   const sys = new FakeSystem();
@@ -129,7 +135,7 @@ describe('helper daemon', () => {
       .filter((e) => e.kind === 'santa.decision')
       .map((e) => e.kind === 'santa.decision' && e.process.path);
     expect(blocks.sort()).toEqual(['/tmp/evil', '/tmp/evil2']);
-    expect(readFileSync(paths.fileAccessPolicy, 'utf8')).toContain('SSHKeys');
+    expect(readFileSync(paths.fileAccessPolicy, 'utf8')).toBe(fileAccessPolicy({ enforce: true }));
 
     await santaPost('postflight', { rules_received: 1, rules_processed: 1 });
     const after = await client!.call<{ sensors: SensorHealth }>({ kind: 'helper.status' });

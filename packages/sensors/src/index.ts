@@ -1,4 +1,6 @@
 export * from './types.js';
+export * from './signing.js';
+export * from './enrich.js';
 export * from './plist.js';
 export * from './tail.js';
 export * from './santa/logParser.js';

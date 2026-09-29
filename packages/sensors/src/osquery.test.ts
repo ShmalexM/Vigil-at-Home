@@ -102,6 +102,33 @@ describe('osquery', () => {
       localAddress: '0.0.0.0',
       process: { pid: 99, path: '/tmp/backdoor' },
     });
+    expect(listen!.kind === 'network.listen' && listen!.process?.signing).toBeUndefined();
+    const signed = (columns: Record<string, string>) => {
+      const [e] = osqueryLineToEvents(
+        JSON.stringify({
+          name: QUERY_NAMES.listeningPorts,
+          counter: 2,
+          action: 'added',
+          columns: { pid: '1', path: '/x', port: '80', protocol: '6', ...columns },
+        }),
+      );
+      return e?.kind === 'network.listen' ? e.process : undefined;
+    };
+    expect(
+      signed({ signed: '1', authority: 'Software Signing', identifier: 'com.apple.rapportd' }),
+    ).toMatchObject({ signing: 'apple', signingId: 'com.apple.rapportd' });
+    expect(
+      signed({
+        signed: '1',
+        authority: 'Developer ID Application: Spotify (2FNC3A47ZF)',
+        team_identifier: '2FNC3A47ZF',
+      }),
+    ).toMatchObject({ signing: 'developer_id', teamId: '2FNC3A47ZF' });
+    expect(signed({ signed: '1', authority: '', identifier: 'backdoor-55554944' })?.signing).toBe(
+      'adhoc',
+    );
+    expect(signed({ signed: '0', authority: '', identifier: '' })?.signing).toBe('unsigned');
+    expect(signed({ signed: '0', identifier: 'com.tampered' })?.signing).toBe('invalid');
     const [ext] = osqueryLineToEvents(
       JSON.stringify({
         name: QUERY_NAMES.browserExtensions,

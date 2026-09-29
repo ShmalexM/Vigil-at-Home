@@ -8,6 +8,7 @@ import { osqueryLineToEvents } from './osquery/resultParser.js';
 import { DEFAULT_PATHS } from './santa/profile.js';
 import { OSQUERY_RESULTS_LOG } from './osquery/config.js';
 import type { SensorEvent, SensorEventSink } from './types.js';
+import { ProcessEnricher } from './enrich.js';
 
 export interface SensorHubOptions {
   sink: SensorEventSink;
@@ -29,6 +30,7 @@ export class SensorHub {
   private readonly tailers = new Map<string, FileTailer>();
   private readonly seen = new Set<string>();
   private readonly activity: SensorActivity = { santa: null, osquery: null };
+  private readonly enricher = new ProcessEnricher();
 
   constructor(private readonly opts: SensorHubOptions) {
     const santa = opts.santaLogPath ?? DEFAULT_PATHS.santaLog;
@@ -61,10 +63,11 @@ export class SensorHub {
     return { ...this.activity };
   }
 
-  emit(event: SensorEvent): void {
-    if (event.source === 'santa' || event.source === 'osquery')
-      this.activity[event.source] = Date.now();
-    if (this.seen.has(event.id)) return;
+  emit(incoming: SensorEvent): void {
+    if (incoming.source === 'santa' || incoming.source === 'osquery')
+      this.activity[incoming.source] = Date.now();
+    if (this.seen.has(incoming.id)) return;
+    const event = this.enricher.enrich(incoming);
     this.seen.add(event.id);
     if (this.seen.size > DEDUPE_WINDOW) {
       // Sets iterate in insertion order, so this drops the oldest id.

@@ -66,11 +66,10 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   const tls = syncTlsPaths(paths.tlsDir);
   await ensureSyncTls(tls, opts.opensslBin);
 
-  // Vigil owns this policy file; Santa re-reads it every minute.
-  if (!existsSync(paths.fileAccessPolicy)) {
-    mkdirSync(dirname(paths.fileAccessPolicy), { recursive: true });
-    writeFileSync(paths.fileAccessPolicy, fileAccessPolicy(), { mode: 0o644 });
-  }
+  // Vigil owns this policy file; Santa re-reads it every minute. Rewriting it
+  // brings watch items added in newer versions to existing installs, keeping
+  // blocking on if the user turned it on.
+  writeFileAccessPolicy(paths.fileAccessPolicy);
 
   const rules = new RuleStore(paths.santaRules);
   const journal = new Journal(paths.journal);
@@ -187,4 +186,18 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     await server.close();
     await new Promise<void>((r) => https.close(() => r()));
   };
+}
+
+function writeFileAccessPolicy(path: string): void {
+  let current: string | undefined;
+  try {
+    current = readFileSync(path, 'utf8');
+  } catch {
+    mkdirSync(dirname(path), { recursive: true });
+  }
+  const enforce = current !== undefined && /<key>AuditOnly<\/key>\s*<false\/>/.test(current);
+  const next = fileAccessPolicy({ enforce });
+  if (next === current) return;
+  writeFileSync(path, next, { mode: 0o644 });
+  chmodSync(path, 0o644);
 }
