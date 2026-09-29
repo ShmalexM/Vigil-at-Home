@@ -188,13 +188,14 @@ export function AiSection() {
           </ul>
           <h4 className="ai-group">Labels events no rule matched</h4>
           <p className="ai-sub ai-group-sub">
-            Programs and connections no rule explained get a hint in Activity, like “unusual”. Hints
-            only: nothing is blocked or allowed because of a label.
+            {labellingText(view)} Hints only: nothing is blocked or allowed because of a label.
           </p>
           <div className="ai-option">
             <div className="ai-main">
               <div className="ai-name">Label events</div>
-              <div className="ai-sub">{labellingText(view)}</div>
+              <div className="ai-sub">
+                Off stops sending events for labels. Alerts are still explained.
+              </div>
             </div>
             <Segmented
               label="Label events no rule matched"
@@ -216,38 +217,64 @@ export function AiSection() {
   );
 }
 
+/** Claude Haiku labels first whenever Claude is on and AI may run in the cloud. */
+function haikuLabels(view: AiView): boolean {
+  return view.prefs.labelling && view.prefs.claude && view.mode !== 'local';
+}
+
 /**
  * What Vigil uses this app or key for, given where AI runs. Mirrors the
  * routing in @vigil/ai: explanations go down the list in order; labels go to
- * Jev first, then the small local model (or, cloud only, the apps above).
+ * Claude Haiku (when Claude is signed in), then Jev, then the small local
+ * model (or, cloud only, the other apps above).
  */
 function usedFor(p: AiProviderView, view: AiView): string {
   const labels = view.prefs.labelling;
-  if (p.provider === 'jev') return 'Used for: labelling events only. It never explains alerts.';
+  const haiku = haikuLabels(view);
+  const before = haiku ? (view.jevVia ? 'Claude Haiku and Jev' : 'Claude Haiku') : 'Jev';
+  if (p.provider === 'jev')
+    return haiku
+      ? 'Used for: labelling events when Claude Haiku can’t. It never explains alerts.'
+      : 'Used for: labelling events only. It never explains alerts.';
   if (p.provider === 'ollama') {
     if (view.mode === 'cloud') return 'Not used while Vigil runs AI in the cloud only.';
     const explain =
       view.mode === 'local' ? 'explaining alerts' : 'explaining alerts when nothing above is ready';
     if (!labels) return `Used for: ${explain}.`;
-    return view.mode !== 'local' && view.jevVia
-      ? `Used for: ${explain}, and labelling events with a small model when Jev can’t.`
+    return view.mode !== 'local' && (view.jevVia || haiku)
+      ? `Used for: ${explain}, and labelling events with a small model when ${before} can’t.`
       : `Used for: ${explain}, and labelling events with a small model.`;
   }
   if (view.mode === 'local') return 'Not used while Vigil runs AI on this Mac only.';
-  return view.mode === 'cloud' && labels
-    ? 'Used for: explaining alerts, and labelling events when Jev can’t.'
-    : 'Used for: explaining alerts.';
+  if (p.provider === 'claude' && haiku)
+    return 'Used for: explaining alerts, and labelling events with Claude Haiku.';
+  return view.mode === 'cloud' && labels && (view.jevVia || haiku)
+    ? `Used for: explaining alerts, and labelling events when ${before} can’t.`
+    : view.mode === 'cloud' && labels
+      ? 'Used for: explaining alerts and labelling events.'
+      : 'Used for: explaining alerts.';
 }
 
 function labellingText(view: AiView): string {
-  if (view.mode === 'local') return 'A small model on this Mac labels them.';
-  if (view.mode === 'cloud')
-    return view.jevVia
-      ? 'Jev labels them. When it can’t, the apps above do, within their background share.'
-      : 'The apps above label them, within their background share. An OpenRouter or TypeSafe key adds Jev.';
-  return view.jevVia
-    ? 'Jev labels them. When it can’t, a small model on this Mac does.'
-    : 'A small model on this Mac labels them. An OpenRouter or TypeSafe key adds Jev.';
+  if (view.mode === 'local')
+    return 'A small model on this Mac labels unusual programs and connections in Activity.';
+  const fallback =
+    view.mode === 'cloud'
+      ? view.jevVia
+        ? 'Jev, then the other apps above, take over'
+        : 'The other apps above take over'
+      : view.jevVia
+        ? 'Jev, then the model on this Mac, take over'
+        : 'The model on this Mac takes over';
+  if (haikuLabels(view))
+    return `Claude Haiku labels unusual programs and connections in Activity when Claude is signed in. ${fallback} when it can’t.`;
+  if (view.jevVia)
+    return `Jev labels unusual programs and connections in Activity. ${
+      view.mode === 'cloud' ? 'The apps above take over' : 'The model on this Mac takes over'
+    } when it can’t.`;
+  return view.mode === 'cloud'
+    ? 'The apps above label unusual programs and connections in Activity, within their background share. An OpenRouter or TypeSafe key adds Jev.'
+    : 'A small model on this Mac labels unusual programs and connections in Activity. An OpenRouter or TypeSafe key adds Jev.';
 }
 
 function describe(p: AiProviderView, view: AiView): string {
