@@ -32,7 +32,7 @@
     "@vigil/detection": "workspace:*",
     "@vigil/helper": "workspace:*",
     "@vigil/sensors": "workspace:*",
-    "@vitejs/plugin-react": "^5.2.0",
+    "@vitejs/plugin-react": "^6.1.1",
     "electron": "^44.0.0",
     "electron-builder": "^26.15.0",
     "electron-vite": "^5.0.0",
