@@ -1,0 +1,20 @@
+name: Idea or feature request
+description: Something Vigil at Home should do, or do differently.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you're trying to do
+      description: The situation or threat, not the solution yet.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+  - type: textarea
+    id: detection
+    attributes:
+      label: For a new detection
+      description: What the malicious behaviour looks like on a Mac (process, file, network, persistence), and what a harmless look-alike would be, so the rule doesn't block normal work.

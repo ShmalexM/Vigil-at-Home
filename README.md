@@ -4,7 +4,7 @@ Your own security operations center, running on your Mac.
 
 Vigil at Home watches what runs on your laptop, blocks malicious activity as it happens, and pops up to tell you when it does. It uses AI you already have (an API key, your ChatGPT plan through Codex, a local model, or your Claude plan when you ask it about an alert) to explain what it found and help you decide, but it never waits on the AI to block, and only you can allow or release something.
 
-> Status: early alpha. The app, popup and alert pipeline work, but the sensors, detection rules and AI connection are still being merged in. Until then the app has nothing real to watch, and blocks are simulated and labelled that way.
+> Status: early alpha. Sensors, detection rules, blocking (once the helper is installed), the popup and AI explanations work on a real Mac, but expect rough edges. Releases aren't signed yet.
 
 ## Install
 
@@ -86,6 +86,10 @@ pnpm check   # naming check, lint, typecheck, tests
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for conventions.
 
+## Contributing
+
+Issues and pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), and follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report security problems privately, as [SECURITY.md](SECURITY.md) describes, not as issues.
+
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE). Third-party code and assets are credited in [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
