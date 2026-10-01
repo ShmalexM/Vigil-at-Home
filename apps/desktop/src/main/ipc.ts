@@ -86,6 +86,11 @@ export function registerIpc(
       core.setTheme(theme);
       windows.applyTheme(theme, core.appearance());
     },
+    setAlertView: (view) => {
+      core.setAlertView(view);
+      windows.setNeedsYou(core.status().badge);
+      windows.broadcast('changed');
+    },
     setAppearance: (appearance) => {
       core.setAppearance(appearance);
       windows.applyTheme(core.theme(), core.appearance());

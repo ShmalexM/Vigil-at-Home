@@ -135,9 +135,14 @@ export function HomeView({ go }: { go: (r: string) => void }) {
         </Card>
       </div>
 
-      {noticed.length > 0 && (
+      {status && noticed.length > 0 && (
         <Card>
-          <NoticedList alerts={noticed} open={(id) => go(`alerts/${id}`)} limit={8} />
+          <NoticedList
+            alerts={noticed}
+            view={status.alertView}
+            open={(id) => go(`alerts/${id}`)}
+            limit={8}
+          />
         </Card>
       )}
 

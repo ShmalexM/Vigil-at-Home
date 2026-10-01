@@ -176,7 +176,7 @@ function start(): void {
   setTimeout(() => windows.prewarmPopover(), 2000);
 
   const refresh = () => {
-    windows.setNeedsYou(core.status().needsYou);
+    windows.setNeedsYou(core.status().badge);
     windows.broadcast('changed');
   };
   core.alerts.on('changed', refresh);

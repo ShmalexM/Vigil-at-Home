@@ -29,6 +29,7 @@ export const CALL_NAMES = [
   'eventStats',
   'getSettings',
   'setTheme',
+  'setAlertView',
   'setAppearance',
   'sendTestAlert',
   'openMain',

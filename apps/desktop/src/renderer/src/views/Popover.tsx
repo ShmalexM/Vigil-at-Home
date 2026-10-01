@@ -72,7 +72,7 @@ export function Popover() {
           </div>
         )}
 
-        <NoticedList alerts={noticed} open={open} />
+        {status && <NoticedList alerts={noticed} view={status.alertView} open={open} />}
       </div>
 
       <footer className="row">

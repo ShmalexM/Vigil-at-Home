@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { z } from 'zod';
 import { canChangeMode, type Rule, type RuleMode, type SensorEvent } from '@vigil/core';
 import {
+  AlertView,
   Appearance,
   ThemePref,
   type AlertDetail,
@@ -198,8 +199,11 @@ export class VigilCore {
   status(): StatusView {
     const s = computeStatus(this.store.listAlerts({ status: 'open' }), this.sensors.list());
     const today = startOfDay(this.now());
+    const alertView = this.alertView();
     return {
       ...s,
+      alertView,
+      badge: s.needsYou + (alertView === 'more' ? s.noticed : 0),
       watch: {
         checkedToday: this.store.countEventsSince(today),
         lastEventAt: this.store.newestEventAt(),
@@ -275,6 +279,14 @@ export class VigilCore {
 
   setTheme(theme: ThemePref): void {
     this.store.setSetting('theme', ThemePref.parse(theme));
+  }
+
+  alertView(): AlertView {
+    return this.store.getSetting('alertView', AlertView, 'less');
+  }
+
+  setAlertView(view: AlertView): void {
+    this.store.setSetting('alertView', AlertView.parse(view));
   }
 
   appearance(): AppearanceSettings {

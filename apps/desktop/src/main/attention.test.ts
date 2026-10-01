@@ -94,6 +94,18 @@ describe('VigilCore', () => {
     expect(core.status()).toMatchObject({ needsYou: 1, noticed: 0 });
   });
 
+  it('counts noticed alerts on the badge only with Show me more', async () => {
+    const { core } = setup();
+    await core.alerts.raise({
+      rule: makeRule({ mode: 'alert', severity: 'medium', fidelity: 'medium' }),
+      events: [makeExec()],
+      actions: [],
+    });
+    expect(core.status()).toMatchObject({ alertView: 'less', badge: 0 });
+    core.setAlertView('more');
+    expect(core.status()).toMatchObject({ alertView: 'more', badge: 1 });
+  });
+
   it('reports what it checked and blocked today', async () => {
     const { core } = setup();
     const yesterday = new Date(2026, 8, 30, 23, 0).getTime();
