@@ -17,6 +17,9 @@ import { systemProbe } from './onboarding/checks.js';
 import { demoProbe } from './onboarding/demo.js';
 import { KeyStore } from './onboarding/keys.js';
 import { OnboardingService } from './onboarding/service.js';
+import { Connectors, ConnectorRecord } from './pack/connectors.js';
+import { PackService } from './pack/service.js';
+import { seedPackDemo } from './pack/demo.js';
 import { PowerPolicy } from './power.js';
 import { HEALTH_CHECK_MS, macProbe, reportHealth, type HelperSensors } from './sensor-health.js';
 import { VigilCore } from './service.js';
@@ -191,10 +194,59 @@ function start(): void {
   if (app.isPackaged) updates.start();
   app.on('before-quit', () => updates.stop());
 
-  registerIpc(core, windows, setup, ai, updates, agents, {
-    install: async () => afterHelperScript(await runHelperScript('install', helperDir())),
-    uninstall: async () => afterHelperScript(await runHelperScript('uninstall', helperDir())),
+  // The pack: Vigil's own AI agents as dogs. The Lead dog talks with the user
+  // and manages the pack; every tool call goes through the pack's gate, and
+  // no dog can block, allow or change a rule.
+  let packPush: NodeJS.Timeout | undefined;
+  const pushPack = () => {
+    // Moods change often while dogs work; one push per 150 ms is plenty.
+    packPush ??= setTimeout(() => {
+      packPush = undefined;
+      windows.broadcast('pack');
+    }, 150);
+  };
+  const cipher = {
+    available: () => safeStorage.isEncryptionAvailable(),
+    encrypt: (s: string) => safeStorage.encryptString(s),
+    decrypt: (b: Buffer) => safeStorage.decryptString(b),
+  };
+  const connectors = new Connectors({
+    load: () => store.getSetting('pack.connectors', z.array(ConnectorRecord), []),
+    save: (records) => store.setSetting('pack.connectors', records),
+    secretsPath: join(dataDir, 'pack-secrets.json'),
+    cipher,
+    onChange: pushPack,
   });
+  const pack = new PackService({
+    load: (key, schema, fallback) => store.getSetting(key, schema, fallback),
+    save: (key, value) => store.setSetting(key, value),
+    ai: ai.packAi(),
+    vigilTools: agents.packTools(),
+    preflight: (req) => agents.packPreflight(req),
+    connectors,
+    scheduler: core.scheduler,
+    isBusy: () => power.isBusy(),
+    onChange: pushPack,
+  });
+  ai.on('busy', (helper, busy) => pack.helperBusy(helper, busy));
+  pack.start();
+  if (demo)
+    seedPackDemo(pack, connectors, join(app.getAppPath(), 'src/main/pack/fixtures/demo-mcp.mjs'));
+  app.on('before-quit', () => void connectors.closeAll());
+
+  registerIpc(
+    core,
+    windows,
+    setup,
+    ai,
+    updates,
+    agents,
+    { service: pack, connectors },
+    {
+      install: async () => afterHelperScript(await runHelperScript('install', helperDir())),
+      uninstall: async () => afterHelperScript(await runHelperScript('uninstall', helperDir())),
+    },
+  );
   windows.createTray();
   windows.applyTheme(core.theme(), core.appearance());
   // After start-up settles, so the menu-bar item appears first.

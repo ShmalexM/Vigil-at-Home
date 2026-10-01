@@ -29,6 +29,7 @@ import {
   type AgentToolRequestEvent,
   type HelloReply,
   type PreflightReply,
+  type PreflightRequest,
   type ToolsReply,
 } from '@vigil/core';
 import {
@@ -511,6 +512,27 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
         runs7d: s?.runs ?? 0,
       };
     });
+  }
+
+  /**
+   * Vigil's read-only tools, for the pack's own dogs (pack.ts). Same tools,
+   * redaction and caps as the user's agents get over MCP; this path doesn't
+   * depend on that opt-in, because the pack runs inside Vigil.
+   */
+  packTools(): {
+    list: () => ReturnType<VigilTools['list']>;
+    call: (name: string, args: Record<string, unknown>) => ToolsReply;
+  } {
+    return { list: () => this.tools.list(), call: (n, a) => this.tools.call(n, a) };
+  }
+
+  /**
+   * Asks Vigil's rules about a pack dog's tool call, as they'd answer a
+   * watched agent's hook: deny, ask or none. Nothing is recorded, and the
+   * answer can only make the gate stricter.
+   */
+  packPreflight(req: PreflightRequest): PreflightReply {
+    return this.o.detector.preflight(req).reply;
   }
 
   /**

@@ -3,6 +3,7 @@ import {
   Bell,
   Bot,
   ChartSpline,
+  Dog as DogIcon,
   Download,
   House,
   ListChecks,
@@ -18,6 +19,7 @@ import { ActivityView } from './Activity';
 import { AgentsView } from './Agents';
 import { AlertsView } from './Alerts';
 import { HomeView } from './Home';
+import { PackPage } from './Pack';
 import { SetupWizard } from './onboarding/SetupWizard';
 import { RulesView } from './Rules';
 import { SettingsView } from './Settings';
@@ -28,6 +30,7 @@ const NAV: { id: string; label: string; icon: ReactNode }[] = [
   { id: 'alerts', label: 'Alerts', icon: <Bell size={16} /> },
   { id: 'rules', label: 'Rules', icon: <ListChecks size={16} /> },
   { id: 'agents', label: 'Agents', icon: <Bot size={16} /> },
+  { id: 'pack', label: 'Pack', icon: <DogIcon size={16} /> },
   { id: 'activity', label: 'Activity', icon: <Activity size={16} /> },
   { id: 'usage', label: 'Usage', icon: <ChartSpline size={16} /> },
   { id: 'settings', label: 'Settings', icon: <SettingsIcon size={16} /> },
@@ -143,6 +146,7 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
         {section === 'alerts' && <AlertsView selected={param} go={go} />}
         {section === 'rules' && <RulesView selected={param} go={go} />}
         {section === 'agents' && <AgentsView selected={param} go={go} />}
+        {section === 'pack' && <PackPage />}
         {section === 'activity' && <ActivityView selected={param} go={go} />}
         {section === 'usage' && <UsageView />}
         {section === 'settings' && <SettingsView />}
