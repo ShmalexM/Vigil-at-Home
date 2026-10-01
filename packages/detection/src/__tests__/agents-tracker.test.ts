@@ -301,6 +301,48 @@ describe('agent tracker', () => {
     expect(t.lookup(vigil.pid)?.tag?.id).toBe('vigil-self');
   });
 
+  it('gives a connector Vigil starts a session of its own, not Vigil’s tag', () => {
+    const vigil = {
+      pid: 777,
+      path: '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home',
+    };
+    const { t, sessions, launch } = tracker({ self: { ...vigil, startedAt: T0 } });
+    const selfSession = t.lookup(vigil.pid)?.tag?.session;
+    t.connectorStarted(3000);
+    const server = launch('/opt/homebrew/bin/node', vigil.pid);
+    expect(server.process.pid).toBe(3000);
+    expect(server.process.agent).toMatchObject({ id: 'vigil-connector', depth: 0 });
+    // What it runs stays the connector's, even another agent's program.
+    const shell = launch('/bin/zsh', server.process.pid);
+    const nested = launch(CLAUDE_BIN, shell.process.pid);
+    expect(shell.process.agent).toEqual({ ...server.process.agent, depth: 1 });
+    expect(nested.process.agent).toEqual({ ...server.process.agent, depth: 2 });
+    expect(sessions.at(-1)).toMatchObject({
+      agentId: 'vigil-connector',
+      rootPid: 3000,
+      parentSession: selfSession,
+    });
+
+    // Vigil's own helpers next to it keep vigil-self.
+    const helper = launch(CLAUDE_BIN, vigil.pid);
+    expect(helper.process.agent).toMatchObject({ id: 'vigil-self', depth: 1 });
+
+    // Told after the launch was seen: retagged with its tree.
+    t.connectorStarted(helper.process.pid);
+    expect(t.lookup(helper.process.pid)?.tag).toMatchObject({ id: 'vigil-connector', depth: 0 });
+
+    // Stopped: a process still running keeps its tag through a retag, and
+    // never falls back to Vigil's own.
+    t.connectorStopped(3000);
+    t.retag();
+    expect(t.lookup(3000)?.tag).toEqual(server.process.agent);
+
+    // Only Vigil's direct children: a pid under someone else is not a connector.
+    t.connectorStarted(4000);
+    t.observe(exec(proc({ path: '/opt/homebrew/bin/node', pid: 4000, ppid: 501, args: ['node'] })));
+    expect(t.lookup(4000)?.tag).toBeUndefined();
+  });
+
   it('suggests an unknown program that runs 20 shell commands in 10 minutes', () => {
     const onCandidate = vi.fn();
     const { t, launch } = tracker({ onCandidate });

@@ -1,7 +1,7 @@
 import { AgentIdentity, AgentIdentityInput } from '@vigil/core';
 import { assertUserOrigin, type UserOrigin } from '../origin.js';
 import type { AgentStore } from '../state/stores.js';
-import { AGENT_CATALOG, VIGIL_SELF, type CatalogEntry } from './catalog.js';
+import { AGENT_CATALOG, VIGIL_CONNECTOR, VIGIL_SELF, type CatalogEntry } from './catalog.js';
 import { compileAgentMatchers, type CompiledAgentMatcher } from './match.js';
 
 /** An agent as the Agents screen lists it. */
@@ -81,7 +81,8 @@ export class AgentRegistry {
   save(input: AgentIdentityInput, origin: UserOrigin): AgentIdentity {
     assertUserOrigin(origin);
     const v = AgentIdentityInput.parse(input);
-    if (v.id === VIGIL_SELF) throw new Error(`"${VIGIL_SELF}" is reserved for Vigil itself.`);
+    if (v.id === VIGIL_SELF || v.id === VIGIL_CONNECTOR)
+      throw new Error(`"${v.id}" is reserved for Vigil itself.`);
     const at = this.now();
     const entry = this.catalog.get(v.id);
     const current = this.get(v.id);

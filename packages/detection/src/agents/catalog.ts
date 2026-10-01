@@ -20,6 +20,13 @@ export interface CatalogEntry extends AgentIdentity {
 /** Vigil's own process tree (its AI helpers). Reserved: never in the catalogue, never a user's id. */
 export const VIGIL_SELF = 'vigil-self';
 
+/**
+ * An MCP server Vigil starts for the pack (a connector the user added). It
+ * runs the user's program, not Vigil's, so it is watched like an agent and
+ * never shares Vigil's own tag. Reserved like VIGIL_SELF.
+ */
+export const VIGIL_CONNECTOR = 'vigil-connector';
+
 /** When this catalogue version was written. Entries carry it as createdAt/updatedAt. */
 const CATALOG_DATE = Date.UTC(2026, 9, 1);
 
