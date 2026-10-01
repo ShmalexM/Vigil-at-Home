@@ -1,6 +1,7 @@
 import {
   Activity,
   Bell,
+  Bot,
   ChartSpline,
   Download,
   House,
@@ -14,6 +15,7 @@ import { useLive, vigil } from '../api';
 import { Shield } from '../components/Shield';
 import { Button, LevelPill } from '../components/ui';
 import { ActivityView } from './Activity';
+import { AgentsView } from './Agents';
 import { AlertsView } from './Alerts';
 import { HomeView } from './Home';
 import { SetupWizard } from './onboarding/SetupWizard';
@@ -25,6 +27,7 @@ const NAV: { id: string; label: string; icon: ReactNode }[] = [
   { id: 'home', label: 'Home', icon: <House size={16} /> },
   { id: 'alerts', label: 'Alerts', icon: <Bell size={16} /> },
   { id: 'rules', label: 'Rules', icon: <ListChecks size={16} /> },
+  { id: 'agents', label: 'Agents', icon: <Bot size={16} /> },
   { id: 'activity', label: 'Activity', icon: <Activity size={16} /> },
   { id: 'usage', label: 'Usage', icon: <ChartSpline size={16} /> },
   { id: 'settings', label: 'Settings', icon: <SettingsIcon size={16} /> },
@@ -54,6 +57,8 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
   const [status] = useLive(() => vigil.getStatus());
   const [setup] = useLive(() => vigil.getSetup());
   const [updates] = useLive(() => vigil.getUpdates());
+  const [agents] = useLive(() => vigil.listAgents());
+  const suggestions = agents?.filter((a) => a.status === 'suggested').length ?? 0;
   const [section = 'home', param] = route.split('/');
 
   if (section === 'setup') return <SetupWizard onDone={() => go('home')} />;
@@ -79,6 +84,11 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
               <span className="grow">{n.label}</span>
               {n.id === 'alerts' && status && status.needsYou > 0 && (
                 <span className="count hot">{status.needsYou}</span>
+              )}
+              {n.id === 'agents' && suggestions > 0 && (
+                <span className="count" title="Suggested agents waiting on you">
+                  {suggestions}
+                </span>
               )}
             </button>
           ))}
@@ -132,7 +142,8 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
         {section === 'home' && <HomeView go={go} />}
         {section === 'alerts' && <AlertsView selected={param} go={go} />}
         {section === 'rules' && <RulesView selected={param} go={go} />}
-        {section === 'activity' && <ActivityView />}
+        {section === 'agents' && <AgentsView selected={param} go={go} />}
+        {section === 'activity' && <ActivityView selected={param} go={go} />}
         {section === 'usage' && <UsageView />}
         {section === 'settings' && <SettingsView />}
       </main>

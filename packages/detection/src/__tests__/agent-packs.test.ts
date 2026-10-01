@@ -11,6 +11,7 @@ import {
   AGENT_CONFIG_RE,
   agentWatchRules,
   ENV_DUMP_RE,
+  KEYCHAIN_SECRET_RE,
   NET_SINK_RE,
   PASTE_HOST_RE,
   PERSIST_RE,
@@ -377,10 +378,12 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
       [read(`${home}/.aws/credentials`), ALERT],
       [read(`${home}/.ssh/id_ed25519`), ALERT],
       [bash('cat ~/.aws/credentials'), ALERT],
+      [bash('security find-generic-password -s "Chrome Safe Storage" -w'), ALERT],
     ],
     good: [
       read(`${home}/.ssh/id_ed25519.pub`),
       bash('cat ~/.ssh/id_ed25519.pub | pbcopy'),
+      bash('security find-generic-password -s "my-app"'),
       read(`${home}/.npmrc`),
       read(`${home}/code/app/README.md`),
     ],
@@ -458,6 +461,7 @@ describe('agent rule packs', () => {
       PERSIST_RE,
       ...TAMPER_RES_NOCASE,
       TAMPER_RE_CASED,
+      KEYCHAIN_SECRET_RE,
       AGENT_CONFIG_RE,
       WRITE_VERB_RE,
     ];

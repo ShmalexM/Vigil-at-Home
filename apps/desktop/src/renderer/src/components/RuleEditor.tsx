@@ -73,11 +73,11 @@ export function RuleEditorPanel({ id, onClose }: { id: string; onClose: () => vo
   );
 }
 
-/** A brand-new rule: just the JSON editor, starting from a template. */
-export function NewRulePanel({ onClose }: { onClose: () => void }) {
+/** A brand-new rule: just the JSON editor, starting from a template (`initial`, or a blank rule). */
+export function NewRulePanel({ onClose, initial }: { onClose: () => void; initial?: string }) {
   return (
     <div className="editor">
-      <JsonEditor initial={NEW_RULE_TEMPLATE} onSaved={onClose} onClose={onClose} />
+      <JsonEditor initial={initial ?? NEW_RULE_TEMPLATE} onSaved={onClose} onClose={onClose} />
     </div>
   );
 }

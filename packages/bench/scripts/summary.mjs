@@ -7,6 +7,7 @@ const dir = resolve(process.argv[2] ?? 'bench-results');
 if (!existsSync(dir)) process.exit(0);
 const pct = (x) => (x === null || x === undefined ? '–' : `${Math.round(x * 100)}%`);
 const ms = (x) => (x === null || x === undefined ? '–' : `${Math.round(x)} ms`);
+const num = (x, d = 2) => (x === null || x === undefined ? '–' : x.toFixed(d));
 const lines = [];
 
 for (const f of readdirSync(dir)
@@ -26,6 +27,10 @@ for (const f of readdirSync(dir)
     lines.push(
       `| Evasive (${s.evasive.total}) | ${s.evasive.caughtIdeal} | ${s.evasive.caughtSensors} |`,
     );
+    if (s.agents)
+      lines.push(
+        `| AI agents, canonical (${s.agents.total}) | ${s.agents.caughtIdeal} | ${s.agents.caughtSensors} |`,
+      );
     const h = d.heldoutSummary;
     if (h)
       lines.push(
@@ -35,14 +40,37 @@ for (const f of readdirSync(dir)
       );
     lines.push('');
     lines.push(
-      '| Workload | Telemetry | Events/day | Alerts/day | Popups/day | Blocks/day | p99 µs/event |',
-      '|---|---|---|---|---|---|---|',
+      '| Workload | Telemetry | Events/day | Alerts/day | Popups/day | Blocks/day | Agent rules/day | p99 µs/event | Stored B/event |',
+      '|---|---|---|---|---|---|---|---|---|',
     );
-    for (const w of d.workload)
+    for (const w of d.workload) {
+      // Agent rules: their alerts plus the steps an agent stopped to ask about.
+      const agent = w.agentRules ? w.agentRules.alerts + w.agentRules.asks : undefined;
+      const b = w.storedBytesPerEvent;
       lines.push(
-        `| ${w.profile}${w.variant ? ` (${w.variant})` : ''} | ${w.telemetry} | ${w.eventsPerDay} | ${w.perDay.alerts.toFixed(2)} | ${w.perDay.popups.toFixed(2)} | ${w.perDay.blocks.toFixed(2)} | ${w.latencyUs.p99.toFixed(1)} |`,
+        `| ${w.profile}${w.variant ? ` (${w.variant})` : ''} | ${w.telemetry} | ${w.eventsPerDay} | ${w.perDay.alerts.toFixed(2)} | ${w.perDay.popups.toFixed(2)} | ${w.perDay.blocks.toFixed(2)} | ${num(agent)} | ${w.latencyUs.p99.toFixed(1)} | ${b ? `${Math.round(b.withAgents)} (+${num(b.delta, 1)})` : '–'} |`,
       );
+    }
     lines.push('');
+  } else if (f === 'preflight.json') {
+    const s = d.summary;
+    lines.push('### Pre-flight', '');
+    lines.push(
+      "Claude Code's hook asks before each tool call; rules answer deny, ask or nothing (never allow).",
+      '',
+      '| Tool calls | Denied | Asked | No opinion |',
+      '|---|---|---|---|',
+      `| Attacks (${s.attacks.total}) | ${s.attacks.denied} | ${s.attacks.asked} | ${s.attacks.missed} |`,
+      `| Look-alikes (${s.lookalikes.total}) | ${s.lookalikes.denied} | ${s.lookalikes.asked} | ${s.lookalikes.quiet} |`,
+      '',
+      `Denies exactly as expected: ${s.deniesExact ? 'yes' : '**no**'}. Known gaps answered as they should be: ${s.gaps.asExpected} of ${s.gaps.total}. Answer time p50 ${num(s.answerUs.p50, 0)} µs, p99 ${num(s.answerUs.p99, 0)} µs.`,
+      '',
+    );
+    for (const m of s.mismatches)
+      lines.push(
+        `- ${m.kind} \`${m.id}\`: expected ${m.expect}, got ${m.decision}${m.ruleIds.length ? ` (${m.ruleIds.join(', ')})` : ''}`,
+      );
+    if (s.mismatches.length) lines.push('');
   } else if (f.startsWith('labels-')) {
     lines.push(
       `### Labels: ${d.model}${d.prompt && d.prompt !== 'shipped' ? ` (${d.prompt})` : ''}${d.split === 'heldout' ? ', held-out' : ''}`,

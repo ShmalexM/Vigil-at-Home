@@ -1,13 +1,19 @@
 import { compareSeverity, type SensorEvent } from '@vigil/core';
 import {
+  AGENT_CATALOG,
+  AgentTracker,
+  agentPreflightRules,
+  agentWatchRules,
+  builtinRules,
+  compileAgentMatchers,
   DetectionEngine,
-  macosCoreRules,
   memoryStores,
   type Detection,
   type DetectionRule,
   type DetectionRuleInput,
   type Stores,
 } from '@vigil/detection';
+import { slimForStorage } from '../../../apps/desktop/src/main/event-slim.js';
 import { ATTACKS, fakeHash, type AttackScenario, type Tactic, type Variant } from './attacks.js';
 import { HELDOUT_ATTACKS, HELDOUT_LOOKALIKES, type HeldoutLookalike } from './heldout.js';
 import { rng } from './rng.js';
@@ -30,13 +36,40 @@ export function notifyLevel(rule: DetectionRule, mode: string): Notify {
   return 'badge';
 }
 
-/** The rules under test: the built-in pack unless a caller passes others (e.g. AI proposals). */
+/** The rules under test: every built-in pack unless a caller passes others (e.g. AI proposals). */
 export type RuleSet = readonly DetectionRuleInput[];
+
+/** The agent-watch and pre-flight rules, whose cost on normal use is reported on its own. */
+export const AGENT_RULE_IDS: ReadonlySet<string> = new Set(
+  [...agentWatchRules, ...agentPreflightRules].map((r) => r.id),
+);
+
+const catalog = compileAgentMatchers(AGENT_CATALOG);
+
+/** Vigil's process tracker as it starts: the built-in agents, no process seen yet. */
+export function agentTracker(): AgentTracker {
+  return new AgentTracker({ matcher: () => catalog });
+}
+
+/**
+ * What the app does with one event inline: the tracker tags it with the
+ * agent it runs under, then the rules run. A tool request from an agent's
+ * hook is only checked (pre-flight): it leaves no trace and runs nothing.
+ */
+function inline(
+  e: DetectionEngine,
+  tracker: AgentTracker,
+  ev: SensorEvent,
+): { event: SensorEvent; detections: Detection[] } {
+  if (ev.kind === 'agent.tool_request') return { event: ev, detections: e.check(ev) };
+  const event = tracker.observe(ev);
+  return { event, detections: e.evaluate(event) };
+}
 
 function engine(
   stores: Stores,
   learningUntil: number,
-  rules: RuleSet = macosCoreRules,
+  rules: RuleSet = builtinRules,
 ): DetectionEngine {
   return new DetectionEngine([...rules], stores, {
     learningUntil,
@@ -103,11 +136,13 @@ function runScenario(
   for (const l of s.lists ?? [])
     stores.lists.add(l.list, l.value, { source: 'bench', updatedAt: at });
   const e = engine(stores, learning ? at + DAY : at - DAY, rules);
+  // A fresh tracker per scenario: what one scenario launched never tags the next.
+  const tracker = agentTracker();
   const raw = s.events(at);
   const events: SensorEvent[] =
     telemetry === 'ideal' ? raw : raw.flatMap((ev) => throughSensors(ev, sensorOpts));
   const detections: Detection[] = [];
-  for (const ev of events) detections.push(...e.evaluate(ev));
+  for (const ev of events) detections.push(...inline(e, tracker, ev).detections);
   const raised = detections.filter((d) => d.alert && (d.mode === 'alert' || d.mode === 'block'));
   const firing = [...new Set(raised.map((d) => d.match.ruleId))];
   // A held-out attack aims at no rule: any alert catches it.
@@ -130,7 +165,7 @@ function runScenario(
 
 export function runAttacks(
   sensorOpts: SensorOptions = {},
-  rules: RuleSet = macosCoreRules,
+  rules: RuleSet = builtinRules,
   scenarios: readonly AttackScenario[] = ATTACKS,
 ): AttackResult[] {
   const out: AttackResult[] = [];
@@ -176,10 +211,11 @@ function runLookalike(l: HeldoutLookalike, telemetry: Telemetry, rules: RuleSet)
   const stores = memoryStores();
   seedLists(stores);
   const e = engine(stores, at - DAY, rules);
+  const tracker = agentTracker();
   const raw = l.events(at);
   const events = telemetry === 'ideal' ? raw : raw.flatMap((ev) => throughSensors(ev));
   const raised = events
-    .flatMap((ev) => e.evaluate(ev))
+    .flatMap((ev) => inline(e, tracker, ev).detections)
     .filter((d) => d.alert && (d.mode === 'alert' || d.mode === 'block'));
   const notify = raised
     .map((d) => notifyLevel(e.getRule(d.match.ruleId)!, d.mode))
@@ -203,7 +239,7 @@ export interface HeldoutResult {
 }
 
 /** The held-out set (heldout.ts): the score that counts, never used for tuning. */
-export function runHeldout(rules: RuleSet = macosCoreRules): HeldoutResult {
+export function runHeldout(rules: RuleSet = builtinRules): HeldoutResult {
   return {
     attacks: runAttacks({}, rules, HELDOUT_ATTACKS),
     lookalikes: (['ideal', 'sensors'] as const).flatMap((t) =>
@@ -262,13 +298,35 @@ export interface WorkloadResult {
   learningDays: number;
   events: number;
   eventsPerDay: number;
-  /** After the learning week. */
-  perDay: { alerts: number; popups: number; badges: number; silent: number; blocks: number };
+  /**
+   * After the learning week. `asks` and `denies` are pre-flight answers to an
+   * agent's hook: the agent stopped to ask the person, or was refused (a
+   * refusal also raises an alert, as in the app).
+   */
+  perDay: {
+    alerts: number;
+    popups: number;
+    badges: number;
+    silent: number;
+    blocks: number;
+    asks: number;
+    denies: number;
+  };
   learningWeek: { alerts: number; popups: number; blocks: number };
-  byRule: Record<string, { alerts: number; blocks: number; notify: Notify; lookalikes: string[] }>;
+  byRule: Record<
+    string,
+    { alerts: number; asks: number; blocks: number; notify: Notify; lookalikes: string[] }
+  >;
   byDay: Array<{ day: number; alerts: number; popups: number; blocks: number }>;
+  /** The agent-watch and pre-flight rules alone, per day after the learning week. */
+  agentRules: { alerts: number; asks: number };
+  /**
+   * What the event log keeps per event, in bytes (the slimmed JSON body plus
+   * the agent_session column): without the process tracker, and with it.
+   */
+  storedBytesPerEvent: { plain: number; withAgents: number; delta: number };
   rates: Readonly<Record<string, number>>;
-  /** Inline cost of evaluating one event (µs). */
+  /** Inline cost of one event (µs): the tracker tags it, then the rules run. */
   latencyUs: { p50: number; p95: number; p99: number; max: number; mean: number };
   eventsPerSecond: number;
 }
@@ -276,6 +334,17 @@ export interface WorkloadResult {
 function percentile(sorted: Float64Array, p: number): number {
   if (sorted.length === 0) return 0;
   return sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))]!;
+}
+
+/** Bytes the event log keeps for one event: its body as stored, and its agent_session column. */
+function storedBytes(e: SensorEvent, matched: boolean): number {
+  const session =
+    e.kind === 'agent.tool_request'
+      ? e.agent.session
+      : 'process' in e
+        ? e.process?.agent?.session
+        : undefined;
+  return Buffer.byteLength(JSON.stringify(slimForStorage(e, matched))) + (session?.length ?? 0);
 }
 
 export function runWorkload(
@@ -288,11 +357,16 @@ export function runWorkload(
   const stores = memoryStores();
   seedLists(stores);
   const e = engine(stores, START + LEARNING_DAYS * DAY, opts.rules);
+  const tracker = agentTracker();
   const alerts: FalseAlert[] = [];
+  const asks: Array<{ day: number; ruleId: string; lookalike: string | null }> = [];
+  const denies: number[] = [];
   const blocks: Array<{ day: number; ruleId: string }> = [];
   const timings: number[] = [];
   let events = 0;
   let evalMs = 0;
+  let plainBytes = 0;
+  let storedWithAgents = 0;
 
   for (let day = 0; day < days; day++) {
     const dayStart = START + day * DAY;
@@ -302,14 +376,34 @@ export function runWorkload(
       for (const ev of batch) {
         events++;
         const t0 = performance.now();
-        const ds = e.evaluate(ev);
+        const { event, detections: ds } = inline(e, tracker, ev);
         const dt = performance.now() - t0;
         evalMs += dt;
         timings.push(dt * 1000);
+        // The app stores every event, with ancestry only where it is looked at (event-slim.ts).
+        const plain = storedBytes(ev, ds.length > 0);
+        plainBytes += plain;
+        storedWithAgents += event === ev ? plain : storedBytes(event, ds.length > 0);
         // Santa itself refused the file read (file-access policy enforced).
         if (ev.kind === 'santa.decision' && ev.decision === 'block' && ev.target === 'file_access')
           blocks.push({ day, ruleId: 'santa-file-access' });
         for (const d of ds) {
+          if (ev.kind === 'agent.tool_request') {
+            // Pre-flight: a deny raises a badge-level alert in the app; an ask is
+            // Claude Code's own prompt, so Vigil raises nothing for it.
+            if (d.mode === 'block') {
+              denies.push(day);
+              alerts.push({
+                day,
+                ruleId: d.match.ruleId,
+                mode: d.mode,
+                notify: 'badge',
+                lookalike: w.lookalike ?? null,
+              });
+            } else if (d.mode === 'alert')
+              asks.push({ day, ruleId: d.match.ruleId, lookalike: w.lookalike ?? null });
+            continue;
+          }
           if (d.alert && (d.mode === 'alert' || d.mode === 'block')) {
             alerts.push({
               day,
@@ -327,19 +421,35 @@ export function runWorkload(
   }
 
   const measured = alerts.filter((a) => a.day >= LEARNING_DAYS);
+  const measuredAsks = asks.filter((a) => a.day >= LEARNING_DAYS);
   const measuredDays = Math.max(1, days - LEARNING_DAYS);
   const byRule: WorkloadResult['byRule'] = {};
+  const entry = (ruleId: string, notify: Notify) =>
+    (byRule[ruleId] ??= { alerts: 0, asks: 0, blocks: 0, notify, lookalikes: [] });
+  const lookalike = (x: { lookalikes: string[] }, l: string | null) => {
+    if (l && !x.lookalikes.includes(l)) x.lookalikes.push(l);
+  };
   for (const a of measured) {
-    const x = (byRule[a.ruleId] ??= { alerts: 0, blocks: 0, notify: a.notify, lookalikes: [] });
+    const x = entry(a.ruleId, a.notify);
     x.alerts++;
-    if (a.lookalike && !x.lookalikes.includes(a.lookalike)) x.lookalikes.push(a.lookalike);
+    lookalike(x, a.lookalike);
   }
-  for (const b of blocks.filter((b) => b.day >= LEARNING_DAYS)) {
-    const x = (byRule[b.ruleId] ??= { alerts: 0, blocks: 0, notify: 'popup', lookalikes: [] });
-    x.blocks++;
+  for (const a of measuredAsks) {
+    // Vigil shows nothing for an ask; the agent's own prompt does the asking.
+    const x = entry(a.ruleId, 'silent');
+    x.asks++;
+    lookalike(x, a.lookalike);
   }
+  for (const b of blocks.filter((b) => b.day >= LEARNING_DAYS)) entry(b.ruleId, 'popup').blocks++;
   const sorted = Float64Array.from(timings).sort();
-  const perDay = (xs: FalseAlert[], n: number) => xs.length / n;
+  const perDay = (xs: unknown[], n: number) => xs.length / n;
+  const agent = (xs: Array<{ ruleId: string }>) =>
+    perDay(
+      xs.filter((x) => AGENT_RULE_IDS.has(x.ruleId)),
+      measuredDays,
+    );
+  const plain = plainBytes / Math.max(1, events);
+  const withAgents = storedWithAgents / Math.max(1, events);
   return {
     profile,
     telemetry,
@@ -362,6 +472,11 @@ export function runWorkload(
         measuredDays,
       ),
       blocks: blocks.filter((b) => b.day >= LEARNING_DAYS).length / measuredDays,
+      asks: perDay(measuredAsks, measuredDays),
+      denies: perDay(
+        denies.filter((day) => day >= LEARNING_DAYS),
+        measuredDays,
+      ),
     },
     learningWeek: {
       alerts: alerts.filter((a) => a.day < LEARNING_DAYS).length,
@@ -375,6 +490,8 @@ export function runWorkload(
       popups: alerts.filter((a) => a.day === day && a.notify === 'popup').length,
       blocks: blocks.filter((b) => b.day === day).length,
     })),
+    agentRules: { alerts: agent(measured), asks: agent(measuredAsks) },
+    storedBytesPerEvent: { plain, withAgents, delta: withAgents - plain },
     rates: workdayRates(profile),
     latencyUs: {
       p50: percentile(sorted, 0.5),
@@ -393,6 +510,8 @@ export interface DetectionSummary {
   rules: number;
   canonical: { total: number; caughtIdeal: number; caughtSensors: number };
   evasive: { total: number; caughtIdeal: number; caughtSensors: number };
+  /** The canonical attacks an AI agent on this Mac carries out (aimed at agent-watch rules). */
+  agents: { total: number; caughtIdeal: number; caughtSensors: number };
   byRule: Array<{
     ruleId: string;
     mode: string;
@@ -404,10 +523,12 @@ export interface DetectionSummary {
 
 export function summarize(
   results: AttackResult[],
-  rules: RuleSet = macosCoreRules,
+  rules: RuleSet = builtinRules,
 ): DetectionSummary {
   const count = (v: Variant, t: Telemetry) =>
     results.filter((r) => r.variant === v && r.telemetry === t);
+  const agents = (t: Telemetry) =>
+    count('canonical', t).filter((r) => r.expect.some((id) => AGENT_RULE_IDS.has(id)));
   const caught = (xs: AttackResult[]) => xs.filter((r) => r.caught).length;
   const byRule = rules.map((rule) => {
     const ideal = results.filter(
@@ -435,6 +556,11 @@ export function summarize(
       total: count('evasive', 'ideal').length,
       caughtIdeal: caught(count('evasive', 'ideal')),
       caughtSensors: caught(count('evasive', 'sensors')),
+    },
+    agents: {
+      total: agents('ideal').length,
+      caughtIdeal: caught(agents('ideal')),
+      caughtSensors: caught(agents('sensors')),
     },
     byRule,
   };
@@ -473,7 +599,7 @@ export interface RuleScore {
 export function scoreRules(
   attacks: AttackResult[],
   workloads: WorkloadResult[],
-  rules: RuleSet = macosCoreRules,
+  rules: RuleSet = builtinRules,
 ): RuleScore[] {
   const days = (w: WorkloadResult) => Math.max(1, w.days - w.learningDays);
   const falseFor = (id: string, telemetry: Telemetry) =>
@@ -561,14 +687,14 @@ function grade(s: Omit<RuleScore, 'grade' | 'why'>): { grade: Grade; why: string
 /**
  * Scores candidate rules (drafted by the AI or the user) against the same
  * attacks and workload, as if they were switched to alert. Shows what each
- * newly catches on top of the built-in pack and what it costs.
+ * newly catches on top of the built-in packs and what it costs.
  */
 export function scoreCandidates(
   candidates: RuleSet,
   opts: { days?: number; telemetry?: Telemetry[] } = {},
 ) {
   const promoted = candidates.map((r) => ({ ...r, mode: 'alert' as const }));
-  const rules = [...macosCoreRules, ...promoted];
+  const rules = [...builtinRules, ...promoted];
   const base = runAttacks();
   const withThem = runAttacks({}, rules);
   const workloads = (['everyday', 'developer'] as const).flatMap((p) =>
@@ -591,13 +717,13 @@ export function scoreCandidates(
 
 /**
  * The held-out grade for a set of candidate rules: held-out attacks they catch
- * that the built-in pack doesn't, and look-alikes they alert on. Tuning loops
+ * that the built-in packs don't, and look-alikes they alert on. Tuning loops
  * use this only to accept or reject a change; its cases never go back to the AI.
  */
 export function scoreCandidatesHeldout(candidates: RuleSet) {
   const promoted = candidates.map((r) => ({ ...r, mode: 'alert' as const }));
   const base = runHeldout();
-  const withThem = runHeldout([...macosCoreRules, ...promoted]);
+  const withThem = runHeldout([...builtinRules, ...promoted]);
   const ids = new Set(promoted.map((r) => r.id));
   const baseCaught = (id: string, t: Telemetry) =>
     base.attacks.find((b) => b.id === id && b.telemetry === t)?.caught ?? false;

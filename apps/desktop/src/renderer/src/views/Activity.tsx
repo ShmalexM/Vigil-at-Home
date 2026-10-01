@@ -1,4 +1,4 @@
-import type { EventKind, SensorEvent } from '@vigil/core';
+import type { AgentTag, EventKind, RuleMode, SensorEvent } from '@vigil/core';
 import {
   AppWindow,
   Bot,
@@ -14,6 +14,7 @@ import {
   Search,
   ShieldAlert,
   ShieldCheck,
+  X,
 } from 'lucide-react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { EventGroup, EventLabel, EventOutcome, EventView } from '../../../shared/ipc';
@@ -21,6 +22,7 @@ import { useLive, vigil } from '../api';
 import { useToast } from '../components/Toasts';
 import { Button, Card, Chip, Segmented, StatusMark } from '../components/ui';
 import { actorLabel, clock, describeAction, describeEvent, timeAgo, timeOfDay } from '../format';
+import { agentRoute, parseActivityParam, VIGIL_SELF } from './agents-format';
 import { PageHead } from './AppShell';
 
 const UNDOABLE = new Set([
@@ -33,8 +35,42 @@ const UNDOABLE = new Set([
 
 type Tab = 'sees' | 'did';
 
-export function ActivityView() {
+/** What an opened event needs to name its agent and link to its session. */
+export interface AgentLinks {
+  /** The agent's name, or its id when Vigil doesn't list it. */
+  nameOf: (id: string) => string;
+  go?: ((route: string) => void) | undefined;
+}
+
+/** Agent names for opened events and the filter chip. */
+export function useAgentLinks(go?: (route: string) => void): AgentLinks {
+  const [agents] = useLive(() => vigil.listAgents());
+  return {
+    nameOf: (id) =>
+      id === VIGIL_SELF ? 'Vigil’s own AI helper' : (agents?.find((a) => a.id === id)?.name ?? id),
+    go,
+  };
+}
+
+/**
+ * `selected` narrows the feed to one agent (`agent-<id>`) or one of its
+ * sessions (`session-<hex>`), as linked from the Agents page.
+ */
+export function ActivityView({
+  selected,
+  go,
+}: {
+  selected?: string | undefined;
+  go?: (route: string) => void;
+}) {
   const [tab, setTab] = useState<Tab>('sees');
+  const filter = parseActivityParam(selected);
+  const filtered = !!(filter.agent || filter.session);
+  const links = useAgentLinks(go);
+  // A link to an agent's activity always lands on the feed.
+  useEffect(() => {
+    if (filtered) setTab('sees');
+  }, [selected, filtered]);
   return (
     <div className="page">
       <PageHead
@@ -59,7 +95,7 @@ export function ActivityView() {
           What Vigil did
         </button>
       </div>
-      {tab === 'sees' ? <EventFeed /> : <ActionLog />}
+      {tab === 'sees' ? <EventFeed filter={filter} links={links} /> : <ActionLog />}
     </div>
   );
 }
@@ -73,6 +109,7 @@ const GROUPS: { value: EventGroup | 'all'; label: string }[] = [
   { value: 'files', label: 'Files' },
   { value: 'startup', label: 'Startup & extensions' },
   { value: 'system', label: 'macOS alerts' },
+  { value: 'agents', label: 'Agent requests' },
 ];
 
 const PAGE = 100;
@@ -80,7 +117,13 @@ const PAGE = 100;
 /** Matches TEXT_SEARCH_WINDOW_MS in shared/ipc.ts (not imported, to keep zod out of the renderer). */
 const SEARCH_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-function EventFeed() {
+function EventFeed({
+  filter,
+  links,
+}: {
+  filter: { agent?: string; session?: string };
+  links: AgentLinks;
+}) {
   const [group, setGroup] = useState<EventGroup | 'all'>('all');
   const [matchedOnly, setMatchedOnly] = useState(false);
   const [text, setText] = useState('');
@@ -97,6 +140,8 @@ function EventFeed() {
     ...(group !== 'all' ? { group } : {}),
     ...(matchedOnly ? { matchedOnly } : {}),
     ...(text.trim() ? { text: text.trim() } : {}),
+    ...(filter.agent ? { agent: filter.agent } : {}),
+    ...(filter.session ? { agentSession: filter.session } : {}),
     limit: PAGE,
   };
   const queryRef = useRef(query);
@@ -182,6 +227,19 @@ function EventFeed() {
             onChange={(e) => setText(e.target.value)}
           />
         </label>
+        {(filter.agent || filter.session) && (
+          <span className="chip accent filter-chip">
+            {filter.agent ? `Agent: ${links.nameOf(filter.agent)}` : 'One agent session'}
+            <button
+              type="button"
+              aria-label="Show every event"
+              title="Show every event"
+              onClick={() => links.go?.('activity')}
+            >
+              <X size={12} />
+            </button>
+          </span>
+        )}
         <Button
           size="sm"
           kind="ghost"
@@ -222,6 +280,7 @@ function EventFeed() {
               view={v}
               open={open === v.event.id}
               onToggle={() => setOpen(open === v.event.id ? undefined : v.event.id)}
+              links={links}
             />
           ))
         )}
@@ -273,14 +332,17 @@ const KIND_ICON: Record<EventKind, ReactNode> = {
   'agent.tool_request': <Bot size={15} />,
 };
 
-function EventRow({
+/** One line of the feed, opening into the event's fields. Also used for an agent session's events. */
+export function EventRow({
   view: { event: e, outcome, label },
   open,
   onToggle,
+  links,
 }: {
   view: EventView;
   open: boolean;
   onToggle: () => void;
+  links: AgentLinks;
 }) {
   const detail = eventDetail(e);
   return (
@@ -293,10 +355,10 @@ function EventRow({
           {detail && <span className="t-small mono ellipsis">{detail}</span>}
         </span>
         {label && label.label !== 'benign' && <LabelChip label={label} />}
-        <OutcomeChip outcome={outcome} />
+        <OutcomeChip outcome={outcome} toolRequest={e.kind === 'agent.tool_request'} />
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
       </button>
-      {open && <EventFields event={e} outcome={outcome} />}
+      {open && <EventFields event={e} outcome={outcome} links={links} />}
     </div>
   );
 }
@@ -314,7 +376,27 @@ function LabelChip({ label }: { label: EventLabel }) {
   );
 }
 
-function OutcomeChip({ outcome }: { outcome: EventOutcome | null }) {
+/** What the top match did. A tool request is asked about or stopped before it runs. */
+const OUTCOME_PREFIX: Record<RuleMode, string> = {
+  block: 'Blocked: ',
+  alert: 'Alert: ',
+  shadow: 'Shadow: ',
+  disabled: '',
+};
+const TOOL_OUTCOME_PREFIX: Record<RuleMode, string> = {
+  block: 'Stopped: ',
+  alert: 'Asked: ',
+  shadow: 'Recorded: ',
+  disabled: '',
+};
+
+function OutcomeChip({
+  outcome,
+  toolRequest,
+}: {
+  outcome: EventOutcome | null;
+  toolRequest: boolean;
+}) {
   if (!outcome) return <span className="t-small feed-outcome">Not checked</span>;
   const top = outcome.matches[0];
   if (!top) {
@@ -328,7 +410,7 @@ function OutcomeChip({ outcome }: { outcome: EventOutcome | null }) {
   const extra = outcome.matches.length > 1 ? ` +${outcome.matches.length - 1}` : '';
   return (
     <Chip tone={tone} title={outcome.matches.map((m) => `${m.ruleName} (${m.mode})`).join('\n')}>
-      {{ block: 'Blocked: ', alert: 'Alert: ', shadow: 'Shadow: ', disabled: '' }[top.mode]}
+      {(toolRequest ? TOOL_OUTCOME_PREFIX : OUTCOME_PREFIX)[top.mode]}
       {top.ruleName}
       {extra}
     </Chip>
@@ -353,12 +435,66 @@ function eventDetail(e: SensorEvent): string | undefined {
       return e.extensionId;
     case 'system.alert':
       return e.path;
+    case 'agent.tool_request':
+      return e.command ?? e.filePath ?? e.url ?? e.mcpServer;
   }
 }
 
 const base = (p: string) => p.split('/').filter(Boolean).pop() ?? p;
 
-function EventFields({ event: e, outcome }: { event: SensorEvent; outcome: EventOutcome | null }) {
+/** Which agent an event ran under, with a link to its session when there is a page for it. */
+function AgentField({
+  id,
+  session,
+  links,
+}: {
+  id: string;
+  session?: string | undefined;
+  links: AgentLinks;
+}) {
+  const own = id === VIGIL_SELF;
+  return (
+    <span className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+      <Chip tone={own ? 'ai' : 'accent'}>
+        <Bot size={12} />
+        {links.nameOf(id)}
+      </Chip>
+      {session && !own && links.go && (
+        <button
+          type="button"
+          className="more-link"
+          onClick={() => links.go?.(agentRoute(id, session))}
+        >
+          Open this session
+        </button>
+      )}
+    </span>
+  );
+}
+
+/** How the hook was answered, from the rules that matched. */
+function answerOf(outcome: EventOutcome | null): string {
+  const modes = new Set(outcome?.matches.map((m) => m.mode));
+  if (modes.has('block')) return 'Stopped: Claude Code did not run it';
+  if (modes.has('alert')) return 'Claude Code asked you first';
+  return 'Left to Claude Code';
+}
+
+/** "the agent itself", "started by the agent", "2 levels under the agent". */
+function depthText(t: AgentTag): string {
+  if (t.depth === 0) return 'the agent itself';
+  return t.depth === 1 ? 'started by the agent' : `${t.depth} levels under the agent`;
+}
+
+function EventFields({
+  event: e,
+  outcome,
+  links,
+}: {
+  event: SensorEvent;
+  outcome: EventOutcome | null;
+  links: AgentLinks;
+}) {
   const fields: [string, ReactNode][] = [
     ['When', clock(e.ts)],
     ['Seen by', e.source === 'osquery' ? 'osquery' : e.source === 'santa' ? 'Santa' : 'Vigil'],
@@ -370,6 +506,23 @@ function EventFields({ event: e, outcome }: { event: SensorEvent; outcome: Event
     fields.push(['Process id', p.pid]);
     if (p.args?.length) fields.push(['Arguments', <code key="a">{p.args.join(' ')}</code>]);
     if (p.parentPath) fields.push(['Started by', <code key="pp">{p.parentPath}</code>]);
+    if (p.ancestors?.length) {
+      fields.push([
+        'Process chain',
+        <code key="anc" title="Nearest first">
+          {[base(p.path), ...p.ancestors].join(' ← ')}
+        </code>,
+      ]);
+    }
+    if (p.agent) {
+      fields.push([
+        'Agent',
+        <span key="ag" className="col" style={{ gap: 2 }}>
+          <AgentField id={p.agent.id} session={p.agent.session} links={links} />
+          <span className="t-small">This program is {depthText(p.agent)}.</span>
+        </span>,
+      ]);
+    }
     if (p.signing) fields.push(['Signature', signingLabel(p.signing, p.teamId)]);
     if (p.sha256) fields.push(['SHA-256', <code key="h">{p.sha256}</code>]);
     if (p.quarantine?.originUrl)
@@ -394,9 +547,27 @@ function EventFields({ event: e, outcome }: { event: SensorEvent; outcome: Event
   if (e.kind === 'santa.decision') fields.push(['Santa said', `${e.decision}: ${e.reason}`]);
   if (e.kind === 'agent.tool_request') {
     fields.push(['Tool', <code key="t">{e.tool}</code>]);
+    if (e.mcpServer) fields.push(['MCP server', <code key="m">{e.mcpServer}</code>]);
     if (e.command) fields.push(['Command', <code key="c">{e.command}</code>]);
+    if (e.commandBytes !== undefined && e.commandBytes > 4096)
+      fields.push(['Command size', `${e.commandBytes} bytes; Vigil checked the first 4 KB`]);
     if (e.filePath) fields.push(['File', <code key="f">{e.filePath}</code>]);
     if (e.url) fields.push(['Address', <code key="u">{e.url}</code>]);
+    if (e.cwd) fields.push(['In folder', <code key="w">{e.cwd}</code>]);
+    if (e.contentBytes !== undefined)
+      fields.push([
+        'Content',
+        `${e.contentBytes} bytes${e.contentSha256 ? `, SHA-256 ${e.contentSha256.slice(0, 16)}…` : ''}. The text itself never reaches Vigil.`,
+      ]);
+    fields.push([
+      'Agent',
+      e.agent.id ? (
+        <AgentField key="ag" id={e.agent.id} session={e.agent.session} links={links} />
+      ) : (
+        'Claude Code (Vigil didn’t see which session started it)'
+      ),
+    ]);
+    fields.push(['Answer', answerOf(outcome)]);
   }
   fields.push([
     'Rules',

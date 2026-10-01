@@ -8,6 +8,7 @@
 //   1. appears in the top-right corner of the screen,
 //   2. does not take keyboard focus from the window the user is working in,
 //   3. stays above other windows, on every Space, and over a full-screen window.
+// Along the way it captures the Agents page (agents.png) for review.
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -130,6 +131,18 @@ try {
   }
   const main = await windowByHash('home');
   await sleep(1500);
+
+  // The Agents page renders, captured for review; then back to Home for the popup checks.
+  await main.evaluate(() => (window.location.hash = 'agents'));
+  const agents = await main.waitForSelector('h1:has-text("Agents")', { timeout: 5000 }).then(
+    () => true,
+    () => false,
+  );
+  check('Agents page renders', agents);
+  await sleep(500);
+  await main.screenshot({ path: join(out, 'agents.png') });
+  await main.evaluate(() => (window.location.hash = 'home'));
+  await sleep(300);
 
   // 1. Normal window: the user is working in the main window.
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.focus());

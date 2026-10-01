@@ -105,6 +105,8 @@ export const TAMPER_RES_NOCASE = [
 ];
 /** Case-sensitive: `pfctl -d` turns the firewall off and `-F` flushes it; `pfctl -f` loads rules and is fine. */
 export const TAMPER_RE_CASED = String.raw`pfctl\s+-(d\b|F)`;
+/** `security` printing a saved password (`-w`) or exporting keychain items. */
+export const KEYCHAIN_SECRET_RE = String.raw`security\s+(find-(generic|internet)-password\b[^|;&]*\s-w\b|export\b)`;
 /** Agent settings files, where hooks, permissions and MCP servers are configured. */
 export const AGENT_CONFIG_RE = String.raw`(\.claude/settings[A-Za-z.]*\.json|\.codex/config\.toml|\.mcp\.json|\.cursor/(hooks|mcp)\.json|claude_desktop_config\.json)`;
 /** Ways a command changes a file. */
@@ -339,12 +341,7 @@ export const agentWatchRules: DetectionRuleInput[] = [
     fidelity: 'medium',
     eventKinds: ['process.exec'],
     condition: {
-      all: [
-        AGENT,
-        CHILD,
-        via(['security']),
-        cmd(String.raw`security\s+(find-(generic|internet)-password\b[^|;&]*\s-w\b|export\b)`),
-      ],
+      all: [AGENT, CHILD, via(['security']), cmd(KEYCHAIN_SECRET_RE)],
     },
     response: [SUSPEND],
     reasons: [

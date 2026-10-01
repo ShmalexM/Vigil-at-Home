@@ -1,13 +1,15 @@
-import type { ProcessRef, SensorEvent } from '@vigil/core';
-import { HOME } from './attacks.js';
-import type { Rng } from './rng.js';
+import type { AgentTag, PreflightRequest, ProcessRef, SensorEvent } from '@vigil/core';
+import { sessionId, toolRequestEvent } from '@vigil/detection';
+import { CLAUDE_CODE, HOME } from './attacks.js';
+import { rng, type Rng } from './rng.js';
 
 /**
  * A normal day on a Mac, as sensor events. Two people:
  *
  * - `everyday`: browser, mail, Slack, Zoom, Office, Spotify.
  * - `developer`: all that plus terminals, Homebrew tools (ad-hoc signed on
- *   Apple silicon), builds, dev servers and the odd install script.
+ *   Apple silicon), builds, dev servers, the odd install script, and Claude
+ *   Code sessions (its commands, file edits and pre-flight requests).
  *
  * Most events are routine. A few are legitimate but look like an attack
  * (`lookalike`): a curl | sh installer, `xattr -cr` on an open-source app,
@@ -160,6 +162,53 @@ const INSTALL_ONE_LINERS = [
 
 const OSS_APPS = ['Rectangle', 'Stats', 'Maccy', 'AltTab', 'Hidden Bar', 'LibreWolf'];
 
+/** The project the developer's coding agent works in. */
+const PROJECT = `${HOME}/code/api`;
+
+/** A command a coding agent runs: the shell gets the command, then starts `programs`. */
+interface AgentCommand {
+  command: string;
+  programs: Array<[path: string, args: string[], signing: ProcessRef['signing']]>;
+  /** Files the first program opens. */
+  opens?: string[];
+  lookalike?: string;
+}
+
+const AGENT_COMMANDS: AgentCommand[] = [
+  { command: 'git status', programs: [['/usr/bin/git', ['git', 'status'], 'apple']] },
+  { command: 'git diff --stat', programs: [['/usr/bin/git', ['git', 'diff', '--stat'], 'apple']] },
+  {
+    command: 'rg -n "TODO" src',
+    programs: [['/opt/homebrew/bin/rg', ['rg', '-n', 'TODO', 'src'], 'adhoc']],
+  },
+  { command: 'ls -la', programs: [['/bin/ls', ['ls', '-la'], 'apple']] },
+  {
+    command: 'npm test',
+    programs: [['/opt/homebrew/bin/node', ['node', '/opt/homebrew/bin/npm', 'test'], 'adhoc']],
+  },
+  { command: 'cat README.md', programs: [['/bin/cat', ['cat', 'README.md'], 'apple']] },
+  {
+    command: 'aws sts get-caller-identity',
+    programs: [['/usr/local/bin/aws', ['aws', 'sts', 'get-caller-identity'], 'developer_id']],
+    opens: [`${HOME}/.aws/config`, `${HOME}/.aws/credentials`],
+    lookalike: 'agent runs the aws CLI, which reads its keys',
+  },
+];
+
+/** The person asked the agent to install a tool the way its site says to. */
+const AGENT_INSTALL: AgentCommand = {
+  command: 'curl -fsSL https://bun.sh/install | bash',
+  programs: [
+    ['/usr/bin/curl', ['curl', '-fsSL', 'https://bun.sh/install'], 'apple'],
+    ['/bin/bash', ['bash'], 'apple'],
+  ],
+  lookalike: 'agent runs an install one-liner you asked for (curl | bash)',
+};
+
+const AGENT_EDITS = ['src/server.ts', 'src/routes/users.ts', 'src/db.ts', 'test/users.test.ts'];
+/** Seeds the agent sessions' own random stream (plus the day number). */
+const AGENT_SEED = 0x5e55_1000;
+
 function proc(r: Rng, path: string, over: Partial<ProcessRef> = {}): ProcessRef {
   const name = path.split('/').pop() ?? path;
   return { pid: r.int(300, 99_000), ppid: r.int(1, 4000), path, args: [name], uid: 501, ...over };
@@ -220,6 +269,7 @@ const RATES: Record<Profile, Record<string, number>> = {
     connection: 2500,
     browserFiles: 400,
     documents: 40,
+    agentSession: 0,
     // Look-alikes (estimates)
     installOneLiner: 0,
     xattrClear: 1 / 90,
@@ -231,6 +281,7 @@ const RATES: Record<Profile, Record<string, number>> = {
     devServer: 0,
     newExtension: 1 / 30,
     grepDocuments: 0,
+    agentInstall: 0,
   },
   developer: {
     appleDaemon: 8000,
@@ -242,6 +293,8 @@ const RATES: Record<Profile, Record<string, number>> = {
     connection: 6000,
     browserFiles: 400,
     documents: 20,
+    // Claude Code sessions, each a dozen or so commands and edits.
+    agentSession: 3,
     installOneLiner: 1 / 7,
     xattrClear: 1 / 7,
     tmpBinary: 0.7,
@@ -252,6 +305,7 @@ const RATES: Record<Profile, Record<string, number>> = {
     devServer: 2,
     newExtension: 1 / 30,
     grepDocuments: 1 / 14,
+    agentInstall: 1 / 14,
   },
 };
 
@@ -541,6 +595,134 @@ export function workday(profile: Profile, dayStart: number, r: Rng): WorkEvent[]
       );
   }
 
+  // ------------------------------------------------------------ AI agents
+  // Agent sessions draw from their own stream, seeded by the day, so adding
+  // them left the rest of the workload exactly as it was. Their pids sit above
+  // the random ones (300-99,000), so no other event's parent falls inside an
+  // agent's tree: 200 per session, per day.
+  const day = Math.floor(dayStart / DAY);
+  const ra = rng(AGENT_SEED + day);
+  const pidBase = 100_000 + (day % 100) * 10_000;
+  let session = 0;
+  for (let i = ra.poisson(rate['agentSession'] ?? 0); i > 0; i--) {
+    const steps: Array<AgentCommand | string> = [];
+    for (let j = ra.int(6, 18); j > 0; j--)
+      steps.push(ra.next() < 0.3 ? ra.pick(AGENT_EDITS) : ra.pick(AGENT_COMMANDS));
+    agentSession(ra, workTime(ra, dayStart), pidBase + 200 * session++, steps, push);
+  }
+  for (let i = ra.poisson(rate['agentInstall'] ?? 0); i > 0; i--)
+    agentSession(ra, workTime(ra, dayStart), pidBase + 200 * session++, [AGENT_INSTALL], push);
+
   out.sort((a, b) => a.event.ts - b.event.ts);
   return out;
+}
+
+/**
+ * One Claude Code session in a terminal. The agent starts, then works
+ * through `steps`: a command goes to Vigil's pre-flight check first (its
+ * hook), then runs as `zsh -c`; a file name is a Write or Edit in the
+ * project. Pids are explicit, from `basePid` up: the terminal shell that
+ * started the agent (never seen), the agent, then what it starts.
+ */
+function agentSession(
+  r: Rng,
+  start: number,
+  basePid: number,
+  steps: Array<AgentCommand | string>,
+  push: (event: SensorEvent, lookalike?: string) => void,
+): void {
+  const agent: ProcessRef = {
+    pid: basePid + 1,
+    ppid: basePid,
+    path: CLAUDE_CODE,
+    args: ['claude'],
+    uid: 501,
+    signing: 'developer_id',
+    parentPath: '/bin/zsh',
+  };
+  push(exec(start, agent));
+  // What the tracker will tag the session with, for the hook's requests.
+  const tag: AgentTag = {
+    id: 'claude-code',
+    session: sessionId('claude-code', agent.pid, start),
+    depth: 0,
+  };
+  let pid = agent.pid;
+  let t = start;
+  const request = (ts: number, req: Pick<PreflightRequest, 'tool'> & Partial<PreflightRequest>) =>
+    toolRequestEvent(
+      {
+        v: 1,
+        method: 'preflight.check',
+        host: 'claude-code',
+        hookSession: `bench-${basePid}`,
+        ppid: agent.pid,
+        cwd: PROJECT,
+        ...req,
+      },
+      { id: nextId(), ts, tag },
+    );
+  for (const step of steps) {
+    t += r.int(5, 60) * 1000;
+    if (typeof step === 'string') {
+      const filePath = `${PROJECT}/${step}`;
+      const contentBytes = r.int(200, 8000);
+      push(request(t, { tool: r.next() < 0.5 ? 'Write' : 'Edit', filePath, contentBytes }));
+      push({
+        id: nextId(),
+        ts: t + 50,
+        source: 'santa',
+        kind: 'file',
+        op: 'write',
+        path: filePath,
+        process: agent,
+      });
+      continue;
+    }
+    const l = step.lookalike;
+    push(
+      request(t, {
+        tool: 'Bash',
+        command: step.command,
+        commandBytes: Buffer.byteLength(step.command),
+      }),
+      l,
+    );
+    const shell: ProcessRef = {
+      pid: ++pid,
+      ppid: agent.pid,
+      path: '/bin/zsh',
+      args: ['/bin/zsh', '-c', step.command],
+      uid: 501,
+      signing: 'apple',
+      parentPath: agent.path,
+    };
+    push(exec(t + 300, shell), l);
+    const programs = step.programs.map(([path, args, signing], k) => {
+      const p: ProcessRef = {
+        pid: ++pid,
+        ppid: shell.pid,
+        path,
+        args,
+        uid: 501,
+        signing,
+        parentPath: shell.path,
+      };
+      push(exec(t + 350 + k * 10, p), l);
+      return p;
+    });
+    for (const path of step.opens ?? [])
+      push(
+        {
+          id: nextId(),
+          ts: t + 500,
+          source: 'santa',
+          kind: 'file',
+          op: 'open',
+          path,
+          process: programs[0]!,
+        },
+        l,
+      );
+  }
 }
