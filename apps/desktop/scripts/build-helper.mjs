@@ -1,6 +1,7 @@
 // Builds what the app ships to install the Vigil helper:
 //   build/helper/common/        helper.mjs (the helper, bundled), the launchd job,
-//                               the install/uninstall scripts and the vigil-helper launcher
+//                               the install/uninstall scripts and the vigil-helper launcher,
+//                               and vigil-hook.mjs (the Claude Code pre-flight hook, bundled)
 //   build/helper/darwin-<arch>/ node, Node.js's own signed and notarized macOS binary
 //   build/helper/dev-<arch>/    both together, which a development build installs from
 // electron-builder copies common and darwin-<arch> into Contents/Resources/helper.
@@ -41,9 +42,7 @@ async function bundle() {
   const common = join(out, 'common');
   rmSync(common, { recursive: true, force: true });
   mkdirSync(common, { recursive: true });
-  await build({
-    entryPoints: [join(repo, 'packages/helper/src/cli.ts')],
-    outfile: join(common, 'helper.mjs'),
+  const options = {
     bundle: true,
     platform: 'node',
     format: 'esm',
@@ -54,6 +53,18 @@ async function bundle() {
     },
     legalComments: 'inline',
     logLevel: 'warning',
+  };
+  await build({
+    ...options,
+    entryPoints: [join(repo, 'packages/helper/src/cli.ts')],
+    outfile: join(common, 'helper.mjs'),
+  });
+  // The pre-flight hook runs as the user, from the app bundle, on the same
+  // signed node. install.sh doesn't copy it: nothing about it runs as root.
+  await build({
+    ...options,
+    entryPoints: [join(repo, 'packages/agent-hook/src/cli.ts')],
+    outfile: join(common, 'vigil-hook.mjs'),
   });
   for (const f of ['install.sh', 'uninstall.sh', 'vigil-helper']) {
     copyFileSync(join(app, 'helper', f), join(common, f));
@@ -63,7 +74,7 @@ async function bundle() {
     join(repo, 'packages/helper/launchd/com.vigilathome.helper.plist'),
     join(common, 'com.vigilathome.helper.plist'),
   );
-  console.log(`helper bundled to ${common}`);
+  console.log(`helper and pre-flight hook bundled to ${common}`);
 }
 
 async function fetchOk(url) {

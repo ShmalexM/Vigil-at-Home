@@ -22,9 +22,9 @@ function rule(r: PackRule): DetectionRuleInput {
   return { version: 1, origin: 'builtin', createdAt: PACK_DATE, updatedAt: PACK_DATE, ...r };
 }
 
-const UNTRUSTED_SIGNING = ['unsigned', 'adhoc', 'invalid'];
-const SHELLS = ['sh', 'bash', 'zsh', 'dash', 'ksh'];
-const SCRIPT_RUNNERS = [
+export const UNTRUSTED_SIGNING = ['unsigned', 'adhoc', 'invalid'];
+export const SHELLS = ['sh', 'bash', 'zsh', 'dash', 'ksh'];
+export const SCRIPT_RUNNERS = [
   'osascript',
   'python',
   'python3',
@@ -35,7 +35,7 @@ const SCRIPT_RUNNERS = [
   ...SHELLS,
 ];
 
-const SUSPEND = {
+export const SUSPEND = {
   kind: 'process.suspend',
   pid: '{{process.pid}}',
   startTime: '{{process.startTime}}',
@@ -53,6 +53,9 @@ const SANTA_BLOCK_BINARY = {
   identifier: '{{process.sha256}}',
   policy: 'block',
 } as const;
+
+/** A download piped straight into a shell: `curl … | sh`, `wget … | sudo bash`. */
+export const PIPE_TO_SHELL_RE = '(curl|wget)\\s[^|]*\\|\\s*(sudo\\s+)?(ba|z|da)?sh\\b';
 
 /** Developer tools (Homebrew Python, Ansible, git helpers) read these every day. */
 const SSH_KEY_GLOBS = ['~/.ssh/id_*'];
@@ -417,11 +420,7 @@ export const macosCoreRules: DetectionRuleInput[] = [
         { field: 'process.name', op: 'in', value: SHELLS },
         {
           any: [
-            {
-              field: 'process.commandLine',
-              op: 'regex',
-              value: ['(curl|wget)\\s[^|]*\\|\\s*(sudo\\s+)?(ba|z|da)?sh\\b'],
-            },
+            { field: 'process.commandLine', op: 'regex', value: [PIPE_TO_SHELL_RE] },
             { field: 'process.commandLine', op: 'contains', value: ['$(curl', '$(wget'] },
           ],
         },

@@ -24,6 +24,7 @@ Vigil at Home is in alpha. Only the latest release and `main` get security fixes
 - ways to get a block lifted, an allow rule added or a detection rule changed without the user's approval
 - ways for event data, alert text or AI output to reach anything other than Vigil's read-only tools
 - the Santa sync server, the osquery configuration and the app's IPC
+- the agent socket (`run/agent.sock` in the app's data folder) that Claude Code's pre-flight hook asks. Only your account can reach it, and it is read-only: it answers deny, ask or nothing, never allow, and changes no rule, setting or block. Anything that makes it do more, or makes the hook (`vigil-hook.mjs`) read files or send what a tool would write, is in scope. See [docs/agents.md](docs/agents.md)
 - leaks of API keys that Vigil stores in the Keychain
 
 Bugs in Santa, osquery, Electron, Claude Code, Codex or Ollama belong with those projects. Tell us too if Vigil makes one of them worse.

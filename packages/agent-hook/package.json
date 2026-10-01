@@ -1,0 +1,18 @@
+{
+  "name": "@vigil/agent-hook",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The pre-flight hook Claude Code runs before a tool call: it asks Vigil and prints deny, ask or nothing, never allow",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/hook.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@vigil/core": "workspace:*",
+    "zod": "^4.1.0"
+  }
+}

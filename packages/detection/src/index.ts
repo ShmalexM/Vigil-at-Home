@@ -30,6 +30,26 @@ export {
 } from './state/sqlite.js';
 export { macosCoreRules, CREDENTIAL_STORE_GLOBS } from './packs/macos-core.js';
 export {
+  agentWatchRules,
+  SECRET_PATH_RE,
+  SECRET_FILE_GLOBS,
+  UPLOAD_RE,
+  NET_SINK_RE,
+  PASTE_HOST_RE,
+  ENV_DUMP_RE,
+  PERSIST_RE,
+  TAMPER_RES_NOCASE,
+  TAMPER_RE_CASED,
+  AGENT_CONFIG_RE,
+  WRITE_VERB_RE,
+  AGENT_CONFIG_GLOBS,
+} from './packs/agent-watch.js';
+export {
+  agentPreflightRules,
+  PREFLIGHT_PROBING_RULE_ID,
+  builtinRules,
+} from './packs/agent-preflight.js';
+export {
   replayRule,
   type ReplayReport,
   type ReplayOptions,
