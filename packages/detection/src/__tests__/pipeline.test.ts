@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { conditionUsesAgentFields, isAgentField } from '../agents/fields.js';
 import { userOrigin } from '../user.js';
 import { proc, testRule } from './fixtures.js';
 import { NOW, twoWeeks } from './history.js';
@@ -264,5 +265,91 @@ describe('AI tuning proposals', () => {
     );
     engine.upsertRule({ ...(baseRule as object), version: 5 } as never);
     expect(() => pipeline.approve(res.proposalId!, userOrigin('rules-screen'))).toThrow(/changed/);
+  });
+});
+
+describe('AI proposals about agent rules', () => {
+  const watchRule = testRule({
+    id: 'agent-secret-command',
+    eventKinds: ['process.exec'],
+    tags: ['agent-watch'],
+    condition: {
+      all: [
+        { field: 'process.agent.id', op: 'exists' },
+        { field: 'process.commandLine', op: 'contains', value: '.aws/credentials' },
+      ],
+    },
+  });
+  const toolRule = testRule({
+    id: 'my-tool-policy',
+    eventKinds: ['agent.tool_request'],
+    condition: { field: 'command', op: 'contains', value: 'git push --force' },
+    reasons: ['{{tool}} would force-push'],
+  });
+  const narrow = { field: 'process.sha256', op: 'eq', value: '1'.repeat(64) } as const;
+  const tune = (ruleId: string, addExclusion: unknown = narrow) => ({
+    ruleId,
+    addExclusion,
+    rationale: 'This tool is a known build helper.',
+  });
+
+  it('refuses to tune or retire an agent rule, for good', () => {
+    const { pipeline, engine } = twoWeeks();
+    engine.upsertRule(watchRule);
+    engine.upsertRule(toolRule);
+    for (const id of ['agent-secret-command', 'my-tool-policy']) {
+      expect(pipeline.submitTuning(tune(id), 'claude')).toEqual({
+        ok: false,
+        errors: ['Agent rules are tuned only by you.'],
+        warnings: [],
+        final: true,
+      });
+      const retire = { ruleId: id, toMode: 'shadow', rationale: 'Noisy.', evidence: ['x'] };
+      expect(pipeline.submitRetirement(retire, 'claude')).toMatchObject({
+        ok: false,
+        errors: ['Agent rules are tuned only by you.'],
+        final: true,
+      });
+    }
+    expect(pipeline.list()).toEqual([]);
+  });
+
+  it('refuses an AI exclusion on agent or tool fields', () => {
+    const { pipeline, engine } = twoWeeks();
+    engine.upsertRule(
+      testRule({
+        id: 'unsigned-net-alert',
+        eventKinds: ['network.connection'],
+        condition: { field: 'process.signing', op: 'in', value: ['unsigned', 'adhoc'] },
+      }),
+    );
+    const byAgent = { field: 'process.agent.id', op: 'eq', value: 'claude-code' };
+    const res = pipeline.submitTuning(
+      tune('unsigned-net-alert', { all: [narrow, byAgent] }),
+      'claude',
+    );
+    expect(res.ok).toBe(false);
+    expect(res.final).toBeUndefined();
+    expect(res.errors.join(' ')).toMatch(/agent or tool-request fields/);
+    expect(pipeline.submitTuning(tune('unsigned-net-alert'), 'claude').ok).toBe(true);
+
+    const rule = { ...pasteRule, id: 'paste-quiet', exclusions: [byAgent] };
+    const sub = pipeline.submitRule({ rule, rationale: why }, 'claude');
+    expect(sub.ok).toBe(false);
+    expect(sub.errors.join(' ')).toMatch(/agent or tool-request fields/);
+  });
+
+  it('knows which fields describe an agent', () => {
+    for (const f of ['process.agent', 'process.agent.id', 'process.ancestors', 'agent.id', 'cwd'])
+      expect(isAgentField(f)).toBe(true);
+    for (const f of ['process.agentx', 'process.cwd', 'process.path', 'commandLine', 'urls'])
+      expect(isAgentField(f)).toBe(false);
+    expect(
+      conditionUsesAgentFields({ not: { firstSeen: { key: ['process.path', 'tool'] } } }),
+    ).toBe(true);
+    expect(conditionUsesAgentFields({ inList: { list: 'x_y', field: 'url' } })).toBe(true);
+    expect(conditionUsesAgentFields({ any: [narrow, { field: 'path', op: 'exists' }] })).toBe(
+      false,
+    );
   });
 });

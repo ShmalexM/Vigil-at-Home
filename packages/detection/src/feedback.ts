@@ -1,4 +1,5 @@
 import { canChangeMode, newId, type RuleMode, type UserDecision } from '@vigil/core';
+import { isAgentField } from './agents/fields.js';
 import type { DetectionEngine } from './engine.js';
 import { assertUserOrigin, type UserOrigin } from './origin.js';
 import type { RuleException } from './state/stores.js';
@@ -57,6 +58,16 @@ function exceptionMatch(
 }
 
 /**
+ * Refuse an exception that names only an agent or its tool request, e.g.
+ * `{ 'process.agent.id': 'claude-code' }`: it would silence the rule for
+ * everything that agent does. Exceptions name a program, signer or thing, so
+ * an empty match is refused too.
+ */
+export function assertExceptionScope(match: Record<string, string>): void {
+  if (Object.keys(match).every(isAgentField)) throw new Error('exception too broad');
+}
+
+/**
  * Everything the user can do to rules. Every method needs a UserOrigin, so
  * none of it is reachable from the AI tool surface.
  */
@@ -107,6 +118,7 @@ export class Feedback {
       } else {
         const match = exceptionMatch(decision.scope, d);
         if (match) {
+          assertExceptionScope(match);
           const ex: RuleException = { id: newId(ts), ruleId, match, createdAt: ts };
           ex.note = decision.note ?? `Marked safe from alert ${d.alert?.id ?? d.match.id}`;
           exceptions.add(ex);

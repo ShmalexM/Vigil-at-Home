@@ -30,6 +30,23 @@ export const SigningStatus = z.enum([
 ]);
 export type SigningStatus = z.infer<typeof SigningStatus>;
 
+/** A watched AI agent's id, e.g. `claude-code`. Built-in ids and the user's own share this shape. */
+export const AgentId = z.string().regex(/^[a-z0-9][a-z0-9-]{0,39}$/);
+export type AgentId = z.infer<typeof AgentId>;
+
+/**
+ * Which watched agent a process runs under. Set by Vigil's process tracker
+ * before rules run, never by a sensor. `depth` is 0 for the agent itself, 1
+ * for what it starts directly, and so on.
+ */
+export const AgentTag = z.object({
+  id: AgentId,
+  /** One run of the agent: 16 hex chars derived from the root process. */
+  session: z.string().regex(/^[0-9a-f]{16}$/),
+  depth: z.number().int().min(0).max(64),
+});
+export type AgentTag = z.infer<typeof AgentTag>;
+
 /** A process as seen by a sensor. `pid` + `startTime` identifies it; pids are reused. */
 export const ProcessRef = z.object({
   pid: z.number().int().nonnegative(),
@@ -54,6 +71,10 @@ export const ProcessRef = z.object({
       agent: z.string().optional(),
     })
     .optional(),
+  /** Program names of the parent, grandparent and so on, nearest first. Filled by Vigil, not sensors. */
+  ancestors: z.array(z.string().max(255)).max(4).optional(),
+  /** Set when the process runs under a watched AI agent. */
+  agent: AgentTag.optional(),
 });
 export type ProcessRef = z.infer<typeof ProcessRef>;
 

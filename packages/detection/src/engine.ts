@@ -129,6 +129,9 @@ function subjectOf(e: DetectionEvent): Alert['subject'] {
     case 'file':
       if (!e.process) return { kind: 'file', label: lastPart(e.path), path: e.path };
       break;
+    case 'agent.tool_request':
+      // Its process is only the shell the request would start.
+      return { kind: 'process', label: `${e.tool} request` };
     default:
       break;
   }
@@ -266,6 +269,21 @@ export class DetectionEngine {
     return out;
   }
 
+  /**
+   * Evaluate without leaving a trace: no history, no baseline learning, no
+   * dedupe or threshold state, no rule statistics. The pre-flight path uses
+   * it, so asking about a tool call many times changes nothing. Each mode is
+   * the one `evaluate` would apply; threshold rules never match here.
+   */
+  check(e: DetectionEvent): Detection[] {
+    const out: Detection[] = [];
+    for (const c of this.byKind.get(e.kind) ?? []) {
+      const d = this.evaluateRule(c, e, true);
+      if (d) out.push(d);
+    }
+    return out;
+  }
+
   /** Resolve the rule's response templates, dropping any the safety floor refuses. */
   private resolveResponse(rule: DetectionRule, e: DetectionEvent, downgrades: string[]): Action[] {
     const actions: Action[] = [];
@@ -291,10 +309,13 @@ export class DetectionEngine {
     return actions;
   }
 
-  private evaluateRule(c: CompiledRule, e: DetectionEvent): Detection | undefined {
+  /** @param dry for `check`: decide only, touching no state. */
+  private evaluateRule(c: CompiledRule, e: DetectionEvent, dry = false): Detection | undefined {
     const { rule } = c;
     let mode = this.modeOf(rule);
     if (mode === 'disabled') return undefined;
+    // A threshold needs counting, which is state.
+    if (dry && rule.threshold) return undefined;
     if (!c.condition.test(e, this.state)) return undefined;
     if (c.exclusions.some((x) => x.test(e, this.state))) return undefined;
     if (this.isExcepted(rule.id, e)) return undefined;
@@ -322,21 +343,25 @@ export class DetectionEngine {
       downgrades.push('Nothing safe was left to do, so Vigil only tells you.');
     }
 
-    const dkeyVal = c.dedupeKey.length
-      ? keyOf(c.dedupeKey, e)
-      : DEFAULT_DEDUPE_KEYS.map((k) => keyOf(k, e)).find((k) => k !== undefined);
-    const dkey = `${rule.id}␞${dkeyVal ?? e.id}`;
-    const last = this.dedupe.get(dkey);
-    const deduped = last !== undefined && e.ts - last <= c.dedupeWindowMs;
-    if (!deduped && MODE_RANK[mode] >= MODE_RANK.alert) {
-      this.dedupe.set(dkey, e.ts);
-      if (this.dedupe.size > MAX_WINDOW_ENTRIES) {
-        this.dedupe.delete(this.dedupe.keys().next().value!);
+    // A dry check is never a repeat and counts nothing.
+    let deduped = false;
+    if (!dry) {
+      const dkeyVal = c.dedupeKey.length
+        ? keyOf(c.dedupeKey, e)
+        : DEFAULT_DEDUPE_KEYS.map((k) => keyOf(k, e)).find((k) => k !== undefined);
+      const dkey = `${rule.id}␞${dkeyVal ?? e.id}`;
+      const last = this.dedupe.get(dkey);
+      deduped = last !== undefined && e.ts - last <= c.dedupeWindowMs;
+      if (!deduped && MODE_RANK[mode] >= MODE_RANK.alert) {
+        this.dedupe.set(dkey, e.ts);
+        if (this.dedupe.size > MAX_WINDOW_ENTRIES) {
+          this.dedupe.delete(this.dedupe.keys().next().value!);
+        }
       }
-    }
 
-    const st = this.stores.ruleState.get(rule.id) ?? { ruleId: rule.id, fired: 0 };
-    this.stores.ruleState.put({ ...st, fired: st.fired + 1, lastFiredAt: e.ts });
+      const st = this.stores.ruleState.get(rule.id) ?? { ruleId: rule.id, fired: 0 };
+      this.stores.ruleState.put({ ...st, fired: st.fired + 1, lastFiredAt: e.ts });
+    }
 
     const reasons = rule.reasons.map((r) => renderTemplate(r, e));
     const match: RuleMatch = {

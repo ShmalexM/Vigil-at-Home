@@ -132,6 +132,8 @@ export function describeEvent(e: SensorEvent): string {
         tcc_modified: 'Privacy permission changed',
         gatekeeper_override: 'Gatekeeper was overridden',
       }[e.subtype];
+    case 'agent.tool_request':
+      return `${{ 'claude-code': 'Claude Code' }[e.agent.host]} asked to use ${e.tool}`;
   }
 }
 

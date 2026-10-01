@@ -1,6 +1,7 @@
 import type { EventKind, SensorEvent } from '@vigil/core';
 import {
   AppWindow,
+  Bot,
   ChevronDown,
   ChevronRight,
   FileText,
@@ -269,6 +270,7 @@ const KIND_ICON: Record<EventKind, ReactNode> = {
   persistence: <Rocket size={15} />,
   'browser.extension': <Puzzle size={15} />,
   'system.alert': <ShieldAlert size={15} />,
+  'agent.tool_request': <Bot size={15} />,
 };
 
 function EventRow({
@@ -361,7 +363,8 @@ function EventFields({ event: e, outcome }: { event: SensorEvent; outcome: Event
     ['When', clock(e.ts)],
     ['Seen by', e.source === 'osquery' ? 'osquery' : e.source === 'santa' ? 'Santa' : 'Vigil'],
   ];
-  const p = 'process' in e ? e.process : undefined;
+  // A tool request's process is the shell it would start, not a real one.
+  const p = 'process' in e && e.kind !== 'agent.tool_request' ? e.process : undefined;
   if (p) {
     fields.push(['Program', <code key="p">{p.path}</code>]);
     fields.push(['Process id', p.pid]);
@@ -389,6 +392,12 @@ function EventFields({ event: e, outcome }: { event: SensorEvent; outcome: Event
       fields.push(['Runs', <code key="r">{e.programArgs.join(' ')}</code>]);
   }
   if (e.kind === 'santa.decision') fields.push(['Santa said', `${e.decision}: ${e.reason}`]);
+  if (e.kind === 'agent.tool_request') {
+    fields.push(['Tool', <code key="t">{e.tool}</code>]);
+    if (e.command) fields.push(['Command', <code key="c">{e.command}</code>]);
+    if (e.filePath) fields.push(['File', <code key="f">{e.filePath}</code>]);
+    if (e.url) fields.push(['Address', <code key="u">{e.url}</code>]);
+  }
   fields.push([
     'Rules',
     outcome

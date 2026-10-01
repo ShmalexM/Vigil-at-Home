@@ -1,9 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import type { Action } from './index.js';
 import {
+  AgentBridgeRequest,
+  AgentIdentity,
+  AgentMatcher,
   Alert,
+  EventKind,
+  PreflightDecision,
+  PreflightReply,
+  PreflightRequest,
+  ProcessRef,
   Rule,
   SensorEvent,
+  ToolsReply,
   authorizeAction,
   canChangeMode,
   canPropose,
@@ -201,5 +210,79 @@ describe('additions for detection and sensors', () => {
       pid: 9,
       path: '/tmp/x',
     });
+  });
+});
+
+describe('agents', () => {
+  const toolRequest = {
+    id: 'e',
+    ts: 1,
+    source: 'vigil',
+    kind: 'agent.tool_request',
+    tool: 'Bash',
+    command: 'ls',
+    agent: { host: 'claude-code', id: 'claude-code', session: '0123456789abcdef' },
+  };
+  const preflight = { v: 1, method: 'preflight.check', host: 'claude-code', tool: 'Bash' };
+
+  it('lists every event kind in EventKind', () => {
+    const kinds = SensorEvent.options.map((o) => o.shape.kind.value);
+    expect(new Set(kinds)).toEqual(new Set(EventKind.options));
+    expect(kinds).toHaveLength(EventKind.options.length);
+  });
+
+  it('never gives a tool request a real process', () => {
+    const shell = { pid: 0, path: '/bin/zsh', args: ['zsh', '-c', 'ls'] };
+    expect(SensorEvent.safeParse({ ...toolRequest, process: shell }).success).toBe(true);
+    expect(SensorEvent.safeParse({ ...toolRequest, process: { ...shell, pid: 123 } }).success).toBe(
+      false,
+    );
+  });
+
+  it('has no allow decision', () => {
+    expect(PreflightDecision.options).not.toContain('allow');
+    expect(PreflightReply.safeParse({ v: 1, decision: 'allow' }).success).toBe(false);
+    expect(PreflightReply.safeParse({ v: 1, decision: 'deny', ok: true }).success).toBe(false);
+    expect(ToolsReply.safeParse({ v: 1, ok: true, result: [], decision: 'deny' }).success).toBe(
+      false,
+    );
+  });
+
+  it('refuses anything a pre-flight request does not need, such as the transcript', () => {
+    expect(PreflightRequest.safeParse(preflight).success).toBe(true);
+    expect(
+      PreflightRequest.safeParse({ ...preflight, transcript_path: '/Users/a/.t.jsonl' }).success,
+    ).toBe(false);
+    expect(PreflightRequest.safeParse({ ...preflight, content: 'secret' }).success).toBe(false);
+    expect(
+      AgentBridgeRequest.parse({ v: 1, method: 'hello', host: 'claude-code', hookVersion: '1' }),
+    ).toMatchObject({ method: 'hello' });
+  });
+
+  it('keeps at most four ancestors', () => {
+    const p = { pid: 1, path: '/bin/sh' };
+    expect(ProcessRef.safeParse({ ...p, ancestors: ['a', 'b', 'c', 'd'] }).success).toBe(true);
+    expect(ProcessRef.safeParse({ ...p, ancestors: ['a', 'b', 'c', 'd', 'e'] }).success).toBe(
+      false,
+    );
+  });
+
+  it('needs an identity in every matcher, not only argument globs', () => {
+    expect(AgentMatcher.safeParse({ names: ['node'], argGlobs: ['*codex*'] }).success).toBe(true);
+    expect(AgentMatcher.safeParse({ argGlobs: ['*codex*'] }).success).toBe(false);
+    expect(AgentMatcher.safeParse({ names: ['x'], extra: 1 }).success).toBe(false);
+    const agent = {
+      id: 'claude-code',
+      name: 'Claude Code',
+      kind: 'cli',
+      origin: 'builtin',
+      status: 'active',
+      watch: true,
+      match: [{ names: ['claude'] }],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    expect(AgentIdentity.safeParse(agent).success).toBe(true);
+    expect(AgentIdentity.safeParse({ ...agent, id: 'Claude Code' }).success).toBe(false);
   });
 });
