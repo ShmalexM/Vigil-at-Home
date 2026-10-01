@@ -1,4 +1,4 @@
-import type { RuleMode } from '@vigil/core';
+import type { AgentIdentity, RuleMode } from '@vigil/core';
 import { BlockList, isIP } from 'node:net';
 import type { DetectionEvent } from '../types.js';
 
@@ -82,6 +82,17 @@ export interface EventHistory {
   append(e: DetectionEvent): void;
   range(fromTs: number, toTs: number): Iterable<DetectionEvent>;
   prune(beforeTs: number): number;
+}
+
+/**
+ * Watched-agent records: the user's own agents, Vigil's suggestions, and the
+ * user's changes to built-in ones. The built-in catalogue itself is code, not
+ * stored, so a release can update it.
+ */
+export interface AgentStore {
+  list(): AgentIdentity[];
+  put(a: AgentIdentity): void;
+  remove(id: string): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +236,19 @@ export class MemoryEventHistory implements EventHistory {
     const before = this.events.length;
     this.events = this.events.filter((e) => e.ts >= beforeTs);
     return before - this.events.length;
+  }
+}
+
+export class MemoryAgentStore implements AgentStore {
+  private readonly byId = new Map<string, AgentIdentity>();
+  list(): AgentIdentity[] {
+    return [...this.byId.values()];
+  }
+  put(a: AgentIdentity): void {
+    this.byId.set(a.id, a);
+  }
+  remove(id: string): void {
+    this.byId.delete(id);
   }
 }
 

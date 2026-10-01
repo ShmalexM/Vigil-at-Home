@@ -1,11 +1,14 @@
+import { AgentIdentity } from '@vigil/core';
 import { MemoryFeedStateStore, type FeedState, type FeedStateStore } from '../feeds/importer.js';
 import type { Proposal, ProposalStore } from '../proposals/pipeline.js';
 import type { DetectionEvent, DetectionRule } from '../types.js';
 import {
+  MemoryAgentStore,
   MemoryBaselineStore,
   MemoryExceptionStore,
   MemoryListStore,
   MemoryRuleStateStore,
+  type AgentStore,
   type EventHistory,
   type ListEntryMeta,
   type RuleException,
@@ -55,6 +58,9 @@ export const DETECTION_MIGRATIONS: string[] = [
   `CREATE TABLE IF NOT EXISTS det_rules (
      id TEXT PRIMARY KEY, version INTEGER NOT NULL, body TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS det_feeds (source_id TEXT PRIMARY KEY, state TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS det_agents (
+     id TEXT PRIMARY KEY, origin TEXT NOT NULL, status TEXT NOT NULL, updated_at INTEGER NOT NULL,
+     body TEXT NOT NULL)`,
 ];
 
 export function migrate(db: SqlDatabase): void {
@@ -297,10 +303,35 @@ class SqliteFeedStateStore extends MemoryFeedStateStore {
   }
 }
 
+class SqliteAgentStore extends MemoryAgentStore {
+  constructor(private readonly db: SqlDatabase) {
+    super();
+    const rows = db.prepare('SELECT body FROM det_agents').all() as Array<{ body: string }>;
+    for (const r of rows) {
+      // The registry trusts what it loads, so a row that no longer parses is left out.
+      const parsed = AgentIdentity.safeParse(JSON.parse(r.body));
+      if (parsed.success) super.put(parsed.data);
+    }
+  }
+  override put(a: AgentIdentity): void {
+    this.db
+      .prepare(
+        'INSERT OR REPLACE INTO det_agents (id, origin, status, updated_at, body) VALUES (?, ?, ?, ?, ?)',
+      )
+      .run(a.id, a.origin, a.status, a.updatedAt, JSON.stringify(a));
+    super.put(a);
+  }
+  override remove(id: string): void {
+    this.db.prepare('DELETE FROM det_agents WHERE id = ?').run(id);
+    super.remove(id);
+  }
+}
+
 export interface SqliteDetectionStores extends Stores {
   proposals: ProposalStore;
   rules: RuleRepository;
   feeds: FeedStateStore;
+  agents: AgentStore;
 }
 
 /** Run migrations and load state from disk. Reads stay in memory; writes go through to SQLite. */
@@ -315,5 +346,6 @@ export function sqliteStores(db: SqlDatabase): SqliteDetectionStores {
     proposals: new SqliteProposalStore(db),
     rules: new SqliteRuleRepository(db),
     feeds: new SqliteFeedStateStore(db),
+    agents: new SqliteAgentStore(db),
   };
 }

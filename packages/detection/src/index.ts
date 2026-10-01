@@ -13,6 +13,7 @@ export {
   Feedback,
   DEFAULT_DEMOTION,
   USER_BLOCKED_HASHES,
+  assertExceptionScope,
   type DemotionPolicy,
   type DecisionResult,
 } from './feedback.js';
@@ -76,6 +77,7 @@ export {
 export { RULE_REVIEW_PROMPT } from './proposals/prompt.js';
 export { mergeRules } from './merge.js';
 export * from './feeds/index.js';
+export * from './agents/index.js';
 export {
   RuleEditor,
   exclusionFor,
