@@ -51,6 +51,7 @@ export function registerIpc(
     getAlertDetail: (id) => core.alertDetail(id),
     decide: (id, input) => core.decide(id, stripUndefined(input)),
     reopen: (id) => core.alerts.reopen(id),
+    clearNoticed: (ids) => core.clearNoticed(ids),
     undoAction: (id) => core.alerts.undo(id),
     approveProposal: (id) => core.alerts.approveProposal(id),
     rejectProposal: (id) => core.alerts.rejectProposal(id),

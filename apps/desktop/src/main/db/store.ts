@@ -242,6 +242,20 @@ export class Store {
     };
   }
 
+  /** Events stored since `since`. */
+  countEventsSince(since: number): number {
+    const row = this.stmt('SELECT COUNT(*) AS n FROM events WHERE ts >= ?').get(since) as {
+      n: number;
+    };
+    return row.n;
+  }
+
+  /** When the newest event of any source arrived, or null if none yet. */
+  newestEventAt(): number | null {
+    const row = this.stmt('SELECT MAX(ts) AS ts FROM events').get() as { ts: number | null };
+    return row.ts;
+  }
+
   /** When this sensor last reported anything, or null if never. */
   lastEventAt(source: string): number | null {
     const row = this.stmt('SELECT MAX(ts) AS ts FROM events WHERE source = ?').get(source) as {
@@ -434,6 +448,17 @@ export class Store {
           'SELECT body FROM actions ORDER BY requested_at DESC LIMIT ?',
           limit,
         );
+  }
+
+  /** Containment a rule carried out since `since`, counting ones the user later released. */
+  countRuleBlocksSince(since: number): number {
+    const row = this.stmt(
+      `SELECT COUNT(*) AS n FROM actions
+         WHERE requested_at >= ? AND status IN ('done', 'undone')
+           AND json_extract(body, '$.actor') = 'rule'
+           AND json_extract(body, '$.undoes') IS NULL`,
+    ).get(since) as { n: number };
+    return row.n;
   }
 
   // ---------------------------------------------------------------- proposals

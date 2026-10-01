@@ -123,6 +123,7 @@ export const calls = {
   getAlertDetail: z.tuple([Id]),
   decide: z.tuple([Id, DecisionInput]),
   reopen: z.tuple([Id]),
+  clearNoticed: z.tuple([z.array(Id).min(1).max(500)]),
   undoAction: z.tuple([Id]),
   approveProposal: z.tuple([Id]),
   rejectProposal: z.tuple([Id]),
@@ -197,10 +198,24 @@ export interface SensorView {
   note?: string;
 }
 
+/** Proof that Vigil is running, for the "it's working" line. Today is since local midnight. */
+export interface WatchSummary {
+  /** Events Vigil checked against its rules today. */
+  checkedToday: number;
+  /** When the newest event arrived, or null before the first. */
+  lastEventAt: number | null;
+  /** Things a rule blocked or paused today. */
+  blockedToday: number;
+}
+
 export interface StatusView {
   level: 'good' | 'fair' | 'poor';
+  /** Open alerts that need a decision (shared/attention.ts needsDecision). */
   needsYou: number;
+  /** Open alerts Vigil only noticed; they don't badge or lower the level. */
+  noticed: number;
   reasons: string[];
+  watch: WatchSummary;
   sensors: SensorView[];
   /** True while blocks are simulated because the privileged helper is missing. */
   dryRun: boolean;
@@ -401,6 +416,8 @@ export interface CallResults {
   getAlertDetail: AlertDetail | null;
   decide: Alert;
   reopen: Alert;
+  /** How many of the given alerts were cleared. */
+  clearNoticed: number;
   undoAction: ActionRecord;
   approveProposal: ActionRecord;
   rejectProposal: void;

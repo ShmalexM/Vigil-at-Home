@@ -5,6 +5,7 @@ export const CALL_NAMES = [
   'getAlertDetail',
   'decide',
   'reopen',
+  'clearNoticed',
   'undoAction',
   'approveProposal',
   'rejectProposal',

@@ -429,7 +429,7 @@ export const macosCoreRules: DetectionRuleInput[] = [
     },
     response: [SUSPEND],
     reasons: [
-      'A command downloaded code from the internet and ran it right away.',
+      'A command downloaded code from the internet and ran it right away: {{process.commandLine}}',
       'If you just pasted this from a site you trust (for example an installer), you can allow it.',
     ],
     tags: ['attack.execution', 'attack.t1059.004'],
