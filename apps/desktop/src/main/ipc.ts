@@ -3,6 +3,8 @@ import type { z } from 'zod';
 import { calls, type CallName, type CallResults } from '../shared/ipc.js';
 import type { HelperInstallResult } from '../shared/ipc.js';
 import type { AiBridge } from './ai.js';
+import { agentsHandlers } from './agents/ipc.js';
+import type { AgentService } from './agents/service.js';
 import type { UpdateChecker } from './updates.js';
 import { onboardingHandlers } from './onboarding/ipc.js';
 import type { OnboardingService } from './onboarding/service.js';
@@ -34,6 +36,7 @@ export function registerIpc(
   setup: OnboardingService,
   ai: AiBridge,
   updates: UpdateChecker,
+  agents: AgentService,
   helper: HelperControl = noHelper,
 ): void {
   let ruleSuggestions: RuleSuggestions | undefined;
@@ -119,6 +122,7 @@ export function registerIpc(
           };
     },
     stopSharingCodexSignIn: () => ai.stopSharingCodexSignIn(),
+    ...agentsHandlers(agents),
   };
 
   for (const name of Object.keys(calls) as CallName[]) {

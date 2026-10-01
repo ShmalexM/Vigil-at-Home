@@ -4,9 +4,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { app, dialog, Notification, powerMonitor, safeStorage, shell } from 'electron';
 import { z } from 'zod';
 import type { HelperInstallResult } from '../shared/ipc.js';
+import { AgentService } from './agents/service.js';
 import { AiBridge } from './ai.js';
 import { Store } from './db/store.js';
-import { seedDemo, startDemoFeed } from './demo.js';
+import { demoInstalled, seedAgentsDemo, seedDemo, startDemoFeed } from './demo.js';
 import { seedUsageDemo } from './usage-demo.js';
 import { Detector } from './detection.js';
 import { helperBundleDir, helperInstallCommand, runHelperScript } from './helper-install.js';
@@ -62,10 +63,35 @@ function start(): void {
   // they are simulated and the UI says so.
   const helper = new HelperLink();
   const core = new VigilCore(store, helper, true);
+  const demo = !app.isPackaged && !!process.env['VIGIL_DEMO'];
   core.detector = new Detector(db, store, core.alerts, (e, o) => core.ingest(e, o), {
     installedAt: core.installedAt(),
     // The .app bundle when packaged; the Electron binary in development.
     selfPaths: [app.isPackaged ? join(process.execPath, '../../..') : process.execPath],
+    // What Vigil itself starts (its AI helpers) is tagged vigil-self, never a watched agent.
+    selfPid: process.pid,
+    // The tracker reports to the agent service, created just below.
+    agentHooks: {
+      onSession: (s) => agents.onSession(s),
+      onMiss: (ppid) => agents.onMiss(ppid),
+      onCandidate: (c) => agents.onCandidate(c),
+    },
+  });
+  const devHelperDir = app.isPackaged
+    ? undefined
+    : join(app.getAppPath(), 'build', 'helper', `dev-${process.arch}`);
+  // Watched AI agents and the pre-flight socket their hooks ask. Rules answer;
+  // the answer never goes through the AI or the scheduler.
+  const agents: AgentService = new AgentService({
+    detector: core.detector,
+    store,
+    alerts: core.alerts,
+    scheduler: core.scheduler,
+    resourcesPath: process.resourcesPath,
+    userData: dataDir,
+    ...(devHelperDir ? { devHelperDir } : {}),
+    // The demo shows a fixed set of agents rather than this Mac's.
+    ...(demo ? { readPs: async () => [], statInstall: demoInstalled } : {}),
   });
   const windows = new Windows();
   const probe = macProbe(
@@ -75,11 +101,7 @@ function start(): void {
   );
 
   // A development build installs the helper that `pnpm build:helper` made.
-  const helperDir = () =>
-    helperBundleDir(
-      process.resourcesPath,
-      app.isPackaged ? undefined : join(app.getAppPath(), 'build', 'helper', `dev-${process.arch}`),
-    );
+  const helperDir = () => helperBundleDir(process.resourcesPath, devHelperDir);
   core.helperInstallable = process.platform === 'darwin' && helperDir() !== null;
   // Santa's configuration profile comes from the helper, which holds the sync
   // server's certificate. Setup offers it once it has been written here.
@@ -99,7 +121,6 @@ function start(): void {
     return r;
   };
 
-  const demo = !app.isPackaged && !!process.env['VIGIL_DEMO'];
   const keys = new KeyStore(join(dataDir, 'api-keys.json'), {
     available: () => safeStorage.isEncryptionAvailable(),
     encrypt: (s) => safeStorage.encryptString(s),
@@ -116,9 +137,11 @@ function start(): void {
     // The wizard's helper and Santa steps, once this build can install them.
     plan: () => {
       const command = helperInstallCommand(helperDir());
+      const claudePreflight = agents.claudePreflightStep();
       return {
         ...(command ? { helperInstallCommand: command } : {}),
         ...(existsSync(santaProfilePath) ? { santaProfilePath } : {}),
+        ...(claudePreflight ? { claudePreflight } : {}),
       };
     },
   });
@@ -166,7 +189,7 @@ function start(): void {
   if (app.isPackaged) updates.start();
   app.on('before-quit', () => updates.stop());
 
-  registerIpc(core, windows, setup, ai, updates, {
+  registerIpc(core, windows, setup, ai, updates, agents, {
     install: async () => afterHelperScript(await runHelperScript('install', helperDir())),
     uninstall: async () => afterHelperScript(await runHelperScript('uninstall', helperDir())),
   });
@@ -182,6 +205,7 @@ function start(): void {
   core.alerts.on('changed', refresh);
   core.sensors.on('changed', refresh);
   setup.on('changed', () => windows.broadcast('changed'));
+  agents.on('changed', () => windows.broadcast('changed'));
   core.alerts.on('popup', (alert) => windows.showPopup(alert.id));
   core.feed.on('events', (n) => windows.broadcast('events', n));
   refresh();
@@ -189,6 +213,8 @@ function start(): void {
   core.applyPower(power.mode);
   power.on('change', (mode) => core.applyPower(mode));
   core.start();
+  // Reads `ps` once, then opens the pre-flight socket if the user turned it on.
+  void agents.start().catch((err) => console.error('[agents] start failed:', err));
 
   // Sensor events arrive through the helper, which reads Santa's and osquery's logs as root.
   helper.on('event', (e) => void core.handleEvent(e));
@@ -216,18 +242,22 @@ function start(): void {
   app.on('window-all-closed', () => {});
   app.on('before-quit', () => {
     helper.stop();
+    void agents.stop();
     core.stop();
     store.close();
   });
 
   if (demo) {
     seedUsageDemo(core.usage);
-    void seedDemo(core).then(() => {
-      const stop = startDemoFeed(core);
-      app.on('before-quit', stop);
-    });
+    void seedDemo(core)
+      .then(() => seedAgentsDemo(core, agents))
+      .then(() => {
+        const stop = startDemoFeed(core);
+        app.on('before-quit', stop);
+      });
   }
-  if (perf) Object.assign(globalThis, { vigil: { core, windows, power, readyAt: Date.now() } });
+  if (perf)
+    Object.assign(globalThis, { vigil: { core, windows, power, agents, readyAt: Date.now() } });
   // First run opens setup; after that Vigil starts quietly in the menu bar.
   else if (!setup.finished()) windows.openMain('setup');
   else if (!app.isPackaged) windows.openMain();

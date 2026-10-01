@@ -132,7 +132,7 @@ export class OnboardingService extends EventEmitter<{ changed: [] }> {
     const defs = stepsFor(mode ?? 'both', inputs);
     const results = supported
       ? await this.results(
-          stepsFor('both', inputs).map((d) => d.check),
+          stepsFor('both', inputs).flatMap((d) => (d.check ? [d.check] : [])),
           fresh,
         )
       : new Map<CheckId, CheckResult>();
@@ -141,7 +141,7 @@ export class OnboardingService extends EventEmitter<{ changed: [] }> {
     const steps: SetupStepView[] = [];
     const doneIds = new Set<string>();
     for (const d of defs) {
-      const r = results.get(d.check);
+      const r = d.result ?? (d.check ? results.get(d.check) : undefined);
       const base = {
         id: d.id,
         group: d.group,

@@ -20,10 +20,63 @@ import {
   type EventStats,
   type EventView,
 } from '../../shared/ipc.js';
+import type { AgentCandidate, AgentSessionView } from '../../shared/agents.js';
 import type { UsageRun } from '../../shared/usage.js';
 import { migrations } from './schema.js';
 
 type Row = { body: string };
+
+/** A new agent session, as the process tracker reports it. */
+export interface AgentSessionRow {
+  id: string;
+  agentId: string;
+  rootPid: number;
+  rootPath: string;
+  startedAt: number;
+  parentSession?: string;
+  seeded: boolean;
+}
+
+const AgentSessionBody = z.object({
+  rootPath: z.string(),
+  rootName: z.string(),
+  parentSession: z.string().optional(),
+  seeded: z.boolean(),
+});
+
+/** One agent's numbers since a time (see `agentStats`). */
+export interface AgentStats {
+  /** Sessions active since then. */
+  sessions: number;
+  /** Events from its sessions that matched a rule. */
+  matches: number;
+  /** Tool requests Vigil answered with ask, and with deny. */
+  asks: number;
+  denies: number;
+  /** Its newest event or session start, at any time. */
+  lastSeenAt?: number;
+}
+
+/** What preview matching needs of one stored program launch. */
+export interface ExecRow {
+  pid: number;
+  ppid?: number;
+  path: string;
+  args?: string[];
+  teamId?: string;
+  signingId?: string;
+}
+
+/** SQL true when a stored tool request was denied (a rule in block mode matched). */
+const DENIED = (e: string) =>
+  `EXISTS (SELECT 1 FROM json_each(${e}.outcome, '$.matches') m WHERE json_extract(m.value, '$.mode') = 'block')`;
+/** ...or asked (alert mode, nothing in block mode). */
+const ASKED = (e: string) =>
+  `(NOT ${DENIED(e)} AND EXISTS (SELECT 1 FROM json_each(${e}.outcome, '$.matches') m WHERE json_extract(m.value, '$.mode') = 'alert'))`;
+
+function basename(p: string): string {
+  return p.slice(p.lastIndexOf('/') + 1);
+}
 
 const Tokens = z.number().int().nonnegative();
 const UsageRunRow = z.object({
@@ -38,6 +91,17 @@ const UsageRunRow = z.object({
   outputTokens: Tokens,
   costUsd: z.number().nonnegative().nullable(),
 }) satisfies z.ZodType<UsageRun>;
+
+type EventRow = { body: string; outcome: string | null; label: string | null };
+
+function eventView(r: EventRow): EventView {
+  const label = r.label ? EventLabel.safeParse(JSON.parse(r.label)) : undefined;
+  return {
+    event: SensorEvent.parse(JSON.parse(r.body)),
+    outcome: r.outcome ? EventOutcome.parse(JSON.parse(r.outcome)) : null,
+    ...(label?.success ? { label: label.data } : {}),
+  };
+}
 
 /**
  * Typed access to Vigil's SQLite database. Pure Node (node:sqlite), no Electron,
@@ -133,11 +197,21 @@ export class Store {
    * the sensor's raw record); then only its outcome is filled in.
    */
   private writeEvent(e: SensorEvent, outcome?: EventOutcome): void {
+    // The agent session the event belongs to: the tracker's tag on a process,
+    // or the hook's agent on a tool request (whose process is only the would-be shell).
+    const session =
+      e.kind === 'agent.tool_request'
+        ? e.agent.session
+        : 'process' in e
+          ? e.process?.agent?.session
+          : undefined;
     this.stmt(
-      `INSERT INTO events (id, ts, kind, source, body, outcome, matched) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO events (id, ts, kind, source, body, outcome, matched, agent_session)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
          outcome = COALESCE(excluded.outcome, outcome),
-         matched = CASE WHEN excluded.outcome IS NULL THEN matched ELSE excluded.matched END`,
+         matched = CASE WHEN excluded.outcome IS NULL THEN matched ELSE excluded.matched END,
+         agent_session = COALESCE(agent_session, excluded.agent_session)`,
     ).run(
       e.id,
       e.ts,
@@ -146,6 +220,7 @@ export class Store {
       JSON.stringify(e),
       outcome ? JSON.stringify(outcome) : null,
       outcome && outcome.matches.length > 0 ? 1 : 0,
+      session ?? null,
     );
   }
 
@@ -164,6 +239,14 @@ export class Store {
       args.push(...kinds);
     }
     if (q.matchedOnly) where.push('matched = 1');
+    if (q.agentSession) {
+      where.push('agent_session = ?');
+      args.push(q.agentSession);
+    }
+    if (q.agent) {
+      where.push('agent_session IN (SELECT id FROM agent_sessions WHERE agent_id = ?)');
+      args.push(q.agent);
+    }
     if (q.before !== undefined) {
       where.push('ts < ?');
       args.push(q.before);
@@ -182,14 +265,7 @@ export class Store {
       outcome: string | null;
       label: string | null;
     }[];
-    return rows.map((r) => {
-      const label = r.label ? EventLabel.safeParse(JSON.parse(r.label)) : undefined;
-      return {
-        event: SensorEvent.parse(JSON.parse(r.body)),
-        outcome: r.outcome ? EventOutcome.parse(JSON.parse(r.outcome)) : null,
-        ...(label?.success ? { label: label.data } : {}),
-      };
-    });
+    return rows.map(eventView);
   }
 
   /** Stores models' labels on events already written. Unknown ids are ignored. */
@@ -491,6 +567,276 @@ export class Store {
 
   pruneAiRuns(before: number): number {
     return Number(this.stmt('DELETE FROM ai_runs WHERE ts < ?').run(before).changes);
+  }
+
+  // ---------------------------------------------------------------- agents
+
+  /** New agent sessions. A session already stored (reported again after a restart) is kept. */
+  insertAgentSessions(rows: readonly AgentSessionRow[]): void {
+    if (rows.length === 0) return;
+    this.tx(() => {
+      for (const r of rows) {
+        const body: z.infer<typeof AgentSessionBody> = {
+          rootPath: r.rootPath,
+          rootName: basename(r.rootPath),
+          seeded: r.seeded,
+        };
+        if (r.parentSession) body.parentSession = r.parentSession;
+        this.stmt(
+          `INSERT OR IGNORE INTO agent_sessions (id, agent_id, root_pid, started_at, body)
+           VALUES (?, ?, ?, ?, ?)`,
+        ).run(r.id, r.agentId, r.rootPid, r.startedAt, JSON.stringify(body));
+      }
+    });
+  }
+
+  /** One agent's sessions, newest first, a page of `limit` before `before`. */
+  listAgentSessions(agentId: string, before?: number, limit = 100): AgentSessionView[] {
+    return this.sessionViews(
+      'agent_id = ? AND started_at < ? ORDER BY started_at DESC, id DESC LIMIT ?',
+      agentId,
+      before ?? Number.MAX_SAFE_INTEGER,
+      limit,
+    );
+  }
+
+  getAgentSession(id: string): AgentSessionView | undefined {
+    return this.sessionViews('id = ?', id)[0];
+  }
+
+  /**
+   * Sessions with their counts. The counts walk each session's own events
+   * through the agent_session index, once for the whole page.
+   */
+  private sessionViews(where: string, ...args: SQLInputValue[]): AgentSessionView[] {
+    const rows = this.stmt(
+      `WITH page AS (
+         SELECT id, agent_id, root_pid, started_at, body FROM agent_sessions WHERE ${where}
+       ), agg AS (
+         SELECT e.agent_session AS sid, COUNT(*) AS events, SUM(e.matched) AS matches,
+           MAX(e.ts) AS lastAt,
+           SUM(CASE WHEN e.kind = 'agent.tool_request' AND ${ASKED('e')} THEN 1 ELSE 0 END) AS asks,
+           SUM(CASE WHEN e.kind = 'agent.tool_request' AND ${DENIED('e')} THEN 1 ELSE 0 END) AS denies
+         FROM events e WHERE e.agent_session IN (SELECT id FROM page) GROUP BY e.agent_session
+       )
+       SELECT page.id, page.agent_id, page.root_pid, page.started_at, page.body,
+         agg.events, agg.matches, agg.lastAt, agg.asks, agg.denies
+       FROM page LEFT JOIN agg ON agg.sid = page.id
+       ORDER BY page.started_at DESC, page.id DESC`,
+    ).all(...args) as {
+      id: string;
+      agent_id: string;
+      root_pid: number;
+      started_at: number;
+      body: string;
+      events: number | null;
+      matches: number | null;
+      lastAt: number | null;
+      asks: number | null;
+      denies: number | null;
+    }[];
+    return rows.map((r) => {
+      const body = AgentSessionBody.parse(JSON.parse(r.body));
+      const view: AgentSessionView = {
+        id: r.id,
+        agentId: r.agent_id,
+        rootPid: Number(r.root_pid),
+        rootPath: body.rootPath,
+        startedAt: Number(r.started_at),
+        lastAt: Math.max(Number(r.started_at), Number(r.lastAt ?? 0)),
+        events: Number(r.events ?? 0),
+        matches: Number(r.matches ?? 0),
+        asks: Number(r.asks ?? 0),
+        denies: Number(r.denies ?? 0),
+        seeded: body.seeded,
+      };
+      if (body.parentSession) view.parentSession = body.parentSession;
+      return view;
+    });
+  }
+
+  /**
+   * A session's events with their outcomes: newest first by default, like the
+   * feed, or oldest first (how its process tree is built).
+   */
+  sessionEvents(
+    id: string,
+    limit = 500,
+    opts: { kind?: EventKind; oldestFirst?: boolean } = {},
+  ): EventView[] {
+    const order = opts.oldestFirst ? 'ASC' : 'DESC';
+    const rows = (
+      opts.kind
+        ? this.stmt(
+            `SELECT body, outcome, label FROM events WHERE agent_session = ? AND kind = ?
+             ORDER BY ts ${order}, id ${order} LIMIT ?`,
+          ).all(id, opts.kind, limit)
+        : this.stmt(
+            `SELECT body, outcome, label FROM events WHERE agent_session = ?
+             ORDER BY ts ${order}, id ${order} LIMIT ?`,
+          ).all(id, limit)
+    ) as EventRow[];
+    return rows.map(eventView);
+  }
+
+  /** The pids behind a session's events that matched a rule. */
+  sessionMatchedPids(id: string): Set<number> {
+    const rows = this.stmt(
+      `SELECT DISTINCT json_extract(body, '$.process.pid') AS pid FROM events
+       WHERE agent_session = ? AND matched = 1`,
+    ).all(id) as { pid: number | null }[];
+    return new Set(rows.flatMap((r) => (r.pid === null ? [] : [Number(r.pid)])));
+  }
+
+  /**
+   * Per agent since `since`: sessions active, matched events, and tool
+   * requests asked and denied. lastSeenAt looks at all stored sessions.
+   */
+  agentStats(since: number): Map<string, AgentStats> {
+    const out = new Map<string, AgentStats>();
+    const get = (id: string) => {
+      let s = out.get(id);
+      if (!s) out.set(id, (s = { sessions: 0, matches: 0, asks: 0, denies: 0 }));
+      return s;
+    };
+    const sessions = this.stmt(
+      `SELECT agent_id, SUM(CASE WHEN last_at >= ? THEN 1 ELSE 0 END) AS sessions,
+         MAX(last_at) AS lastSeenAt
+       FROM (SELECT s.agent_id, MAX(s.started_at, COALESCE(
+               (SELECT MAX(e.ts) FROM events e WHERE e.agent_session = s.id), 0)) AS last_at
+             FROM agent_sessions s)
+       GROUP BY agent_id`,
+    ).all(since) as { agent_id: string; sessions: number; lastSeenAt: number }[];
+    for (const r of sessions) {
+      const s = get(r.agent_id);
+      s.sessions = Number(r.sessions);
+      s.lastSeenAt = Number(r.lastSeenAt);
+    }
+    const matches = this.stmt(
+      `SELECT s.agent_id, COUNT(*) AS n FROM events e JOIN agent_sessions s ON s.id = e.agent_session
+       WHERE e.matched = 1 AND e.ts >= ? GROUP BY s.agent_id`,
+    ).all(since) as { agent_id: string; n: number }[];
+    for (const r of matches) get(r.agent_id).matches = Number(r.n);
+    const answers = this.stmt(
+      `SELECT json_extract(e.body, '$.agent.id') AS agent_id,
+         SUM(CASE WHEN ${ASKED('e')} THEN 1 ELSE 0 END) AS asks,
+         SUM(CASE WHEN ${DENIED('e')} THEN 1 ELSE 0 END) AS denies
+       FROM events e WHERE e.kind = 'agent.tool_request' AND e.ts >= ?
+         AND json_extract(e.body, '$.agent.id') IS NOT NULL
+       GROUP BY agent_id`,
+    ).all(since) as { agent_id: string; asks: number; denies: number }[];
+    for (const r of answers) {
+      const s = get(r.agent_id);
+      s.asks = Number(r.asks);
+      s.denies = Number(r.denies);
+    }
+    return out;
+  }
+
+  /** Stored tool requests since `since`, by the answer Vigil gave. */
+  toolRequestCounts(since: number): { deny: number; ask: number; none: number } {
+    const r = this.stmt(
+      `SELECT COUNT(*) AS n,
+         SUM(CASE WHEN ${ASKED('e')} THEN 1 ELSE 0 END) AS asks,
+         SUM(CASE WHEN ${DENIED('e')} THEN 1 ELSE 0 END) AS denies
+       FROM events e WHERE e.kind = 'agent.tool_request' AND e.ts >= ?`,
+    ).get(since) as { n: number; asks: number | null; denies: number | null };
+    const deny = Number(r.denies ?? 0);
+    const ask = Number(r.asks ?? 0);
+    return { deny, ask, none: Number(r.n) - deny - ask };
+  }
+
+  /**
+   * Programs started since `since`, most recently seen first, for adding an
+   * agent by hand. Apple's own programs are left out: none of them is an agent.
+   */
+  recentExecPrograms(since: number, limit = 50): AgentCandidate[] {
+    // With MAX(), SQLite takes the bare columns from the newest row.
+    const rows = this.stmt(
+      `SELECT json_extract(body, '$.process.path') AS path, MAX(ts) AS lastSeen, COUNT(*) AS n,
+         json_extract(body, '$.process.teamId') AS teamId,
+         json_extract(body, '$.process.signingId') AS signingId
+       FROM events WHERE kind = 'process.exec' AND ts >= ?
+         AND COALESCE(json_extract(body, '$.process.signing'), '') <> 'apple'
+       GROUP BY path HAVING path IS NOT NULL ORDER BY lastSeen DESC LIMIT ?`,
+    ).all(since, limit) as {
+      path: string;
+      lastSeen: number;
+      n: number;
+      teamId: string | null;
+      signingId: string | null;
+    }[];
+    return rows.map((r) => ({
+      path: r.path,
+      name: basename(r.path),
+      ...(r.teamId ? { teamId: r.teamId } : {}),
+      ...(r.signingId ? { signingId: r.signingId } : {}),
+      lastSeen: Number(r.lastSeen),
+      count: Number(r.n),
+    }));
+  }
+
+  /**
+   * Program launches since `since`, newest first, at most `max`. Only the
+   * fields agent matching reads, pulled out by SQLite rather than parsed here.
+   */
+  *iterateExecEvents(since: number, max = 200_000): Iterable<ExecRow> {
+    const rows = this.db
+      .prepare(
+        `SELECT json_extract(body, '$.process.pid') AS pid,
+           json_extract(body, '$.process.ppid') AS ppid,
+           json_extract(body, '$.process.path') AS path,
+           json_extract(body, '$.process.args') AS args,
+           json_extract(body, '$.process.teamId') AS teamId,
+           json_extract(body, '$.process.signingId') AS signingId
+         FROM events WHERE kind = 'process.exec' AND ts >= ? ORDER BY ts DESC LIMIT ?`,
+      )
+      .iterate(since, max) as Iterable<{
+      pid: number | null;
+      ppid: number | null;
+      path: string | null;
+      args: string | null;
+      teamId: string | null;
+      signingId: string | null;
+    }>;
+    for (const r of rows) {
+      if (r.path === null || r.pid === null) continue;
+      const row: ExecRow = { pid: Number(r.pid), path: r.path };
+      if (r.ppid !== null) row.ppid = Number(r.ppid);
+      if (r.args !== null) {
+        const args = JSON.parse(r.args) as unknown;
+        if (Array.isArray(args)) row.args = args.map(String);
+      }
+      if (r.teamId !== null) row.teamId = r.teamId;
+      if (r.signingId !== null) row.signingId = r.signingId;
+      yield row;
+    }
+  }
+
+  /** Delete sessions that started before `before` and have no events left. Returns rows removed. */
+  pruneAgentSessions(before: number): number {
+    return Number(
+      this.stmt(
+        `DELETE FROM agent_sessions WHERE started_at < ? AND NOT EXISTS (
+           SELECT 1 FROM events e WHERE e.agent_session = agent_sessions.id)`,
+      ).run(before).changes,
+    );
+  }
+
+  /** Vigil's own AI runs by purpose: runs since `since`, and the last run ever. */
+  aiRunStats(since: number): Map<string, { runs: number; lastAt: number }> {
+    const rows = this.stmt(
+      `SELECT json_extract(body, '$.purpose') AS purpose,
+         SUM(CASE WHEN ts >= ? THEN 1 ELSE 0 END) AS runs, MAX(ts) AS lastAt
+       FROM ai_runs GROUP BY purpose`,
+    ).all(since) as { purpose: string | null; runs: number; lastAt: number }[];
+    return new Map(
+      rows.flatMap((r) =>
+        r.purpose === null
+          ? []
+          : [[r.purpose, { runs: Number(r.runs), lastAt: Number(r.lastAt) }] as const],
+      ),
+    );
   }
 
   // ---------------------------------------------------------------- settings

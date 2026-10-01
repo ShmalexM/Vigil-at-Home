@@ -1,6 +1,7 @@
 import type { SensorEvent } from '@vigil/core';
 import type { EventOutcome } from '../shared/ipc.js';
 import type { Store } from './db/store.js';
+import { slimForStorage } from './event-slim.js';
 
 export interface EventLogOptions {
   /** Longest an event waits in memory before it is written. */
@@ -45,10 +46,9 @@ export class EventLog {
       this.dropped++;
       return;
     }
-    // The sensor's raw record roughly doubles an event's size and no rule
-    // reads it. It is kept only on events an alert refers to.
-    const { raw: _raw, ...slim } = event;
-    this.pending.push({ event: slim as SensorEvent, ...(outcome ? { outcome } : {}) });
+    // No raw sensor record, and ancestry only where it is looked at (event-slim.ts).
+    const slim = slimForStorage(event, (outcome?.matches.length ?? 0) > 0);
+    this.pending.push({ event: slim, ...(outcome ? { outcome } : {}) });
     if (this.pending.length >= this.maxBatch) this.flush();
     else this.timer ??= setTimeout(() => this.flush(), this.flushMs);
   }

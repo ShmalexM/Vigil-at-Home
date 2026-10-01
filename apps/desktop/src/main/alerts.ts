@@ -28,6 +28,8 @@ export interface Detection {
   title?: string;
   summary?: string;
   subject?: Alert['subject'];
+  /** How loudly to tell the user, instead of what the rule's mode and fidelity call for. */
+  notify?: NotifyLevel;
 }
 
 export interface AlertEvents {
@@ -94,7 +96,7 @@ export class AlertService extends EventEmitter<AlertEvents> {
       summary: d.summary ?? d.rule.description,
       severity: d.rule.severity,
       fidelity: d.rule.fidelity,
-      notify: notifyLevel(d.rule),
+      notify: d.notify ?? notifyLevel(d.rule),
       status: 'open',
       containment: 'none',
       eventIds: d.events.map((e) => e.id),

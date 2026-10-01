@@ -109,6 +109,23 @@ describe('setup plan', () => {
     expect(step.why).toContain('400 MB');
   });
 
+  it('offers Claude Code pre-flight only when Claude Code is around, with no commands to run', () => {
+    for (const mode of ['local', 'cloud', 'both'] as const) {
+      expect(stepsFor(mode).map((s) => s.id)).not.toContain('claude-preflight');
+      const step = stepsFor(mode, { claudePreflight: { connected: false } }).find(
+        (s) => s.id === 'claude-preflight',
+      )!;
+      expect(step.optional).toBe(true);
+      expect(step.commands).toEqual([]);
+      expect(step.check).toBeUndefined();
+      expect(step.result).toEqual({ ok: false });
+    }
+    const on = stepsFor('local', { claudePreflight: { connected: true } }).find(
+      (s) => s.id === 'claude-preflight',
+    )!;
+    expect(on.result?.ok).toBe(true);
+  });
+
   it('quotes the profile path for the shell', () => {
     const plan = setupPlan({ santaProfilePath: "/Users/o'neil/Vigil Santa.mobileconfig" });
     const step = plan.find((s) => s.id === 'santa-profile')!;
@@ -192,6 +209,24 @@ describe('checks', () => {
 });
 
 describe('OnboardingService', () => {
+  it('shows the pre-flight step as done once the hook has checked in, without running a check', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vigil-setup-'));
+    let connected = false;
+    const mac = fakeMac({});
+    const svc = new OnboardingService({
+      store: memoryStore(),
+      keys: new KeyStore(join(dir, 'k.json'), testCipher()),
+      probe: mac,
+      supported: true,
+      plan: () => ({ claudePreflight: { connected } }),
+    });
+    const step = async () => (await svc.view(true)).steps.find((s) => s.id === 'claude-preflight');
+    expect((await step())?.state).toBe('todo');
+    connected = true;
+    expect(await step()).toMatchObject({ state: 'done', optional: true, commands: [] });
+    expect(mac.runs.some((r) => r.includes('claude'))).toBe(false);
+  });
+
   it('starts unfinished with no mode, then remembers the choice', async () => {
     const { svc } = service(fakeMac({}));
     expect(svc.finished()).toBe(false);
