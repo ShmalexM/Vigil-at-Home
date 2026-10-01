@@ -158,7 +158,7 @@ export function render(r: PreflightReply | 'unavailable', onUnavailable: OnUnava
 class Timeout extends Error {}
 
 /** `p`, or a Timeout after `ms`. A result that arrives late goes to `late`, to be closed. */
-function within<T>(p: Promise<T>, ms: number, late?: (v: T) => void): Promise<T> {
+export function within<T>(p: Promise<T>, ms: number, late?: (v: T) => void): Promise<T> {
   return new Promise<T>((done, fail) => {
     let expired = false;
     const timer = setTimeout(
@@ -287,9 +287,13 @@ export async function runHello(io: HookIO, o: { socket: string }): Promise<0> {
 export type HookArgs =
   | { command: 'preflight'; socket: string; onUnavailable: OnUnavailable }
   | { command: 'hello'; socket: string }
+  | { command: 'mcp'; socket: string }
   | { command: 'usage' };
 
-/** `preflight --socket <path> [--on-unavailable ask|defer]` or `hello --socket <path>`. */
+/**
+ * `preflight --socket <path> [--on-unavailable ask|defer]`, `hello --socket <path>`
+ * or `mcp --socket <path>` (Vigil's read-only tools as an MCP server, mcp.ts).
+ */
 export function parseArgs(argv: readonly string[]): HookArgs {
   const option = (name: string) => {
     const i = argv.indexOf(name);
@@ -305,6 +309,8 @@ export function parseArgs(argv: readonly string[]): HookArgs {
       };
     case 'hello':
       return { command: 'hello', socket };
+    case 'mcp':
+      return { command: 'mcp', socket };
     default:
       return { command: 'usage' };
   }

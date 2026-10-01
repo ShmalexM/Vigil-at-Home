@@ -156,6 +156,36 @@ describe('Store', () => {
     expect(stats.byGroup).toMatchObject({ programs: 1, network: 1, files: 0 });
   });
 
+  it('searches events since a time by kind and text, within a scan budget', () => {
+    const s = memoryStore();
+    const exec = (path: string, ts: number) => ({ ...makeExec(path), ts });
+    const old = exec('/opt/tools/goose', 100);
+    const goose = exec('/opt/tools/goose', 1000);
+    const git = exec('/usr/bin/git', 2000);
+    s.insertEvents([{ event: old }, { event: goose }, { event: git }]);
+    s.insertEvent({
+      id: 'f1',
+      ts: 3000,
+      source: 'santa',
+      kind: 'file',
+      op: 'open',
+      path: '/Users/a/.aws/credentials',
+    });
+    const ids = (q: Partial<Parameters<typeof s.searchEvents>[0]>) =>
+      s.searchEvents({ since: 500, limit: 10, scanRows: 100, ...q }).views.map((v) => v.event.id);
+
+    expect(ids({})).toEqual(['f1', git.id, goose.id]);
+    expect(ids({ kinds: ['process.exec'] })).toEqual([git.id, goose.id]);
+    expect(ids({ text: 'goose' })).toEqual([goose.id]);
+    expect(ids({ text: 'goose', since: 0 })).toEqual([goose.id, old.id]);
+    expect(ids({ text: '.aws', kinds: ['file'] })).toEqual(['f1']);
+    expect(ids({ limit: 1 })).toEqual(['f1']);
+    // Text is looked for in the newest events only, and the answer says so.
+    const partial = s.searchEvents({ since: 0, text: 'goose', limit: 10, scanRows: 2 });
+    expect(partial).toEqual({ views: [], partial: true });
+    expect(s.searchEvents({ since: 0, text: 'git', limit: 10, scanRows: 4 }).partial).toBe(false);
+  });
+
   it('fills in the outcome of an event an alert already stored, keeping its raw record', () => {
     const s = memoryStore();
     const e = { ...makeExec(), raw: { line: 'santa' } };

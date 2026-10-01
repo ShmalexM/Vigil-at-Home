@@ -13,6 +13,9 @@ your Mac as you. Vigil watches them in two ways:
 Both are rules, not AI. Vigil's AI helpers (the explainer, labeller and rule
 reviewer) can explain an alert afterwards; they never decide what runs.
 
+Separately, and also opt-in, your own agents can read what Vigil saw through
+[Vigil's tools](#vigils-tools-for-your-own-agents), a read-only MCP server.
+
 ## Threat model
 
 Here the agent is the attacker, or rather whatever steers it: a prompt
@@ -183,12 +186,109 @@ socket. The socket is mode 0600 inside a 0700 folder, so other accounts on
 the Mac can't reach it.
 
 Anything running as you can, the agent included, so the socket only answers
-questions. It replies deny, ask or nothing to a tool request and "ok" to a
-hello, and nothing it is sent changes a rule, a setting or an agent, runs an
-action or lifts a block. It is limited to 30 requests a second (with a burst
-of 60), 16 connections and 64 KB per request. An agent that uses it to test
-which commands get stopped leaves a trail of stored requests and trips the
-probing alert.
+questions. It replies deny, ask or nothing to a tool request, "ok" to a
+hello and, when [Vigil's tools](#vigils-tools-for-your-own-agents) are on,
+read-only data to a tools call. Nothing it is sent changes a rule, a setting
+or an agent, runs an action or lifts a block. It is limited to 30 requests a
+second (with a burst of 60), 16 connections and 64 KB per request. An agent
+that uses it to test which commands get stopped leaves a trail of stored
+requests and trips the probing alert.
+
+The socket is open while pre-flight or Vigil's tools are on. With only the
+tools on, a pre-flight request gets what the hook would print if Vigil
+weren't running (ask, or nothing with **Let Claude Code decide**), and
+nothing is checked or stored.
+
+## Vigil's tools for your own agents
+
+Advanced and off by default. Add Vigil as an MCP server to your own Claude
+Code, Cursor or Codex, and the agent can look up Vigil's alerts, what Vigil
+saw in the last 7 days and the agent sessions on this Mac: "what was that
+alert about?", or "did anything I just ran trip a rule?". Your agent asks
+with its own model and account. Vigil runs no model for this, and its AI
+settings, API keys and Claude plan play no part.
+
+### Set it up
+
+1. On **Agents › Tool policy**, turn **Vigil tools for your agents** on.
+2. Add the server entry Vigil shows to your agent. Vigil doesn't write these
+   files for you:
+   - **Claude Code:** run the `claude mcp add-json vigil '…'` command in
+     Terminal (add `--scope user` after `add-json` to have it in every
+     project), or put the `.mcp.json` form in a project.
+   - **Cursor:** the same `mcpServers` entry, in `~/.cursor/mcp.json` or a
+     project's `.cursor/mcp.json`.
+   - **Codex:** the `[mcp_servers.vigil]` table, in `~/.codex/config.toml`.
+3. Start a new session of the agent.
+
+The `.mcp.json` form looks like this:
+
+```json
+{
+  "mcpServers": {
+    "vigil": {
+      "type": "stdio",
+      "command": "/Applications/Vigil at Home.app/Contents/Resources/helper/node",
+      "args": [
+        "/Applications/Vigil at Home.app/Contents/Resources/helper/vigil-hook.mjs",
+        "mcp",
+        "--socket",
+        "/Users/you/Library/Application Support/Vigil at Home/run/agent.sock"
+      ]
+    }
+  }
+}
+```
+
+The server is the same `vigil-hook.mjs`, started with `mcp`: a small MCP
+server on the agent's stdin and stdout (JSON-RPC, one message a line) that
+passes each `tools/list` and `tools/call` on to Vigil over the agent socket.
+It reads no files and has no tools of its own.
+
+### The tools
+
+| Tool                | Arguments                        | Returns                                                                               |
+| ------------------- | -------------------------------- | ------------------------------------------------------------------------------------- |
+| `vigil_status`      |                                  | protection level and reasons, sensors, rules by mode, pre-flight on and connected     |
+| `list_alerts`       | `since`, `status`, `limit`       | alerts, newest first: title, rule name, severity, time, status and explanation if any |
+| `get_alert`         | `id`                             | one alert, its explanation and the events behind it                                   |
+| `search_events`     | `kind`, `text`, `since`, `limit` | events from the last 7 days at most, newest first, with the rules they matched        |
+| `list_agents`       |                                  | the agents on this Mac, today's numbers and their latest sessions                     |
+| `get_agent_session` | `id`                             | one agent session: its process tree and latest events                                 |
+
+`since` is an ISO time or a span such as `30m`, `24h` or `7d`. `kind` is an
+event kind (`process.exec`, `file`, `agent.tool_request`, …) or a group
+(`programs`, `network`, `files`, `startup`, `system`, `agents`). A text
+search looks through the newest 50,000 events of the window and says so
+when there were more.
+
+Every result is cut to 50 rows and 64 KB and goes through the same redaction
+as the data Vigil's own AI gets: user names in `/Users/…` paths, private
+keys, AWS keys, GitHub, Slack and API tokens, JWTs, passwords and tokens in
+`key=value` form, and email addresses are replaced. Long text, such as a command line, is cut to
+1,000 characters.
+
+### What they can't do
+
+- **Change anything.** No tool changes a rule, a mode, an exception, a
+  setting or an agent, runs or undoes an action, lifts a block or answers a
+  proposal.
+- **Show how a rule works.** Alerts and events name the rule that matched,
+  never its condition, exclusions or response, so an agent can't use Vigil
+  to learn how to word its commands around the rules.
+- **Try a command.** There is no dry-run pre-flight check. An agent that
+  wants to know whether a step would be stopped has to send it as a real
+  pre-flight request, which is stored and counts towards the probing alert.
+- **Read secrets or settings.** No API key, setting or AI prompt is reachable.
+
+While the tools are off, every call is refused before anything is read. They
+share the socket's limits and add their own: at most 120 calls a minute on
+one connection. Vigil counts the calls and shows the last one on the Tool
+policy tab.
+
+Turn them on only if you want your agents to see this. An agent that has been
+steered by a prompt injection can read it too, including whether Vigil has
+noticed it; that's why the tools are off by default, read-only and redacted.
 
 ## What Vigil never reads
 

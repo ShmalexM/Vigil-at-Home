@@ -89,6 +89,8 @@ function start(): void {
     scheduler: core.scheduler,
     resourcesPath: process.resourcesPath,
     userData: dataDir,
+    // For the vigil_status tool (Vigil's read-only tools for the user's own agents).
+    status: () => core.status(),
     ...(devHelperDir ? { devHelperDir } : {}),
     // The demo shows a fixed set of agents rather than this Mac's.
     ...(demo ? { readPs: async () => [], statInstall: demoInstalled } : {}),

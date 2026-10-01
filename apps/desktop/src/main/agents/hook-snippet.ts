@@ -1,8 +1,11 @@
 // The Claude Code hooks the user pastes into their own Claude Code settings so
-// the pre-flight hook runs before tool calls. Vigil only shows this text: it
-// never reads or writes Claude Code's configuration, which can hold API keys.
+// the pre-flight hook runs before tool calls, and the MCP server entry that
+// gives the user's own agents Vigil's read-only tools. Vigil only shows this
+// text: it never reads or writes an agent's configuration, which can hold API
+// keys.
 
 import { join } from 'node:path';
+import type { McpSnippets } from '../../shared/agents.js';
 
 /** The tools Claude Code asks the pre-flight hook about. */
 export const PREFLIGHT_MATCHER = 'Bash|Write|Edit|MultiEdit|NotebookEdit|Read|WebFetch|mcp__.*';
@@ -29,6 +32,41 @@ export function hookFiles(bundleDir: string): { nodePath: string; hookPath: stri
 /** One shell word in double quotes, with `"`, `$`, backtick and backslash escaped. */
 export function doubleQuote(s: string): string {
   return `"${s.replace(/["$`\\]/g, '\\$&')}"`;
+}
+
+/** One shell word in single quotes, for a command the user pastes into Terminal. */
+export function singleQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** A TOML basic string. JSON's escapes are TOML's, except that TOML also escapes DEL. */
+export function tomlString(s: string): string {
+  return JSON.stringify(s).replace(/\u007f/g, '\\u007F');
+}
+
+export interface McpSnippetInput {
+  nodePath: string;
+  hookPath: string;
+  socketPath: string;
+}
+
+/**
+ * Vigil as a stdio MCP server, `vigil-hook mcp --socket <path>` run by the
+ * app's own node: as a `claude mcp add-json` command, as a `.mcp.json` file
+ * (Claude Code projects, Cursor) and as a table for Codex's config.toml.
+ */
+export function mcpSnippet(i: McpSnippetInput): McpSnippets {
+  const args = [i.hookPath, 'mcp', '--socket', i.socketPath];
+  const server = { type: 'stdio', command: i.nodePath, args };
+  return {
+    claudeCommand: `claude mcp add-json vigil ${singleQuote(JSON.stringify(server))}`,
+    mcpJson: JSON.stringify({ mcpServers: { vigil: server } }, null, 2),
+    codexToml: [
+      '[mcp_servers.vigil]',
+      `command = ${tomlString(i.nodePath)}`,
+      `args = [${args.map(tomlString).join(', ')}]`,
+    ].join('\n'),
+  };
 }
 
 /** The `hooks` block for Claude Code, as pretty JSON. */

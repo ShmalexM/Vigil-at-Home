@@ -128,12 +128,15 @@ export interface AgentPrefs {
   onUnavailable: 'ask' | 'defer';
   /** Suggest programs that behave like agents (at most one a day). */
   suggestions: boolean;
+  /** Vigil's read-only tools answer your own agents over MCP. Off by default. */
+  toolsEnabled: boolean;
 }
 
 export const DEFAULT_AGENT_PREFS: AgentPrefs = {
   preflightEnabled: false,
   onUnavailable: 'ask',
   suggestions: true,
+  toolsEnabled: false,
 };
 
 export interface PreflightStatus {
@@ -162,6 +165,89 @@ export interface VigilHelperView {
   tools: string[];
   lastRunAt?: number;
   runs7d: number;
+}
+
+export type VigilToolName =
+  | 'vigil_status'
+  | 'list_alerts'
+  | 'get_alert'
+  | 'search_events'
+  | 'list_agents'
+  | 'get_agent_session';
+
+/** One of the read-only tools Vigil offers your own agents over MCP. */
+export interface VigilToolInfo {
+  name: VigilToolName;
+  /** What it returns, in one line. */
+  description: string;
+  /** Its arguments, as the agent sees them (`?` marks optional ones). */
+  args: string;
+}
+
+/**
+ * The tools, in the order agents list them. They only read: none changes a
+ * rule, a setting or an agent, runs an action, lifts a block, or shows a
+ * rule's conditions (so an agent can't learn how to word around them).
+ */
+export const VIGIL_TOOLS: readonly VigilToolInfo[] = [
+  {
+    name: 'vigil_status',
+    description:
+      'How protected this Mac is: sensors, open alerts, rules by mode and pre-flight checks.',
+    args: '',
+  },
+  {
+    name: 'list_alerts',
+    description: 'Recent alerts, newest first: title, rule, severity, time and explanation.',
+    args: 'since?, status?, limit?',
+  },
+  {
+    name: 'get_alert',
+    description: 'One alert with its explanation and the events behind it.',
+    args: 'id',
+  },
+  {
+    name: 'search_events',
+    description: 'What Vigil saw in the last 7 days, by kind or text, newest first.',
+    args: 'kind?, text?, since?, limit?',
+  },
+  {
+    name: 'list_agents',
+    description: 'The AI agents on this Mac, what they did today and their latest sessions.',
+    args: '',
+  },
+  {
+    name: 'get_agent_session',
+    description: 'One agent session: its process tree and its latest events.',
+    args: 'id',
+  },
+];
+
+/** Vigil's tools for your own agents: the switch, what to paste, and how they're used. */
+export interface AgentToolsStatus {
+  enabled: boolean;
+  /** The socket the tools answer on (shared with pre-flight). */
+  endpoint: 'off' | 'listening' | 'error';
+  error?: string;
+  /** What to add to your agents. Null when this build has no hook to run. */
+  snippets: McpSnippets | null;
+  tools: readonly VigilToolInfo[];
+  /** Tool calls answered while on, in all. */
+  calls: number;
+  lastCallAt?: number;
+  lastTool?: string;
+  /** Calls refused because the tools were off, since Vigil started. */
+  refused: number;
+}
+
+/** The same MCP server, written for each place an agent reads it from. */
+export interface McpSnippets {
+  /** `claude mcp add-json vigil '…'`, to run in Terminal. */
+  claudeCommand: string;
+  /** A `.mcp.json` (or other `mcpServers` file) with the vigil entry. */
+  mcpJson: string;
+  /** The `[mcp_servers.vigil]` table for Codex's config.toml. */
+  codexToml: string;
 }
 
 /** The hook counts as connected while it was heard from this recently. */

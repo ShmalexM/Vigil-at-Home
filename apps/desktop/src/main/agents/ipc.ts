@@ -16,6 +16,7 @@ type AgentCall =
   | 'getAgentPrefs'
   | 'setAgentPrefs'
   | 'getPreflightStatus'
+  | 'getAgentToolsStatus'
   | 'listVigilHelpers';
 
 /**
@@ -39,6 +40,7 @@ export function agentsHandlers(agents: AgentService): Pick<Handlers, AgentCall> 
     getAgentPrefs: () => agents.prefs(),
     setAgentPrefs: (patch) => agents.setPrefs(patch),
     getPreflightStatus: () => agents.preflightStatus(),
+    getAgentToolsStatus: () => agents.toolsStatus(),
     listVigilHelpers: () => agents.listVigilHelpers(),
   };
 }

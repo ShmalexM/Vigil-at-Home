@@ -412,7 +412,7 @@ describe('runHello', () => {
 });
 
 describe('parseArgs', () => {
-  it('reads the two commands the snippet runs', () => {
+  it('reads the commands the snippets run', () => {
     expect(parseArgs(['preflight', '--socket', '/s', '--on-unavailable', 'defer'])).toEqual({
       command: 'preflight',
       socket: '/s',
@@ -429,6 +429,7 @@ describe('parseArgs', () => {
       onUnavailable: 'ask',
     });
     expect(parseArgs(['hello', '--socket', '/s'])).toEqual({ command: 'hello', socket: '/s' });
+    expect(parseArgs(['mcp', '--socket', '/s'])).toEqual({ command: 'mcp', socket: '/s' });
     expect(parseArgs(['allow'])).toEqual({ command: 'usage' });
     expect(parseArgs([])).toEqual({ command: 'usage' });
   });
@@ -441,7 +442,7 @@ describe('the hook package source', () => {
     .map((f) => ({ f, text: readFileSync(new URL(f, dir), 'utf8') }));
 
   it("never names the agent's settings, tokens or conversation", () => {
-    expect(sources.map((s) => s.f).sort()).toEqual(['cli.ts', 'hook.ts']);
+    expect(sources.map((s) => s.f).sort()).toEqual(['cli.ts', 'hook.ts', 'mcp.ts']);
     const banned = ['settings.json', '.credentials.json', 'auth.json', 'transcript_path'];
     for (const { f, text } of sources) {
       for (const word of banned) expect(`${f}: ${text.includes(word)}`).toBe(`${f}: false`);

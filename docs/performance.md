@@ -43,6 +43,8 @@ processes.
 | Database                                    | Size on disk                  | ≤ 1 GB, oldest unreferenced events dropped first              |
 | Agent pre-flight hook (Claude Code)         | Per tool call it checks       | about 60–150 ms (Node.js start-up); Vigil answers in ≤ 5 ms   |
 |                                             | Between tool calls            | nothing: no process, timer or wakeup                          |
+| Vigil tools for agents (MCP, opt-in)        | Per call                      | one bounded read: 50 rows and 64 KB at most                   |
+|                                             | Between calls                 | nothing in Vigil; the agent keeps its MCP server process      |
 | Agent process tracker                       | Memory                        | about 2 MB (8,192 processes at most)                          |
 |                                             | Time per event                | ≤ 5 µs on average                                             |
 | Agent ancestry on stored events             | Disk per event                | ≤ 40 B on average                                             |

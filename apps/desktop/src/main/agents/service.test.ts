@@ -20,6 +20,7 @@ import { Detector } from '../detection.js';
 import { DryRunExecutor } from '../executor.js';
 import type { Scheduler } from '../scheduler.js';
 import { VigilCore } from '../service.js';
+import { TOOLS_OFF } from './endpoint.js';
 import {
   AgentService,
   DENY_ALERT_MS,
@@ -75,6 +76,7 @@ function setup(o: Partial<AgentServiceDeps> = {}) {
     resourcesPath: join(folder, 'Resources'),
     userData: folder,
     socketPath: join(folder, 'run', 'agent.sock'),
+    status: () => core.status(),
     now,
     readPs: async () => [],
     statInstall: () => false,
@@ -475,12 +477,195 @@ describe('AgentService: the hook', () => {
       preflightEnabled: false,
       onUnavailable: 'defer',
       suggestions: true,
+      toolsEnabled: false,
     });
   });
 
   it('has no snippet when this build has no hook', () => {
     const { agents } = setup();
     expect(agents.preflightStatus().snippet).toBe('');
+  });
+});
+
+/** A connection to the agent socket: one request line out, one reply line back. */
+async function socketClient(path: string) {
+  const sock = connect(path);
+  await once(sock, 'connect');
+  sock.setEncoding('utf8');
+  let buf = '';
+  const lines: string[] = [];
+  let wake = () => {};
+  sock.on('data', (chunk: string) => {
+    buf += chunk;
+    let nl: number;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      lines.push(buf.slice(0, nl));
+      buf = buf.slice(nl + 1);
+    }
+    wake();
+  });
+  cleanups.push(() => void sock.destroy());
+  return async (req: object): Promise<Record<string, unknown>> => {
+    sock.write(JSON.stringify(req) + '\n');
+    while (!lines.length) await new Promise<void>((r) => (wake = r));
+    return JSON.parse(lines.shift()!) as Record<string, unknown>;
+  };
+}
+
+const toolCall = (tool: string, args: Record<string, unknown> = {}) =>
+  ({ v: 1, method: 'tools.call', tool, args }) as const;
+
+describe('AgentService: Vigil’s tools for agents', () => {
+  it('refuses every tools call while they are off, before reading anything', async () => {
+    const { agents, store } = setup();
+    expect(agents.prefs().toolsEnabled).toBe(false);
+    const reads = (
+      [
+        'listAlerts',
+        'getAlert',
+        'getEvents',
+        'getRule',
+        'searchEvents',
+        'listAgentSessions',
+        'getAgentSession',
+        'sessionEvents',
+        'agentStats',
+        'toolRequestCounts',
+        'getSetting',
+        'setSetting',
+      ] as const
+    ).map((m) => vi.spyOn(store, m));
+    const requests = [
+      { v: 1, method: 'tools.list' } as const,
+      toolCall('vigil_status'),
+      toolCall('list_alerts', { limit: 5 }),
+      toolCall('get_alert', { id: 'a1' }),
+      toolCall('search_events', { text: 'ssh' }),
+      toolCall('list_agents'),
+      toolCall('get_agent_session', { id: '0123456789abcdef' }),
+    ];
+    for (const r of requests) expect(agents.handleTools(r)).toEqual(TOOLS_OFF);
+    await settle();
+    for (const spy of reads) expect(spy, spy.getMockName()).not.toHaveBeenCalled();
+    for (const spy of reads) spy.mockRestore();
+    expect(agents.toolsStatus()).toMatchObject({ enabled: false, calls: 0, refused: 7 });
+  });
+
+  it('opens the socket for the tools alone, where pre-flight answers as if Vigil were away', async () => {
+    const { agents, store, core } = setup();
+    await agents.start();
+    agents.setPrefs({ toolsEnabled: true });
+    await vi.waitFor(() => expect(agents.toolsStatus().endpoint).toBe('listening'));
+    expect(agents.preflightStatus().endpoint).toBe('listening');
+    const ask = await socketClient(agents.preflightStatus().socketPath);
+
+    const status = await ask(toolCall('vigil_status'));
+    expect(status).toMatchObject({
+      v: 1,
+      ok: true,
+      result: { preflight: { on: false }, rules: { alert: expect.any(Number) } },
+    });
+    expect(status).not.toHaveProperty('decision');
+    const listed = (await ask({ v: 1, method: 'tools.list' })) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    expect(listed.result.tools.map((t) => t.name)).toContain('search_events');
+
+    // Pre-flight is off: nothing is checked or stored, as when the socket is closed.
+    expect(await ask(request({ command: EXFIL }))).toEqual({
+      v: 1,
+      decision: 'ask',
+      reason: "Vigil's pre-flight checks are off",
+    });
+    agents.setPrefs({ onUnavailable: 'defer' });
+    expect(await ask(request({ command: EXFIL }))).toEqual({ v: 1, decision: 'none' });
+    await settle();
+    core.events.flush();
+    expect(store.toolRequestCounts(0)).toEqual({ deny: 0, ask: 0, none: 0 });
+    expect(store.listAlerts()).toEqual([]);
+
+    agents.setPrefs({ toolsEnabled: false });
+    await vi.waitFor(() => expect(agents.toolsStatus().endpoint).toBe('off'));
+  });
+
+  it('answers from what Vigil stored, redacted, and counts the calls', async () => {
+    const { agents, core, store, launch, folder, clock } = setup();
+    agents.setPrefs({ toolsEnabled: true });
+    const root = launch(CLAUDE, ['claude'], 501);
+    await core.handleEvent(root);
+    await core.handleEvent(launch('/bin/zsh', ['/bin/zsh', '-c', 'git status'], root.process.pid));
+    agents.handleBridge(request({ ppid: root.process.pid, command: EXFIL }));
+    await settle();
+    await agents.stop(); // writes the session
+    core.events.flush();
+
+    const result = (tool: string, args: Record<string, unknown> = {}) => {
+      const r = agents.handleTools(toolCall(tool, args));
+      expect(r).toMatchObject({ v: 1, ok: true });
+      return (r as { result: Record<string, unknown> }).result;
+    };
+    const alerts = result('list_alerts') as { alerts: Array<Record<string, unknown>> };
+    expect(alerts.alerts).toEqual([
+      expect.objectContaining({
+        title: expect.stringMatching(/^Stopped: /),
+        ruleId: 'preflight-secret-exfil',
+        severity: 'critical',
+      }),
+    ]);
+    const alert = result('get_alert', { id: alerts.alerts[0]!['id'] }) as {
+      events: Array<Record<string, unknown>>;
+    };
+    expect(alert.events[0]).toMatchObject({ kind: 'agent.tool_request', answer: 'deny' });
+
+    const found = result('search_events', { text: 'versions/2.0', kind: 'programs' }) as {
+      events: Array<Record<string, unknown>>;
+    };
+    expect(found.events.map((e) => e['program'])).toEqual([
+      '/Users/<user>/.local/share/claude/versions/2.0.14',
+    ]);
+    const agentList = result('list_agents') as {
+      agents: Array<{ id: string; latestSessions: Array<{ id: string }> }>;
+    };
+    const claude = agentList.agents.find((a) => a.id === 'claude-code')!;
+    expect(claude.latestSessions).toHaveLength(1);
+    const session = result('get_agent_session', { id: claude.latestSessions[0]!.id }) as {
+      tree: Array<{ program: string; depth: number }>;
+    };
+    expect(session.tree.map((n) => [n.program, n.depth])).toEqual([
+      ['/Users/<user>/.local/share/claude/versions/2.0.14', 0],
+      ['/bin/zsh', 1],
+    ]);
+    const everything = JSON.stringify(
+      ['vigil_status', 'list_alerts', 'search_events', 'list_agents'].map((t) => result(t)),
+    );
+    expect(everything).not.toContain('/Users/you');
+    expect(everything).not.toMatch(/allow/i);
+
+    // Nine calls so far; each is counted after its answer.
+    await settle();
+    clock.t += 1000;
+    expect(agents.toolsStatus()).toMatchObject({
+      enabled: true,
+      calls: 9,
+      lastTool: 'list_agents',
+      refused: 0,
+      snippets: null,
+    });
+    await agents.stop();
+    expect(store.getSetting('agents.tools', z.unknown(), {})).toMatchObject({ calls: 9 });
+
+    // A build with the hook gives the MCP server's entry to paste.
+    const helper = join(folder, 'Resources', 'helper');
+    mkdirSync(helper, { recursive: true });
+    for (const f of ['install.sh', 'node', 'vigil-hook.mjs']) writeFileSync(join(helper, f), '');
+    const snippets = agents.toolsStatus().snippets!;
+    expect(JSON.parse(snippets.mcpJson).mcpServers.vigil).toEqual({
+      type: 'stdio',
+      command: join(helper, 'node'),
+      args: [join(helper, 'vigil-hook.mjs'), 'mcp', '--socket', join(folder, 'run', 'agent.sock')],
+    });
+    expect(snippets.claudeCommand).toMatch(/^claude mcp add-json vigil '/);
+    expect(snippets.codexToml).toMatch(/^\[mcp_servers\.vigil\]\n/);
   });
 });
 

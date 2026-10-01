@@ -11,6 +11,11 @@
 // nothing, never allow. The answer goes out first; storing the request,
 // alerting on a deny and counting repeated denies happen after it. Nothing on
 // the answer path reaches the AI or the scheduler.
+//
+// Vigil's tools for agents (opt-in): the user's own agents, through the hook
+// package's MCP server, read alerts, events and agent sessions over the same
+// socket (tools.ts). Read-only and redacted; while they're off, every call is
+// refused before anything is read.
 
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
@@ -24,6 +29,7 @@ import {
   type AgentToolRequestEvent,
   type HelloReply,
   type PreflightReply,
+  type ToolsReply,
 } from '@vigil/core';
 import {
   PREFLIGHT_PROBING_RULE_ID,
@@ -36,6 +42,7 @@ import {
 import { userOrigin } from '@vigil/detection/user';
 import {
   DEFAULT_AGENT_PREFS,
+  VIGIL_TOOLS,
   hookConnected,
   type AgentCandidate,
   type AgentDetail,
@@ -43,6 +50,7 @@ import {
   type AgentMatchPreview,
   type AgentPresence,
   type AgentSessionView,
+  type AgentToolsStatus,
   type AgentView,
   type PreflightStatus,
   type SaveAgentResult,
@@ -54,19 +62,28 @@ import {
   AgentPrefsPatch,
   type AgentSessionDetail,
   type EventView,
+  type StatusView,
 } from '../../shared/ipc.js';
 import type { AlertService } from '../alerts.js';
 import type { AgentSessionRow, AgentStats, Store } from '../db/store.js';
 import { coreRule, type Detector, type PreflightResult } from '../detection.js';
 import { helperBundleDir } from '../helper-install.js';
 import type { Scheduler } from '../scheduler.js';
-import { AgentEndpoint, socketPathFor, type EndpointRequest } from './endpoint.js';
-import { hookFiles, hookSnippet } from './hook-snippet.js';
+import {
+  AgentEndpoint,
+  TOOLS_OFF,
+  socketPathFor,
+  type EndpointRequest,
+  type ToolsRequest,
+} from './endpoint.js';
+import { hookFiles, hookSnippet, mcpSnippet } from './hook-snippet.js';
 import { readProcessTable } from './ps.js';
+import { VigilTools, type StatusFacts } from './tools.js';
 
 const KEY_PREFS = 'agents.prefs';
 const KEY_HOOK = 'agents.hook';
 const KEY_SUGGESTED = 'agents.suggestedAt';
+const KEY_TOOLS = 'agents.tools';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -110,6 +127,14 @@ const HookState = z.object({
 });
 type HookState = z.infer<typeof HookState>;
 
+/** How Vigil's tools for agents have been used, setting `agents.tools`. */
+const ToolUse = z.object({
+  calls: z.number().int().nonnegative(),
+  lastCallAt: z.number().int().optional(),
+  lastTool: z.string().max(64).optional(),
+});
+type ToolUse = z.infer<typeof ToolUse>;
+
 /** Vigil's own AI helpers, for the read-only tab. Provider ids as on the Usage page. */
 const HELPERS: ReadonlyArray<
   Omit<VigilHelperView, 'lastRunAt' | 'runs7d'> & { purpose: 'explain' | 'classify' | 'analyze' }
@@ -146,6 +171,8 @@ export interface AgentServiceDeps {
   resourcesPath: string;
   /** Vigil's data folder; the socket lives in it. */
   userData: string;
+  /** The app's protection status, for the vigil_status tool. */
+  status?: () => StatusView;
   now?: () => number;
   /** A development build's helper folder (build/helper/dev-<arch>). */
   devHelperDir?: string;
@@ -194,6 +221,11 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
   private cachedPrefs: AgentPrefs | undefined;
   private hook: HookState;
   private hookSavedAt = 0;
+  private readonly tools: VigilTools;
+  private toolUse: ToolUse;
+  private toolUseSavedAt = 0;
+  /** Tools calls refused because the tools were off, since start. */
+  private toolsRefused = 0;
 
   private pendingSessions: AgentSessionRow[] = [];
   private sessionTimer: ReturnType<typeof setTimeout> | undefined;
@@ -222,20 +254,37 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
     this.home = o.home ?? homedir();
     this.log = o.log ?? ((msg) => console.warn(`[agents] ${msg}`));
     this.hook = o.store.getSetting(KEY_HOOK, HookState, {});
+    this.toolUse = o.store.getSetting(KEY_TOOLS, ToolUse, { calls: 0 });
     this.endpoint = new AgentEndpoint({
       socketPath: o.socketPath ?? socketPathFor(o.userData, tmpdir(), process.getuid?.() ?? 0),
-      handle: (req) => this.handleBridge(req),
+      handle: (req) => this.fromSocket(req),
+      tools: (req) => this.handleTools(req),
       log: this.log,
+    });
+    this.tools = new VigilTools({
+      now: this.now,
+      status: () => this.statusFacts(),
+      alerts: (opts) => o.store.listAlerts(opts),
+      alert: (id) => o.store.getAlert(id),
+      events: (ids) => o.store.getEventViews(ids),
+      ruleName: (id) => o.detector.engine.getRule(id)?.name ?? o.store.getRule(id)?.name,
+      searchEvents: (q) => o.store.searchEvents(q),
+      agents: () => this.listAgents(),
+      agentSessions: (id, limit) => o.store.listAgentSessions(id, undefined, limit),
+      agentSession: (id, rows) => this.sessionDetail(id, rows, rows),
     });
   }
 
-  /** Read the process table, start the daily discovery, and open the socket if pre-flight is on. */
+  /**
+   * Read the process table, start the daily discovery, and open the socket if
+   * pre-flight or Vigil's tools are on.
+   */
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
     this.o.scheduler.every('agent-discovery', DAY, () => this.discover(), true);
     await this.seed();
-    if (this.prefs().preflightEnabled) await this.endpoint.start();
+    if (this.socketWanted()) await this.endpoint.start();
     this.emit('changed');
   }
 
@@ -245,6 +294,7 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
     clearTimeout(this.changedTimer);
     this.changedTimer = undefined;
     this.saveHook();
+    this.saveToolUse();
     await this.endpoint.stop();
   }
 
@@ -372,17 +422,21 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
 
   /** One session: its process tree (from launches, oldest first) and its newest events. */
   getAgentSession(id: string): AgentSessionDetail | null {
+    return this.sessionDetail(id, MAX_TREE, MAX_SESSION_EVENTS);
+  }
+
+  private sessionDetail(id: string, maxTree: number, maxEvents: number): AgentSessionDetail | null {
     const session = this.o.store.getAgentSession(id);
     if (!session) return null;
     const matched = this.o.store.sessionMatchedPids(id);
-    const execs = this.o.store.sessionEvents(id, MAX_TREE, {
+    const execs = this.o.store.sessionEvents(id, maxTree, {
       kind: 'process.exec',
       oldestFirst: true,
     });
     return {
       session,
-      tree: sessionTree(session, execs, matched),
-      events: this.o.store.sessionEvents(id, MAX_SESSION_EVENTS),
+      tree: sessionTree(session, execs, matched, maxTree),
+      events: this.o.store.sessionEvents(id, maxEvents),
     };
   }
 
@@ -404,9 +458,31 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
     this.o.store.setSetting(KEY_PREFS, AgentPrefs.parse({ ...before, ...defined }));
     this.cachedPrefs = undefined;
     const next = this.prefs();
-    if (next.preflightEnabled !== before.preflightEnabled) void this.syncEndpoint();
+    if (
+      next.preflightEnabled !== before.preflightEnabled ||
+      next.toolsEnabled !== before.toolsEnabled
+    ) {
+      void this.syncEndpoint();
+    }
     this.emit('changed');
     return next;
+  }
+
+  /** Vigil's tools for agents: the switch, what to paste, and how they've been used. */
+  toolsStatus(): AgentToolsStatus {
+    const ep = this.endpoint.status();
+    const files = this.hookFiles();
+    return {
+      enabled: this.prefs().toolsEnabled,
+      endpoint: ep.state,
+      ...(ep.error ? { error: ep.error } : {}),
+      snippets: files ? mcpSnippet({ ...files, socketPath: ep.socketPath }) : null,
+      tools: VIGIL_TOOLS,
+      calls: this.toolUse.calls,
+      ...(this.toolUse.lastCallAt !== undefined ? { lastCallAt: this.toolUse.lastCallAt } : {}),
+      ...(this.toolUse.lastTool !== undefined ? { lastTool: this.toolUse.lastTool } : {}),
+      refused: this.toolsRefused,
+    };
   }
 
   preflightStatus(): PreflightStatus {
@@ -468,6 +544,77 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
     const result = this.o.detector.preflight(req);
     setImmediate(() => this.record(result));
     return result.reply;
+  }
+
+  /**
+   * What the socket answers. While it is open for Vigil's tools alone, a tool
+   * request gets what the hook does when Vigil isn't there, and nothing is
+   * checked or stored.
+   */
+  private fromSocket(req: EndpointRequest): PreflightReply | HelloReply {
+    const p = this.prefs();
+    if (req.method !== 'preflight.check' || p.preflightEnabled) return this.handleBridge(req);
+    return p.onUnavailable === 'defer'
+      ? { v: 1, decision: 'none' }
+      : { v: 1, decision: 'ask', reason: "Vigil's pre-flight checks are off" };
+  }
+
+  /**
+   * A call to Vigil's read-only tools from the user's own agent. While the
+   * tools are off it is refused before anything is read. The call is counted
+   * after the answer.
+   */
+  handleTools(req: ToolsRequest): ToolsReply {
+    if (!this.prefs().toolsEnabled) {
+      this.toolsRefused++;
+      this.soon();
+      return TOOLS_OFF;
+    }
+    if (req.method === 'tools.list')
+      return { v: 1, ok: true, result: { tools: this.tools.list() } };
+    const at = this.now();
+    const reply = this.tools.call(req.tool, req.args);
+    setImmediate(() => this.calledTool(req.tool, at));
+    return reply;
+  }
+
+  private calledTool(tool: string, at: number): void {
+    this.toolUse = { calls: this.toolUse.calls + 1, lastCallAt: at, lastTool: tool };
+    if (this.now() - this.toolUseSavedAt >= HOOK_SAVE_MS) this.saveToolUse();
+    this.soon();
+  }
+
+  private saveToolUse(): void {
+    this.o.store.setSetting(KEY_TOOLS, this.toolUse);
+    this.toolUseSavedAt = this.now();
+  }
+
+  /** What vigil_status reports. */
+  private statusFacts(): StatusFacts {
+    const rules: StatusFacts['rules'] = { disabled: 0, shadow: 0, alert: 0, block: 0 };
+    for (const r of this.o.detector.engine.listRules()) rules[r.effectiveMode]++;
+    const s = this.o.status?.();
+    const last = Math.max(this.hook.lastHelloAt ?? 0, this.hook.lastRequestAt ?? 0);
+    return {
+      ...(s
+        ? {
+            protection: {
+              level: s.level,
+              reasons: s.reasons,
+              needsYou: s.needsYou,
+              sensors: s.sensors,
+              simulated: s.dryRun,
+            },
+          }
+        : {}),
+      rules,
+      preflight: {
+        on: this.prefs().preflightEnabled,
+        hookConnected: hookConnected(this.hook, this.now()),
+        ...(last > 0 ? { lastHookAt: last } : {}),
+        last24h: this.o.store.toolRequestCounts(this.now() - DAY),
+      },
+    };
   }
 
   /** After the answer: store the request (within caps), alert on a deny, watch for probing. */
@@ -566,19 +713,31 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
     this.hookSavedAt = this.now();
   }
 
+  /** The socket is open while pre-flight or Vigil's tools are on. */
+  private socketWanted(): boolean {
+    const p = this.prefs();
+    return p.preflightEnabled || p.toolsEnabled;
+  }
+
   private async syncEndpoint(): Promise<void> {
-    if (this.started && this.prefs().preflightEnabled) await this.endpoint.start();
+    if (this.started && this.socketWanted()) await this.endpoint.start();
     else await this.endpoint.stop();
     this.emit('changed');
   }
 
   /** The hooks to paste into Claude Code, or '' when this build has no hook to run. */
   private snippet(socketPath: string): string {
-    const dir = helperBundleDir(this.o.resourcesPath, this.o.devHelperDir);
-    if (!dir) return '';
-    const files = hookFiles(dir);
-    if (!existsSync(files.hookPath)) return '';
+    const files = this.hookFiles();
+    if (!files) return '';
     return hookSnippet({ ...files, socketPath, onUnavailable: this.prefs().onUnavailable });
+  }
+
+  /** This build's node and hook script, or undefined when it ships no hook. */
+  private hookFiles(): { nodePath: string; hookPath: string } | undefined {
+    const dir = helperBundleDir(this.o.resourcesPath, this.o.devHelperDir);
+    if (!dir) return undefined;
+    const files = hookFiles(dir);
+    return existsSync(files.hookPath) ? files : undefined;
   }
 
   // ---------------------------------------------------------------- tracker hooks
@@ -733,6 +892,7 @@ export function sessionTree(
   session: AgentSessionView,
   execs: readonly EventView[],
   matchedPids: ReadonlySet<number>,
+  max = MAX_TREE,
 ): TreeNode[] {
   const root: TreeNode = {
     pid: session.rootPid,
@@ -755,7 +915,7 @@ export function sessionTree(
       root.matched ||= matched;
       continue;
     }
-    if (out.length >= MAX_TREE) break;
+    if (out.length >= max) break;
     out.push({
       pid: p.pid,
       ppid: p.ppid ?? 0,

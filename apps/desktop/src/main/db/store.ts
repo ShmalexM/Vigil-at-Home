@@ -268,6 +268,48 @@ export class Store {
     return rows.map(eventView);
   }
 
+  /**
+   * Events since `since`, newest first, of some kinds and holding some text,
+   * for Vigil's tools for agents. Text is looked for in at most `scanRows` of
+   * the newest events in the window, so a rare word never walks a week of
+   * events on the thread that also runs detection. `partial` says the window
+   * held more events than that and fewer than `limit` matched.
+   */
+  searchEvents(q: {
+    since: number;
+    kinds?: readonly EventKind[];
+    text?: string;
+    limit: number;
+    scanRows: number;
+  }): { views: EventView[]; partial: boolean } {
+    const where = ['ts >= ?'];
+    const args: SQLInputValue[] = [q.since];
+    if (q.kinds?.length) {
+      where.push(`kind IN (${q.kinds.map(() => '?').join(',')})`);
+      args.push(...q.kinds);
+    }
+    const filter = where.join(' AND ');
+    const window = `SELECT body, outcome, label, ts, id FROM events WHERE ${filter}
+      ORDER BY ts DESC, id DESC`;
+    if (!q.text) {
+      const rows = this.db.prepare(`${window} LIMIT ?`).all(...args, q.limit) as EventRow[];
+      return { views: rows.map(eventView), partial: false };
+    }
+    const like = `%${q.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    const rows = this.db
+      .prepare(
+        `SELECT body, outcome, label FROM (${window} LIMIT ?)
+         WHERE body LIKE ? ESCAPE '\\' ORDER BY ts DESC, id DESC LIMIT ?`,
+      )
+      .all(...args, q.scanRows, like, q.limit) as EventRow[];
+    const partial =
+      rows.length < q.limit &&
+      this.db
+        .prepare(`SELECT ts FROM events WHERE ${filter} ORDER BY ts DESC LIMIT 1 OFFSET ?`)
+        .get(...args, q.scanRows) !== undefined;
+    return { views: rows.map(eventView), partial };
+  }
+
   /** Stores models' labels on events already written. Unknown ids are ignored. */
   setEventLabels(labels: readonly { eventId: string; label: EventLabel }[]): void {
     this.tx(() => {
@@ -360,6 +402,16 @@ export class Store {
       'SELECT body FROM events WHERE id IN (SELECT value FROM json_each(?)) ORDER BY ts',
       JSON.stringify(ids),
     );
+  }
+
+  /** Events by id with what the rules made of them, oldest first. */
+  getEventViews(ids: readonly string[]): EventView[] {
+    if (ids.length === 0) return [];
+    const rows = this.stmt(
+      `SELECT body, outcome, label FROM events
+       WHERE id IN (SELECT value FROM json_each(?)) ORDER BY ts`,
+    ).all(JSON.stringify(ids)) as EventRow[];
+    return rows.map(eventView);
   }
 
   recentEvents(opts: { kind?: EventKind; since?: number; limit?: number } = {}): SensorEvent[] {

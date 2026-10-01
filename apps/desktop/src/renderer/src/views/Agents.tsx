@@ -30,6 +30,7 @@ import { PROVIDER_LABEL, type UsageProvider } from '../../../shared/usage';
 import { TOOL_RULE_TEMPLATES, type ToolRuleTemplate } from '../agent-templates';
 import { useLive, vigil } from '../api';
 import { AgentForm } from '../components/AgentForm';
+import { AgentToolsSetup } from '../components/AgentToolsSetup';
 import { HoldButton } from '../components/HoldButton';
 import { PreflightSetup } from '../components/PreflightSetup';
 import { ProcessTree } from '../components/ProcessTree';
@@ -894,6 +895,13 @@ function ToolPolicy() {
             />
           ))}
         </div>
+      </Card>
+      <Card>
+        <SectionHead
+          title="Vigil tools for your agents (advanced)"
+          sub="Your own agent can read Vigil’s alerts and activity. It can’t change anything."
+        />
+        <AgentToolsSetup />
       </Card>
     </>
   );

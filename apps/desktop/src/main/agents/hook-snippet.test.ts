@@ -1,6 +1,13 @@
 import { execFileSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import { HOOK_TIMEOUT_S, PREFLIGHT_MATCHER, hookFiles, hookSnippet } from './hook-snippet.js';
+import {
+  HOOK_TIMEOUT_S,
+  PREFLIGHT_MATCHER,
+  hookFiles,
+  hookSnippet,
+  mcpSnippet,
+  tomlString,
+} from './hook-snippet.js';
 
 interface Snippet {
   hooks: Record<
@@ -81,6 +88,47 @@ describe('hookSnippet', () => {
     expect(
       shellWords(JSON.parse(hookSnippet(plain)).hooks.SessionStart[0].hooks[0].command),
     ).toEqual([plain.nodePath, plain.hookPath, 'hello', '--socket', plain.socketPath]);
+  });
+});
+
+describe('mcpSnippet', () => {
+  const server = (i: { nodePath: string; hookPath: string; socketPath: string }) => ({
+    type: 'stdio',
+    command: i.nodePath,
+    args: [i.hookPath, 'mcp', '--socket', i.socketPath],
+  });
+
+  it('runs the hook’s MCP server with the app’s own node, three ways', () => {
+    const s = mcpSnippet(plain);
+    expect(JSON.parse(s.mcpJson)).toEqual({ mcpServers: { vigil: server(plain) } });
+    const words = shellWords(s.claudeCommand);
+    expect(words.slice(0, 4)).toEqual(['claude', 'mcp', 'add-json', 'vigil']);
+    expect(JSON.parse(words[4]!)).toEqual(server(plain));
+    expect(words).toHaveLength(5);
+    expect(s.codexToml.split('\n')).toEqual([
+      '[mcp_servers.vigil]',
+      `command = "${app}/node"`,
+      `args = ["${app}/vigil-hook.mjs", "mcp", "--socket", "${plain.socketPath}"]`,
+    ]);
+  });
+
+  it('stays valid JSON, TOML and one shell word, whatever the paths hold', () => {
+    const odd = {
+      nodePath: '/Users/o\'brien/dev "build"/node',
+      hookPath: '/tmp/a $HOME `id` $(id) \\ b\u007f/vigil-hook.mjs',
+      socketPath: "/Users/a b/it's/run/agent.sock",
+    };
+    const s = mcpSnippet(odd);
+    expect(JSON.parse(s.mcpJson).mcpServers.vigil).toEqual(server(odd));
+    const words = shellWords(s.claudeCommand);
+    expect(words).toHaveLength(5);
+    expect(JSON.parse(words[4]!)).toEqual(server(odd));
+    // TOML's basic strings are JSON's, with DEL escaped as well.
+    const [, command, args] = s.codexToml.split('\n');
+    expect(command).not.toMatch(/\u007f/);
+    expect(JSON.parse(command!.replace(/^command = /, ''))).toBe(odd.nodePath);
+    expect(JSON.parse(args!.replace(/^args = /, ''))).toEqual(server(odd).args);
+    expect(tomlString('a"b\\c\u007f\n')).toBe('"a\\"b\\\\c\\u007F\\n"');
   });
 });
 

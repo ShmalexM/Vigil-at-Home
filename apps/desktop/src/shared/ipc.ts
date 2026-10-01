@@ -21,6 +21,7 @@ import type {
   AgentMatchPreview,
   AgentPrefs as AgentPrefsShape,
   AgentSessionView,
+  AgentToolsStatus,
   AgentView,
   PreflightStatus,
   SaveAgentResult,
@@ -125,6 +126,7 @@ export const AgentPrefs = z.object({
   preflightEnabled: z.boolean(),
   onUnavailable: z.enum(['ask', 'defer']),
   suggestions: z.boolean(),
+  toolsEnabled: z.boolean(),
 }) satisfies z.ZodType<AgentPrefsShape>;
 export type AgentPrefs = AgentPrefsShape;
 
@@ -240,6 +242,8 @@ export const calls = {
   getAgentPrefs: z.tuple([]),
   setAgentPrefs: z.tuple([AgentPrefsPatch]),
   getPreflightStatus: z.tuple([]),
+  /** Vigil's read-only tools for your own agents (MCP). */
+  getAgentToolsStatus: z.tuple([]),
   listVigilHelpers: z.tuple([]),
 } as const;
 export type CallName = keyof typeof calls;
@@ -525,6 +529,7 @@ export interface CallResults {
   getAgentPrefs: AgentPrefs;
   setAgentPrefs: AgentPrefs;
   getPreflightStatus: PreflightStatus;
+  getAgentToolsStatus: AgentToolsStatus;
   listVigilHelpers: VigilHelperView[];
 }
 

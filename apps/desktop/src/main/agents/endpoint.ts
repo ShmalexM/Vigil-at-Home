@@ -1,12 +1,15 @@
 // The agent bridge: a Unix socket in Vigil's own folder where the pre-flight
-// hook (packages/agent-hook) asks about a tool call before Claude Code runs it.
+// hook (packages/agent-hook) asks about a tool call before Claude Code runs it,
+// and where the same package's MCP server asks Vigil's read-only tools for the
+// user's own agents (when the user has turned them on).
 //
 // Newline-delimited JSON: one AgentBridgeRequest per line in, one reply line
 // out. The socket is 0600 inside a 0700 folder, so other accounts on the Mac
-// can't reach it. Anything running as the user can, so it changes nothing and
-// answers only deny, ask or nothing, never allow. Answers come from rules
-// alone: `handle` is synchronous, and nothing here reaches the AI or the
-// scheduler. Whatever goes wrong, the answer is ask.
+// can't reach it. Anything running as the user can, so it changes nothing:
+// a tool request gets deny, ask or nothing, never allow, and a tools call gets
+// data or a refusal, never a decision. Answers come from rules and stored
+// data alone: the handlers are synchronous, and nothing here reaches the AI or
+// the scheduler. Whatever goes wrong, a tool request is answered ask.
 
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { chmodSync, lstatSync, mkdirSync, rmSync } from 'node:fs';
@@ -15,19 +18,27 @@ import {
   AgentBridgeRequest,
   HelloReply,
   PreflightReply,
+  ToolsReply,
   type HookHello,
   type PreflightRequest,
-  type ToolsReply,
+  type ToolsCallRequest,
+  type ToolsListRequest,
 } from '@vigil/core';
 
-/** The requests `handle` answers. Vigil's tools for agents (tools.*) are refused until they exist. */
+/** The requests `handle` answers. */
 export type EndpointRequest = PreflightRequest | HookHello;
+/** The requests `tools` answers: Vigil's read-only tools for the user's own agents. */
+export type ToolsRequest = ToolsListRequest | ToolsCallRequest;
 export type EndpointReply = PreflightReply | HelloReply | ToolsReply;
 
 export interface AgentEndpointOptions {
   socketPath: string;
   /** Answers one request, synchronously: the reply is written before anything else runs. */
   handle(req: EndpointRequest): PreflightReply | HelloReply;
+  /** Answers tools.list and tools.call, synchronously. Without it every tools call is refused. */
+  tools?(req: ToolsRequest): ToolsReply;
+  /** Tools calls per connection per minute. Default 120. */
+  toolsPerMinute?: number;
   /** Open connections at most; more are closed unanswered. Default 16. */
   maxConnections?: number;
   /** Requests per second over all connections, after a burst. Defaults 30 and 60. */
@@ -66,7 +77,24 @@ const ask = (reason: string): PreflightReply => ({ v: 1, decision: 'ask', reason
 const UNREADABLE = ask('Vigil could not read this request');
 const UNANSWERED = ask('Vigil could not answer');
 const BUSY = ask('busy');
-const TOOLS_OFF: ToolsReply = { v: 1, ok: false, error: "Vigil's tools are off" };
+/** Vigil's tools for agents are turned off (Agents › Tool policy). */
+export const TOOLS_OFF: ToolsReply = {
+  v: 1,
+  ok: false,
+  error: "Vigil's tools are off. Turn them on in Vigil at Home: Agents › Tool policy.",
+};
+const TOOLS_UNANSWERED: ToolsReply = { v: 1, ok: false, error: 'Vigil could not answer' };
+const toolsBusy = (perMinute: number): ToolsReply => ({
+  v: 1,
+  ok: false,
+  error: `Too many tool calls: at most ${perMinute} a minute on one connection`,
+});
+
+/** One connection's tools calls in the current minute. */
+interface ToolsWindow {
+  since: number;
+  calls: number;
+}
 
 /** A 0700 folder that belongs to this user, created if missing. */
 function privateDir(dir: string): void {
@@ -182,6 +210,7 @@ export class AgentEndpoint {
 
   private onConnection(sock: Socket): void {
     const maxLine = this.opts.maxLine ?? 64 * 1024;
+    const tools: ToolsWindow = { since: this.now(), calls: 0 };
     let buf = '';
     let closing = false;
     this.connections.add(sock);
@@ -200,7 +229,7 @@ export class AgentEndpoint {
         const line = buf.slice(0, nl);
         buf = buf.slice(nl + 1);
         if (line.length > maxLine) return tooLong();
-        if (line.trim()) this.send(sock, this.answer(line));
+        if (line.trim()) this.send(sock, this.answer(line, tools));
       }
       if (buf.length > maxLine) tooLong();
     });
@@ -226,12 +255,25 @@ export class AgentEndpoint {
     return true;
   }
 
+  /** Room for one more tools call on this connection this minute. */
+  private takeTool(w: ToolsWindow, perMinute: number): boolean {
+    const now = this.now();
+    if (now - w.since >= 60_000) {
+      w.since = now;
+      w.calls = 0;
+    }
+    if (w.calls >= perMinute) return false;
+    w.calls += 1;
+    return true;
+  }
+
   /**
    * One request line to one reply. The rate limit comes first, so a flood of
    * lines costs no parsing. The handler's reply is checked against the
-   * schema for its request, so a deny, ask, none or hello is all that leaves.
+   * schema for its request, so a deny, ask, none, hello or tools reply is all
+   * that leaves.
    */
-  private answer(line: string): EndpointReply {
+  private answer(line: string, tools: ToolsWindow): EndpointReply {
     if (!this.take()) return BUSY;
     let raw: unknown;
     try {
@@ -255,13 +297,21 @@ export class AgentEndpoint {
           break;
         }
         case 'tools.list':
-        case 'tools.call':
-          return TOOLS_OFF;
+        case 'tools.call': {
+          if (!this.opts.tools) return TOOLS_OFF;
+          const perMinute = this.opts.toolsPerMinute ?? 120;
+          if (!this.takeTool(tools, perMinute)) return toolsBusy(perMinute);
+          const reply = ToolsReply.safeParse(this.opts.tools(req));
+          if (reply.success) return reply.data;
+          break;
+        }
       }
       this.opts.log?.(`agent endpoint: refused the reply to ${req.method}`);
     } catch (err) {
       this.opts.log?.(`agent endpoint: ${req.method} failed: ${(err as Error).message}`);
     }
-    return UNANSWERED;
+    return req.method === 'tools.list' || req.method === 'tools.call'
+      ? TOOLS_UNANSWERED
+      : UNANSWERED;
   }
 }

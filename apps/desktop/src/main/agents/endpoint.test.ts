@@ -19,6 +19,7 @@ import {
   socketPathFor,
   type AgentEndpointOptions,
   type EndpointRequest,
+  type ToolsRequest,
 } from './endpoint.js';
 
 const request = (r: Partial<PreflightRequest> = {}): PreflightRequest => ({
@@ -186,7 +187,7 @@ describe('AgentEndpoint', () => {
     }
   });
 
-  it("refuses Vigil's tools until they exist", async () => {
+  it("refuses Vigil's tools when nothing answers them", async () => {
     const { path, seen } = await endpoint();
     const c = await client(path);
     for (const req of [
@@ -198,6 +199,65 @@ describe('AgentEndpoint', () => {
       expect(reply).not.toHaveProperty('decision');
     }
     expect(seen).toEqual([]);
+  });
+
+  it("hands Vigil's tools to their own handler, and passes on only a tools reply", async () => {
+    const asked: ToolsRequest[] = [];
+    const replies: unknown[] = [
+      { v: 1, ok: true, result: { tools: [] } },
+      { v: 1, ok: true, result: { alerts: [] } },
+      { v: 1, ok: true, result: [], decision: 'deny' },
+      { v: 1, decision: 'none' },
+      { v: 1, ok: false, error: 'x'.repeat(301) },
+    ];
+    const { path, seen } = await endpoint({
+      tools: (req) => {
+        asked.push(req);
+        const r = replies.shift();
+        if (r === undefined) throw new Error('boom');
+        return r as ToolsReply;
+      },
+    });
+    const c = await client(path);
+    const call = { v: 1, method: 'tools.call', tool: 'list_alerts', args: { limit: 5 } };
+    expect(await c.ask({ v: 1, method: 'tools.list' })).toEqual({
+      v: 1,
+      ok: true,
+      result: { tools: [] },
+    });
+    expect(await c.ask(call)).toEqual({ v: 1, ok: true, result: { alerts: [] } });
+    for (let i = 0; i < 4; i++) {
+      expect(await c.ask(call)).toEqual({ v: 1, ok: false, error: 'Vigil could not answer' });
+    }
+    expect(asked[1]).toEqual(call);
+    expect(await c.ask({ v: 1, method: 'tools.call', tool: 'List-Alerts' })).toEqual(UNREADABLE);
+    // A pre-flight request on the same socket still goes to `handle`.
+    expect(await c.ask(request())).toEqual({ v: 1, decision: 'none' });
+    expect(seen).toHaveLength(1);
+  });
+
+  it('takes at most 120 tools calls a minute on one connection', async () => {
+    const clock = { t: 1_000_000 };
+    const { path } = await endpoint({
+      burst: 1e9,
+      now: () => clock.t,
+      tools: () => ({ v: 1, ok: true, result: {} }),
+    });
+    const call = { v: 1, method: 'tools.call', tool: 'vigil_status', args: {} };
+    const c = await client(path);
+    for (let i = 0; i < 120; i++) expect(await c.ask(call)).toMatchObject({ ok: true });
+    const busy = ToolsReply.parse(await c.ask(call));
+    expect(busy).toEqual({
+      v: 1,
+      ok: false,
+      error: 'Too many tool calls: at most 120 a minute on one connection',
+    });
+    // Pre-flight requests aren't tools calls; another connection has its own minute.
+    expect(await c.ask(request())).toEqual({ v: 1, decision: 'none' });
+    const d = await client(path);
+    expect(await d.ask(call)).toMatchObject({ ok: true });
+    clock.t += 60_000;
+    expect(await c.ask(call)).toMatchObject({ ok: true });
   });
 
   it('asks, then closes, on a line over 64 KB', async () => {

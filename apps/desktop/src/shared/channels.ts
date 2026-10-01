@@ -74,6 +74,7 @@ export const CALL_NAMES = [
   'getAgentPrefs',
   'setAgentPrefs',
   'getPreflightStatus',
+  'getAgentToolsStatus',
   'listVigilHelpers',
 ] as const;
 
