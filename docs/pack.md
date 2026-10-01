@@ -67,6 +67,8 @@ Each connector tool gets the same four choices as Vigil's own: Follow mode, Alwa
 
 Connections close after five idle minutes.
 
+A connector runs your program, not Vigil's. Vigil tells Agent watch the server's process id as soon as it starts, so the server and everything it runs are tagged `vigil-connector` in a session of their own (shown as "A pack connector" in Activity), and every Agent watch rule applies to them. They never share the `vigil-self` tag of Vigil's own AI helpers. A command inside Vigil's own app is refused, because Vigil never blocks its own binaries.
+
 ## Animations
 
 The dogs are original SVG drawings built from shapes in `components/Dog.tsx`: shepherd, doberman, husky, golden retriever, beagle, corgi, dachshund and chihuahua. Moods come from real work:

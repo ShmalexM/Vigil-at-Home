@@ -5,6 +5,8 @@ import type { AgentMatcherView, AgentView, TreeNode } from '../../../shared/agen
 
 /** Vigil's own AI helpers run under this tag; it is never a watched agent. */
 export const VIGIL_SELF = 'vigil-self';
+/** An MCP server Vigil started for the pack. Same id as VIGIL_CONNECTOR in @vigil/detection. */
+export const VIGIL_CONNECTOR = 'vigil-connector';
 
 // ---------------------------------------------------------------- routes
 
@@ -251,6 +253,7 @@ export function agentIdFor(name: string, taken: ReadonlySet<string>): string {
       .slice(0, 32)
       .replace(/-+$/, '') || 'agent';
   let id = slug;
-  for (let i = 2; taken.has(id) || id === VIGIL_SELF; i++) id = `${slug}-${i}`;
+  for (let i = 2; taken.has(id) || id === VIGIL_SELF || id === VIGIL_CONNECTOR; i++)
+    id = `${slug}-${i}`;
   return id;
 }

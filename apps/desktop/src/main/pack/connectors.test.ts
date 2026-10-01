@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,7 +14,7 @@ const cipher = {
   decrypt: (b: Buffer) => Buffer.from(b.toString().slice(4), 'hex').toString(),
 };
 
-function hub() {
+function hub(extra: Partial<ConstructorParameters<typeof Connectors>[0]> = {}) {
   let records: ConnectorRecord[] = [];
   const dir = mkdtempSync(join(tmpdir(), 'vigil-pack-'));
   const c = new Connectors({
@@ -23,6 +23,7 @@ function hub() {
     secretsPath: join(dir, 'pack-secrets.json'),
     cipher,
     onChange: () => undefined,
+    ...extra,
   });
   return { c, dir, records: () => records };
 }
@@ -35,7 +36,8 @@ afterEach(async () => {
 
 describe('connectors', () => {
   it('lists a stdio server’s tools, with its read-only hints, and calls them', async () => {
-    const { c, dir } = hub();
+    const spawned: Array<[number, boolean]> = [];
+    const { c, dir } = hub({ spawned: (pid, running) => spawned.push([pid, running]) });
     open.push(c);
     const view = c.add({
       kind: 'stdio',
@@ -58,7 +60,28 @@ describe('connectors', () => {
     expect(await c.call('demo-issues', 'create_issue', { repo: 'a/b', title: 'Hi' })).toBe(
       'created a/b#2 "Hi" token=set',
     );
+
+    // The tracker hears the server's pid once, and again when it is closed.
+    expect(spawned).toHaveLength(1);
+    const [pid, running] = spawned[0]!;
+    expect(pid).toBeGreaterThan(1);
+    expect(running).toBe(true);
+    await c.closeAll();
+    expect(spawned).toEqual([
+      [pid, true],
+      [pid, false],
+    ]);
   }, 20_000);
+
+  it('refuses a command inside Vigil’s own app, even through a link', () => {
+    const { c, dir } = hub({ selfPaths: [process.execPath] });
+    const input = { kind: 'stdio' as const, name: 'Sneaky', args: [server] };
+    expect(() => c.add({ ...input, command: process.execPath })).toThrow('part of Vigil');
+    const link = join(dir, 'node-link');
+    symlinkSync(process.execPath, link);
+    expect(() => c.add({ ...input, command: link })).toThrow('part of Vigil');
+    expect(c.list()).toEqual([]);
+  });
 
   it('refuses calls to a switched-off connector and forgets secrets on removal', async () => {
     const { c, dir, records } = hub();

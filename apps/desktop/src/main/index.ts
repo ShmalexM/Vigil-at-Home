@@ -67,10 +67,11 @@ function start(): void {
   const helper = new HelperLink();
   const core = new VigilCore(store, helper, true);
   const demo = !app.isPackaged && !!process.env['VIGIL_DEMO'];
-  core.detector = new Detector(db, store, core.alerts, (e, o) => core.ingest(e, o), {
+  // The .app bundle when packaged; the Electron binary in development.
+  const selfPaths = [app.isPackaged ? join(process.execPath, '../../..') : process.execPath];
+  const detector = new Detector(db, store, core.alerts, (e, o) => core.ingest(e, o), {
     installedAt: core.installedAt(),
-    // The .app bundle when packaged; the Electron binary in development.
-    selfPaths: [app.isPackaged ? join(process.execPath, '../../..') : process.execPath],
+    selfPaths,
     // What Vigil itself starts (its AI helpers) is tagged vigil-self, never a watched agent.
     selfPid: process.pid,
     // The tracker reports to the agent service, created just below.
@@ -80,6 +81,7 @@ function start(): void {
       onCandidate: (c) => agents.onCandidate(c),
     },
   });
+  core.detector = detector;
   const devHelperDir = app.isPackaged
     ? undefined
     : join(app.getAppPath(), 'build', 'helper', `dev-${process.arch}`);
@@ -216,6 +218,10 @@ function start(): void {
     secretsPath: join(dataDir, 'pack-secrets.json'),
     cipher,
     onChange: pushPack,
+    // Connectors run the user's programs: watched as connectors, never as Vigil.
+    selfPaths,
+    spawned: (pid, running) =>
+      running ? detector.tracker.connectorStarted(pid) : detector.tracker.connectorStopped(pid),
   });
   const pack = new PackService({
     load: (key, schema, fallback) => store.getSetting(key, schema, fallback),

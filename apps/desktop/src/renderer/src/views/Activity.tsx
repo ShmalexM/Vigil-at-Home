@@ -22,7 +22,7 @@ import { useLive, vigil } from '../api';
 import { useToast } from '../components/Toasts';
 import { Button, Card, Chip, Segmented, StatusMark } from '../components/ui';
 import { actorLabel, clock, describeAction, describeEvent, timeAgo, timeOfDay } from '../format';
-import { agentRoute, parseActivityParam, VIGIL_SELF } from './agents-format';
+import { agentRoute, parseActivityParam, VIGIL_CONNECTOR, VIGIL_SELF } from './agents-format';
 import { PageHead } from './AppShell';
 
 const UNDOABLE = new Set([
@@ -47,7 +47,11 @@ export function useAgentLinks(go?: (route: string) => void): AgentLinks {
   const [agents] = useLive(() => vigil.listAgents());
   return {
     nameOf: (id) =>
-      id === VIGIL_SELF ? 'Vigil’s own AI helper' : (agents?.find((a) => a.id === id)?.name ?? id),
+      id === VIGIL_SELF
+        ? 'Vigil’s own AI helper'
+        : id === VIGIL_CONNECTOR
+          ? 'A pack connector'
+          : (agents?.find((a) => a.id === id)?.name ?? id),
     go,
   };
 }
@@ -453,13 +457,15 @@ function AgentField({
   links: AgentLinks;
 }) {
   const own = id === VIGIL_SELF;
+  // Pack connectors have no page on Agents; the Pack page lists them.
+  const linked = !own && id !== VIGIL_CONNECTOR;
   return (
     <span className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
       <Chip tone={own ? 'ai' : 'accent'}>
         <Bot size={12} />
         {links.nameOf(id)}
       </Chip>
-      {session && !own && links.go && (
+      {session && linked && links.go && (
         <button
           type="button"
           className="more-link"

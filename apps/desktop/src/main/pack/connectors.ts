@@ -5,8 +5,22 @@
 // Secrets (environment values and bearer tokens) are encrypted with the
 // Keychain-backed cipher the API keys use, in a file only the user can read.
 // Nothing here reads another app's MCP settings (~/.claude, ~/.codex, …).
+//
+// A server Vigil starts runs the user's program, not Vigil's: its pid goes to
+// the agent tracker (`spawned`) so Agent watch rules see it as a connector,
+// and a command inside Vigil's own app is refused, because the safety floor
+// never blocks Vigil's own binaries.
 
-import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import {
   getDefaultEnvironment,
@@ -67,6 +81,8 @@ interface Live {
   state: ConnectorView['state'];
   error?: string;
   idle?: NodeJS.Timeout;
+  /** The server process, for a stdio connector. */
+  pid?: number;
 }
 
 const Secrets = z.record(z.string(), z.string());
@@ -82,8 +98,16 @@ export class Connectors implements ConnectorHub {
       secretsPath: string;
       cipher: Cipher;
       onChange: () => void;
+      /** Vigil's own app (the safety floor's self paths): no connector may run a program in it. */
+      selfPaths?: string[];
+      /** A stdio server started (true) or was closed (false), for the agent tracker. */
+      spawned?: (pid: number, running: boolean) => void;
       /** For tests. */
-      connect?: (record: ConnectorRecord, secrets: Record<string, string>) => Promise<Client>;
+      connect?: (
+        record: ConnectorRecord,
+        secrets: Record<string, string>,
+        onPid: (pid: number) => void,
+      ) => Promise<Client>;
     },
   ) {}
 
@@ -110,6 +134,7 @@ export class Connectors implements ConnectorHub {
 
   add(raw: ConnectorInput): ConnectorView {
     const input = ConnectorInput.parse(raw);
+    if (input.kind === 'stdio') this.assertNotVigil(input.command);
     const records = this.list();
     if (records.length >= 20) throw new Error('Twenty connectors is the most Vigil keeps');
     const id = slug(input.name, new Set(records.map((r) => r.id)));
@@ -229,9 +254,14 @@ export class Connectors implements ConnectorHub {
       live.state = 'connecting';
       this.o.onChange();
       try {
+        if (record.kind === 'stdio') this.assertNotVigil(record.command!);
         const secrets = this.secretsFor(id);
+        const onPid = (pid: number) => {
+          live.pid = pid;
+          this.o.spawned?.(pid, true);
+        };
         const client = await withTimeout(
-          (this.o.connect ?? connectTo)(record, secrets),
+          (this.o.connect ?? connectTo)(record, secrets, onPid),
           CONNECT_MS,
           `${record.name} didn’t answer`,
         );
@@ -240,6 +270,7 @@ export class Connectors implements ConnectorHub {
         delete live.error;
         return client;
       } catch (err) {
+        this.stopped(live);
         live.state = 'error';
         live.error = err instanceof Error ? err.message.slice(0, 300) : String(err);
         throw err;
@@ -262,6 +293,26 @@ export class Connectors implements ConnectorHub {
       await c?.close();
     } catch {
       // Already gone.
+    }
+    this.stopped(l);
+  }
+
+  private stopped(l: Live): void {
+    if (l.pid === undefined) return;
+    this.o.spawned?.(l.pid, false);
+    delete l.pid;
+  }
+
+  /** Refuse a command that is part of Vigil, which the safety floor would never block. */
+  private assertNotVigil(command: string): void {
+    const selfPaths = (this.o.selfPaths ?? []).map((p) => p.toLowerCase().replace(/\/+$/, ''));
+    if (selfPaths.length === 0) return;
+    const path = whereIs(command);
+    for (const candidate of path ? [path, realOr(path)] : []) {
+      const p = candidate.toLowerCase();
+      if (selfPaths.some((s) => p === s || p.startsWith(`${s}/`))) {
+        throw new Error('That program is part of Vigil. A connector has to run its own program.');
+      }
     }
   }
 
@@ -302,18 +353,25 @@ export class Connectors implements ConnectorHub {
 async function connectTo(
   record: ConnectorRecord,
   secrets: Record<string, string>,
+  onPid: (pid: number) => void,
 ): Promise<Client> {
   const client = new Client({ name: 'vigil-at-home-pack', version: '1' });
   if (record.kind === 'stdio') {
-    await client.connect(
-      new StdioClientTransport({
-        command: record.command!,
-        args: record.args ?? [],
-        // Only the basics (PATH, HOME…) and the user's own values for this server.
-        env: { ...getDefaultEnvironment(), ...secrets },
-        stderr: 'ignore',
-      }),
-    );
+    const transport = new StdioClientTransport({
+      command: record.command!,
+      args: record.args ?? [],
+      // Only the basics (PATH, HOME…) and the user's own values for this server.
+      env: { ...getDefaultEnvironment(), ...secrets },
+      stderr: 'ignore',
+    });
+    // Report the pid as soon as the process exists, before the MCP handshake,
+    // so the tracker tags the server before it can start anything.
+    const start = transport.start.bind(transport);
+    transport.start = async () => {
+      await start();
+      if (transport.pid) onPid(transport.pid);
+    };
+    await client.connect(transport);
   } else {
     const token = secrets['token'];
     await client.connect(
@@ -323,6 +381,29 @@ async function connectTo(
     );
   }
   return client;
+}
+
+/** Where `command` runs from: itself when it has a slash, else the first match on PATH. */
+function whereIs(command: string): string | undefined {
+  if (command.includes('/')) return isAbsolute(command) ? command : resolve(command);
+  const dirs = (getDefaultEnvironment()['PATH'] ?? '').split(delimiter).filter(Boolean);
+  for (const dir of dirs) {
+    const p = join(dir, command);
+    try {
+      if (statSync(p).isFile()) return p;
+    } catch {
+      // Not here.
+    }
+  }
+  return undefined;
+}
+
+function realOr(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
 }
 
 function slug(name: string, taken: Set<string>): string {
