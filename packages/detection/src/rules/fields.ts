@@ -19,7 +19,9 @@ function read(e: DetectionEvent, key: string): unknown {
  */
 const COMPUTED: Record<string, FieldGetter> = {
   'process.name': (e) => ('process' in e ? basename(e.process?.path) : undefined),
-  'process.parentName': (e) => ('process' in e ? basename(e.process?.parentPath) : undefined),
+  /** The parent's name from its path, else the nearest ancestor Vigil knows (see process.ancestors). */
+  'process.parentName': (e) =>
+    'process' in e ? (basename(e.process?.parentPath) ?? e.process?.ancestors?.[0]) : undefined,
   'process.commandLine': (e) => ('process' in e ? e.process?.args?.join(' ') : undefined),
   /**
    * The download a process comes from: the nearest downloaded ancestor, or the
@@ -46,6 +48,18 @@ const COMPUTED: Record<string, FieldGetter> = {
     const program = read(e, 'program');
     return typeof program === 'string' ? program : undefined;
   },
+  /**
+   * Agent tool requests: the file is outside the folder the agent works in.
+   * The hook has already resolved `..`, so a prefix test is enough.
+   */
+  toolOutsideCwd: (e) => {
+    const file = read(e, 'filePath');
+    const cwd = read(e, 'cwd');
+    if (typeof file !== 'string' || typeof cwd !== 'string' || file === '' || cwd === '')
+      return undefined;
+    const root = cwd.endsWith('/') ? cwd : `${cwd}/`;
+    return file !== cwd && !file.startsWith(root);
+  },
 };
 
 export const COMPUTED_FIELDS = Object.keys(COMPUTED);
@@ -68,11 +82,17 @@ const PROCESS_FIELDS = [
   'quarantine',
   'quarantine.originUrl',
   'quarantine.agent',
-  'ancestors',
   'downloadedAncestor',
   'downloadedAncestor.path',
   'downloadedAncestor.originUrl',
   'downloadedAncestor.signing',
+  // Filled by Vigil: the helper's sensor hub and the app's process tracker.
+  'ancestors',
+  // Filled by the app's process tracker only, never in the helper.
+  'agent',
+  'agent.id',
+  'agent.session',
+  'agent.depth',
 ].map((f) => `process.${f}`);
 
 /** Every path a rule may reference, for the linter and the AI's rule guide. */
@@ -118,6 +138,22 @@ export const KNOWN_FIELDS = new Set<string>([
   'details.eventType',
   'details.authRight',
   'details.authReason',
+  // agent.tool_request
+  'tool',
+  'command',
+  'commandBytes',
+  'commandClipped',
+  'filePath',
+  'url',
+  'mcpServer',
+  'cwd',
+  'contentBytes',
+  'contentSha256',
+  'agent',
+  'agent.host',
+  'agent.id',
+  'agent.session',
+  'agent.hookSession',
   ...COMPUTED_FIELDS,
 ]);
 

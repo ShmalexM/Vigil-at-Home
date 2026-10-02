@@ -1,0 +1,390 @@
+/* The Agents page, its forms, the process tree, and the pre-flight setup. */
+
+.agents .tabs .count {
+  margin-left: 2px;
+}
+
+/* ---------------------------------------------------------------- agent cards */
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+@media (max-width: 900px) {
+  .agent-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.agent-card {
+  gap: 10px;
+}
+.agent-open {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: calc(100% + 12px);
+  margin: -6px -6px 0;
+  padding: 6px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.agent-open:hover {
+  background: var(--bg3);
+}
+.agent-chevron {
+  flex: none;
+  color: var(--tx3);
+}
+.agent-head {
+  align-items: center;
+  gap: 12px;
+}
+.agent-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 10px;
+  background: var(--bg3);
+  color: var(--ac);
+}
+.agent-icon.sm {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+}
+.agent-icon.ai {
+  background: var(--ai-bg);
+  color: var(--ai);
+}
+.agent-presence {
+  flex: none;
+  gap: 6px;
+}
+.agent-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+}
+.agent-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+}
+.agent-stat-n {
+  font-size: 16px;
+  font-weight: 650;
+  line-height: 1.3;
+  color: var(--tx0);
+  font-variant-numeric: tabular-nums;
+}
+.agent-stat-n.fair {
+  color: var(--fair);
+}
+.agent-stat-n.poor {
+  color: var(--poor);
+}
+.agent-foot {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--ln0);
+}
+.agent-suggestion {
+  align-items: flex-start;
+}
+.agent-suggestion > svg {
+  margin-top: 2px;
+  flex: none;
+}
+.agent-fold {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--tx1);
+  text-align: left;
+  cursor: pointer;
+}
+.agent-fold:disabled {
+  cursor: default;
+}
+.agent-line {
+  gap: 10px;
+  padding-right: 4px;
+}
+.agent-line .list-row {
+  padding: 6px 8px;
+}
+.agent-rule {
+  padding: 6px 8px;
+}
+
+/* ---------------------------------------------------------------- sessions */
+.session-row {
+  border-bottom: 1px solid var(--ln0);
+}
+.session-row:last-child {
+  border-bottom: 0;
+}
+.session-row .list-row {
+  padding: 8px;
+}
+.session-open {
+  margin: 0 0 12px 30px;
+  padding: 12px 14px;
+  border: 1px solid var(--ln0);
+  border-radius: var(--radius);
+  background: var(--bg2);
+}
+.session-open .card.feed {
+  background: var(--bg1);
+}
+.session-open .feed-fields {
+  margin-left: 8px;
+}
+
+/* ---------------------------------------------------------------- process tree */
+.ptree {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  border: 1px solid var(--ln0);
+  border-radius: var(--radius-sm);
+  background: var(--bg1);
+  max-height: 420px;
+  overflow: auto;
+}
+.ptree-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 3px 8px 3px calc(8px + var(--depth, 0) * 18px);
+  border-radius: 6px;
+}
+.ptree-row.matched {
+  background: var(--fair-bg);
+}
+.ptree-glyph {
+  display: inline-flex;
+  flex: none;
+  color: var(--tx3);
+}
+.ptree-row:first-child .ptree-glyph {
+  color: var(--ac);
+}
+.ptree-name {
+  flex: none;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--tx0);
+  font-weight: 500;
+}
+.ptree-path {
+  color: var(--tx3);
+}
+.ptree-meta {
+  color: var(--tx3);
+}
+
+/* ---------------------------------------------------------------- forms */
+.agent-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 10px;
+}
+.matcher-row {
+  display: grid;
+  grid-template-columns: 170px minmax(140px, 2fr) minmax(120px, 1.4fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+@media (max-width: 760px) {
+  .agent-form-grid,
+  .matcher-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.candidate-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  padding: 4px;
+  border: 1px solid var(--ln0);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+}
+.candidate-list .list-row {
+  padding: 6px 8px;
+}
+.agent-form code,
+.preflight code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--tx0);
+}
+
+/* ---------------------------------------------------------------- pre-flight */
+.preflight-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--tx1);
+}
+.snippet {
+  position: relative;
+  border: 1px solid var(--ln1);
+  border-radius: var(--radius-sm);
+  background: var(--bg0);
+}
+.snippet pre {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--tx0);
+  cursor: text;
+}
+.snippet .btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: var(--bg2);
+}
+.preflight-option {
+  align-items: flex-start;
+  gap: 16px;
+  padding-top: 10px;
+  border-top: 1px solid var(--ln0);
+}
+
+/* ---------------------------------------------------------------- tool policy */
+.template-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+@media (max-width: 900px) {
+  .template-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.template {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--ln0);
+  border-radius: var(--radius);
+  background: var(--bg2);
+}
+.tool-rule {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0;
+  border-top: 1px solid var(--ln0);
+}
+.tool-rule:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+/* Severity, count and mode line up from row to row. */
+.tool-rule-sev {
+  flex: none;
+  width: 78px;
+}
+.tool-rule-count {
+  flex: none;
+  width: 84px;
+  text-align: right;
+}
+.tool-rule-mode {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  min-width: 222px;
+}
+@media (max-width: 900px) {
+  .tool-rule-mode {
+    min-width: 0;
+  }
+}
+
+/* The draft from a template, set apart from the list of saved rules. */
+.tool-draft {
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--ln0);
+}
+
+/* ---------------------------------------------------------------- Vigil tools for agents */
+.agent-tools code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--tx0);
+}
+/* The server entry is one long line; keep it clear of the Copy button. */
+.agent-tools .snippet pre {
+  padding-right: 84px;
+}
+.agent-tool-list {
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+}
+.agent-tool-list dd {
+  color: var(--tx1);
+}
+.agent-tool-args {
+  color: var(--tx2);
+}
+
+/* ---------------------------------------------------------------- AI helpers */
+.helper-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+.helper-card .kv {
+  grid-template-columns: 78px minmax(0, 1fr);
+  align-items: center;
+}
+.helper-tool {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--bg3);
+}
+
+/* Activity's filter chip (an agent or one session), with its clear button. */
+.filter-chip button {
+  display: inline-flex;
+  margin-right: -3px;
+  padding: 1px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.filter-chip button:hover {
+  background: var(--ac-bg);
+}

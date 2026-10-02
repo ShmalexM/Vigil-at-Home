@@ -63,6 +63,23 @@ export const CALL_NAMES = [
   'setUpdateAuto',
   'dismissUpdate',
   'downloadUpdate',
+  'listAgents',
+  'listAgentNames',
+  'getAgent',
+  'saveAgent',
+  'setAgentWatch',
+  'setAgentStatus',
+  'removeAgent',
+  'resetAgent',
+  'previewAgentMatch',
+  'listAgentCandidates',
+  'listAgentSessions',
+  'getAgentSession',
+  'getAgentPrefs',
+  'setAgentPrefs',
+  'getPreflightStatus',
+  'getAgentToolsStatus',
+  'listVigilHelpers',
 ] as const;
 
-export const PUSH_NAMES = ['changed', 'popup', 'navigate', 'theme', 'events'] as const;
+export const PUSH_NAMES = ['changed', 'popup', 'navigate', 'theme', 'events', 'agents'] as const;

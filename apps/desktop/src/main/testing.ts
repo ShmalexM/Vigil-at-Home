@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import type { Rule, SensorEvent } from '@vigil/core';
+import type { EventOfKind, Rule } from '@vigil/core';
 import { Store } from './db/store.js';
 
 export function memoryStore(): Store {
@@ -29,7 +29,7 @@ export function makeRule(over: Partial<Rule> = {}): Rule {
 }
 
 let n = 0;
-export function makeExec(path = '/tmp/evil', pid = 4242): SensorEvent {
+export function makeExec(path = '/tmp/evil', pid = 4242): EventOfKind<'process.exec'> {
   n++;
   return {
     id: `ev-${n}`,

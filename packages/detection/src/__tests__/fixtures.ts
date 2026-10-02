@@ -1,3 +1,7 @@
+import type { EventOfKind } from '@vigil/core';
+import { AGENT_CATALOG } from '../agents/catalog.js';
+import { compileAgentMatchers, type CompiledAgentMatcher } from '../agents/match.js';
+import { AgentTracker, type TrackerOptions } from '../agents/tracker.js';
 import type { DetectionEvent, DetectionProcessRef } from '../types.js';
 
 let seq = 0;
@@ -81,4 +85,54 @@ export function testRule(r: Record<string, unknown> & { id: string; condition: u
     reasons: ['{{process.name}} matched'],
     ...r,
   } as never;
+}
+
+export type ExecEvent = EventOfKind<'process.exec'>;
+
+/** Claude Code's native binary as Santa reports it (the ~/.local/bin/claude link resolved). */
+export const CLAUDE_BIN = '/Users/alex/.local/share/claude/versions/2.0.14';
+
+let catalogMatcher: CompiledAgentMatcher | undefined;
+/** The built-in catalogue, compiled once. */
+export const catalog = (): CompiledAgentMatcher =>
+  (catalogMatcher ??= compileAgentMatchers(AGENT_CATALOG));
+
+/**
+ * A process tree under a watched agent, tagged by a real tracker with the
+ * built-in catalogue, the way the app tags events before rules run. The
+ * agent's own launch comes first; pids count up from `basePid`.
+ */
+export function agentTree(
+  agentPath = CLAUDE_BIN,
+  opts: { args?: string[]; basePid?: number; tracker?: Partial<TrackerOptions> } = {},
+) {
+  const tracker = new AgentTracker({ matcher: catalog, ...opts.tracker });
+  let next = opts.basePid ?? 60_000;
+  const launch = (p: Partial<DetectionProcessRef> & { path: string }, ppid: number) =>
+    tracker.observe(
+      ev({ kind: 'process.exec', process: proc({ ...p, pid: next++, ppid }) }) as ExecEvent,
+    );
+  const root = launch(
+    { path: agentPath, args: opts.args ?? ['claude'], signing: 'developer_id' },
+    // A shell in the user's terminal, which the tracker has not seen.
+    501,
+  );
+  const exec = (
+    path: string,
+    args: string[] = [path.slice(path.lastIndexOf('/') + 1)],
+    parent: DetectionProcessRef = root.process,
+    extra: Partial<DetectionProcessRef> = {},
+  ): ExecEvent => launch({ signing: 'apple', ...extra, path, args }, parent.pid);
+  return {
+    tracker,
+    /** The agent's own launch (depth 0). */
+    root,
+    /** Launch a program under `parent` (the agent by default) and return the tagged event. */
+    exec,
+    /** A command the way agents run them: `zsh -c` under `parent`. */
+    sh: (command: string, parent: DetectionProcessRef = root.process) =>
+      exec('/bin/zsh', ['/bin/zsh', '-c', command], parent),
+    /** Tag any other event (a file open, a connection) as the app would. */
+    observe: <E extends DetectionEvent>(e: E): E => tracker.observe(e),
+  };
 }

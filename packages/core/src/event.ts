@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Id, ProcessRef, Timestamp } from './common.js';
+import { AgentId, Id, ProcessRef, Timestamp } from './common.js';
 
 /** Where an event came from. */
 export const EventSource = z.enum(['osquery', 'santa', 'vigil', 'test']);
@@ -123,6 +123,50 @@ export const SystemAlertEvent = z.object({
   details: z.record(z.string(), z.string()).default({}),
 });
 
+/**
+ * An AI agent asked to run a tool (Claude Code's PreToolUse hook). Vigil checks
+ * it against rules before the tool runs. Nothing has happened yet, so no real
+ * process exists: write content arrives only as its size and hash.
+ */
+export const AgentToolRequestEvent = z.object({
+  ...base,
+  kind: z.literal('agent.tool_request'),
+  /** The agent's tool name, e.g. Bash, Write, WebFetch or mcp__server__tool. */
+  tool: z.string().max(128),
+  command: z.string().max(4096).optional(),
+  /** Size of the full command; it may be longer than the part in `command`. */
+  commandBytes: z.number().int().nonnegative().optional(),
+  /** Set by Vigil when `command` is only the start of the command (the hook keeps 4,096 characters). */
+  commandClipped: z.literal(true).optional(),
+  /**
+   * Absolute; the hook has already resolved `..` against `cwd` and followed
+   * links, and Vigil writes it the way rules do (`/var`, not `/private/var`).
+   */
+  filePath: z.string().max(1024).optional(),
+  /** The path as the hook sent it, when that differs from `filePath`. For display only. */
+  filePathGiven: z.string().max(1024).optional(),
+  url: z.string().max(2048).optional(),
+  /** For mcp__<server>__<tool> tools. */
+  mcpServer: z.string().max(128).optional(),
+  cwd: z.string().max(1024).optional(),
+  contentBytes: z.number().int().nonnegative().optional(),
+  contentSha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
+  agent: z.object({
+    host: z.enum(['claude-code']),
+    id: AgentId.optional(),
+    /** Vigil's session for the agent, when the tracker knows the hook's parent. */
+    session: z.string().max(32).optional(),
+    /** The host's own session id. */
+    hookSession: z.string().max(128).optional(),
+  }),
+  /** Bash only: the would-be shell. Never a real process. */
+  process: ProcessRef.extend({ pid: z.literal(0) }).optional(),
+});
+export type AgentToolRequestEvent = z.infer<typeof AgentToolRequestEvent>;
+
 export const SensorEvent = z.discriminatedUnion('kind', [
   ProcessExecEvent,
   ProcessExitEvent,
@@ -133,6 +177,7 @@ export const SensorEvent = z.discriminatedUnion('kind', [
   NetworkListenEvent,
   BrowserExtensionEvent,
   SystemAlertEvent,
+  AgentToolRequestEvent,
 ]);
 export type SensorEvent = z.infer<typeof SensorEvent>;
 export type EventKind = SensorEvent['kind'];
@@ -146,6 +191,7 @@ export const EventKind = z.enum([
   'network.listen',
   'browser.extension',
   'system.alert',
+  'agent.tool_request',
 ]);
 
 export type EventOfKind<K extends EventKind> = Extract<SensorEvent, { kind: K }>;

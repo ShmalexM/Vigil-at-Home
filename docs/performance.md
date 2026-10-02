@@ -41,6 +41,14 @@ processes.
 | Local classifier (optional)                 | CPU, averaged over an hour    | ≤ 2%, only on mains power and when the Mac is not busy        |
 |                                             | Memory while loaded           | ≤ 0.6 GB on 8 GB Macs, ≤ 1.2 GB otherwise; unloaded when idle |
 | Database                                    | Size on disk                  | ≤ 1 GB, oldest unreferenced events dropped first              |
+| Agent pre-flight hook (Claude Code)         | Per tool call it checks       | about 60–150 ms (Node.js start-up); Vigil answers in ≤ 5 ms   |
+|                                             | Between tool calls            | nothing: no process, timer or wakeup                          |
+| Vigil tools for agents (MCP, opt-in)        | Per call                      | one bounded read: 50 rows and 64 KB at most                   |
+|                                             | All calls together            | ≤ 50 ms of main-thread time a second (bursts of 150 ms)       |
+|                                             | Between calls                 | nothing in Vigil; the agent keeps its MCP server process      |
+| Agent process tracker                       | Memory                        | about 2 MB (8,192 processes at most)                          |
+|                                             | Time per event                | ≤ 5 µs on average                                             |
+| Agent ancestry on stored events             | Disk per event                | ≤ 40 B on average                                             |
 
 Blocking is outside the budget on purpose: a block never waits for anything on
 this page, and nothing here ever slows or pauses it.
@@ -67,6 +75,18 @@ flowchart LR
 
 The inline path (tailing, detection, block) has to be cheap on every event.
 Everything after the EventLog can wait, batch, or skip a turn.
+
+Following AI agents adds two costs. Each launch updates an in-memory process
+tree (a map of at most 8,192 processes, about 2 MB) before the rules run, and
+events an agent caused keep a few basenames of their ancestry in storage,
+plus the agent's id in an indexed column (about 30 bytes) so the Activity
+feed can show one agent's events without sorting them all. Other launches
+keep only their parent's name, when the sensor gave no parent path, so a
+rule on it replays as it ran.
+Claude Code's pre-flight hook, when the user sets it up, starts Node.js once
+per tool call it checks, about 60–150 ms that the agent waits and Vigil
+doesn't: the app only answers a line on a local socket. See
+[agents.md](agents.md).
 
 ## Rules for every part
 
@@ -99,6 +119,10 @@ Everything after the EventLog can wait, batch, or skip a turn.
    slower.
 8. **Measure it.** A change to a hot path adds or updates a measurement in
    `apps/desktop/perf/` rather than asserting it's fast.
+9. **Hooks wait on rules only.** The agent socket answers a pre-flight hook
+   from the rules, synchronously, before anything is stored; it never goes
+   through the scheduler or the AI. Recording the request happens after the
+   answer, and nothing about the socket runs while no hook is asking.
 
 ## Measure it yourself
 

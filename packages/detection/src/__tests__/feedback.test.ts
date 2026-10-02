@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DetectionEngine } from '../engine.js';
-import { Feedback } from '../feedback.js';
+import { assertExceptionScope, Feedback } from '../feedback.js';
 import { macosCoreRules } from '../packs/macos-core.js';
 import { memoryStores } from '../state/stores.js';
 import { userOrigin } from '../user.js';
@@ -105,5 +105,18 @@ describe('user decisions', () => {
     expect(() => fb.setMode('noisy-rule', 'block', forged)).toThrow(/approval/);
     fb.setMode('noisy-rule', 'shadow', me);
     expect(eng.modeOf(eng.getRule('noisy-rule')!)).toBe('shadow');
+  });
+});
+
+describe('exception scope', () => {
+  it('refuses an exception that only names an agent', () => {
+    expect(() => assertExceptionScope({ 'process.agent.id': 'claude-code' })).toThrow(/too broad/);
+    expect(() => assertExceptionScope({ 'agent.id': 'claude-code', tool: 'Bash' })).toThrow(
+      /too broad/,
+    );
+    expect(() => assertExceptionScope({})).toThrow(/too broad/);
+    expect(() =>
+      assertExceptionScope({ 'process.agent.id': 'claude-code', 'process.sha256': 'a'.repeat(64) }),
+    ).not.toThrow();
   });
 });

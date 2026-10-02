@@ -111,7 +111,10 @@ export class VigilCore {
       'prune-events',
       DAY,
       () => {
-        this.store.pruneEvents(this.now() - EVENT_RETENTION_DAYS * DAY);
+        const before = this.now() - EVENT_RETENTION_DAYS * DAY;
+        this.store.pruneEvents(before);
+        // Agent sessions go once their events have.
+        this.store.pruneAgentSessions(before);
         this.usage.prune();
       },
       true,

@@ -12,8 +12,9 @@ import { writeResult } from './report.js';
 
 // The full detection benchmark: every simulated attack with ideal telemetry
 // and through Vigil's sensor parsers, then four weeks of normal use (one
-// learning week, three measured) for two kinds of user. Results go to
-// bench-results/detection.json.
+// learning week, three measured) for two kinds of user. Events go through
+// Vigil's process tracker first, as in the app, so agent rules see which AI
+// agent a process runs under. Results go to bench-results/detection.json.
 
 // Held-out ratchet: the score on attacks the rules were never written for may
 // not drop below the best seen so far. Raise these when it improves; never
@@ -61,5 +62,12 @@ describe('detection benchmark', () => {
     expect(summary.canonical.caughtIdeal).toBe(summary.canonical.total);
     expect(heldoutSummary.caughtIdeal).toBeGreaterThanOrEqual(HELDOUT_FLOOR.caughtIdeal);
     expect(heldoutSummary.caughtSensors).toBeGreaterThanOrEqual(HELDOUT_FLOOR.caughtSensors);
+    expect(summary.agents.caughtIdeal).toBe(summary.agents.total);
+    for (const w of workload) {
+      // Agent rules stay out of a developer's way (alerts, and steps the agent
+      // stops to ask about), and following agents costs little storage.
+      expect(w.agentRules.alerts + w.agentRules.asks, w.profile).toBeLessThanOrEqual(0.5);
+      expect(w.storedBytesPerEvent.delta, w.profile).toBeLessThanOrEqual(40);
+    }
   });
 });

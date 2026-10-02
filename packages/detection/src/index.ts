@@ -13,6 +13,7 @@ export {
   Feedback,
   DEFAULT_DEMOTION,
   USER_BLOCKED_HASHES,
+  assertExceptionScope,
   type DemotionPolicy,
   type DecisionResult,
 } from './feedback.js';
@@ -28,6 +29,35 @@ export {
   type SqliteDetectionStores,
 } from './state/sqlite.js';
 export { macosCoreRules, CREDENTIAL_STORE_GLOBS } from './packs/macos-core.js';
+export {
+  agentWatchRules,
+  SECRET_PATH_RES,
+  SECRET_FILE_GLOBS,
+  UPLOAD_RES,
+  PIPE_SINK_RE,
+  COPY_OUT_RES,
+  PASTE_HOST_RE,
+  ENV_DUMP_RE,
+  PERSIST_RES,
+  TAMPER_RES_NOCASE,
+  TAMPER_RE_CASED,
+  KEYCHAIN_SECRET_RE,
+  AGENT_CONFIG_RE,
+  CONFIG_WRITE_RE,
+  CONFIG_INPLACE_RE,
+  SCRIPT_WRITE_RE,
+  MCP_ADD_RE,
+  PREFLIGHT_PIPE_RE,
+  PREFLIGHT_PROCSUB_RE,
+  AGENT_CONFIG_GLOBS,
+} from './packs/agent-watch.js';
+export {
+  agentPreflightRules,
+  PREFLIGHT_PROBING_RULE_ID,
+  PREFLIGHT_SOCKET_RULE_ID,
+  PREFLIGHT_SOCKET_TOOL,
+  builtinRules,
+} from './packs/agent-preflight.js';
 export {
   replayRule,
   type ReplayReport,
@@ -76,6 +106,7 @@ export {
 export { RULE_REVIEW_PROMPT } from './proposals/prompt.js';
 export { mergeRules } from './merge.js';
 export * from './feeds/index.js';
+export * from './agents/index.js';
 export {
   RuleEditor,
   exclusionFor,

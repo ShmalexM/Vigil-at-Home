@@ -7,18 +7,42 @@
 //
 // The app keeps running every rule either way and stays the one that raises
 // alerts. A rule is left out when it depends on something the helper does
-// not have: the "first seen" baseline (kept in the app's database), or a
-// field only the app fills in (agent sessions, for example).
+// not have: the "first seen" baseline (kept in the app's database), a field
+// only the app fills in (agent sessions, for example), or an event only the
+// app sees (an agent's tool request: pre-flight rules always stay in the app).
 
 import { createHash } from 'node:crypto';
 import type { RuleMode } from '@vigil/core';
+import { AGENT_FIELD_PREFIXES } from './agents/fields.js';
 import type { DetectionRule } from './types.js';
 
 /**
  * Fields the app adds to events after they leave the helper. Rules reading
- * them stay app-only. Matched as prefixes, so "agent." covers "agent.name".
+ * them stay app-only:
+ * - `process.agent`: the app's agent tracker tags processes under a watched
+ *   AI agent; the helper never knows which programs are agents.
+ * - Everything on an agent's tool request (`agent`, `tool`, `command`, ...):
+ *   those events come from the app's pre-flight socket and never reach the
+ *   helper.
+ * `process.ancestors` is not here: the helper's sensor hub fills it in itself.
+ *
+ * Each entry covers the field and everything under it ("agent" covers
+ * "agent.id", not "agentId"); an entry ending in "." covers only what is under it.
  */
-export const APP_ONLY_FIELD_PREFIXES: readonly string[] = [];
+export const APP_ONLY_FIELD_PREFIXES: readonly string[] = AGENT_FIELD_PREFIXES.filter(
+  (p) => p !== 'process.ancestors',
+);
+
+/** Event kinds only the app sees: an agent's tool request is checked by the app, never by the helper. */
+const APP_ONLY_KINDS: ReadonlySet<string> = new Set(['agent.tool_request']);
+
+/** True when `field` is one of `prefixes` or under one (see APP_ONLY_FIELD_PREFIXES). */
+export function isAppOnlyField(
+  field: string,
+  prefixes: readonly string[] = APP_ONLY_FIELD_PREFIXES,
+): boolean {
+  return prefixes.some((p) => field === p || field.startsWith(p.endsWith('.') ? p : `${p}.`));
+}
 
 export interface FastPathSet {
   /** The rules, each with mode set to block. */
@@ -35,9 +59,15 @@ export function fastPathRules(
   const lists = new Set<string>();
   for (const { effectiveMode, ...rule } of rules) {
     if (effectiveMode !== 'block') continue;
+    // Pre-flight rules answer an agent's tool request (deny or ask); the helper never sees one.
+    const kinds = [
+      ...rule.eventKinds,
+      ...(rule.sequence?.steps.flatMap((st) => st.eventKinds) ?? []),
+    ];
+    if (kinds.some((k) => APP_ONLY_KINDS.has(k))) continue;
     const seen = scan(rule);
     if (seen.firstSeen) continue;
-    if (seen.fields.some((f) => appOnlyFields.some((p) => f === p || f.startsWith(p)))) continue;
+    if (seen.fields.some((f) => isAppOnlyField(f, appOnlyFields))) continue;
     for (const l of seen.lists) lists.add(l);
     out.push({ ...(rule as DetectionRule), mode: 'block' });
   }

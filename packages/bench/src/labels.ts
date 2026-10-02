@@ -146,6 +146,8 @@ export function labelSet(
   for (let day = firstDay; day < firstDay + 14; day++)
     for (const profile of ['developer', 'everyday'] as Profile[])
       for (const w of workday(profile, START + day * DAY, r)) {
+        // An agent's tool requests come from its hook, not a sensor: never labelled.
+        if (w.event.kind === 'agent.tool_request') continue;
         if (engine.evaluate(w.event).length > 0) continue;
         const key = genericKey(w.event);
         if (seen.has(key)) continue;

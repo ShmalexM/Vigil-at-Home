@@ -139,6 +139,10 @@ export function eventLine(e: SensorEvent): string {
       }`;
     case 'system.alert':
       return `macOS ${e.subtype}${e.path ? ` ${e.path}` : ''}${proc(e.process)}`;
+    case 'agent.tool_request':
+      return `${e.agent.host} asked to run ${e.tool}${e.command ? ` ${e.command.slice(0, 300)}` : ''}${
+        e.filePath ? ` on ${e.filePath}` : ''
+      }${e.url ? ` ${e.url}` : ''}`;
   }
 }
 

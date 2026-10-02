@@ -1,8 +1,13 @@
+import { copyFileSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { TEXT_SEARCH_WINDOW_MS } from '../shared/ipc.js';
+import type { AgentToolRequestEvent, EventOfKind, SensorEvent } from '@vigil/core';
+import { TEXT_SEARCH_WINDOW_MS, type EventOutcome } from '../shared/ipc.js';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { Store } from './db/store.js';
+import { migrations } from './db/schema.js';
+import { Store, eventViewsQuery } from './db/store.js';
 import { makeExec, makeRule, memoryStore } from './testing.js';
 
 describe('Store', () => {
@@ -180,6 +185,36 @@ describe('Store', () => {
     expect(stats.byGroup).toMatchObject({ programs: 1, network: 1, files: 0 });
   });
 
+  it('searches events since a time by kind and text, within a scan budget', () => {
+    const s = memoryStore();
+    const exec = (path: string, ts: number) => ({ ...makeExec(path), ts });
+    const old = exec('/opt/tools/goose', 100);
+    const goose = exec('/opt/tools/goose', 1000);
+    const git = exec('/usr/bin/git', 2000);
+    s.insertEvents([{ event: old }, { event: goose }, { event: git }]);
+    s.insertEvent({
+      id: 'f1',
+      ts: 3000,
+      source: 'santa',
+      kind: 'file',
+      op: 'open',
+      path: '/Users/a/.aws/credentials',
+    });
+    const ids = (q: Partial<Parameters<typeof s.searchEvents>[0]>) =>
+      s.searchEvents({ since: 500, limit: 10, scanRows: 100, ...q }).views.map((v) => v.event.id);
+
+    expect(ids({})).toEqual(['f1', git.id, goose.id]);
+    expect(ids({ kinds: ['process.exec'] })).toEqual([git.id, goose.id]);
+    expect(ids({ text: 'goose' })).toEqual([goose.id]);
+    expect(ids({ text: 'goose', since: 0 })).toEqual([goose.id, old.id]);
+    expect(ids({ text: '.aws', kinds: ['file'] })).toEqual(['f1']);
+    expect(ids({ limit: 1 })).toEqual(['f1']);
+    // Text is looked for in the newest events only, and the answer says so.
+    const partial = s.searchEvents({ since: 0, text: 'goose', limit: 10, scanRows: 2 });
+    expect(partial).toEqual({ views: [], partial: true });
+    expect(s.searchEvents({ since: 0, text: 'git', limit: 10, scanRows: 4 }).partial).toBe(false);
+  });
+
   it('fills in the outcome of an event an alert already stored, keeping its raw record', () => {
     const s = memoryStore();
     const e = { ...makeExec(), raw: { line: 'santa' } };
@@ -200,5 +235,329 @@ describe('Store', () => {
       { event: plain, outcome: { checked: 1, matches: [] } },
     ]);
     expect(s.listEventViews({ matchedOnly: true }).map((v) => v.event.id)).toEqual([hit.id]);
+  });
+});
+
+// ---------------------------------------------------------------- agents
+
+const S1 = 'aaaaaaaaaaaaaaaa';
+const S2 = 'bbbbbbbbbbbbbbbb';
+const tag = (session: string, depth = 1, id = 'claude-code') => ({ id, session, depth });
+
+function tagged(
+  session: string,
+  ts: number,
+  pid: number,
+  path = '/usr/bin/git',
+  agent = 'claude-code',
+): EventOfKind<'process.exec'> {
+  return {
+    ...makeExec(path, pid),
+    ts,
+    process: { pid, ppid: 100, path, signing: 'apple', agent: tag(session, 1, agent) },
+  };
+}
+
+function toolRequest(
+  id: string,
+  ts: number,
+  session: string | undefined,
+  mode?: 'block' | 'alert' | 'shadow',
+): { event: AgentToolRequestEvent; outcome: EventOutcome } {
+  return {
+    event: {
+      id,
+      ts,
+      source: 'vigil',
+      kind: 'agent.tool_request',
+      tool: 'Bash',
+      command: 'ls',
+      agent: { host: 'claude-code', ...(session ? { id: 'claude-code', session } : {}) },
+      process: { pid: 0, path: '/bin/zsh', args: ['zsh', '-c', 'ls'] },
+    },
+    outcome: { checked: 9, matches: mode ? [{ ruleId: 'r', ruleName: 'R', mode }] : [] },
+  };
+}
+
+const quiet: EventOutcome = { checked: 1, matches: [] };
+const hit: EventOutcome = { checked: 1, matches: [{ ruleId: 'r', ruleName: 'R', mode: 'alert' }] };
+
+function sessionRow(id: string, startedAt: number, agentId = 'claude-code') {
+  return {
+    id,
+    agentId,
+    rootPid: 100,
+    rootPath: '/Users/you/.local/share/claude/versions/2.0.14',
+    startedAt,
+    seeded: false,
+  };
+}
+
+describe('Store: agents', () => {
+  it('migrates a copy of a version 6 database, keeping its events', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vigil-v6-'));
+    const v6 = new DatabaseSync(join(dir, 'v6.db'));
+    for (const m of migrations.slice(0, 6)) v6.exec(m);
+    v6.exec('PRAGMA user_version = 6');
+    const old = makeExec('/usr/bin/old');
+    v6.prepare('INSERT INTO events (id, ts, kind, source, body) VALUES (?, ?, ?, ?, ?)').run(
+      old.id,
+      old.ts,
+      old.kind,
+      old.source,
+      JSON.stringify(old),
+    );
+    v6.close();
+    copyFileSync(join(dir, 'v6.db'), join(dir, 'copy.db'));
+
+    const db = new DatabaseSync(join(dir, 'copy.db'));
+    const s = new Store(db);
+    expect(migrations).toHaveLength(7);
+    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 7 });
+    const columns = (db.prepare('PRAGMA table_info(events)').all() as { name: string }[]).map(
+      (c) => c.name,
+    );
+    expect(columns).toEqual(expect.arrayContaining(['agent_session', 'agent_id']));
+    const indexes = (
+      db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index'`).all() as { name: string }[]
+    ).map((r) => r.name);
+    expect(indexes).toEqual(
+      expect.arrayContaining([
+        'agent_sessions_agent_started',
+        'events_agent_session_ts',
+        'events_agent_ts',
+      ]),
+    );
+    expect(s.getEvent(old.id)).toEqual(old);
+    expect(s.listEventViews({ agentSession: S1 })).toEqual([]);
+
+    // New events fill the column; reopening runs nothing again.
+    s.insertEvent(tagged(S1, 5000, 7));
+    s.close();
+    const again = new Store(new DatabaseSync(join(dir, 'copy.db')));
+    expect(again.listEventViews({ agentSession: S1 })).toHaveLength(1);
+    again.close();
+  });
+
+  it('stores sessions once and lists them with their counts, newest first', () => {
+    const s = memoryStore();
+    s.insertAgentSessions([sessionRow(S1, 1000), { ...sessionRow(S2, 2000), parentSession: S1 }]);
+    s.insertAgentSessions([{ ...sessionRow(S1, 1000), rootPath: '/other' }]); // reported again
+    s.insertEvents([
+      { event: tagged(S1, 1100, 7), outcome: quiet },
+      { event: tagged(S1, 1200, 8, '/bin/cat'), outcome: hit },
+      toolRequest('t1', 1300, S1, 'block'),
+      toolRequest('t2', 1400, S1, 'alert'),
+      toolRequest('t3', 1500, S1),
+      toolRequest('t4', 1600, S1, 'shadow'),
+    ]);
+    const [b, a] = s.listAgentSessions('claude-code');
+    expect(b).toMatchObject({ id: S2, events: 0, lastAt: 2000, parentSession: S1 });
+    expect(a).toMatchObject({
+      id: S1,
+      agentId: 'claude-code',
+      rootPid: 100,
+      rootPath: '/Users/you/.local/share/claude/versions/2.0.14',
+      startedAt: 1000,
+      lastAt: 1600,
+      events: 6,
+      matches: 4,
+      asks: 1,
+      denies: 1,
+      seeded: false,
+    });
+    expect(s.listAgentSessions('claude-code', 2000).map((x) => x.id)).toEqual([S1]);
+    expect(s.listAgentSessions('codex')).toEqual([]);
+    expect(s.getAgentSession(S1)).toEqual(a);
+    expect(s.getAgentSession('cccccccccccccccc')).toBeUndefined();
+
+    expect(s.sessionEvents(S1).map((v) => v.event.ts)).toEqual([
+      1600, 1500, 1400, 1300, 1200, 1100,
+    ]);
+    const execs = s.sessionEvents(S1, 10, { kind: 'process.exec', oldestFirst: true });
+    expect(execs.map((v) => v.event.ts)).toEqual([1100, 1200]);
+    expect([...s.sessionMatchedPids(S1)].sort()).toEqual([0, 8]);
+  });
+
+  it('filters the feed by agent and by session', () => {
+    const s = memoryStore();
+    s.insertAgentSessions([sessionRow(S1, 1000), sessionRow(S2, 1000, 'codex')]);
+    s.insertEvent(tagged(S1, 1100, 7));
+    s.insertEvent(tagged(S2, 1200, 8, '/usr/bin/git', 'codex'));
+    s.insertEvent(makeExec('/usr/bin/plain'));
+    const req = toolRequest('t1', 1300, S1, 'block');
+    s.insertEvent(req.event, req.outcome);
+    expect(s.listEventViews({ agent: 'claude-code' }).map((v) => v.event.id)).toEqual([
+      't1',
+      expect.any(String),
+    ]);
+    expect(s.listEventViews({ agent: 'codex' })).toHaveLength(1);
+    expect(s.listEventViews({ agentSession: S2 })).toHaveLength(1);
+    expect(s.listEventViews({ group: 'agents' }).map((v) => v.event.id)).toEqual(['t1']);
+    expect(s.eventStats(0).byGroup).toMatchObject({ agents: 1, programs: 3 });
+  });
+
+  it('pages the feed by agent through an index, without sorting all its events', () => {
+    const s = memoryStore();
+    const db = (s as unknown as { db: DatabaseSync }).db;
+    const plan = (q: Parameters<typeof eventViewsQuery>[0]) => {
+      const { sql, args } = eventViewsQuery(q, 10_000);
+      return (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args) as { detail: string }[]).map(
+        (r) => r.detail,
+      );
+    };
+    for (const q of [
+      { agent: 'claude-code' },
+      { agent: 'claude-code', group: 'programs' as const },
+      { agent: 'claude-code', before: 5000 },
+    ]) {
+      const steps = plan(q);
+      expect(steps.join('\n'), JSON.stringify(q)).toContain('events_agent_ts');
+      // Ordering rows of equal ts by id is fine; sorting every row is not.
+      expect(steps, JSON.stringify(q)).not.toContain('USE TEMP B-TREE FOR ORDER BY');
+    }
+    // The agent comes from the event's own tag, and a tool request's agent.
+    s.insertEvents([
+      { event: tagged(S1, 1100, 7), outcome: quiet },
+      toolRequest('t1', 1200, S1, 'block'),
+      toolRequest('t2', 1300, undefined, 'alert'),
+    ]);
+    expect(s.listEventViews({ agent: 'claude-code' }).map((v) => v.event.ts)).toEqual([1200, 1100]);
+  });
+
+  it('keeps session counts between reads and counts again only what changed', () => {
+    const s = memoryStore();
+    s.insertAgentSessions([sessionRow(S1, 1000), sessionRow(S2, 2000)]);
+    s.insertEvents([
+      { event: tagged(S1, 1100, 7), outcome: hit },
+      { event: tagged(S2, 2100, 8), outcome: quiet },
+    ]);
+    expect(s.hasAgentSessions('claude-code')).toBe(true);
+    expect(s.hasAgentSessions('codex')).toBe(false);
+    const counts = () =>
+      s.listAgentSessions('claude-code').map((v) => [v.id, v.events, v.matches, v.lastAt]);
+    expect(counts()).toEqual([
+      [S2, 1, 0, 2100],
+      [S1, 1, 1, 1100],
+    ]);
+    // A new event in S1, its outcome filled in later, then a request in S2.
+    const late = tagged(S1, 1200, 9);
+    s.insertEvent(late);
+    expect(counts()).toEqual([
+      [S2, 1, 0, 2100],
+      [S1, 2, 1, 1200],
+    ]);
+    s.insertEvents([{ event: late, outcome: hit }, toolRequest('t1', 2200, S2, 'block')]);
+    expect(counts()).toEqual([
+      [S2, 2, 1, 2200],
+      [S1, 2, 2, 1200],
+    ]);
+    expect(s.getAgentSession(S2)).toMatchObject({ denies: 1, events: 2 });
+    // Pruning forgets them all.
+    s.pruneEvents(1150);
+    expect(counts()).toEqual([
+      [S2, 2, 1, 2200],
+      [S1, 1, 1, 1200],
+    ]);
+  });
+
+  it('keeps the session an alert stored first when the batch writes the event again', () => {
+    const s = memoryStore();
+    const e = tagged(S1, 1100, 7);
+    s.insertEvent(e);
+    s.insertEvents([{ event: e, outcome: hit }]);
+    expect(s.listEventViews({ agentSession: S1 })[0]?.outcome).toEqual(hit);
+  });
+
+  it('counts each agent’s day: sessions, matches, asks and denies', () => {
+    const s = memoryStore();
+    s.insertAgentSessions([sessionRow(S1, 500), sessionRow(S2, 5000)]);
+    s.insertEvents([
+      { event: tagged(S1, 600, 7), outcome: hit }, // before the day starts
+      { event: tagged(S1, 2100, 7), outcome: hit },
+      { event: tagged(S2, 5100, 9), outcome: quiet },
+      toolRequest('t1', 5200, S2, 'block'),
+      toolRequest('t2', 5300, S2, 'alert'),
+      toolRequest('t3', 5400, undefined, 'alert'), // no agent known
+    ]);
+    const stats = s.agentStats(2000);
+    expect(stats.get('claude-code')).toEqual({
+      sessions: 2,
+      matches: 3,
+      asks: 1,
+      denies: 1,
+      lastSeenAt: 5300,
+    });
+    expect(s.agentStats(6000).get('claude-code')).toMatchObject({ sessions: 0, matches: 0 });
+    expect(s.toolRequestCounts(0)).toEqual({ deny: 1, ask: 2, none: 0 });
+    expect(s.toolRequestCounts(5250)).toEqual({ deny: 0, ask: 2, none: 0 });
+  });
+
+  it('prunes sessions whose events are gone, and keeps the rest', () => {
+    const s = memoryStore();
+    s.insertAgentSessions([sessionRow(S1, 1000), sessionRow(S2, 1000)]);
+    s.insertEvent(tagged(S2, 1100, 7));
+    expect(s.pruneAgentSessions(5000)).toBe(1);
+    expect(s.getAgentSession(S1)).toBeUndefined();
+    expect(s.getAgentSession(S2)).toBeDefined();
+    s.pruneEvents(5000);
+    expect(s.pruneAgentSessions(500)).toBe(0); // too new
+    expect(s.pruneAgentSessions(5000)).toBe(1);
+  });
+
+  it('lists recent programs that are not Apple’s, newest first', () => {
+    const s = memoryStore();
+    const run = (path: string, ts: number, signing: 'apple' | 'developer_id', teamId?: string) =>
+      s.insertEvent({
+        ...makeExec(path),
+        ts,
+        process: { pid: ts, path, signing, ...(teamId ? { teamId } : {}) },
+      } satisfies SensorEvent);
+    run('/usr/bin/git', 100, 'apple');
+    run('/opt/homebrew/bin/aider', 200, 'developer_id', 'ABCDE12345');
+    run('/opt/homebrew/bin/aider', 300, 'developer_id', 'ABCDE12345');
+    run('/Users/you/.local/bin/goose', 400, 'developer_id');
+    run('/opt/old/tool', 10, 'developer_id');
+    expect(s.recentExecPrograms(50)).toEqual([
+      { path: '/Users/you/.local/bin/goose', name: 'goose', lastSeen: 400, count: 1 },
+      {
+        path: '/opt/homebrew/bin/aider',
+        name: 'aider',
+        teamId: 'ABCDE12345',
+        lastSeen: 300,
+        count: 2,
+      },
+    ]);
+    const rows = [...s.iterateExecEvents(50)];
+    expect(rows.map((r) => r.path)).toEqual([
+      '/Users/you/.local/bin/goose',
+      '/opt/homebrew/bin/aider',
+      '/opt/homebrew/bin/aider',
+      '/usr/bin/git',
+    ]);
+    expect([...s.iterateExecEvents(0, 2)]).toHaveLength(2);
+  });
+
+  it('counts Vigil’s own AI runs by purpose', () => {
+    const s = memoryStore();
+    const run = (id: string, at: number, purpose: 'explain' | 'classify') =>
+      s.addAiRun({
+        id,
+        at,
+        provider: 'claude',
+        purpose,
+        ok: true,
+        inputTokens: 1,
+        cachedInputTokens: 0,
+        outputTokens: 1,
+        costUsd: null,
+      });
+    run('a', 100, 'explain');
+    run('b', 900, 'explain');
+    run('c', 50, 'classify');
+    const stats = s.aiRunStats(500);
+    expect(stats.get('explain')).toEqual({ runs: 1, lastAt: 900 });
+    expect(stats.get('classify')).toEqual({ runs: 0, lastAt: 50 });
+    expect(stats.has('analyze')).toBe(false);
   });
 });

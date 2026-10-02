@@ -1,12 +1,16 @@
 import type { Alert, SensorEvent } from '@vigil/core';
 import { Bell, RotateCcw, Sparkles } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { useLive, vigil } from '../api';
 import { DecisionControls, type Decided } from '../components/Decision';
 import { useToast } from '../components/Toasts';
+import { toolRequestFields } from '../components/ToolRequestFields';
 import { Button, Card, Chip, SectionHead, SeverityMark, StatusMark } from '../components/ui';
+import { evidenceSub, isHookRequest, realProcess, STOPPED_ANSWER } from '../evidence';
 import { actorLabel, clock, describeAction, describeEvent, seenTimes, timeAgo } from '../format';
+import { modeLabel } from '../rule-modes';
 import { ExcludeFromAlert } from '../components/ExcludeFromAlert';
+import { useAgentLinks, type AgentLinks } from './Activity';
 import { PageHead } from './AppShell';
 import { onRovingKeyDown } from '../components/roving';
 import { shownAlert, tabFor } from './alerts-selection';
@@ -121,6 +125,7 @@ function AlertRow({
 function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
   const [detail] = useLive(() => vigil.getAlertDetail(id), id);
   const toast = useToast();
+  const links = useAgentLinks(go);
   if (!detail) return null;
   const { alert, events, actions, proposals, rule } = detail;
   const pending = proposals.filter((p) => p.status === 'pending');
@@ -262,12 +267,9 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
       )}
 
       <Card>
-        <SectionHead
-          title="Evidence"
-          sub={`${events.length} event${events.length === 1 ? '' : 's'} from the sensors`}
-        />
+        <SectionHead title="Evidence" sub={evidenceSub(events)} />
         {events.map((e) => (
-          <EventBlock key={e.id} event={e} />
+          <EventBlock key={e.id} event={e} links={links} />
         ))}
       </Card>
 
@@ -276,7 +278,7 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
           <div className="row">
             <span className="t-label">Rule</span>
             <span className="grow t-h3">{rule.name}</span>
-            <Chip>{rule.mode}</Chip>
+            <Chip>{modeLabel(rule, rule.mode)}</Chip>
             <Chip>{rule.fidelity} fidelity</Chip>
             {rule.origin === 'ai' && <Chip tone="ai">AI-drafted</Chip>}
           </div>
@@ -306,8 +308,9 @@ function isUndoable(kind: string): boolean {
   ].includes(kind);
 }
 
-function EventBlock({ event }: { event: SensorEvent }) {
-  const p = 'process' in event ? event.process : undefined;
+function EventBlock({ event, links }: { event: SensorEvent; links: AgentLinks }) {
+  // A tool request's process is only the shell it would have started, never a real one.
+  const p = realProcess(event);
   return (
     <div className="event">
       <div className="row spread">
@@ -317,6 +320,19 @@ function EventBlock({ event }: { event: SensorEvent }) {
         </span>
       </div>
       <dl className="kv">
+        {event.kind === 'agent.tool_request' &&
+          toolRequestFields(event, links).map(([k, v]) => (
+            <Fragment key={k}>
+              <dt>{k}</dt>
+              <dd>{v}</dd>
+            </Fragment>
+          ))}
+        {isHookRequest(event) && (
+          <>
+            <dt>Answer</dt>
+            <dd>{STOPPED_ANSWER}</dd>
+          </>
+        )}
         {p && (
           <>
             <dt>Program</dt>

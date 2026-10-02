@@ -133,6 +133,11 @@ export class Scheduler {
     this.slowdown = Math.max(1, factor);
   }
 
+  /** How many times less often periodic jobs run now (1 = normal; more on battery). */
+  get slowdownFactor(): number {
+    return this.slowdown;
+  }
+
   get isPaused(): boolean {
     return this.paused;
   }

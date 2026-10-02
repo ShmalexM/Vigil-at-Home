@@ -1,4 +1,7 @@
 import {
+  AgentId,
+  AgentIdentityInput,
+  AgentMatcher,
   Id,
   RuleMode,
   UserDecision,
@@ -12,6 +15,19 @@ import {
 import { z } from 'zod';
 import type { CALL_NAMES, PUSH_NAMES } from './channels.js';
 import { AiPrefsPatch, AiProvider, type AiActionResult, type AiView } from './ai.js';
+import type {
+  AgentCandidate,
+  AgentDetail,
+  AgentMatchPreview,
+  AgentPrefs as AgentPrefsShape,
+  AgentSessionView,
+  AgentToolsStatus,
+  AgentView,
+  PreflightStatus,
+  SaveAgentResult,
+  TreeNode,
+  VigilHelperView,
+} from './agents.js';
 import type { AppearanceSettings } from './themes.js';
 import type { UpdateView } from './updates.js';
 import type { UsageLimitsView, UsageReport } from './usage.js';
@@ -80,7 +96,7 @@ export const EventOutcome = z.object({
 export type EventOutcome = z.infer<typeof EventOutcome>;
 
 /** Which events broad kind the feed filters by. */
-export const EventGroup = z.enum(['programs', 'network', 'files', 'startup', 'system']);
+export const EventGroup = z.enum(['programs', 'network', 'files', 'startup', 'system', 'agents']);
 export type EventGroup = z.infer<typeof EventGroup>;
 
 export const EVENT_GROUPS: Record<EventGroup, EventKind[]> = {
@@ -89,7 +105,11 @@ export const EVENT_GROUPS: Record<EventGroup, EventKind[]> = {
   files: ['file'],
   startup: ['persistence', 'browser.extension'],
   system: ['system.alert'],
+  agents: ['agent.tool_request'],
 };
+
+/** One run of an agent (see AgentSessionView): 16 hex chars. */
+export const AgentSessionId = z.string().regex(/^[0-9a-f]{16}$/);
 
 /** How far back one text search looks; the feed then offers the day before. */
 export const TEXT_SEARCH_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -103,8 +123,25 @@ export const EventQuery = z.object({
   /** Page backwards from this timestamp. */
   before: z.number().int().optional(),
   limit: z.number().int().min(1).max(500).optional(),
+  /** Only events from this agent's sessions. */
+  agent: AgentId.optional(),
+  /** Only events from one agent session. */
+  agentSession: AgentSessionId.optional(),
 });
 export type EventQuery = z.infer<typeof EventQuery>;
+
+/** Agents › Tool policy switches (main/agents/service.ts). */
+export const AgentPrefs = z.object({
+  preflightEnabled: z.boolean(),
+  onUnavailable: z.enum(['ask', 'defer']),
+  suggestions: z.boolean(),
+  toolsEnabled: z.boolean(),
+}) satisfies z.ZodType<AgentPrefsShape>;
+export type AgentPrefs = AgentPrefsShape;
+
+/** A change to some agent prefs. */
+export const AgentPrefsPatch = AgentPrefs.partial();
+export type AgentPrefsPatch = z.input<typeof AgentPrefsPatch>;
 
 const RuleId = z.string().min(1).max(100);
 /** A rule as JSON text from the editor. Main parses and validates it. */
@@ -198,6 +235,29 @@ export const calls = {
   setUpdateAuto: z.tuple([z.boolean()]),
   dismissUpdate: z.tuple([]),
   downloadUpdate: z.tuple([]),
+  // Agents (main/agents).
+  listAgents: z.tuple([]),
+  listAgentNames: z.tuple([]),
+  getAgent: z.tuple([AgentId]),
+  saveAgent: z.tuple([AgentIdentityInput]),
+  setAgentWatch: z.tuple([AgentId, z.boolean()]),
+  setAgentStatus: z.tuple([AgentId, z.enum(['active', 'ignored'])]),
+  removeAgent: z.tuple([AgentId]),
+  /** A built-in agent back to Vigil's own matchers, watch and status. */
+  resetAgent: z.tuple([AgentId]),
+  previewAgentMatch: z.tuple([z.array(AgentMatcher).min(1).max(4)]),
+  listAgentCandidates: z.tuple([]),
+  listAgentSessions: z.tuple([
+    AgentId,
+    z.object({ before: z.number().int().optional() }).optional(),
+  ]),
+  getAgentSession: z.tuple([AgentSessionId]),
+  getAgentPrefs: z.tuple([]),
+  setAgentPrefs: z.tuple([AgentPrefsPatch]),
+  getPreflightStatus: z.tuple([]),
+  /** Vigil's read-only tools for your own agents (MCP). */
+  getAgentToolsStatus: z.tuple([]),
+  listVigilHelpers: z.tuple([]),
 } as const;
 export type CallName = keyof typeof calls;
 
@@ -507,6 +567,31 @@ export interface CallResults {
   setUpdateAuto: void;
   dismissUpdate: void;
   downloadUpdate: void;
+  listAgents: AgentView[];
+  /** The registry only, without listAgents' stats. */
+  listAgentNames: Pick<AgentView, 'id' | 'name' | 'status'>[];
+  getAgent: AgentDetail | null;
+  saveAgent: SaveAgentResult;
+  setAgentWatch: void;
+  setAgentStatus: void;
+  removeAgent: void;
+  resetAgent: void;
+  previewAgentMatch: AgentMatchPreview;
+  listAgentCandidates: AgentCandidate[];
+  listAgentSessions: AgentSessionView[];
+  getAgentSession: AgentSessionDetail | null;
+  getAgentPrefs: AgentPrefs;
+  setAgentPrefs: AgentPrefs;
+  getPreflightStatus: PreflightStatus;
+  getAgentToolsStatus: AgentToolsStatus;
+  listVigilHelpers: VigilHelperView[];
+}
+
+/** One agent session: its process tree (at most 200 nodes) and events (at most 500). */
+export interface AgentSessionDetail {
+  session: AgentSessionView;
+  tree: TreeNode[];
+  events: EventView[];
 }
 
 /** Pushed from main to every window. */
@@ -520,6 +605,12 @@ export interface Pushes {
   theme: [ThemePref];
   /** New events were stored. Sent at most once a second, with how many arrived. */
   events: [number];
+  /**
+   * Agent activity was recorded: a pre-flight request, a session, a hook
+   * check-in or a tools call. Sent at most every 2 seconds, for the views
+   * that show those; `changed` covers everything else.
+   */
+  agents: [];
 }
 
 export type VigilApi = {

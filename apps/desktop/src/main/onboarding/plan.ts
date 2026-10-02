@@ -44,7 +44,10 @@ export interface StepDef {
   commands: StepCommand[];
   /** Things only the user can click in System Settings. */
   manual?: ManualStep[];
-  check: CheckId;
+  /** The check that says the step is done. Unset when Vigil knows itself (`result`). */
+  check?: CheckId;
+  /** Done or not, from what Vigil itself saw rather than a check of the Mac. */
+  result?: { ok: boolean; detail?: string };
   /** What Vigil looks at to decide the step is done, shown to the user. */
   checks: string;
   /** Steps that have to be done first. */
@@ -64,6 +67,13 @@ export interface PlanInputs {
   helperInstallCommand?: string;
   /** Where the Santa configuration profile was written; unset until blocking ships. */
   santaProfilePath?: string;
+  /**
+   * Set once Claude Code is installed or has been seen on this Mac, which
+   * offers its pre-flight hook; `connected` while pre-flight is on and the
+   * hook was heard from in the last 7 days; `off` when it was heard from but
+   * pre-flight is off.
+   */
+  claudePreflight?: { connected: boolean; off?: true };
 }
 
 /**
@@ -230,7 +240,42 @@ export function setupPlan(inputs: PlanInputs = {}): StepDef[] {
       checks: 'codex is installed',
       after: ['homebrew'],
     },
+    ...(inputs.claudePreflight ? [claudePreflightStep(inputs.claudePreflight)] : []),
   ];
+}
+
+/**
+ * Optional, whatever the AI mode: it is about the Claude Code the user runs,
+ * not the AI Vigil uses. The hooks are pasted by the user; Vigil never reads
+ * or writes Claude Code's own settings.
+ */
+function claudePreflightStep(p: { connected: boolean; off?: true }): StepDef {
+  return {
+    id: 'claude-preflight',
+    group: 'ai',
+    title: 'Claude Code pre-flight checks',
+    why: 'Claude Code asks Vigil before it runs a command, writes a file or fetches a page, and Vigil’s rules answer: stop the step, ask you, or leave it to Claude Code. Rules decide, never an AI, and Vigil never answers “allow”.',
+    modes: ALL,
+    optional: true,
+    commands: [],
+    manual: [
+      {
+        text: 'Turn on pre-flight checks, copy the hooks and paste them into your Claude Code settings yourself. Vigil never opens that file.',
+      },
+      { text: 'Start a new Claude Code session. Vigil shows Connected once the hook says hello.' },
+    ],
+    result: p.connected
+      ? { ok: true, detail: 'The hook checked in within the last 7 days' }
+      : p.off
+        ? {
+            ok: false,
+            detail:
+              'Pre-flight checks are off. Turn them on below, or remove the hooks from Claude Code.',
+          }
+        : { ok: false },
+    checks:
+      'pre-flight checks are on and the hook said hello or asked about a tool call in the last 7 days',
+  };
 }
 
 export interface KeyDef {

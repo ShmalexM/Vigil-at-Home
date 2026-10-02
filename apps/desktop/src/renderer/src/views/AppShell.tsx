@@ -1,6 +1,7 @@
 import {
   Activity,
   Bell,
+  Bot,
   ChartSpline,
   Download,
   History as HistoryIcon,
@@ -15,6 +16,7 @@ import { useLive, vigil } from '../api';
 import { Shield } from '../components/Shield';
 import { Button, LevelPill } from '../components/ui';
 import { ActivityView } from './Activity';
+import { AgentsView } from './Agents';
 import { AlertsView } from './Alerts';
 import { HistoryView } from './History';
 import { HomeView } from './Home';
@@ -39,6 +41,7 @@ const NAV: NavItem[] = [
 export const ADVANCED_NAV: NavItem[] = [
   { id: 'alerts', label: 'Alerts', icon: <Bell size={16} /> },
   { id: 'rules', label: 'Rules', icon: <ListChecks size={16} /> },
+  { id: 'agents', label: 'Agents', icon: <Bot size={16} /> },
   { id: 'activity', label: 'Activity', icon: <Activity size={16} /> },
   { id: 'usage', label: 'Usage', icon: <ChartSpline size={16} /> },
 ];
@@ -68,6 +71,9 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
   const [setup] = useLive(() => vigil.getSetup());
   const [updates] = useLive(() => vigil.getUpdates());
   const [settings] = useLive(() => vigil.getSettings());
+  // Names and statuses only: the badge needs no stats, and this runs on every page.
+  const [agents] = useLive(() => vigil.listAgentNames());
+  const suggestions = agents?.filter((a) => a.status === 'suggested').length ?? 0;
   const [section = 'home', param] = route.split('/');
   const onAdvanced = ADVANCED_NAV.some((n) => n.id === section);
   const showAdvanced = !!settings?.showAdvanced || onAdvanced;
@@ -100,6 +106,13 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
                   key={n.id}
                   item={n}
                   current={section === n.id}
+                  {...(n.id === 'agents'
+                    ? {
+                        badge: suggestions,
+                        calm: true,
+                        badgeTitle: 'Suggested agents waiting on you',
+                      }
+                    : {})}
                   onClick={() => go(n.id)}
                 />
               ))}
@@ -163,7 +176,8 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
         {section === 'history' && <HistoryView go={go} />}
         {section === 'alerts' && <AlertsView selected={param} go={go} />}
         {section === 'rules' && <RulesView selected={param} go={go} />}
-        {section === 'activity' && <ActivityView />}
+        {section === 'agents' && <AgentsView selected={param} go={go} />}
+        {section === 'activity' && <ActivityView selected={param} go={go} />}
         {section === 'usage' && <UsageView />}
         {section === 'settings' && <SettingsView go={go} />}
       </main>
@@ -175,11 +189,16 @@ function NavButton({
   item,
   current,
   badge,
+  calm,
+  badgeTitle,
   onClick,
 }: {
   item: NavItem;
   current: boolean;
   badge?: number | undefined;
+  /** A count that waits on the user but isn't urgent. */
+  calm?: boolean;
+  badgeTitle?: string;
   onClick: () => void;
 }) {
   return (
@@ -191,7 +210,11 @@ function NavButton({
     >
       {item.icon}
       <span className="grow">{item.label}</span>
-      {!!badge && <span className="count hot">{badge}</span>}
+      {!!badge && (
+        <span className={calm ? 'count' : 'count hot'} title={badgeTitle}>
+          {badge}
+        </span>
+      )}
     </button>
   );
 }

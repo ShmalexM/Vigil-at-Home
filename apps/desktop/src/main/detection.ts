@@ -1,7 +1,18 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
-import type { Rule, RuleMode, SensorEvent, UserDecision } from '@vigil/core';
 import {
+  newId,
+  type AgentToolRequestEvent,
+  type PreflightReply,
+  type PreflightRequest,
+  type Rule,
+  type RuleMode,
+  type SensorEvent,
+  type UserDecision,
+} from '@vigil/core';
+import {
+  AgentRegistry,
+  AgentTracker,
   DEFAULT_FEEDS,
   DetectionEngine,
   FeedImporter,
@@ -9,9 +20,11 @@ import {
   RuleEditor,
   RulePipeline,
   RuleReviewer,
-  macosCoreRules,
+  builtinRules,
+  decide,
   mergeRules,
   sqliteStores,
+  toolRequestEvent,
   type DecisionResult,
   type Detection,
   type DetectionRule,
@@ -21,11 +34,13 @@ import {
   type FeedStatus,
   type FlaggedEvent,
   type Proposal,
+  type PsRow,
   type ReviewState,
   type RuleException,
   type SqliteDetectionStores,
+  type TrackerOptions,
 } from '@vigil/detection';
-import { fastPathRules } from '@vigil/detection/fastpath';
+import { fastPathRules, isAppOnlyField } from '@vigil/detection/fastpath';
 import { userOrigin } from '@vigil/detection/user';
 import type { EventOutcome } from '../shared/ipc.js';
 import type { AlertService } from './alerts.js';
@@ -78,6 +93,17 @@ export interface DetectorOptions {
   selfPaths: string[];
   feeds?: FeedImporterOptions;
   now?: () => number;
+  /** Vigil's own pid: its process tree is tagged `vigil-self` (its AI helpers). */
+  selfPid?: number;
+  /** What the agent service hears from the process tracker. */
+  agentHooks?: Pick<TrackerOptions, 'onSession' | 'onMiss' | 'onCandidate'>;
+}
+
+/** What the pre-flight hook gets back, and what is recorded after it has its answer. */
+export interface PreflightResult {
+  reply: PreflightReply;
+  event: AgentToolRequestEvent;
+  detections: Detection[];
 }
 
 /**
@@ -94,6 +120,10 @@ export class Detector {
   readonly editor: RuleEditor;
   /** AI proposals: checked, replayed on 14 days, then waiting for the user. */
   readonly pipeline: RulePipeline;
+  /** The watched AI agents: the catalogue merged with the user's own. Changes need a UserOrigin. */
+  readonly registry: AgentRegistry;
+  /** Which processes run under a watched agent; tags events before rules see them. */
+  readonly tracker: AgentTracker;
   private reviewer: RuleReviewer | undefined;
   private checkedByKind = new Map<string, number>();
   private readonly now: () => number;
@@ -116,8 +146,16 @@ export class Detector {
     // Detection keeps its state in det_* tables in the same database. Replay
     // history reads the app's own event table rather than keeping a second copy.
     this.stores = { ...sqliteStores(db), history: appHistory(store) };
+    this.registry = new AgentRegistry(this.stores.agents);
+    this.tracker = new AgentTracker({
+      matcher: () => this.registry.matcher(),
+      ...(opts.selfPid ? { self: { pid: opts.selfPid, path: process.execPath } } : {}),
+      ...opts.agentHooks,
+    });
+    // An agent added, edited or switched off changes the tags of what is running now.
+    this.registry.onChange(() => this.tracker.retag());
     this.engine = new DetectionEngine(
-      mergeRules(macosCoreRules, this.stores.rules.list()),
+      mergeRules(builtinRules, this.stores.rules.list()),
       this.stores,
       {
         learningUntil: opts.installedAt + LEARNING_DAYS * DAY,
@@ -132,7 +170,7 @@ export class Detector {
     });
     this.editor = new RuleEditor(
       this.engine,
-      macosCoreRules,
+      builtinRules,
       this.stores.rules,
       this.stores.history,
       {
@@ -231,18 +269,72 @@ export class Detector {
     this.recount();
   }
 
-  /** The inline path for one event. Microseconds of rule work, then storage and alerts. */
+  /**
+   * The inline path for one event. The tracker tags it with its agent first,
+   * so rules see `process.agent`; then microseconds of rule work, then
+   * storage and alerts.
+   */
   async handle(event: SensorEvent): Promise<void> {
-    const detections = this.engine.evaluate(event);
-    this.ingest(event, {
-      checked: this.checkedByKind.get(event.kind) ?? 0,
+    const tagged = this.tracker.observe(event);
+    const detections = this.engine.evaluate(tagged);
+    this.ingest(tagged, this.outcome(tagged.kind, detections));
+    for (const d of detections) await this.apply(d);
+  }
+
+  /**
+   * An agent's hook asks about one tool call. Synchronous and side-effect
+   * free: the tracker only says which agent session asked (attribution), and
+   * `engine.check` leaves no trace. Rules decide deny, ask or nothing; never allow.
+   */
+  preflight(req: PreflightRequest): PreflightResult {
+    const ts = this.now();
+    const found = req.ppid !== undefined ? this.tracker.lookup(req.ppid) : undefined;
+    const event = toolRequestEvent(req, {
+      id: newId(ts),
+      ts,
+      ...(found?.tag ? { tag: found.tag } : {}),
+    });
+    const detections = this.engine.check(event);
+    const reply = decide(detections, (id) => this.engine.getRule(id)?.name ?? id);
+    return { reply, event, detections };
+  }
+
+  /**
+   * Store a tool request after its answer went out, with a rule match per
+   * detection. Nothing runs: tool-request rules have no actions, and this
+   * never goes through `apply`. `alerted` are rules whose match an alert
+   * already recorded (the agent service raises those itself).
+   */
+  recordToolRequest(
+    event: AgentToolRequestEvent,
+    detections: Detection[],
+    alerted: ReadonlySet<string> = new Set(),
+  ): void {
+    this.ingest(event, this.outcome(event.kind, detections));
+    for (const d of detections) {
+      if (!alerted.has(d.match.ruleId)) this.store.insertRuleMatch({ ...d.match, mode: d.mode });
+    }
+  }
+
+  /** Take before reading `ps`, and pass to seedProcesses: launches seen meanwhile are newer. */
+  processMark(): number {
+    return this.tracker.mark();
+  }
+
+  /** Processes `ps` listed (those running before Vigil, or missed): the tracker learns them. */
+  seedProcesses(rows: PsRow[], since?: number): void {
+    this.tracker.seed(rows, since);
+  }
+
+  private outcome(kind: SensorEvent['kind'], detections: Detection[]): EventOutcome {
+    return {
+      checked: this.checkedByKind.get(kind) ?? 0,
       matches: detections.map((d) => ({
         ruleId: d.match.ruleId,
         ruleName: this.engine.getRule(d.match.ruleId)?.name ?? d.match.ruleId,
         mode: d.mode,
       })),
-    });
-    for (const d of detections) await this.apply(d);
+    };
   }
 
   private async apply(d: Detection): Promise<void> {
@@ -311,10 +403,20 @@ export class Detector {
    * stop before launch; this engine keeps running all of them either way.
    */
   helperRules(): HelperRuleSet {
-    const { rules, lists } = fastPathRules(this.engine.listRules());
+    const exceptions = this.stores.exceptions.all();
+    // The helper can't honour an exception on a field only the app fills in
+    // (an agent's tag), so it would block what the app lets through.
+    const needApp = new Set(
+      exceptions
+        .filter((x) => Object.keys(x.match).some((f) => isAppOnlyField(f)))
+        .map((x) => x.ruleId),
+    );
+    const { rules, lists } = fastPathRules(
+      this.engine.listRules().filter((r) => !needApp.has(r.id)),
+    );
     return {
       rules,
-      exceptions: this.stores.exceptions.all(),
+      exceptions,
       selfPaths: this.selfPaths,
       lists: Object.fromEntries(lists.map((l) => [l, this.stores.lists.entries(l)])),
     };
@@ -426,7 +528,7 @@ export class Detector {
 }
 
 /** A detection rule as the core Rule the app stores and shows. */
-function coreRule(r: DetectionRule): Rule {
+export function coreRule(r: DetectionRule): Rule {
   const { santa: _santa, ...rule } = r as DetectionRule & { santa?: unknown };
   return rule as Rule;
 }

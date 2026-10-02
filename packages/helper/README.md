@@ -56,11 +56,14 @@ Santa / osquery ─► SensorHub ─► FastPath (same engine as the app) ─►
 ```
 
 - Only rules the helper can run alone are sent (`fastPathRules` in `@vigil/detection`):
-  block mode, no "first seen" baseline, and no field only the app fills in
-  (`APP_ONLY_FIELD_PREFIXES`, the hook for app-side context such as agent sessions).
-  Those stay in the app, which runs every rule either way.
+  block mode, no "first seen" baseline, no field only the app fills in
+  (`APP_ONLY_FIELD_PREFIXES`: an agent's tag, `process.agent`, and the fields of an
+  agent's tool request), and no rule on tool requests (`agent.tool_request`), which
+  only the app receives. Those stay in the app, which runs every rule either way.
+  `process.ancestors` is filled in by the SensorHub here, so rules on it can run.
 - The user's exceptions and Vigil's own paths come along, so "this is fine" and the
-  safety floor apply here too. The app re-sends whenever rules, modes or exceptions change.
+  safety floor apply here too. A rule with an exception on an app-only field stays in
+  the app, since the helper couldn't honour it. The app re-sends whenever rules, modes or exceptions change.
 - Indicator lists the rules use are named by digest; the helper asks for the ones it
   lacks, which arrive in parts (`detection.list.set`) and only apply once complete and
   matching.

@@ -100,4 +100,22 @@ export const migrations: string[] = [
   `
   ALTER TABLE events ADD COLUMN label TEXT;
   `,
+  // Watched AI agents: one row per agent session (the agent's own process and
+  // everything it starts), and each event's session and agent, for the session
+  // view and the activity feed's agent filter. A session's last activity is
+  // MAX(events.ts) through the partial index.
+  `
+  CREATE TABLE agent_sessions (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    root_pid INTEGER NOT NULL,
+    started_at INTEGER NOT NULL,
+    body TEXT NOT NULL
+  );
+  CREATE INDEX agent_sessions_agent_started ON agent_sessions (agent_id, started_at DESC);
+  ALTER TABLE events ADD COLUMN agent_session TEXT;
+  CREATE INDEX events_agent_session_ts ON events (agent_session, ts) WHERE agent_session IS NOT NULL;
+  ALTER TABLE events ADD COLUMN agent_id TEXT;
+  CREATE INDEX events_agent_ts ON events (agent_id, ts) WHERE agent_id IS NOT NULL;
+  `,
 ];

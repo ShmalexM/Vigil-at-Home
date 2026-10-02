@@ -65,9 +65,13 @@ function walk(c: Condition, depth: number, visit: (c: Condition, depth: number) 
   else if ('not' in c) walk(c.not, depth + 1, visit);
 }
 
-/** True when every way the condition can match goes through a precise anchor. */
+/**
+ * True when every way the condition can match goes through a precise anchor.
+ * A list lookup counts only on an anchor field: a list of command lines names
+ * a behaviour, not a program.
+ */
 export function isAnchored(c: Condition): boolean {
-  if ('inList' in c) return true;
+  if ('inList' in c) return ANCHOR_FIELDS.has(c.inList.field);
   if (isMatch(c)) return ANCHOR_FIELDS.has(c.field) && ANCHOR_OPS.has(c.op);
   if ('all' in c) return c.all.some(isAnchored);
   if ('any' in c) return c.any.every(isAnchored);
@@ -92,6 +96,63 @@ function hasSpecificTest(c: Condition): boolean {
   if ('all' in c) return c.all.some(hasSpecificTest);
   if ('any' in c) return c.any.every(hasSpecificTest);
   return false;
+}
+
+/** Pre-flight rules: they decide an agent's tool request before it runs. */
+const TOOL_REQUEST = 'agent.tool_request';
+
+function usesFirstSeen(c: Condition): boolean {
+  let found = false;
+  walk(c, 1, (n) => {
+    if ('firstSeen' in n) found = true;
+  });
+  return found;
+}
+
+/** Fields a tool request never carries: it is attributed by `agent.*`, and has no real process. */
+const NOT_ON_TOOL_REQUESTS = ['process.agent', 'process.ancestors', 'process.parentName'];
+
+function fieldsRead(c: Condition, out: Set<string>): void {
+  walk(c, 1, (n) => {
+    if (isMatch(n)) out.add(n.field);
+    else if ('inList' in n) out.add(n.inList.field);
+    else if ('firstSeen' in n) for (const k of n.firstSeen.key) out.add(k);
+  });
+}
+
+/**
+ * A pre-flight rule only answers deny, ask or nothing, and checking a request
+ * must leave no trace (engine.check), so the parts that act or remember are out.
+ */
+function lintPreflight(rule: DetectionRule, errors: string[], warnings: string[]): void {
+  // Tool requests are only ever checked, and a check never moves a chain on.
+  if (rule.sequence?.steps.some((st) => st.eventKinds.includes(TOOL_REQUEST)))
+    errors.push(`a sequence step cannot be an ${TOOL_REQUEST}; checking a request moves no chain`);
+  if (!rule.eventKinds.includes(TOOL_REQUEST)) return;
+  if (rule.eventKinds.every((k) => k === TOOL_REQUEST)) {
+    const read = new Set<string>(rule.dedupe?.key ?? []);
+    fieldsRead(rule.condition, read);
+    for (const x of rule.exclusions) fieldsRead(x, read);
+    for (const r of rule.reasons)
+      for (const m of r.matchAll(TEMPLATE_RE)) for (const f of templateFields(m[1]!)) read.add(f);
+    for (const f of read) {
+      if (NOT_ON_TOOL_REQUESTS.some((p) => f === p || f.startsWith(`${p}.`)))
+        warnings.push(
+          `${f} is never set on a tool request; use agent.id or agent.session (agent.host for the app)`,
+        );
+    }
+  }
+  if (rule.eventKinds.some((k) => k !== TOOL_REQUEST))
+    errors.push(`pre-flight rules check only ${TOOL_REQUEST}`);
+  if (rule.response.length > 0)
+    errors.push('pre-flight rules decide ask or deny; they cannot run actions');
+  if (rule.threshold)
+    errors.push('pre-flight rules decide each request on its own; they cannot use a threshold');
+  if (rule.sequence)
+    errors.push('pre-flight rules decide each request on its own; they cannot use a sequence');
+  if (usesFirstSeen(rule.condition) || rule.exclusions.some(usesFirstSeen))
+    errors.push('pre-flight rules cannot use firstSeen; checking a request learns nothing');
+  if (rule.santa) errors.push('pre-flight rules cannot add Santa rules');
 }
 
 function checkMatch(c: FieldTest, errors: string[]): number {
@@ -191,7 +252,10 @@ export function lintRule(rule: DetectionRule, opts: LintOptions = {}): LintResul
       errors.push(`${t.kind} releases or allows something; rules may only contain`);
     }
   }
-  if (rule.mode === 'block' && rule.response.length === 0) {
+  lintPreflight(rule, errors, warnings);
+  // A pre-flight rule in block mode denies the request; it needs no response.
+  const preflightOnly = rule.eventKinds.length === 1 && rule.eventKinds[0] === TOOL_REQUEST;
+  if (rule.mode === 'block' && rule.response.length === 0 && !preflightOnly) {
     warnings.push('the rule is in block mode but has no response, so it only alerts');
   }
 
@@ -210,7 +274,7 @@ export function lintRule(rule: DetectionRule, opts: LintOptions = {}): LintResul
     const anchored = isAnchored(rule.condition);
     if (kinds.some((k) => HARD_ACTIONS.has(k)) && !anchored) {
       errors.push(
-        'an AI-proposed rule can only kill, block, quarantine or disable when it names a specific hash, signer, host, address or extension (or uses a list); behaviour alone can ask to suspend or just alert',
+        'an AI-proposed rule can only kill, block, quarantine or disable when it names a specific hash, signer, host, address or extension (or looks one up in a list); behaviour alone can ask to suspend or just alert',
       );
     }
     if (

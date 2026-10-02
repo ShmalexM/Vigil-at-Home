@@ -358,6 +358,9 @@ export function throughSensors(e: SensorEvent, opts: SensorOptions = {}): Sensor
         }),
       ]);
       break;
+    case 'agent.tool_request':
+      // No sensor involved: the agent's hook sends it to Vigil, so it arrives as it is.
+      return [e];
     default:
       break;
   }

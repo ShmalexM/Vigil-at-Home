@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { DetectionEngine, macosCoreRules, memoryStores, MemoryListStore } from '../index.js';
-import { fastPathRules, listDigest } from '../fastpath.js';
+import {
+  AGENT_FIELD_PREFIXES,
+  agentPreflightRules,
+  agentWatchRules,
+  builtinRules,
+  DetectionEngine,
+  macosCoreRules,
+  memoryStores,
+  MemoryListStore,
+} from '../index.js';
+import { APP_ONLY_FIELD_PREFIXES, fastPathRules, isAppOnlyField, listDigest } from '../fastpath.js';
+import { preexecRules } from '../preexec.js';
 import type { DetectionRule } from '../types.js';
 
 const engine = () => new DetectionEngine(macosCoreRules, memoryStores());
@@ -70,5 +80,123 @@ describe('rules the helper can run itself', () => {
     expect(copy.has('ips', '198.51.100.7')).toBe(true);
     expect(listDigest(copy.entries('ips'))).toBe(listDigest(lists.entries('ips')));
     expect(listDigest(['b', 'a', 'a'])).toBe(listDigest(['a', 'b']));
+  });
+});
+
+describe('agent rules and the helper', () => {
+  type Listed = DetectionRule & { effectiveMode: 'block' };
+  /** Every built-in rule, as if the user had turned each one to block. */
+  const allBlocking = (): Listed[] =>
+    new DetectionEngine(builtinRules, memoryStores())
+      .listRules()
+      .map((r) => ({ ...r, effectiveMode: 'block' as const }));
+  const agentIds = new Set([...agentWatchRules, ...agentPreflightRules].map((r) => r.id));
+
+  it('never hands the helper (or Santa) an agent-watch or pre-flight rule', () => {
+    const set = fastPathRules(allBlocking());
+    expect(set.rules.length).toBeGreaterThan(0);
+    expect(set.rules.filter((r) => agentIds.has(r.id))).toEqual([]);
+    expect(set.rules.some((r) => r.eventKinds.includes('agent.tool_request'))).toBe(false);
+    // Santa's pre-launch rules come from that same set (packages/helper preexec.ts),
+    // and would refuse the agent rules anyway: Santa can't see an agent.
+    const pre = preexecRules(set.rules.map((rule) => ({ rule, mode: 'block' as const })));
+    expect(pre.rules.flatMap((r) => r.ruleIds).filter((id) => agentIds.has(id))).toEqual([]);
+    const direct = preexecRules(
+      allBlocking()
+        .filter((r) => agentIds.has(r.id))
+        .map(({ effectiveMode: _m, ...rule }) => ({ rule, mode: 'block' as const })),
+    );
+    expect(direct.rules).toEqual([]);
+  });
+
+  it('keeps any rule on a tool request in the app, whatever fields it reads', () => {
+    const base = allBlocking().find((r) => r.id === 'known-bad-hash')!;
+    const request = {
+      ...base,
+      id: 'user-deny-zsh',
+      eventKinds: ['agent.tool_request'],
+      condition: { field: 'process.path', op: 'eq', value: '/bin/zsh' },
+      response: [],
+    } as Listed;
+    const chained = {
+      ...base,
+      id: 'user-chain',
+      sequence: {
+        steps: [
+          {
+            eventKinds: ['agent.tool_request'],
+            condition: { field: 'process.path', op: 'eq', value: '/bin/zsh' },
+          },
+        ],
+        key: ['process.path'],
+        windowSec: 60,
+      },
+    } as Listed;
+    expect(fastPathRules([base, request, chained]).rules.map((r) => r.id)).toEqual([
+      'known-bad-hash',
+    ]);
+  });
+
+  it('runs rules on the process tree there, since the sensor hub fills it in', () => {
+    const base = allBlocking().find((r) => r.id === 'known-bad-hash')!;
+    const tree = (id: string, field: string) =>
+      ({
+        ...base,
+        id,
+        condition: { all: [base.condition, { field, op: 'in', value: ['Installer'] }] },
+      }) as Listed;
+    const ids = fastPathRules([
+      tree('on-ancestors', 'process.ancestors'),
+      tree('on-parent', 'process.parentName'),
+      tree('on-download', 'process.downloadRoot'),
+      tree('on-agent', 'process.agent.id'),
+      {
+        ...base,
+        id: 'in-reason',
+        reasons: ['{{process.agent.session}} ran it'],
+      } as Listed,
+    ]).rules.map((r) => r.id);
+    expect(ids).toEqual(['on-ancestors', 'on-parent', 'on-download']);
+  });
+
+  it('matches app-only fields by name or what is under them, not by any prefix', () => {
+    for (const f of [
+      'process.agent',
+      'process.agent.id',
+      'process.agent.session',
+      'agent',
+      'agent.id',
+      'agent.hookSession',
+      'tool',
+      'command',
+      'commandBytes',
+      'commandClipped',
+      'filePath',
+      'url',
+      'mcpServer',
+      'cwd',
+      'toolOutsideCwd',
+      'contentBytes',
+      'contentSha256',
+    ])
+      expect([f, isAppOnlyField(f)]).toEqual([f, true]);
+    for (const f of [
+      'process.ancestors',
+      'process.parentName',
+      'process.cwd',
+      'process.commandLine',
+      'process.path',
+      'path',
+      'agentish',
+      'process.agentish',
+    ])
+      expect([f, isAppOnlyField(f)]).toEqual([f, false]);
+    // Every agent field is app-only except the tree, which the helper now has too.
+    expect([...APP_ONLY_FIELD_PREFIXES, 'process.ancestors'].sort()).toEqual(
+      [...AGENT_FIELD_PREFIXES].sort(),
+    );
+    // An entry ending in "." covers only what is under it.
+    expect(isAppOnlyField('agent.name', ['agent.'])).toBe(true);
+    expect(isAppOnlyField('agent', ['agent.'])).toBe(false);
   });
 });

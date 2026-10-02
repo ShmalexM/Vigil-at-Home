@@ -547,6 +547,12 @@ select {
   color: var(--tx0);
   min-width: 0;
 }
+.kv dd > code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
 
 /* ---------------------------------------------------------------- toast with undo fuse */
 .toasts {

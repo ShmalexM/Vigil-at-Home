@@ -9,6 +9,7 @@ import type {
 } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
 import { timeAgo } from '../format';
+import { draftIsToolRule, replayLine, replaySampleRow } from '../rule-modes';
 import { HoldButton } from './HoldButton';
 import { useToast } from './Toasts';
 import { Button, Chip, IconButton } from './ui';
@@ -73,11 +74,11 @@ export function RuleEditorPanel({ id, onClose }: { id: string; onClose: () => vo
   );
 }
 
-/** A brand-new rule: just the JSON editor, starting from a template. */
-export function NewRulePanel({ onClose }: { onClose: () => void }) {
+/** A brand-new rule: just the JSON editor, starting from a template (`initial`, or a blank rule). */
+export function NewRulePanel({ onClose, initial }: { onClose: () => void; initial?: string }) {
   return (
     <div className="editor">
-      <JsonEditor initial={NEW_RULE_TEMPLATE} onSaved={onClose} onClose={onClose} />
+      <JsonEditor initial={initial ?? NEW_RULE_TEMPLATE} onSaved={onClose} onClose={onClose} />
     </div>
   );
 }
@@ -253,7 +254,9 @@ function JsonEditor({
       />
       {current && <Issues check={current} />}
       {current?.impact && <ImpactSummary impact={current.impact} />}
-      {current?.replay && <ReplaySummary replay={current.replay} />}
+      {current?.replay && (
+        <ReplaySummary replay={current.replay} toolRule={draftIsToolRule(text)} />
+      )}
       <div className="row" style={{ flexWrap: 'wrap' }}>
         <Button icon={<Check size={14} />} disabled={busy} onClick={() => void check()}>
           {busy ? 'Checking…' : 'Check'}
@@ -312,11 +315,13 @@ function Issues({ check }: { check: RuleCheck }) {
   return (
     <>
       {check.errors.length > 0 && (
-        <ul className="issues errors">
-          {check.errors.map((e) => (
-            <li key={e}>{e}</li>
-          ))}
-        </ul>
+        <div role="alert">
+          <ul className="issues errors">
+            {check.errors.map((e) => (
+              <li key={e}>{e}</li>
+            ))}
+          </ul>
+        </div>
       )}
       {check.warnings.length > 0 && (
         <ul className="issues warnings">
@@ -370,31 +375,38 @@ export function ImpactSummary({ impact }: { impact: ImpactPreview }) {
   );
 }
 
-export function ReplaySummary({ replay: r }: { replay: ReplayPreview }) {
+/** `toolRule`: the rule answers Claude Code's hook, so it counts steps, not alerts or programs. */
+export function ReplaySummary({
+  replay: r,
+  toolRule = false,
+}: {
+  replay: ReplayPreview;
+  toolRule?: boolean;
+}) {
   const v = VERDICT[r.verdict] ?? { label: r.verdict };
   return (
     <div className="col" style={{ gap: 6 }}>
       <div className="row">
         <Chip {...(v.tone ? { tone: v.tone } : {})}>{v.label}</Chip>
-        <span className="t-small">
-          Would have matched {r.hits} time{r.hits === 1 ? '' : 's'} in the last 14 days (
-          {r.hitsPerDay.toFixed(1)} a day), with {r.popups} alert{r.popups === 1 ? '' : 's'}, across{' '}
-          {r.distinctPrograms} program{r.distinctPrograms === 1 ? '' : 's'}. Checked{' '}
-          {r.eventsScanned} events.
-        </span>
+        <span className="t-small">{replayLine(r, toolRule)}</span>
       </div>
       {r.notes.map((n) => (
         <span key={n} className="t-small">
           {n}
         </span>
       ))}
-      {r.samples.slice(0, 5).map((s, i) => (
-        <div key={i} className="excl-row">
-          <span className="t-small nowrap">{timeAgo(s.ts)}</span>
-          <span className="grow mono ellipsis">{s.program ?? s.subject}</span>
-          <span className="t-small">{s.wouldDo.join(', ')}</span>
-        </div>
-      ))}
+      {r.samples.slice(0, 5).map((s, i) => {
+        const row = replaySampleRow(s, toolRule);
+        return (
+          <div key={i} className="excl-row">
+            <span className="t-small nowrap">{timeAgo(s.ts)}</span>
+            <span className="grow mono ellipsis" title={row.what}>
+              {row.what}
+            </span>
+            <span className="t-small">{row.note}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }

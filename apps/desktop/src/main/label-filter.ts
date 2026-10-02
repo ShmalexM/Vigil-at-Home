@@ -1,5 +1,8 @@
 import type { ProcessRef, SensorEvent } from '@vigil/core';
 
+/** Same id as VIGIL_SELF in @vigil/detection, restated so this file stays import-light. */
+const VIGIL_SELF = 'vigil-self';
+
 /**
  * Which events no rule matched are worth the labeller's look, and what makes
  * two of them the same. Kept free of Electron so the benchmarks can import it.
@@ -102,6 +105,11 @@ function folder(path: string): string {
  * exception let it through, so the caller can cap those separately.
  */
 export function labelKey(e: SensorEvent): { key: string; tool: boolean } | undefined {
+  // A watched agent's activity is reviewed per session, not event by event: an
+  // agent runs hundreds of commands an hour, which would swamp the labeller's
+  // CPU budget. Vigil's own helpers (vigil-self) are still labelled.
+  const agent = 'process' in e ? e.process?.agent : undefined;
+  if (agent && agent.id !== VIGIL_SELF) return undefined;
   const apple = 'process' in e && e.process?.signing === 'apple';
   const k = (key: string) => ({ key, tool: apple });
   switch (e.kind) {

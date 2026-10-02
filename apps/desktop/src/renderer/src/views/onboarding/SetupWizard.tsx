@@ -12,6 +12,7 @@ import {
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { SetupMode, SetupStepView, SetupView } from '../../../../shared/setup';
 import { useLive, vigil } from '../../api';
+import { PreflightSetup } from '../../components/PreflightSetup';
 import { Shield } from '../../components/Shield';
 import { useToast } from '../../components/Toasts';
 import { Button, Card, Chip, Segmented, StatusMark, type MarkState } from '../../components/ui';
@@ -409,6 +410,11 @@ export function StepCard({
         )}
       </div>
       {step.id === 'claude' && <ClaudePlanSwitch />}
+      {step.id === 'claude-preflight' && !step.skipped && (
+        <div className="step-plan">
+          <PreflightSetup compact />
+        </div>
+      )}
       {open && (
         <div className="col step-body">
           {step.action && <StepAction action={step.action} setView={setView} />}
