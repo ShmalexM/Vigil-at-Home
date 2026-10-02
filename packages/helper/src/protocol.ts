@@ -1,5 +1,6 @@
 // The helper's entire command surface: the response actions defined in
-// @vigil/core, plus four read-only queries. Nothing else can be asked of the
+// @vigil/core, four read-only queries, and the list of rules Santa should
+// enforce before launch (santa.preexec.set). Nothing else can be asked of the
 // root process: no shell, no programs to run, no generic "execute".
 //
 // Containment actions (suspend, kill, block, quarantine, disable, Santa block
@@ -24,6 +25,7 @@ import {
   SantaRuleSet,
   isRelease,
 } from '@vigil/core';
+import { DetectionRule } from '@vigil/detection';
 
 export const HelperAction = z.discriminatedUnion('kind', [
   ProcessSuspend,
@@ -51,7 +53,21 @@ export const HelperQuery = z.discriminatedUnion('kind', [
 ]);
 export type HelperQuery = z.infer<typeof HelperQuery>;
 
-export type HelperCommand = HelperAction | HelperQuery;
+/**
+ * The rules Vigil is enforcing in block mode, for Santa to enforce before
+ * launch where it can. The helper builds the Santa rules itself (preexec.ts)
+ * and only ever targets Apple's own programs, so this can add blocks but
+ * never allow anything. Sending fewer rules only moves those blocks back to
+ * Vigil's own engine, which still kills the program after it starts, so it
+ * needs no admin password.
+ */
+export const SantaPreexecSet = z.strictObject({
+  kind: z.literal('santa.preexec.set'),
+  rules: z.array(DetectionRule).max(64),
+});
+export type SantaPreexecSet = z.infer<typeof SantaPreexecSet>;
+
+export type HelperCommand = HelperAction | HelperQuery | SantaPreexecSet;
 
 export interface HelperRequest {
   id: string;
@@ -68,9 +84,13 @@ export type HelperResponse =
   | { id: string; ok: false; needsApproval: true; nonce: string; prompt: string };
 
 export function isAction(cmd: HelperCommand): cmd is HelperAction {
-  return !['helper.status', 'helper.journal', 'santa.profile', 'events.subscribe'].includes(
-    cmd.kind,
-  );
+  return ![
+    'helper.status',
+    'helper.journal',
+    'santa.profile',
+    'events.subscribe',
+    'santa.preexec.set',
+  ].includes(cmd.kind);
 }
 
 /** Commands that loosen protection and so need the user's admin password. */
@@ -108,7 +128,9 @@ export function parseRequest(line: string): HelperRequest | { error: string; id?
     ['helper.status', 'helper.journal', 'santa.profile', 'events.subscribe'].includes(kind);
   const parsed = isQuery
     ? HelperQuery.safeParse(env.data.command)
-    : HelperAction.safeParse(env.data.command);
+    : kind === 'santa.preexec.set'
+      ? SantaPreexecSet.safeParse(env.data.command)
+      : HelperAction.safeParse(env.data.command);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     return withId(

@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@vigil/core": "workspace:*",
+    "@vigil/detection": "workspace:*",
     "@vigil/sensors": "workspace:*",
     "zod": "^4.1.0"
   }

@@ -37,6 +37,13 @@ is its sync server on the same Mac:
   removals. Each sync sends only what changed since Santa last confirmed a sync. It
   sends a clean sync the first time, when Santa asks, or when Santa's rule count no
   longer matches Vigil's.
+- **Pre-launch rules (CEL).** Santa 2025.8 and later can decide a launch by running a
+  small expression over the program's arguments. Vigil's block-mode rules that kill a
+  program on launch and only test its name and arguments (today: the fake password
+  dialog) are turned into such rules by `@vigil/detection/preexec` and installed by the
+  helper (`packages/helper/src/preexec.ts`), so Santa stops the program before it runs.
+  Only Apple's own programs are targeted, because a CEL rule's "otherwise" answer is
+  allow. Vigil's engine keeps running the same rules as a backstop.
 - **File protection.** `fileAccessPolicy()` watches browser cookies and saved logins
   (Chrome, Brave, Edge, Arc, Firefox, Safari), crypto wallets (Exodus, Electrum, Atomic),
   SSH private keys, the user's keychains, and writes to the privacy (TCC) database.

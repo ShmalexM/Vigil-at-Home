@@ -19,6 +19,7 @@ import { needsApproval } from './protocol.js';
 import { Journal, type JournalEntry } from './journal.js';
 import type { Approvals } from './approval.js';
 import type { System } from './system.js';
+import type { PreexecSync } from './preexec.js';
 import { ActionError } from './commands/errors.js';
 import {
   identifyProcess,
@@ -52,6 +53,8 @@ export interface ExecutorDeps {
   /** Ask Santa to sync now so a new rule applies in seconds, not at the next interval. */
   triggerSantaSync?: () => Promise<void>;
   statusExtra?: () => Record<string, unknown>;
+  /** Turns block rules into Santa pre-launch rules; absent in tests that don't need it. */
+  preexec?: PreexecSync;
 }
 
 export type ExecOutcome =
@@ -321,6 +324,13 @@ export class Executor {
         };
       case 'helper.journal':
         return journal.recent(cmd.limit ?? 100);
+      case 'santa.preexec.set': {
+        if (!this.d.preexec) throw new ActionError('failed', 'pre-launch rules are not set up');
+        const before = this.d.rules.rev;
+        const outcome = await this.d.preexec.apply(cmd.rules);
+        if (this.d.rules.rev !== before) await this.syncSanta();
+        return outcome;
+      }
       case 'santa.profile':
         return { mobileconfig: santaProfile({ syncPort: this.d.syncPort }) };
       case 'events.subscribe':

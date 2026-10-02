@@ -150,6 +150,9 @@ importers:
       '@vigil/core':
         specifier: workspace:*
         version: link:../core
+      '@vigil/detection':
+        specifier: workspace:*
+        version: link:../detection
       '@vigil/sensors':
         specifier: workspace:*
         version: link:../sensors
