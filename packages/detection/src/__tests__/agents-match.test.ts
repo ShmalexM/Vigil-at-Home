@@ -71,6 +71,58 @@ describe('agent matching', () => {
     ).toBe(true);
   });
 
+  it('matches the installs seen on a real Mac (2026-10-02)', () => {
+    const home = '/Users/alex';
+    // Claude Code's native install: the program's name is its version number.
+    expect(idOf(`${home}/.local/share/claude/versions/2.1.280`)).toBe('claude-code');
+    // The copy the Claude app runs for its Code tab.
+    expect(
+      idOf(
+        `${home}/Library/Application Support/Claude/claude-code/2.1.286/0f3a9c/claude.app/Contents/MacOS/claude`,
+      ),
+    ).toBe('claude-code');
+    // Codex's standalone install, and the copy inside the Codex app.
+    expect(idOf(`${home}/.codex/packages/standalone/current/bin/codex`)).toBe('codex');
+    expect(idOf(`${home}/.codex/packages/standalone/releases/0.161.0/bin/codex`)).toBe('codex');
+    expect(
+      idOf(
+        '/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex',
+      ),
+    ).toBe('codex');
+    // The Codex desktop app ships as ChatGPT.app, helpers included.
+    expect(idOf('/Applications/ChatGPT.app/Contents/MacOS/ChatGPT')).toBe('codex-app');
+    expect(
+      idOf(
+        '/Applications/ChatGPT.app/Contents/Frameworks/Codex Helper (Renderer).app/Contents/MacOS/Codex (Renderer)',
+      ),
+    ).toBe('codex-app');
+    expect(idOf(`${home}/.local/share/cursor-agent/versions/2026.04.17-787b533/cursor-agent`)).toBe(
+      'cursor-agent',
+    );
+    expect(idOf(`${home}/.opencode/bin/opencode`)).toBe('opencode');
+    // Signed builds are known by team and signing ID together, never by team alone.
+    const m = catalog();
+    expect(m.match({ path: '/x/codex', teamId: '2DC432GLL2', signingId: 'codex' })?.id).toBe(
+      'codex',
+    );
+    expect(m.match({ path: '/x/y', teamId: '2DC432GLL2', signingId: 'com.openai.codex' })?.id).toBe(
+      'codex-app',
+    );
+    expect(
+      m.match({ path: '/x/y', teamId: 'Q6L2SF6YDW', signingId: 'com.anthropic.claude-code' })?.id,
+    ).toBe('claude-code');
+    expect(m.match({ path: '/x/y', teamId: '2DC432GLL2', signingId: 'other' })).toBeUndefined();
+    expect(m.match({ path: '/x/y', teamId: 'Q6L2SF6YDW' })).toBeUndefined();
+  });
+
+  it('lists where each install shows up, including the ones found on a real Mac', () => {
+    const installs = (id: string) => AGENT_CATALOG.find((e) => e.id === id)?.installPaths ?? [];
+    expect(installs('codex')).toContain('~/.local/bin/codex');
+    expect(installs('codex-app')).toContain('/Applications/ChatGPT.app');
+    expect(installs('opencode')).toContain('~/.opencode/bin/opencode');
+    expect(installs('ollama')).toContain('~/.local/bin/ollama');
+  });
+
   it('finds the desktop apps in ~/Applications and when translocated', () => {
     expect(idOf('/Users/x/Applications/Claude.app/Contents/MacOS/Claude')).toBe('claude-desktop');
     expect(
@@ -181,7 +233,9 @@ describe('agent matching', () => {
       const { installPaths: _paths, preflightHost: _host, ...id } = c;
       expect(AgentIdentity.safeParse(id).success).toBe(true);
       expect(c.origin).toBe('builtin');
-      expect(c.match.every((m) => !m.teamIds)).toBe(true); // none until verified on a Mac
+      expect(AgentIdentity.safeParse(id).error?.issues ?? []).toEqual([]);
+      // A team ID covers every program a vendor signs, so it always comes with signing IDs.
+      expect(c.match.every((m) => !m.teamIds || m.signingIds?.length)).toBe(true);
     }
     expect(AGENT_CATALOG.filter((c) => c.preflightHost).map((c) => c.id)).toEqual(['claude-code']);
     expect(AGENT_CATALOG.filter((c) => !c.watch).map((c) => c.id)).toEqual([

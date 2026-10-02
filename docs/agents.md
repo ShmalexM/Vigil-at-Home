@@ -1,7 +1,8 @@
 # AI agents on your Mac
 
 AI coding agents (Claude Code, Codex, Copilot CLI, Gemini CLI, cursor-agent,
-the Claude and Codex apps, and the MCP servers they start) run commands on
+opencode, the Claude and Codex apps (Codex ships as ChatGPT.app), and the MCP
+servers they start) run commands on
 your Mac as you. Vigil watches them in two ways:
 
 - **Agent watch.** Vigil follows the process tree of every agent it knows and

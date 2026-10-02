@@ -4,10 +4,11 @@ import type { AgentIdentity } from '@vigil/core';
  * The AI agents Vigil knows out of the box. Matching is deterministic: a
  * process is an agent when its program fits one of these matchers.
  *
- * Every identifier here is marked VERIFY until it has been checked on a Mac
- * (`codesign -dv` on the binary, and the same program's Santa EXEC line).
- * Team IDs are left out until then: a wrong one would match nothing, or
- * worse, the wrong thing.
+ * Identifiers marked VERIFY have not been checked on a Mac yet. The rest
+ * were checked on 2026-10-02 against real installs (`codesign -dv` on the
+ * binary, and where it really lives). Team and signing IDs appear only once
+ * checked. Santa's EXEC line has no signing ID, so those matchers serve
+ * sensors that report one; names and paths do the work for Santa.
  */
 
 export interface CatalogEntry extends AgentIdentity {
@@ -69,9 +70,18 @@ export const AGENT_CATALOG: readonly CatalogEntry[] = [
     name: 'Claude Code',
     kind: 'cli',
     match: [
-      // VERIFY: the native install links ~/.local/bin/claude to a versioned binary.
+      { teamIds: ['Q6L2SF6YDW'], signingIds: ['com.anthropic.claude-code'] },
+      // The native install links ~/.local/bin/claude to ~/.local/share/claude/versions/<version>,
+      // so the running program's name is the version number: the path matcher is the one that fits.
+      // The second path is the copy the Claude app runs for its Code tab
+      // (…/claude-code/<version>/<hash>/claude.app/Contents/MacOS/claude).
+      {
+        paths: [
+          '~/.local/share/claude/versions/*',
+          '~/Library/Application Support/Claude/claude-code/**',
+        ],
+      },
       { names: ['claude'] },
-      { paths: ['~/.local/share/claude/versions/*'] },
       // VERIFY: the npm install links bin/claude to cli.js (`#!/usr/bin/env node`), so a
       // launch is `node …/bin/claude`, which `names` matches through the script name
       // (match.ts). This matcher is for a direct `node …/claude-code/cli.js` (an IDE).
@@ -84,7 +94,10 @@ export const AGENT_CATALOG: readonly CatalogEntry[] = [
     id: 'claude-desktop',
     name: 'Claude app',
     kind: 'app',
-    match: [{ paths: appGlobs('Claude') }], // VERIFY
+    match: [
+      { teamIds: ['Q6L2SF6YDW'], signingIds: ['com.anthropic.claudefordesktop'] },
+      { paths: appGlobs('Claude') },
+    ],
     installPaths: appInstalls('Claude'),
   }),
   entry({
@@ -92,17 +105,33 @@ export const AGENT_CATALOG: readonly CatalogEntry[] = [
     name: 'Codex CLI',
     kind: 'cli',
     match: [
-      { names: ['codex'] }, // VERIFY
+      { teamIds: ['2DC432GLL2'], signingIds: ['codex'] },
+      // The standalone install links ~/.local/bin/codex to
+      // ~/.codex/packages/standalone/current/bin/codex. The Codex app runs its own copy
+      // (ChatGPT.app/…/CodexCLI.app/Contents/MacOS/codex), which the name also fits.
+      { names: ['codex'] },
+      { paths: ['~/.codex/packages/standalone/**'] },
       { names: ['node'], argGlobs: ['*@openai/codex*'] }, // VERIFY
     ],
-    installPaths: ['/opt/homebrew/bin/codex', '/usr/local/bin/codex'],
+    installPaths: [
+      '~/.local/bin/codex',
+      '~/.codex/packages/standalone/current/bin/codex',
+      '/opt/homebrew/bin/codex',
+      '/usr/local/bin/codex',
+    ],
   }),
   entry({
     id: 'codex-app',
     name: 'Codex app',
     kind: 'app',
-    match: [{ paths: appGlobs('Codex') }], // VERIFY
-    installPaths: appInstalls('Codex'),
+    match: [
+      { teamIds: ['2DC432GLL2'], signingIds: ['com.openai.codex'] },
+      // The Codex desktop app ships as ChatGPT.app (bundle com.openai.codex); its helpers are
+      // named "Codex (Renderer)" and "Codex (Service)". Codex.app is kept in case it is renamed.
+      { paths: [...appGlobs('ChatGPT'), ...appGlobs('Codex')] },
+    ],
+    installPaths: [...appInstalls('ChatGPT'), ...appInstalls('Codex')],
+    note: 'Installed as ChatGPT.app.',
   }),
   entry({
     id: 'copilot-cli',
@@ -128,8 +157,21 @@ export const AGENT_CATALOG: readonly CatalogEntry[] = [
     id: 'cursor-agent',
     name: 'Cursor Agent',
     kind: 'cli',
-    match: [{ names: ['cursor-agent'] }], // VERIFY
+    // Unsigned: ~/.local/bin/cursor-agent links to ~/.local/share/cursor-agent/versions/<v>/cursor-agent.
+    match: [{ names: ['cursor-agent'] }],
     installPaths: ['~/.local/bin/cursor-agent'],
+  }),
+  entry({
+    id: 'opencode',
+    name: 'opencode',
+    kind: 'cli',
+    // Ad hoc signed, installed by its script to ~/.opencode/bin.
+    match: [{ names: ['opencode'] }, { paths: ['~/.opencode/bin/*'] }],
+    installPaths: [
+      '~/.opencode/bin/opencode',
+      '/opt/homebrew/bin/opencode',
+      '/usr/local/bin/opencode',
+    ],
   }),
   // IDEs start off: people type their own commands in the built-in terminal.
   entry({
@@ -137,7 +179,10 @@ export const AGENT_CATALOG: readonly CatalogEntry[] = [
     name: 'Cursor',
     kind: 'ide',
     watch: false,
-    match: [{ paths: appGlobs('Cursor') }], // VERIFY
+    match: [
+      { teamIds: ['VDXQ22DGB9'], signingIds: ['com.todesktop.230313mzl4w4u92'] },
+      { paths: appGlobs('Cursor') },
+    ],
     installPaths: appInstalls('Cursor'),
     note: "Off by default: commands you type in its terminal would count as the agent's.",
   }),
@@ -157,9 +202,15 @@ export const AGENT_CATALOG: readonly CatalogEntry[] = [
     kind: 'runtime',
     watch: false,
     match: [
-      { paths: appGlobs('Ollama') }, // VERIFY
+      { teamIds: ['3MU9H2V9Y9'], signingIds: ['com.electron.ollama', 'ai.ollama.ollama'] },
+      { paths: appGlobs('Ollama') },
       { names: ['ollama'] },
     ],
-    installPaths: [...appInstalls('Ollama'), '/opt/homebrew/bin/ollama', '/usr/local/bin/ollama'],
+    installPaths: [
+      ...appInstalls('Ollama'),
+      '/opt/homebrew/bin/ollama',
+      '/usr/local/bin/ollama',
+      '~/.local/bin/ollama',
+    ],
   }),
 ];
