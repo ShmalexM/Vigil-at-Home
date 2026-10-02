@@ -19,7 +19,7 @@ import { needsApproval } from './protocol.js';
 import { Journal, type JournalEntry } from './journal.js';
 import type { Approvals } from './approval.js';
 import type { System } from './system.js';
-import type { FastPath } from './fastpath.js';
+import { PolicyRefused, type FastPath } from './fastpath.js';
 import type { PreexecSync } from './preexec.js';
 import { ActionError } from './commands/errors.js';
 import {
@@ -93,7 +93,14 @@ export class Executor {
   }
 
   async execute(cmd: HelperCommand, approval?: string): Promise<ExecOutcome> {
-    if (needsApproval(cmd)) {
+    if (cmd.kind === 'detection.sync') {
+      // Whether a sync weakens anything depends on the policy in force.
+      const weakens = this.d.fastPath?.loosening(cmd) ?? [];
+      if (weakens.length && (!approval || !this.d.approvals.consume(approval, cmd))) {
+        const nonce = this.d.approvals.request(cmd);
+        return { kind: 'needs_approval', nonce, prompt: syncPrompt(weakens) };
+      }
+    } else if (needsApproval(cmd)) {
       // Check the release can actually happen before bothering the user.
       this.findContainment(cmd as HelperAction);
       if (!approval || !this.d.approvals.consume(approval, cmd)) {
@@ -333,7 +340,7 @@ export class Executor {
         try {
           synced = this.d.fastPath.sync(cmd);
         } catch (err) {
-          throw new ActionError('invalid', (err as Error).message);
+          throw policyError(err);
         }
         if (!this.d.preexec) return { ...synced, preexec: null };
         const before = this.d.rules.rev;
@@ -346,7 +353,7 @@ export class Executor {
         try {
           return this.d.fastPath.putList(cmd);
         } catch (err) {
-          throw new ActionError('invalid', (err as Error).message);
+          throw policyError(err);
         }
       }
       case 'santa.profile':
@@ -373,6 +380,18 @@ export class Executor {
     for (const e of active) await this.firewall.block(e.undo?.address as string);
     return active.length;
   }
+}
+
+/** The password prompt for a sync that weakens the helper's rules. Kept short: macOS shows it in a small dialog. */
+export function syncPrompt(weakens: string[]): string {
+  const shown = weakens.slice(0, 3).join('; ');
+  const more = weakens.length > 3 ? ` and ${weakens.length - 3} more` : '';
+  return `Vigil wants to loosen its blocking rules: ${shown}${more}.`;
+}
+
+function policyError(err: unknown): ActionError {
+  const message = (err as Error).message;
+  return new ActionError(err instanceof PolicyRefused ? 'refused' : 'invalid', message);
 }
 
 function target(cmd: { startTime?: number | undefined; path?: string | undefined }): {

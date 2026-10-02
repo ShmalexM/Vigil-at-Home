@@ -92,11 +92,20 @@ export class Approvals {
   }
 }
 
-/** The AppleScript the app runs to show macOS's own admin password dialog. */
-export function approvalAppleScript(helperPath: string, nonce: string, prompt: string): string {
-  if (!/^[a-f0-9]{32}$/.test(nonce)) throw new Error('bad nonce');
+/**
+ * The AppleScript the app runs to show macOS's own admin password dialog.
+ * Several nonces approve several commands with one password.
+ */
+export function approvalAppleScript(
+  helperPath: string,
+  nonce: string | string[],
+  prompt: string,
+): string {
+  const nonces = typeof nonce === 'string' ? [nonce] : nonce;
+  if (nonces.length === 0 || !nonces.every((n) => /^[a-f0-9]{32}$/.test(n)))
+    throw new Error('bad nonce');
   if (!/^\/[A-Za-z0-9 ._/-]+$/.test(helperPath)) throw new Error('bad helper path');
   const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  const shell = `'${helperPath}' approve ${nonce}`;
+  const shell = `'${helperPath}' approve ${nonces.join(' ')}`;
   return `do shell script "${esc(shell)}" with prompt "${esc(prompt.slice(0, 200))}" with administrator privileges`;
 }

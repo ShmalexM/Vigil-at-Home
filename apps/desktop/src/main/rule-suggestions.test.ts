@@ -103,6 +103,17 @@ describe('AI rule suggestions in the app', () => {
     expect(await again.detector.reviewRules()).toMatchObject({ ran: false });
   });
 
+  it('accepting leaves everything as it was if the helper’s password is cancelled', async () => {
+    const { detector, ui } = setup(answer);
+    await detector.reviewRules({ force: true });
+    const id = ui.view().pending[0]!.id;
+    detector.syncHelper = async () => 'declined';
+    expect(await detector.approveProposal(id, 'block')).toBe('declined');
+    expect(detector.hasRule('ai-paste-site')).toBe(false);
+    expect(detector.stores.rules.list().map((r) => r.id)).not.toContain('ai-paste-site');
+    expect(ui.view().pending.map((p) => p.id)).toEqual([id]);
+  });
+
   it('dismissing keeps the rule off and tells the AI next time', async () => {
     const { detector, ui, seen } = setup(answer);
     await detector.reviewRules({ force: true });

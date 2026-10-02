@@ -8,7 +8,7 @@ import { RuleStore, type SensorEvent } from '@vigil/sensors';
 import { Approvals } from './approval.js';
 import { HelperClient } from './client.js';
 import { Executor, type ActionOutcome } from './executor.js';
-import { FastPath, type HelperRan } from './fastpath.js';
+import { FastPath, RETIRE_MS, type HelperRan } from './fastpath.js';
 import { Journal } from './journal.js';
 import { LIST_PART_MAX, type DetectionSync } from './protocol.js';
 import { HelperServer } from './server.js';
@@ -24,9 +24,14 @@ let server: HelperServer;
 let client: HelperClient;
 let rulesFile: string;
 
+// Small enough that the oversized-drop test stays fast on a busy runner.
+const RETIRED_TEST_MAX = 5000;
+
 function makeFastPath(executor: Executor): FastPath {
   return new FastPath({
     file: rulesFile,
+    now: () => clock,
+    retiredMax: RETIRED_TEST_MAX,
     run: async (action) => {
       const out = await executor.execute(action);
       if (out.kind !== 'done') throw new Error('needs the admin password');
@@ -36,15 +41,21 @@ function makeFastPath(executor: Executor): FastPath {
 }
 
 let executor: Executor;
+let approvalsDir: string;
+/** Whether the fake password dialog says yes; every answer is recorded. */
+let approve = false;
+const prompts: string[] = [];
+let clock = 1_000_000;
 
 beforeAll(async () => {
   root = mkdtempSync(join(tmpdir(), 'vigil-fastpath-'));
   rulesFile = join(root, 'helper-rules.json');
+  approvalsDir = join(root, 'approvals');
   sys = new FakeSystem();
   executor = new Executor({
     sys,
     journal: new Journal(join(root, 'journal.json')),
-    approvals: new Approvals({ dir: join(root, 'approvals'), requiredOwnerUid: process.getuid!() }),
+    approvals: new Approvals({ dir: approvalsDir, requiredOwnerUid: process.getuid!() }),
     rules: new RuleStore(join(root, 'rules.json')),
     quarantine: { quarantineDir: join(root, 'Quarantine') },
     syncPort: 47821,
@@ -55,7 +66,12 @@ beforeAll(async () => {
   fast = makeFastPath(executor);
   server = new HelperServer({ socketPath: join(root, 'helper.sock'), executor });
   await server.listen();
-  client = await HelperClient.connect(join(root, 'helper.sock'), async () => false);
+  // Stands in for the password dialog: only a yes writes the root-owned approval.
+  client = await HelperClient.connect(join(root, 'helper.sock'), async (nonce, prompt, also) => {
+    prompts.push(prompt);
+    if (approve) for (const n of [nonce, ...(also ?? [])]) Approvals.writeApproval(approvalsDir, n);
+    return approve;
+  });
 });
 
 afterAll(async () => {
@@ -66,6 +82,8 @@ afterAll(async () => {
 
 beforeEach(() => {
   sys.signals.length = 0;
+  prompts.length = 0;
+  approve = false;
 });
 
 const exec = (pid: number, sha256: string, path = '/tmp/payload'): SensorEvent => ({
@@ -137,7 +155,9 @@ describe('blocking rules in the helper', () => {
     const { sync, lists } = appSet({ known_bad_sha256: [BAD] }, [
       { id: 'x1', ruleId: '*', match: { 'process.path': '/tmp/allowed' }, createdAt: 1 },
     ]);
+    approve = true;
     await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    expect(prompts).toEqual(['Vigil wants to loosen its blocking rules: add an exception to *.']);
     sys.processes.set(5000, { path: '/tmp/allowed', started: 'T' });
     expect(await fast.check(exec(5000, BAD, '/tmp/allowed'))).toEqual([]);
     const self = `${SELF}/Contents/MacOS/Vigil at Home`;
@@ -160,7 +180,8 @@ describe('blocking rules in the helper', () => {
         entries: ['e'.repeat(64)],
       }),
     ).rejects.toMatchObject({ code: 'invalid' });
-    expect(fast.status().lists['known_bad_sha256']).toBeUndefined();
+    // What the last good copy had, still blocking while the new one is awaited.
+    expect(fast.status().lists['known_bad_sha256']).toBe(1);
   });
 
   it('keeps the rules across a restart, and ignores a damaged file', async () => {
@@ -181,9 +202,179 @@ describe('blocking rules in the helper', () => {
   it('refuses rules that do not compile, without dropping the current ones', async () => {
     const before = fast.status();
     const bad = { ...appSet({}).sync };
-    bad.rules = [{ ...bad.rules[0]!, condition: { field: 'path', op: 'regex', value: '(' } }];
+    bad.rules = [
+      ...bad.rules,
+      { ...bad.rules[0]!, id: 'broken', condition: { field: 'path', op: 'regex', value: '(' } },
+    ];
     await expect(client.call(bad)).rejects.toMatchObject({ code: 'invalid' });
     expect(fast.status()).toEqual(before);
+  });
+
+  it('needs the admin password to turn a rule off, change it or add a path', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    approve = true;
+    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    approve = false;
+    const rev = fast.status().rev;
+    const [first, ...rest] = sync.rules;
+
+    // Anything on the user's account can send these; without the password nothing changes.
+    const weaker: DetectionSync[] = [
+      { ...sync, rules: rest },
+      {
+        ...sync,
+        rules: [{ ...first!, exclusions: [{ field: 'process.path', op: 'exists' }] }, ...rest],
+      },
+      { ...sync, selfPaths: [...sync.selfPaths, '/tmp'] },
+    ];
+    for (const cmd of weaker)
+      await expect(client.call(cmd)).rejects.toMatchObject({ code: 'refused' });
+    expect(prompts).toEqual([
+      `Vigil wants to loosen its blocking rules: stop blocking with “${first!.name}”.`,
+      `Vigil wants to loosen its blocking rules: change what “${first!.name}” blocks.`,
+      'Vigil wants to loosen its blocking rules: never block /tmp.',
+    ]);
+    expect(fast.status().rev).toBe(rev);
+    sys.processes.set(7000, { path: '/tmp/payload', started: 'T' });
+    expect((await fast.check(exec(7000, BAD))).length).toBeGreaterThan(0);
+
+    // Wording-only edits and the same rules again need no password.
+    prompts.length = 0;
+    await client.call({
+      ...sync,
+      rules: [{ ...first!, name: 'Renamed', reasons: ['Reworded reason'] }, ...rest],
+    });
+    await client.call(sync);
+    expect(prompts).toEqual([]);
+
+    // With the password, it goes through.
+    approve = true;
+    await client.call({ ...sync, rules: rest });
+    expect(fast.status().rules).toBe(rest.length);
+    expect(fast.status().rev).toBeGreaterThan(rev);
+    await client.call(sync);
+  });
+
+  it('lets a held rule change ride on the next password dialog', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    approve = true;
+    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    prompts.length = 0;
+    const exception = {
+      id: 'x9',
+      ruleId: 'known-bad-hash',
+      match: { 'process.path': '/tmp/ok' },
+      createdAt: 2,
+    };
+    let held = false;
+    const syncing = client.hold({ ...sync, exceptions: [exception] }, () => (held = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(held).toBe(true);
+    // A release (here: removing a Santa rule) asks for the password, for both at once.
+    await client.call({
+      kind: 'santa.rule.set',
+      ruleType: 'binary',
+      identifier: BAD,
+      policy: 'block',
+    });
+    await client.call({ kind: 'santa.rule.remove', ruleType: 'binary', identifier: BAD });
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('add an exception to known-bad-hash');
+    await client.approveHeld();
+    await syncing;
+    expect(prompts).toHaveLength(1);
+    expect(fast.status().rules).toBeGreaterThan(0);
+
+    // Nothing else asks: approveHeld asks once for what is still waiting, and a no settles it as refused.
+    approve = false;
+    const refused = client.hold({
+      ...sync,
+      exceptions: [],
+      selfPaths: [...sync.selfPaths, '/tmp'],
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    await client.approveHeld();
+    await expect(refused).rejects.toMatchObject({ code: 'refused' });
+    expect(prompts).toHaveLength(2);
+  });
+
+  it('refuses a held rule change when the dialog it rode on gets a no', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    approve = true;
+    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    await client.call({
+      kind: 'santa.rule.set',
+      ruleType: 'binary',
+      identifier: BAD,
+      policy: 'block',
+    });
+    prompts.length = 0;
+    approve = false;
+    const syncing = client.hold({ ...sync, selfPaths: [...sync.selfPaths, '/tmp'] });
+    await new Promise((r) => setTimeout(r, 20));
+    await expect(
+      client.call({ kind: 'santa.rule.remove', ruleType: 'binary', identifier: BAD }),
+    ).rejects.toMatchObject({ code: 'refused' });
+    await expect(syncing).rejects.toMatchObject({ code: 'refused' });
+    // Nothing is left to ask about.
+    await client.approveHeld();
+    expect(prompts).toHaveLength(1);
+  });
+
+  it('drops held rule changes without asking', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    prompts.length = 0;
+    const syncing = client.hold({ ...sync, selfPaths: [...sync.selfPaths, '/tmp'] });
+    await new Promise((r) => setTimeout(r, 20));
+    client.dropHeld();
+    await expect(syncing).rejects.toMatchObject({ code: 'refused' });
+    await client.approveHeld();
+    expect(prompts).toHaveLength(0);
+  });
+
+  it('keeps an entry a list drops blocking for a week', async () => {
+    const OTHER = 'a'.repeat(64);
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD, OTHER] });
+    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    // A list update without BAD, as anything on the user's account could send.
+    await sendLists(['known_bad_sha256'], { known_bad_sha256: [OTHER] });
+    expect(fast.status().lists['known_bad_sha256']).toBe(1);
+    sys.processes.set(7100, { path: '/tmp/payload', started: 'T' });
+    expect((await fast.check(exec(7100, BAD))).length).toBeGreaterThan(0);
+    // Dropping the list from the sync altogether doesn't help either.
+    const { known_bad_sha256: _gone, ...others } = sync.lists;
+    await client.call({ ...sync, lists: others });
+    sys.processes.set(7101, { path: '/tmp/payload', started: 'T' });
+    expect((await fast.check(exec(7101, OTHER))).length).toBeGreaterThan(0);
+    // It survives a restart.
+    const again = makeFastPath(executor);
+    again.load();
+    sys.processes.set(7102, { path: '/tmp/payload', started: 'T' });
+    expect((await again.check(exec(7102, BAD))).length).toBeGreaterThan(0);
+
+    // A week later the feed's removal takes effect.
+    clock += RETIRE_MS;
+    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, {
+      known_bad_sha256: [OTHER],
+    });
+    expect(fast.status().retired).toBe(0);
+    sys.processes.set(7103, { path: '/tmp/payload', started: 'T' });
+    expect(await fast.check(exec(7103, BAD))).toEqual([]);
+  });
+
+  it('refuses a list that would drop more than it may in a week', async () => {
+    const many = Array.from({ length: RETIRED_TEST_MAX + 1 }, (_, i) =>
+      i.toString(16).padStart(64, '0'),
+    );
+    const { sync, lists } = appSet({ known_bad_sha256: many });
+    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    await expect(
+      sendLists(['known_bad_sha256'], { known_bad_sha256: [BAD] }),
+    ).rejects.toMatchObject({
+      code: 'refused',
+    });
+    expect(fast.status().lists['known_bad_sha256']).toBe(RETIRED_TEST_MAX + 1);
   });
 
   it('tells subscribers what it already did about each event, replays included', async () => {

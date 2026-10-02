@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // vigil-helper daemon            run the root daemon (launchd does this)
-// vigil-helper approve <nonce>   record the user's approval; only works as root,
+// vigil-helper approve <nonce>…  record the user's approval; only works as root,
 //                                i.e. after macOS's admin password dialog
 // vigil-helper santa-profile     print the Santa configuration profile
 // vigil-helper osquery-config    print the osquery configuration
@@ -16,7 +16,7 @@ import { ensureOsquery, removeOsquery } from './osquery.js';
 import { realSystem } from './system.js';
 
 async function main(argv: string[]): Promise<number> {
-  const [cmd, arg] = argv;
+  const [cmd, arg, ...more] = argv;
   switch (cmd) {
     case 'daemon': {
       const stop = await runDaemon();
@@ -32,11 +32,17 @@ async function main(argv: string[]): Promise<number> {
         console.error('approve must run as root (through the macOS password dialog)');
         return 1;
       }
-      if (!arg || !/^[a-f0-9]{32}$/.test(arg)) {
-        console.error('usage: vigil-helper approve <nonce>');
+      // One password can approve several commands, each by its own nonce.
+      const nonces = arg ? [arg, ...more] : [];
+      if (
+        nonces.length === 0 ||
+        nonces.length > 8 ||
+        !nonces.every((n) => /^[a-f0-9]{32}$/.test(n))
+      ) {
+        console.error('usage: vigil-helper approve <nonce>…');
         return 2;
       }
-      Approvals.writeApproval(defaultPaths().approvalsDir, arg);
+      for (const n of nonces) Approvals.writeApproval(defaultPaths().approvalsDir, n);
       return 0;
     }
     case 'santa-profile':
@@ -60,7 +66,7 @@ async function main(argv: string[]): Promise<number> {
     }
     default:
       console.error(
-        'usage: vigil-helper daemon | approve <nonce> | santa-profile | osquery-config | ' +
+        'usage: vigil-helper daemon | approve <nonce>… | santa-profile | osquery-config | ' +
           'osquery-flags | osquery-setup | osquery-remove',
       );
       return 2;
