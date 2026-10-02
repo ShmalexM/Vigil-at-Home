@@ -1,18 +1,11 @@
 import type { Alert, SensorEvent } from '@vigil/core';
-import { Bell, RotateCcw, ShieldAlert, ShieldCheck, Sparkles } from 'lucide-react';
+import { Bell, RotateCcw, Sparkles } from 'lucide-react';
 import { useState } from 'react';
 import { useLive, vigil } from '../api';
-import { HoldButton } from '../components/HoldButton';
+import { DecisionControls, type Decided } from '../components/Decision';
 import { useToast } from '../components/Toasts';
 import { Button, Card, Chip, SectionHead, SeverityMark, StatusMark } from '../components/ui';
-import {
-  actorLabel,
-  clock,
-  describeAction,
-  describeEvent,
-  releaseFailed,
-  timeAgo,
-} from '../format';
+import { actorLabel, clock, describeAction, describeEvent, timeAgo } from '../format';
 import { ExcludeFromAlert } from '../components/ExcludeFromAlert';
 import { PageHead } from './AppShell';
 
@@ -116,21 +109,17 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
   const pending = proposals.filter((p) => p.status === 'pending');
   const contained = alert.containment === 'active';
 
-  const decide = async (verdict: 'malicious' | 'benign' | 'expected', release: boolean) => {
-    const out = await vigil.decide(alert.id, { verdict, release });
-    if (release && !out.decision) {
-      toast({ text: releaseFailed(out), ms: 10000 });
-      return;
-    }
+  const decided = (d: Decided) =>
     toast({
-      text: release
-        ? 'Released and marked safe'
-        : verdict === 'malicious'
-          ? 'Kept blocked'
-          : 'Marked as resolved',
-      undo: release ? undefined : () => void vigil.reopen(alert.id),
+      text: {
+        kept: 'Kept as it is',
+        released: 'Done, and marked safe',
+        contained: 'Done',
+        fine: 'Marked as fine',
+        expected: 'Marked as you',
+      }[d],
+      undo: d === 'released' || d === 'contained' ? undefined : () => void vigil.reopen(alert.id),
     });
-  };
 
   return (
     <div className="col" style={{ gap: 14 }}>
@@ -141,6 +130,7 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
           {alert.containment === 'released' && <Chip tone="fair">Released</Chip>}
           {alert.status === 'resolved' && <Chip>Resolved</Chip>}
           <span className="grow" />
+          {!alert.ai && <ExplainButton alertId={alert.id} />}
           <span className="t-small">{clock(alert.createdAt)}</span>
         </div>
         <h2 className="t-title">{alert.title}</h2>
@@ -148,45 +138,12 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
         {alert.subject?.path && <div className="subject mono">{alert.subject.path}</div>}
 
         {alert.status === 'open' ? (
-          <div className="row" style={{ flexWrap: 'wrap' }}>
-            {contained ? (
-              <>
-                <Button
-                  kind="primary"
-                  icon={<ShieldCheck size={15} />}
-                  onClick={() => void decide('malicious', false)}
-                >
-                  Keep blocked
-                </Button>
-                <HoldButton
-                  label="Allow and release"
-                  doneLabel="Released"
-                  onConfirm={() => void decide('benign', true)}
-                />
-              </>
-            ) : (
-              <>
-                {pending.length > 0 && (
-                  <Button
-                    kind="primary"
-                    icon={<ShieldAlert size={15} />}
-                    onClick={async () => {
-                      for (const p of pending) await vigil.approveProposal(p.id);
-                      toast({ text: 'Blocked' });
-                    }}
-                  >
-                    Block it
-                  </Button>
-                )}
-                <Button kind="outline" onClick={() => void decide('benign', false)}>
-                  It's fine
-                </Button>
-                <Button kind="ghost" onClick={() => void decide('expected', false)}>
-                  Expected, resolve
-                </Button>
-              </>
-            )}
-          </div>
+          <DecisionControls
+            alert={alert}
+            actions={actions}
+            proposals={proposals}
+            onDecided={decided}
+          />
         ) : (
           <div className="row">
             <span className="t-small">
@@ -227,16 +184,6 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
           )}
         </Card>
       )}
-      {!alert.ai && (
-        <Card>
-          <SectionHead
-            title="AI opinion"
-            sub="None yet. Ask for one: advisory only, it never changes the response."
-            right={<ExplainButton alertId={alert.id} />}
-          />
-        </Card>
-      )}
-
       {(actions.length > 0 || proposals.length > 0) && (
         <Card>
           <SectionHead title="Response" sub="What was done, and what was suggested" />
