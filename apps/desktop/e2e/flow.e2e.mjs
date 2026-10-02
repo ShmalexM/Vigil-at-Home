@@ -468,8 +468,16 @@ try {
     }
     check('beacon: seen by real osquery', s.sensor === 'real osquery');
     check('beacon: alert raised', !!alert);
-    const d = alert && (await detail(alert.id));
-    const block = d?.actions.find((a) => a.action.kind === 'network.block');
+    // The alert is saved before its block runs, so wait for the block's record to settle.
+    const blockOf = (x) => x?.actions.find((a) => a.action.kind === 'network.block');
+    const d =
+      alert &&
+      ((await waitUntil(async () => {
+        const x = await detail(alert.id);
+        return blockOf(x) && blockOf(x).status !== 'pending' ? x : null;
+      }, 5000)) ??
+        (await detail(alert.id)));
+    const block = blockOf(d);
     const ev = d?.events[0];
     s.connectToEventMs = ev ? ev.ts - t0 : null;
     s.connectToBlockMs = block?.result?.at ? block.result.at - t0 : null;
