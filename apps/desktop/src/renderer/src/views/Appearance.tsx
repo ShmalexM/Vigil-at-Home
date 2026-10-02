@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ThemePref } from '../../../shared/ipc';
 import {
   DEFAULT_APPEARANCE,
+  DEFAULT_UI_FONT_SIZE,
   isFontFamily,
   isHexColor,
   parseCodexTheme,
@@ -140,18 +141,20 @@ export function AppearanceSection({
           <label className="row spread">
             <span>
               Text size
-              <span className="small muted"> · the main window’s base size</span>
+              <span className="small muted"> · up to 200%, in every window</span>
             </span>
             <span className="row" style={{ gap: 10 }}>
               <input
                 type="range"
                 min={11}
-                max={16}
+                max={26}
                 value={a.uiFontSize}
                 aria-label="Text size"
                 onChange={(e) => update({ ...a, uiFontSize: Number(e.target.value) })}
               />
-              <span className="mono small range-value">{a.uiFontSize}px</span>
+              <span className="mono small range-value">
+                {Math.round((a.uiFontSize / DEFAULT_UI_FONT_SIZE) * 100)}%
+              </span>
             </span>
           </label>
           <FontField

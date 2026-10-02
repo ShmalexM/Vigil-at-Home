@@ -84,8 +84,8 @@ export class OnboardingService extends EventEmitter<{ changed: [] }> {
     this.emit('changed');
   }
 
+  /** Setup can finish without AI: protection never depends on it. */
   finish(): void {
-    if (!this.mode()) throw new Error('Choose how Vigil runs first');
     this.o.store.setSetting(KEY_FINISHED, this.now());
     this.emit('changed');
   }

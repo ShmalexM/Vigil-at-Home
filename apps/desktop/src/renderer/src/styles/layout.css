@@ -139,7 +139,13 @@
   background: var(--bg1);
   border: 1px solid var(--ln1);
   border-radius: 12px;
-  overflow: hidden;
+  /* Scrolls when large text outgrows the window. */
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+.popover > .scroll {
+  /* The list's negative margin would otherwise scroll sideways. */
+  overflow-x: hidden;
 }
 .popover .list {
   margin: 0 -6px;
@@ -147,7 +153,10 @@
 
 /* ---------------------------------------------------------------- detection popup */
 body.transparent {
-  overflow: hidden;
+  /* The popup fits its content; with large text it can reach the screen's
+     height, and then it scrolls. */
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 .popup {
   margin: 10px;

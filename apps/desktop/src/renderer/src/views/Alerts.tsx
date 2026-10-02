@@ -8,6 +8,7 @@ import { Button, Card, Chip, SectionHead, SeverityMark, StatusMark } from '../co
 import { actorLabel, clock, describeAction, describeEvent, timeAgo } from '../format';
 import { ExcludeFromAlert } from '../components/ExcludeFromAlert';
 import { PageHead } from './AppShell';
+import { onRovingKeyDown } from '../components/roving';
 
 export function AlertsView({
   selected,
@@ -28,11 +29,12 @@ export function AlertsView({
         title="Alerts"
         purpose="Everything Vigil flagged. Blocks happen first; you decide whether they stay."
       />
-      <div className="tabs" role="tablist">
+      <div className="tabs" role="tablist" onKeyDown={onRovingKeyDown}>
         <button
           type="button"
           role="tab"
           aria-selected={tab === 'open'}
+          tabIndex={tab === 'open' ? 0 : -1}
           onClick={() => setTab('open')}
         >
           Open <span className="count">{open?.length ?? 0}</span>
@@ -41,6 +43,7 @@ export function AlertsView({
           type="button"
           role="tab"
           aria-selected={tab === 'resolved'}
+          tabIndex={tab === 'resolved' ? 0 : -1}
           onClick={() => setTab('resolved')}
         >
           Resolved <span className="count">{resolved?.length ?? 0}</span>

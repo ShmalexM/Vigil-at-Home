@@ -9,7 +9,7 @@ import {
   RefreshCw,
   SquareTerminal,
 } from 'lucide-react';
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { SetupMode, SetupStepView, SetupView } from '../../../../shared/setup';
 import { useLive, vigil } from '../../api';
 import { Shield } from '../../components/Shield';
@@ -17,12 +17,13 @@ import { useToast } from '../../components/Toasts';
 import { Button, Card, Chip, Segmented, StatusMark, type MarkState } from '../../components/ui';
 import { ApiKeys, cleanError } from './ApiKeys';
 import './onboarding.css';
+import { onRovingKeyDown, rovingTabIndex } from '../../components/roving';
 
-type Stage = 'choose' | 'protection' | 'ai' | 'review';
+// Protection comes first and AI is optional: setup can finish without it.
+type Stage = 'protection' | 'ai' | 'review';
 const STAGES: { id: Stage; label: string }[] = [
-  { id: 'choose', label: 'How Vigil runs' },
   { id: 'protection', label: 'Protection' },
-  { id: 'ai', label: 'AI' },
+  { id: 'ai', label: 'AI (optional)' },
   { id: 'review', label: 'Review' },
 ];
 
@@ -54,14 +55,36 @@ const MODES: { id: SetupMode; icon: ReactNode; title: string; body: string; cost
 ];
 
 /**
+ * The setup view, with a background load that never replaces a newer one: a
+ * re-check that started before you picked or skipped something is dropped,
+ * so the screen can't jump back.
+ */
+export function useSetupView(): [SetupView | undefined, (v: SetupView) => void, () => void] {
+  const [view, set] = useState<SetupView>();
+  const version = useRef(0);
+  const setView = useCallback((v: SetupView) => {
+    version.current++;
+    set(v);
+  }, []);
+  const reload = useCallback(() => {
+    const started = version.current;
+    void vigil.getSetup().then((v) => {
+      if (version.current === started) setView(v);
+    });
+  }, [setView]);
+  return [view, setView, reload];
+}
+
+/**
  * Re-check while the window is in front, so a step turns green soon after its
  * command finishes in Terminal. Only while setup is on screen.
  */
-export function useSetupPolling(active: boolean, setView: (v: SetupView) => void) {
+export function useSetupPolling(active: boolean, reload: () => void) {
   useEffect(() => {
     if (!active) return;
+    reload();
     const tick = () => {
-      if (document.hasFocus()) void vigil.getSetup().then(setView);
+      if (document.hasFocus()) reload();
     };
     const id = setInterval(tick, POLL_MS);
     window.addEventListener('focus', tick);
@@ -69,12 +92,13 @@ export function useSetupPolling(active: boolean, setView: (v: SetupView) => void
       clearInterval(id);
       window.removeEventListener('focus', tick);
     };
-  }, [active, setView]);
+  }, [active, reload]);
 }
 
 export function SetupWizard({ onDone }: { onDone: () => void }) {
-  const [view, setView] = useState<SetupView>();
-  const [stage, setStage] = useState<Stage>('choose');
+  const [view, setView, reload] = useSetupView();
+  const [stage, setStage] = useState<Stage>('protection');
+  const [choosing, setChoosing] = useState(false);
   const [checking, setChecking] = useState(false);
 
   const recheck = useCallback(async () => {
@@ -84,16 +108,9 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
     } finally {
       setChecking(false);
     }
-  }, []);
+  }, [setView]);
 
-  useEffect(() => {
-    void vigil.getSetup().then((v) => {
-      setView(v);
-      if (v.mode) setStage('protection');
-    });
-  }, []);
-
-  useSetupPolling(stage !== 'choose', setView);
+  useSetupPolling(true, reload);
 
   if (!view) return null;
   const idx = STAGES.findIndex((s) => s.id === stage);
@@ -110,7 +127,7 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
         <ol className="setup-stages" aria-label="Setup steps">
           {STAGES.map((s, i) => (
             <li key={s.id} aria-current={s.id === stage ? 'step' : undefined}>
-              <button type="button" disabled={i > 0 && !view.mode} onClick={() => setStage(s.id)}>
+              <button type="button" onClick={() => setStage(s.id)}>
                 <span className="num">{i + 1}</span>
                 {s.label}
               </button>
@@ -118,20 +135,10 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
           ))}
         </ol>
 
-        {!view.supported && stage !== 'choose' && (
+        {!view.supported && (
           <div className="attn fair">
             Vigil can only check these steps on macOS. The commands are shown so you can read them.
           </div>
-        )}
-
-        {stage === 'choose' && (
-          <ChooseMode
-            mode={view.mode}
-            onPick={async (m) => {
-              setView(await vigil.setSetupMode(m));
-              setStage('protection');
-            }}
-          />
         )}
 
         {stage === 'protection' && (
@@ -145,7 +152,21 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
           />
         )}
 
-        {stage === 'ai' && (
+        {stage === 'ai' && (!view.mode || choosing) && (
+          <ChooseMode
+            mode={view.mode}
+            onPick={async (m) => {
+              setView(await vigil.setSetupMode(m));
+              setChoosing(false);
+            }}
+            onSkip={() => {
+              setChoosing(false);
+              setStage('review');
+            }}
+          />
+        )}
+
+        {stage === 'ai' && view.mode && !choosing && (
           <>
             <StepList
               title="AI"
@@ -160,20 +181,29 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
               recheck={recheck}
             />
             {view.mode !== 'local' && <ApiKeys view={view} setView={setView} />}
+            <div className="row">
+              <Button kind="ghost" onClick={() => setChoosing(true)}>
+                Change where the AI runs
+              </Button>
+            </div>
           </>
         )}
 
         {stage === 'review' && <Review view={view} onDone={onDone} />}
 
-        {stage !== 'choose' && (
+        {!(stage === 'ai' && (!view.mode || choosing)) && (
           <div className="row spread">
-            <Button
-              kind="ghost"
-              icon={<ArrowLeft size={15} />}
-              onClick={() => setStage(STAGES[idx - 1]!.id)}
-            >
-              Back
-            </Button>
+            {idx > 0 ? (
+              <Button
+                kind="ghost"
+                icon={<ArrowLeft size={15} />}
+                onClick={() => setStage(STAGES[idx - 1]!.id)}
+              >
+                Back
+              </Button>
+            ) : (
+              <span />
+            )}
             {stage !== 'review' && (
               <Button kind="primary" onClick={() => setStage(STAGES[idx + 1]!.id)}>
                 Next
@@ -190,28 +220,36 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
 function ChooseMode({
   mode,
   onPick,
+  onSkip,
 }: {
   mode: SetupMode | undefined;
   onPick: (m: SetupMode) => void;
+  onSkip: () => void;
 }) {
   const [picked, setPicked] = useState<SetupMode | undefined>(mode);
   return (
     <>
       <div className="col" style={{ gap: 6 }}>
-        <h1 className="t-title">Where should Vigil’s AI run?</h1>
+        <h1 className="t-title">Add AI? (optional)</h1>
         <span>
-          Detection and blocking always run on your Mac with fixed rules, so they are instant and
-          never wait for AI. The AI explains alerts and suggests new rules for you to approve. You
-          can change this later in Settings.
+          Protection is already set: detection and blocking run on your Mac with fixed rules and
+          never wait for AI. AI only explains alerts and suggests new rules for you to approve. You
+          can skip it and add it later in Settings.
         </span>
       </div>
-      <div className="mode-grid" role="radiogroup" aria-label="Where the AI runs">
-        {MODES.map((m) => (
+      <div
+        className="mode-grid"
+        role="radiogroup"
+        aria-label="Where the AI runs"
+        onKeyDown={onRovingKeyDown}
+      >
+        {MODES.map((m, i) => (
           <button
             key={m.id}
             type="button"
             role="radio"
             aria-checked={picked === m.id}
+            tabIndex={rovingTabIndex(picked === m.id, i, picked !== undefined)}
             className="mode-card"
             onClick={() => setPicked(m.id)}
           >
@@ -222,7 +260,10 @@ function ChooseMode({
           </button>
         ))}
       </div>
-      <div className="row" style={{ justifyContent: 'flex-end' }}>
+      <div className="row spread">
+        <Button kind="ghost" onClick={onSkip}>
+          Skip AI for now
+        </Button>
         <Button kind="primary" disabled={!picked} onClick={() => picked && onPick(picked)}>
           Continue
           <ArrowRight size={15} />
@@ -447,7 +488,9 @@ function Command({ label, cmd }: { label: string; cmd: string }) {
 }
 
 function Review({ view, onDone }: { view: SetupView; onDone: () => void }) {
-  const left = view.steps.filter(
+  // With no AI chosen, the AI steps aren't part of this setup.
+  const shown = view.mode ? view.steps : view.steps.filter((s) => s.group !== 'ai');
+  const left = shown.filter(
     (s) => !s.optional && !s.skipped && (s.state === 'todo' || s.state === 'waiting'),
   );
   const aiReady =
@@ -468,7 +511,7 @@ function Review({ view, onDone }: { view: SetupView; onDone: () => void }) {
       </div>
       <Card>
         <ul className="review-list">
-          {view.steps.map((s) => {
+          {shown.map((s) => {
             const [mark, label] = MARK[s.state];
             return (
               <li key={s.id} className="row" style={{ gap: 10 }}>
@@ -493,8 +536,8 @@ function Review({ view, onDone }: { view: SetupView; onDone: () => void }) {
       </Card>
       {!aiReady && (
         <div className="attn fair">
-          No AI is connected yet. Protection still works; alerts just won’t have an explanation
-          until you add one.
+          {view.mode ? 'No AI is connected yet.' : 'No AI chosen.'} Protection works without it;
+          alerts just won’t have an explanation until you add one in Settings.
         </div>
       )}
       {pending.length > 0 && view.supported && (
