@@ -405,9 +405,115 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
         ),
         { mode: 'alert' },
       ],
+      [
+        exec(
+          proc({
+            path: '/usr/bin/xattr',
+            args: ['xattr', '-d', '-r', 'com.apple.quarantine', '/Applications/Google Chrome.app'],
+            signing: 'apple',
+          }),
+        ),
+        { mode: 'alert' },
+      ],
+      [
+        exec(
+          proc({
+            path: '/usr/bin/xattr',
+            args: ['xattr', '-r', '-d', 'com.apple.quarantine', '/Applications/X.app'],
+            signing: 'apple',
+          }),
+        ),
+        { mode: 'alert' },
+      ],
+      [
+        exec(
+          proc({
+            path: '/usr/bin/xattr',
+            args: ['xattr', '-dr', 'com.apple.quarantine', '/Applications/X.app'],
+            signing: 'apple',
+          }),
+        ),
+        { mode: 'alert' },
+      ],
+      [
+        exec(
+          proc({
+            path: '/usr/bin/xattr',
+            args: ['xattr', '-rd', 'com.apple.quarantine', '/Applications/X.app'],
+            signing: 'apple',
+          }),
+        ),
+        { mode: 'alert' },
+      ],
+      [
+        exec(
+          proc({
+            path: '/usr/bin/xattr',
+            args: ['xattr', '-c', '/Applications/X.app'],
+            signing: 'apple',
+          }),
+        ),
+        { mode: 'alert' },
+      ],
+      [
+        exec(
+          proc({
+            path: '/usr/bin/xattr',
+            args: ['xattr', '-rc', '/Applications/X.app'],
+            signing: 'apple',
+          }),
+        ),
+        { mode: 'alert' },
+      ],
     ],
     good: [
       exec(proc({ path: '/usr/bin/xattr', args: ['xattr', '-l', 'file.txt'], signing: 'apple' })),
+      // Real cases from Alex's Mac: Claude and Slack write the flag on downloads.
+      exec(
+        proc({
+          path: '/usr/bin/xattr',
+          args: [
+            'xattr',
+            '-w',
+            'com.apple.quarantine',
+            '0081;66f0a1b2;Claude;',
+            '/Users/alex/Downloads/report.pdf',
+          ],
+          signing: 'apple',
+        }),
+      ),
+      exec(
+        proc({
+          path: '/usr/bin/xattr',
+          args: [
+            'xattr',
+            '-w',
+            'com.apple.quarantine',
+            '0081;66f0a1b2;Slack;',
+            '/Users/alex/Downloads/notes.docx',
+          ],
+          signing: 'apple',
+        }),
+      ),
+      exec(
+        proc({
+          path: '/usr/bin/xattr',
+          args: ['xattr', '-p', 'com.apple.quarantine', '/Users/alex/Downloads/report.pdf'],
+          signing: 'apple',
+        }),
+      ),
+      exec(
+        proc({
+          path: '/usr/bin/xattr',
+          args: [
+            'xattr',
+            '-d',
+            'com.apple.metadata:kMDItemWhereFroms',
+            '/Users/alex/Downloads/a.zip',
+          ],
+          signing: 'apple',
+        }),
+      ),
     ],
   },
   'gatekeeper-disabled': {
