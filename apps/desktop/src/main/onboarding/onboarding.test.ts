@@ -145,8 +145,18 @@ describe('checks', () => {
     expect((await check('https://127.0.0.1:478219')).ok).toBe(false);
   });
 
-  it('sees the helper by its socket', async () => {
-    expect((await CHECKS.helper(fakeMac({ files: [HELPER_SOCKET] }))).ok).toBe(true);
+  it('counts the helper only when it answers on its socket', async () => {
+    const mac = (answers: boolean) => ({
+      ...fakeMac({ files: [HELPER_SOCKET] }),
+      helperAnswers: async () => answers,
+    });
+    expect(await CHECKS.helper(mac(true))).toEqual({ ok: true, detail: 'Running and answering' });
+    expect(await CHECKS.helper(mac(false))).toEqual({
+      ok: false,
+      detail: 'Installed, but the helper isn’t answering',
+    });
+    // A leftover socket file with nothing to ask is not enough.
+    expect((await CHECKS.helper(fakeMac({ files: [HELPER_SOCKET] }))).ok).toBe(false);
   });
 
   it('prefers the small model but accepts one already installed', async () => {
@@ -229,7 +239,10 @@ describe('OnboardingService', () => {
     // The Santa profile waits for the helper, rather than saying it is missing.
     expect(after.find((s) => s.id === 'santa-profile')!.state).toBe('waiting');
 
-    const { svc: svc2 } = service(fakeMac({ files: [HELPER_SOCKET] }));
+    const { svc: svc2 } = service({
+      ...fakeMac({ files: [HELPER_SOCKET] }),
+      helperAnswers: async () => true,
+    });
     svc2.setMode('local');
     expect((await svc2.view()).steps.find((s) => s.id === 'helper')!.state).toBe('done');
   });
