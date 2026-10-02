@@ -12,14 +12,14 @@
 // Scenarios:
 //   1. Infostealer reads Chrome passwords: the event is simulated (Santa can't
 //      be approved on a runner), the stand-in process is real. Vigil pauses it
-//      through the helper, the popup shows, the user holds Allow, and the
+//      through the helper, the popup shows, the user holds Resume app, and the
 //      helper resumes it after the admin approval.
 //   2. Fake password dialog: Vigil kills the stand-in; the user presses Keep blocked.
 //   3. Beacon to a command server: a real connection, seen by the real osquery
 //      through the helper. Vigil blocks the address with pf; the user undoes
 //      it from the alert's page.
 //   4. Launch agent named like Apple's: a real plist, seen by osquery. The
-//      popup suggests disabling it; the user presses Block it; then undoes it.
+//      popup suggests disabling it; the user presses Turn off startup item; then undoes it.
 //   5. Timing: the same pause-and-popup path repeated to get a spread.
 //   6. Learning: answering "fine" three times suggests turning the rule down to alert;
 //      it keeps blocking until the suggestion is accepted.
@@ -360,10 +360,11 @@ try {
     if (page) {
       await snap(page, 'popup-stealer');
       const t1 = Date.now();
-      await hold(page, /Allow/);
+      // The release button names its effect: "Resume app", or "Release both" with a network block too.
+      await hold(page, /Resume app|Release both|Release all/);
       const resumed = await waitUntil(() => !procState(pid).startsWith('T'), 20000);
       s.allowToReleaseMs = Date.now() - t1;
-      check('stealer: holding Allow resumed the process', resumed, procState(pid));
+      check('stealer: holding Resume app resumed the process', resumed, procState(pid));
       const after = await detail(alert.id);
       check('stealer: alert resolved as fine', after?.alert.decision?.verdict === 'benign');
       check(
@@ -481,8 +482,16 @@ try {
     }
     check('beacon: seen by real osquery', s.sensor === 'real osquery');
     check('beacon: alert raised', !!alert);
-    const d = alert && (await settled(alert.id, 'network.block'));
-    const block = d?.actions.find((a) => a.action.kind === 'network.block');
+    // The alert is saved before its block runs, so wait for the block's record to settle.
+    const blockOf = (x) => x?.actions.find((a) => a.action.kind === 'network.block');
+    const d =
+      alert &&
+      ((await waitUntil(async () => {
+        const x = await detail(alert.id);
+        return blockOf(x) && blockOf(x).status !== 'pending' ? x : null;
+      }, 5000)) ??
+        (await detail(alert.id)));
+    const block = blockOf(d);
     const ev = d?.events[0];
     s.connectToEventMs = ev ? ev.ts - t0 : null;
     s.connectToBlockMs = block?.result?.at ? block.result.at - t0 : null;
@@ -565,9 +574,9 @@ try {
     const page = await popupPage();
     if (page && alert) {
       await snap(page, 'popup-launch-agent');
-      await page.getByRole('button', { name: 'Block it' }).click();
+      await page.getByRole('button', { name: 'Turn off startup item' }).click();
       const disabled = await waitUntil(() => !existsSync(AGENT_PLIST), 15000, 250);
-      check('launch agent: Block it disabled the plist through the helper', disabled);
+      check('launch agent: Turn off startup item disabled the plist through the helper', disabled);
       const d = await detail(alert.id);
       const act = d?.actions.find((a) => a.action.kind === 'persistence.disable');
       check('launch agent: action recorded as done', act?.status === 'done', act?.result);

@@ -12,7 +12,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
-import { LEVEL_MEANING, LEVEL_RULES } from '../../../shared/levels';
+import { LEVEL_RULES } from '../../../shared/levels';
 import { useLive, vigil } from '../api';
 import { AskScout } from '../components/AskScout';
 import { Shield } from '../components/Shield';
@@ -132,14 +132,21 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
             title={[LEVEL_RULES[status.level], '', ...status.reasons].join('\n')}
           >
             <span className="row spread" style={{ width: '100%' }}>
-              <span className="t-small muted">Mac health</span>
+              <span className="t-small muted">Protection</span>
               <LevelPill level={status.level} small />
             </span>
-            <span className="t-small sidebar-status-why">
-              {status.reasons[0] ?? LEVEL_MEANING.good}
-            </span>
+            {(status.reasons.length > 0 || status.needsYou === 0) && (
+              <span className="t-small sidebar-status-why">
+                {status.reasons[0] ?? 'Nothing needs you'}
+              </span>
+            )}
             {status.reasons.length > 1 && (
               <span className="t-small muted">and {status.reasons.length - 1} more · see Home</span>
+            )}
+            {status.needsYou > 0 && (
+              <span className="t-small sidebar-status-why">
+                {status.needsYou} {status.needsYou === 1 ? 'thing needs' : 'things need'} you
+              </span>
             )}
           </button>
         )}

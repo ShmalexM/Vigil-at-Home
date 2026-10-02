@@ -1,7 +1,7 @@
-import { ShieldAlert, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { Sparkles, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useLive, vigil } from '../api';
-import { HoldButton } from '../components/HoldButton';
+import { DecisionControls } from '../components/Decision';
 import { Shield } from '../components/Shield';
 import { Button, Chip, IconButton, SeverityMark, StatusMark } from '../components/ui';
 import { describeAction, headline, timeAgo } from '../format';
@@ -39,15 +39,6 @@ export function Popup({ initialId }: { initialId: string }) {
   const others = (open ?? []).filter((a) => a.id !== alert.id && !a.decision).length;
   const contained = alert.containment === 'active';
   const decided = !!alert.decision;
-
-  const decide = async (verdict: 'malicious' | 'benign' | 'expected', release: boolean) => {
-    await vigil.decide(alert.id, { verdict, release });
-    await vigil.closePopup();
-  };
-  const blockIt = async () => {
-    for (const p of pending) await vigil.approveProposal(p.id);
-    await decide('malicious', false);
-  };
 
   return (
     <div
@@ -140,44 +131,24 @@ export function Popup({ initialId }: { initialId: string }) {
         </div>
       )}
 
-      <div className="popup-actions">
-        {decided ? (
+      {decided ? (
+        <div className="popup-actions">
           <Button kind="primary" full onClick={() => void vigil.closePopup()}>
             Done
           </Button>
-        ) : contained ? (
-          <>
-            <Button
-              kind="primary"
-              icon={<ShieldCheck size={15} />}
-              onClick={() => void decide('malicious', false)}
-            >
-              Keep blocked
-            </Button>
-            <HoldButton
-              label="Allow"
-              doneLabel="Allowed"
-              onConfirm={() => void decide('benign', true)}
-            />
-          </>
-        ) : pending.length > 0 ? (
-          <>
-            <Button kind="primary" icon={<ShieldAlert size={15} />} onClick={() => void blockIt()}>
-              Block it
-            </Button>
-            <Button kind="outline" onClick={() => void decide('benign', false)}>
-              It's fine
-            </Button>
-          </>
-        ) : (
-          <Button kind="primary" onClick={() => void decide('expected', false)}>
-            Got it
-          </Button>
-        )}
-        <Button kind="ghost" onClick={() => void vigil.openMain(`alerts/${alert.id}`)}>
-          Details
-        </Button>
-      </div>
+        </div>
+      ) : (
+        <DecisionControls
+          alert={alert}
+          actions={actions}
+          proposals={proposals}
+          full
+          onDecided={() => void vigil.closePopup()}
+        />
+      )}
+      <Button kind="ghost" size="sm" onClick={() => void vigil.openMain(`alerts/${alert.id}`)}>
+        Details
+      </Button>
 
       {others > 0 && (
         <button type="button" className="more-link" onClick={() => void vigil.openMain('alerts')}>

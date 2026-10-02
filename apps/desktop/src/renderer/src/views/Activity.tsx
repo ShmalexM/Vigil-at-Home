@@ -27,6 +27,7 @@ import { actorLabel, clock, describeAction, describeEvent, timeAgo, timeOfDay } 
 import { matchText } from '../rule-modes';
 import { parseActivityParam, VIGIL_CONNECTOR, VIGIL_SELF } from './agents-format';
 import { PageHead } from './AppShell';
+import { onRovingKeyDown } from '../components/roving';
 
 const UNDOABLE = new Set([
   'process.suspend',
@@ -84,11 +85,12 @@ export function ActivityView({
         title="Activity"
         purpose="Everything Vigil looks at on this Mac, what its rules made of it, and every action it took."
       />
-      <div className="tabs" role="tablist">
+      <div className="tabs" role="tablist" onKeyDown={onRovingKeyDown}>
         <button
           type="button"
           role="tab"
           aria-selected={tab === 'sees'}
+          tabIndex={tab === 'sees' ? 0 : -1}
           onClick={() => setTab('sees')}
         >
           What Vigil sees
@@ -97,6 +99,7 @@ export function ActivityView({
           type="button"
           role="tab"
           aria-selected={tab === 'did'}
+          tabIndex={tab === 'did' ? 0 : -1}
           onClick={() => setTab('did')}
         >
           What Vigil did

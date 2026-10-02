@@ -144,3 +144,10 @@ export function headline(a: Alert): string {
   if (a.containment === 'released') return 'Released by you';
   return 'Vigil needs you';
 }
+
+/** What to say when the user asked to release an alert and the release didn't go through. */
+export function releaseFailed(a: Alert): string {
+  return a.containment === 'active'
+    ? 'Couldn’t release it, so it’s still blocked and still needs you.'
+    : 'Couldn’t finish releasing it, so it still needs you.';
+}

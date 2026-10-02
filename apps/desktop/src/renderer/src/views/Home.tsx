@@ -1,11 +1,11 @@
-import { CircleCheck, TriangleAlert } from 'lucide-react';
+import { CircleCheck, Eye, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import { useLive, vigil } from '../api';
 import { homeMood } from '../components/AskScout';
-import { NoticedList, WatchLine } from '../components/Attention';
+import { NeedsYouLine, NoticedList, WatchLine } from '../components/Attention';
 import { Dog } from '../components/Dog';
 import { Card, Chip, LevelPill, SectionHead, SeverityMark, StatusMark } from '../components/ui';
-import { actorLabel, describeRecord, timeAgo } from '../format';
+import { timeAgo } from '../format';
 import { isNoticed, needsDecision } from '../../../shared/attention';
 import { LEVEL_RULES } from '../../../shared/levels';
 import { leadChat } from '../lead-chat';
@@ -13,15 +13,14 @@ import { PageHead } from './AppShell';
 import { usePack } from './Pack';
 
 const levelSentence = {
-  good: 'Protection is on. Nothing needs you.',
-  fair: 'Something needs a look.',
-  poor: 'Something needs you now.',
+  good: 'Protection is on.',
+  fair: 'Protection is only partly on.',
+  poor: 'Protection has stopped.',
 };
 
 export function HomeView({ go }: { go: (r: string) => void }) {
   const [status] = useLive(() => vigil.getStatus());
   const [alerts] = useLive(() => vigil.listAlerts('open'));
-  const [actions] = useLive(() => vigil.listActions());
   const needs = (alerts ?? []).filter(needsDecision);
   const noticed = (alerts ?? []).filter(isNoticed);
   const allRunning = !!status && status.sensors.every((s) => s.state === 'ok');
@@ -42,7 +41,10 @@ export function HomeView({ go }: { go: (r: string) => void }) {
         <Card>
           <div className="home-status">
             <LevelPill level={status.level} />
-            <span className="t-h2">{levelSentence[status.level]}</span>
+            <span className="t-h2">
+              {levelSentence[status.level]}
+              {status.needsYou === 0 && ' Nothing needs you.'}
+            </span>
             {lead && (
               <button
                 type="button"
@@ -55,7 +57,13 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               </button>
             )}
           </div>
-          <WatchLine watch={status.watch} />
+          {status.needsYou > 0 && <NeedsYouLine count={status.needsYou} />}
+          <div className="row spread" style={{ flexWrap: 'wrap' }}>
+            <WatchLine watch={status.watch} />
+            <button type="button" className="btn sm ghost" onClick={() => go('history')}>
+              What Vigil handled
+            </button>
+          </div>
           {status.reasons.length > 0 && (
             <ul className="reasons">
               {status.reasons.map((r) => (
@@ -73,8 +81,8 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               ))}
             </ul>
             <p className="t-small">
-              The first reason above is the one that sets the level. Protection layers are Santa,
-              osquery and the Vigil helper.
+              The level is only about protection: Santa, osquery and the Vigil helper. Alerts
+              waiting on you are counted separately, so they never make protection look broken.
             </p>
           </details>
           {status.dryRun && (
@@ -89,121 +97,96 @@ export function HomeView({ go }: { go: (r: string) => void }) {
         </Card>
       )}
 
-      <div className="grid-2">
+      {needs.length > 0 && (
         <Card>
-          <SectionHead title="Needs you" sub="Alerts waiting on your decision, newest first" />
-          {needs.length === 0 ? (
-            <div className="row t-small">
-              <CircleCheck size={16} color="var(--good)" /> Nothing right now.
-            </div>
-          ) : (
-            <div className="list">
-              {needs.slice(0, 6).map((a) => (
-                <button
-                  key={a.id}
-                  type="button"
-                  className="list-row"
-                  onClick={() => go(`alerts/${a.id}`)}
-                >
-                  <SeverityMark severity={a.severity} />
-                  <span className="grow clamp-2 t-h3" title={a.title}>
-                    {a.title}
-                  </span>
-                  {a.containment === 'active' && <Chip tone="good">Blocked</Chip>}
-                  <span className="t-small nowrap">{timeAgo(a.createdAt)}</span>
-                </button>
-              ))}
-            </div>
+          <SectionHead title="Needs you" sub="Waiting on your decision, newest first" />
+          <div className="list">
+            {needs.slice(0, 6).map((a) => (
+              <button
+                key={a.id}
+                type="button"
+                className="list-row"
+                onClick={() => go(`alerts/${a.id}`)}
+              >
+                <SeverityMark severity={a.severity} />
+                <span className="grow clamp-2 t-h3" title={a.title}>
+                  {a.title}
+                </span>
+                {a.containment === 'active' && <Chip tone="good">Blocked</Chip>}
+                <span className="t-small nowrap">{timeAgo(a.createdAt)}</span>
+              </button>
+            ))}
+          </div>
+          {needs.length > 6 && (
+            <button type="button" className="btn sm ghost" onClick={() => go('alerts')}>
+              All {needs.length}
+            </button>
           )}
-        </Card>
-
-        <Card>
-          <SectionHead title="Protection" sub="The layers that watch and block" />
-          <details className="layers" open={!allRunning}>
-            <summary className="row t-small">
-              {allRunning ? (
-                <>
-                  <CircleCheck size={16} color="var(--good)" /> All {status?.sensors.length} layers
-                  are running.
-                </>
-              ) : (
-                'Layers'
-              )}
-            </summary>
-            <div className="col">
-              {status?.sensors.map((s) => (
-                <div key={s.id} className="row">
-                  <StatusMark
-                    state={s.state === 'ok' ? 'done' : s.state === 'down' ? 'failed' : 'warn'}
-                    label={s.state.replace('_', ' ')}
-                  />
-                  <div className="col grow" style={{ gap: 0 }}>
-                    <span className="t-h3">{s.name}</span>
-                    <span className="t-small">{s.detail}</span>
-                  </div>
-                  <span className="col" style={{ gap: 0, alignItems: 'flex-end' }}>
-                    <span className="t-small">
-                      {
-                        {
-                          ok: 'Running',
-                          degraded: 'Needs attention',
-                          down: 'Stopped',
-                          not_installed: 'Not installed',
-                        }[s.state]
-                      }
-                    </span>
-                    {s.note && (
-                      <span className="t-small" style={{ color: 'var(--tx3)', textAlign: 'right' }}>
-                        {s.note}
-                      </span>
-                    )}
-                    {s.id === 'helper' && s.state !== 'ok' && status.helperInstallable && (
-                      <InstallHelper reinstall={s.state === 'down'} />
-                    )}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </details>
-        </Card>
-      </div>
-
-      {status && noticed.length > 0 && (
-        <Card>
-          <NoticedList
-            alerts={noticed}
-            view={status.alertView}
-            open={(id) => go(`alerts/${id}`)}
-            limit={8}
-          />
         </Card>
       )}
 
       <Card>
-        <SectionHead
-          title="Recent actions"
-          sub="What Vigil and you did"
-          right={
-            <button type="button" className="btn sm ghost" onClick={() => go('history')}>
-              History
-            </button>
-          }
-        />
-        {(actions ?? []).length === 0 ? (
-          <span className="t-small">No actions yet.</span>
-        ) : (
+        <SectionHead title="Protection" sub="The layers that watch and block" />
+        <details className="layers" open={!allRunning}>
+          <summary className="row t-small">
+            {allRunning ? (
+              <>
+                <CircleCheck size={16} color="var(--good)" /> All {status?.sensors.length} layers
+                are running.
+              </>
+            ) : (
+              'Layers'
+            )}
+          </summary>
           <div className="col">
-            {(actions ?? []).slice(0, 5).map((r) => (
-              <div key={r.id} className="row">
-                <span className="grow ellipsis">{describeRecord(r)}</span>
-                <span className="t-small">
-                  {actorLabel(r.actor)} · {timeAgo(r.requestedAt)}
+            {status?.sensors.map((s) => (
+              <div key={s.id} className="row">
+                <StatusMark
+                  state={s.state === 'ok' ? 'done' : s.state === 'down' ? 'failed' : 'warn'}
+                  label={s.state.replace('_', ' ')}
+                />
+                <div className="col grow" style={{ gap: 0 }}>
+                  <span className="t-h3">{s.name}</span>
+                  <span className="t-small">{s.detail}</span>
+                </div>
+                <span className="col" style={{ gap: 0, alignItems: 'flex-end' }}>
+                  <span className="t-small">
+                    {
+                      {
+                        ok: 'Running',
+                        degraded: 'Needs attention',
+                        down: 'Stopped',
+                        not_installed: 'Not installed',
+                      }[s.state]
+                    }
+                  </span>
+                  {s.note && (
+                    <span className="t-small" style={{ color: 'var(--tx3)', textAlign: 'right' }}>
+                      {s.note}
+                    </span>
+                  )}
+                  {s.id === 'helper' && s.state !== 'ok' && status.helperInstallable && (
+                    <InstallHelper reinstall={s.state === 'down'} />
+                  )}
                 </span>
               </div>
             ))}
           </div>
-        )}
+        </details>
       </Card>
+
+      {status && noticed.length > 0 && status.alertView === 'more' && (
+        <Card>
+          <NoticedList alerts={noticed} view="more" open={(id) => go(`alerts/${id}`)} limit={8} />
+        </Card>
+      )}
+      {status && noticed.length > 0 && status.alertView === 'less' && (
+        <button type="button" className="row t-small noticed-hint" onClick={() => go('history')}>
+          <Eye size={14} />
+          Vigil also noticed {noticed.length === 1 ? 'one thing' : `${noticed.length} things`},
+          probably you. Nothing was blocked. See History.
+        </button>
+      )}
     </div>
   );
 }
