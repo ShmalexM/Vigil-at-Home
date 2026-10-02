@@ -1,18 +1,19 @@
 import type { Alert, SensorEvent } from '@vigil/core';
 import { Bell, RotateCcw, Sparkles } from 'lucide-react';
-import { Fragment, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { useLive, vigil } from '../api';
 import { DecisionControls, type Decided } from '../components/Decision';
 import { useToast } from '../components/Toasts';
 import { toolRequestFields } from '../components/ToolRequestFields';
 import { Button, Card, Chip, SectionHead, SeverityMark, StatusMark } from '../components/ui';
 import { evidenceSub, isHookRequest, realProcess, STOPPED_ANSWER } from '../evidence';
-import { actorLabel, clock, describeAction, describeEvent, timeAgo } from '../format';
+import { actorLabel, clock, describeAction, describeEvent, seenTimes, timeAgo } from '../format';
 import { modeLabel } from '../rule-modes';
 import { ExcludeFromAlert } from '../components/ExcludeFromAlert';
 import { useAgentLinks, type AgentLinks } from './Activity';
 import { PageHead } from './AppShell';
 import { onRovingKeyDown } from '../components/roving';
+import { shownAlert, tabFor } from './alerts-selection';
 
 export function AlertsView({
   selected,
@@ -25,7 +26,19 @@ export function AlertsView({
   const [open] = useLive(() => vigil.listAlerts('open'));
   const [resolved] = useLive(() => vigil.listAlerts('resolved'));
   const list = (tab === 'open' ? open : resolved) ?? [];
-  const current = selected ?? list[0]?.id;
+  const current = shownAlert(selected, list);
+
+  // An alert opened by link (from History, Home or a popup) brings up the tab
+  // it is in. Only when the link changes: deciding an alert moves it out of
+  // Open, and then the next open one shows instead of jumping tabs.
+  const synced = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!selected || synced.current === selected) return;
+    const t = tabFor(selected, open, resolved);
+    if (!t) return;
+    synced.current = selected;
+    setTab(t);
+  }, [selected, open, resolved]);
 
   return (
     <div className="page">
@@ -100,6 +113,7 @@ function AlertRow({
         <span className="row t-small">
           <SeverityMark severity={alert.severity} />
           <span>· {timeAgo(alert.createdAt)}</span>
+          {seenTimes(alert) && <Chip>{seenTimes(alert)}</Chip>}
           {alert.containment === 'active' && <Chip tone="good">Blocked</Chip>}
           {alert.ai && <Chip tone="ai">AI read</Chip>}
         </span>
@@ -134,6 +148,7 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
       <Card>
         <div className="row">
           <SeverityMark severity={alert.severity} />
+          {seenTimes(alert) && <Chip>{seenTimes(alert)}</Chip>}
           {contained && <Chip tone="good">Blocked</Chip>}
           {alert.containment === 'released' && <Chip tone="fair">Released</Chip>}
           {alert.status === 'resolved' && <Chip>Resolved</Chip>}
