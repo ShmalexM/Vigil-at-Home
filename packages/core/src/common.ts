@@ -61,7 +61,14 @@ export const ProcessRef = z.object({
    * quarantine flag), so a script started by a downloaded app still counts
    * as coming from that download. Filled by Vigil, not sensors.
    */
-  downloadedAncestor: z.object({ path: z.string(), originUrl: z.string().optional() }).optional(),
+  downloadedAncestor: z
+    .object({
+      path: z.string(),
+      originUrl: z.string().optional(),
+      /** That ancestor's signature, so rules can tell an unsigned download from an identified app. */
+      signing: SigningStatus.optional(),
+    })
+    .optional(),
 });
 export type ProcessRef = z.infer<typeof ProcessRef>;
 

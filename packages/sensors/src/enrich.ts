@@ -32,7 +32,7 @@ interface Known extends Signature {
   ppid?: number;
   parentPath?: string;
   ancestors?: string[];
-  downloadedAncestor?: { path: string; originUrl?: string };
+  downloadedAncestor?: { path: string; originUrl?: string; signing?: SigningStatus };
 }
 
 /** A program's signature, as a lookup outside the sensors reports it. */
@@ -148,6 +148,7 @@ export class ProcessEnricher {
         ? {
             path: parent.path,
             ...(parent.quarantine.originUrl ? { originUrl: parent.quarantine.originUrl } : {}),
+            ...(parent.signing ? { signing: parent.signing } : {}),
           }
         : parent.downloadedAncestor;
       if (downloaded) known.downloadedAncestor = downloaded;

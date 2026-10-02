@@ -97,6 +97,7 @@ describe('process tree', () => {
     expect(curl?.downloadedAncestor).toEqual({
       path: '/Volumes/Setup/Installer.app/Contents/MacOS/Installer',
       originUrl: 'https://evil.example/setup.dmg',
+      signing: 'unsigned',
     });
     // A later file read by curl carries the same context.
     const read = proc(x.enrich(open(40, '/usr/bin/curl')));

@@ -58,6 +58,7 @@ const PROCESS_FIELDS = [
   'downloadedAncestor',
   'downloadedAncestor.path',
   'downloadedAncestor.originUrl',
+  'downloadedAncestor.signing',
 ].map((f) => `process.${f}`);
 
 /** Every path a rule may reference, for the linter and the AI's rule guide. */
