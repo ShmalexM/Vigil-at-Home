@@ -10,7 +10,14 @@ import { defineConfig } from 'electron-vite';
 export default defineConfig({
   main: {},
   preload: {
-    build: { rollupOptions: { output: { format: 'cjs', entryFileNames: '[name].cjs' } } },
+    build: {
+      rollupOptions: {
+        // electron-vite 5 does not externalize electron for a CommonJS preload under
+        // vite 8, which bundles the npm stub and leaves window.vigil undefined.
+        external: ['electron'],
+        output: { format: 'cjs', entryFileNames: '[name].cjs' },
+      },
+    },
   },
   renderer: {
     root: resolve(import.meta.dirname, 'src/renderer'),

@@ -53,20 +53,27 @@ describe('user decisions', () => {
     ).toHaveLength(1);
   });
 
-  it('demotes a rule one mode after repeated false positives, and never promotes', () => {
+  it('suggests a quieter mode after repeated false positives, and never changes it itself', () => {
     const eng = new DetectionEngine([noisy], memoryStores());
     const fb = new Feedback(eng, undefined, () => T0);
     const results = [1, 2, 3].map((n) =>
       fb.recordDecision(eng.evaluate(exec(tool(n)))[0]!, benign, me),
     );
-    expect(results[1]!.demoted).toBeUndefined();
-    expect(results[2]!.demoted).toMatchObject({ from: 'block', to: 'alert' });
-    expect(eng.modeOf(eng.getRule('noisy-rule')!)).toBe('alert');
-    expect(eng.evaluate(exec(tool(9)))[0]!.execute).toEqual([]);
+    expect(results[1]!.suggestDemotion).toBeUndefined();
+    expect(results[2]!.suggestDemotion).toMatchObject({ from: 'block', to: 'alert' });
+    expect(results[2]!.suggestDemotion!.message).toMatch(/Move it from Block to Alert\?/);
+    // Still blocking: only the user can turn it down.
+    expect(eng.modeOf(eng.getRule('noisy-rule')!)).toBe('block');
+    expect(eng.evaluate(exec(tool(9)))[0]!.execute).not.toEqual([]);
+    eng._setMode('noisy-rule', 'alert');
     const more = [4, 5, 6].map((n) =>
       fb.recordDecision(eng.evaluate(exec(tool(n)))[0]!, benign, me),
     );
-    expect(more.find((r) => r.demoted)?.demoted).toMatchObject({ from: 'alert', to: 'shadow' });
+    expect(more.find((r) => r.suggestDemotion)?.suggestDemotion).toMatchObject({
+      from: 'alert',
+      to: 'shadow',
+    });
+    expect(eng.modeOf(eng.getRule('noisy-rule')!)).toBe('alert');
   });
 
   it('confirming a threat blocks that program from then on and returns a Santa rule', () => {

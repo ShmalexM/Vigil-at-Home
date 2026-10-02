@@ -207,6 +207,7 @@ export const calls = {
   getSettings: z.tuple([]),
   setTheme: z.tuple([ThemePref]),
   setAlertView: z.tuple([AlertView]),
+  setShowAdvanced: z.tuple([z.boolean()]),
   setAppearance: z.tuple([Appearance]),
   sendTestAlert: z.tuple([]),
   openMain: z.tuple([Route.optional()]),
@@ -428,7 +429,7 @@ export interface RuleSuggestionView {
   /** Tuning: the exclusion it adds, in words. */
   exclusion?: string;
   /** Retire: the quieter mode. */
-  retireTo?: 'shadow' | 'disabled';
+  retireTo?: 'alert' | 'shadow' | 'disabled';
   /** New rule: the whole rule, for reading or copying into the editor. */
   ruleJson?: string;
   replay?: ReplayPreview;
@@ -509,6 +510,8 @@ export interface SettingsView {
   appearance: AppearanceSettings;
   dataDir: string;
   version: string;
+  /** Advanced pages (Alerts, Rules, Activity, Usage) are listed in the sidebar. */
+  showAdvanced: boolean;
 }
 
 /** Return types, one per call. */
@@ -544,6 +547,7 @@ export interface CallResults {
   getSettings: SettingsView;
   setTheme: void;
   setAlertView: void;
+  setShowAdvanced: void;
   setAppearance: void;
   sendTestAlert: Alert;
   openMain: void;

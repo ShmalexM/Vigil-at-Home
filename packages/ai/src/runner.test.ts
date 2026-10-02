@@ -140,11 +140,17 @@ describe('runner', () => {
       json: { verdict: 'maybe' },
       audit: audit(),
     }));
-    const { runner } = setup([claude], { order: ['claude'] });
+    const { runner, log } = setup([claude], { order: ['claude'] });
     const result = await runner.run(request);
     expect(result).toMatchObject({ ok: false, reason: 'invalid_output' });
     expect(claude.inputs).toHaveLength(2);
     expect(claude.inputs[1]?.userPrompt).toContain('did not match the required format');
+    // Each attempt is its own row, tied together by runId, so neither cost is lost.
+    expect(log).toHaveLength(2);
+    expect(new Set(log.map((e) => e.id)).size).toBe(2);
+    expect(log[0]?.runId).toBe(log[1]?.runId);
+    expect(log[0]?.id).toBe(log[0]?.runId);
+    expect(result.logId).toBe(log[1]?.id);
   });
 
   it('falls back to the next provider when a subscription is out of quota', async () => {

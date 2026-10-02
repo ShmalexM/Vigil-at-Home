@@ -14,10 +14,16 @@ const KIND: Record<RuleSuggestionView['kind'], string> = {
   retire: 'Turn down',
 };
 
+const RETIRE_TO: Record<NonNullable<RuleSuggestionView['retireTo']>, string> = {
+  alert: 'Alert',
+  shadow: 'Shadow',
+  disabled: 'Off',
+};
+
 /**
- * What the AI suggested for the rules since the user last looked. Each one
- * was checked and replayed on this Mac's last 14 days; nothing changes until
- * the user accepts it.
+ * What the AI, or Vigil from the user's own answers, suggested for the rules
+ * since the user last looked. Each one was checked and replayed on this Mac's
+ * last 14 days; nothing changes until the user accepts it.
  */
 export function RuleSuggestions() {
   const [view, reload] = useLive(() => vigil.listRuleSuggestions());
@@ -48,8 +54,8 @@ export function RuleSuggestions() {
   return (
     <Card>
       <SectionHead
-        title="Suggested by AI"
-        sub={subtitle(review)}
+        title="Suggested changes"
+        sub={subtitle(review, pending.length)}
         right={
           review.available && (
             <Button
@@ -75,7 +81,9 @@ export function RuleSuggestions() {
   );
 }
 
-function subtitle(review: RuleSuggestionsView['review']): string {
+function subtitle(review: RuleSuggestionsView['review'], pending: number): string {
+  if (!review.available && pending > 0)
+    return 'Checked and replayed on your last 14 days. Nothing changes until you accept.';
   if (!review.available)
     return 'Needs Claude, Codex or a cloud API key in Settings. The local model only labels events.';
   const parts = ['Checked and replayed on your last 14 days. Nothing changes until you accept.'];
@@ -86,6 +94,7 @@ function subtitle(review: RuleSuggestionsView['review']): string {
 function Suggestion({ s, onDone }: { s: RuleSuggestionView; onDone: () => void }) {
   const toast = useToast();
   const [showJson, setShowJson] = useState(false);
+  const fromVigil = s.provider === 'vigil';
   const accept = async () => {
     await vigil.acceptRuleSuggestion(s.id);
     toast({
@@ -93,26 +102,30 @@ function Suggestion({ s, onDone }: { s: RuleSuggestionView; onDone: () => void }
         s.kind === 'new_rule'
           ? `${s.ruleName} is on, in Alert mode`
           : s.kind === 'retire'
-            ? `${s.ruleName} turned down to ${s.retireTo === 'disabled' ? 'Off' : 'Shadow'}`
+            ? `${s.ruleName} turned down to ${RETIRE_TO[s.retireTo ?? 'shadow']}`
             : `${s.ruleName} updated`,
     });
     onDone();
   };
   const dismiss = async () => {
     await vigil.dismissRuleSuggestion(s.id);
-    toast({ text: 'Dismissed. The AI sees that you said no.' });
+    toast({
+      text: fromVigil
+        ? 'Dismissed. Vigil won’t ask about this rule again for 30 days.'
+        : 'Dismissed. The AI sees that you said no.',
+    });
     onDone();
   };
   return (
     <div className="suggestion">
       <div className="row">
-        <Chip tone="ai">
-          <Sparkles size={12} /> {KIND[s.kind]}
+        <Chip tone={fromVigil ? undefined : 'ai'}>
+          {!fromVigil && <Sparkles size={12} />} {KIND[s.kind]}
         </Chip>
         <span className="t-h3 grow ellipsis">{s.ruleName}</span>
         {s.kind === 'new_rule' && <SeverityMark severity={s.severity as never} />}
         <span className="t-small nowrap">
-          {s.provider} · {timeAgo(s.createdAt)}
+          {fromVigil ? 'Vigil, from your answers' : s.provider} · {timeAgo(s.createdAt)}
         </span>
       </div>
       <p className="t-small" style={{ margin: 0 }}>
@@ -124,7 +137,9 @@ function Suggestion({ s, onDone }: { s: RuleSuggestionView; onDone: () => void }
         <div className="subject">
           {s.retireTo === 'disabled'
             ? 'Turn this rule off.'
-            : 'Keep recording matches in Shadow, without alerts.'}
+            : s.retireTo === 'alert'
+              ? 'Alert instead of blocking.'
+              : 'Keep recording matches in Shadow, without alerts.'}
         </div>
       )}
       {s.tuning && (

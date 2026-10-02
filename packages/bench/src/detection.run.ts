@@ -15,6 +15,13 @@ import { writeResult } from './report.js';
 // learning week, three measured) for two kinds of user. Events go through
 // Vigil's process tracker first, as in the app, so agent rules see which AI
 // agent a process runs under. Results go to bench-results/detection.json.
+
+// Held-out ratchet: the score on attacks the rules were never written for may
+// not drop below the best seen so far. Raise these when it improves; never
+// lower them to get a change through. Only counts are checked, so nothing
+// about the held-out cases leaks into what rule authors or reviewers see.
+const HELDOUT_FLOOR = { caughtIdeal: 9, caughtSensors: 9 } as const; // of 25, 2026-10-02
+
 describe('detection benchmark', () => {
   it('runs', () => {
     const attacks = runAttacks();
@@ -33,12 +40,13 @@ describe('detection benchmark', () => {
     ];
     const summary = summarize(attacks);
     const heldout = runHeldout();
+    const heldoutSummary = summarizeHeldout(heldout);
     writeResult('detection', {
       at: new Date().toISOString(),
       platform: `${process.platform}-${process.arch}`,
       node: process.version,
       summary,
-      heldoutSummary: summarizeHeldout(heldout),
+      heldoutSummary,
       heldout,
       rules: scoreRules(attacks, workload),
       attacks,
@@ -59,5 +67,7 @@ describe('detection benchmark', () => {
       expect(w.agentRules.alerts + w.agentRules.asks, w.profile).toBeLessThanOrEqual(0.5);
       expect(w.storedBytesPerEvent.delta, w.profile).toBeLessThanOrEqual(40);
     }
+    expect(heldoutSummary.caughtIdeal).toBeGreaterThanOrEqual(HELDOUT_FLOOR.caughtIdeal);
+    expect(heldoutSummary.caughtSensors).toBeGreaterThanOrEqual(HELDOUT_FLOOR.caughtSensors);
   });
 });

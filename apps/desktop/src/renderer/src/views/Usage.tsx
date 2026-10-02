@@ -3,10 +3,12 @@ import { Fragment, useEffect, useState, type ReactNode } from 'react';
 import {
   PROVIDER_LABEL,
   PURPOSE_LABEL,
+  type KeyCapView,
   type LimitWindowView,
   type PeriodTotals,
   type UsageDays,
   type UsageLimitsView,
+  type UsageProvider,
   type UsageReport,
 } from '../../../shared/usage';
 import { useLive, vigil } from '../api';
@@ -467,63 +469,69 @@ function LimitsSection({ limits, now }: { limits: UsageLimitsView; now: number }
           the rest for you. Explaining a block never waits.
         </p>
       )}
-      {limits.keys.length > 0 && (
+      {(limits.keys.length > 0 || limits.cap) && (
         <section className="col" style={{ gap: 10 }}>
           <h2 className="t-h3">API keys this month</h2>
           <div className="usage-limit-grid">
-            {limits.keys.map((k) => {
-              const used = k.capUsd ? Math.min(100, (k.spentUsd / k.capUsd) * 100) : undefined;
-              return (
-                <Fragment key={k.provider}>
-                  <span className="row spread usage-limit-label">
-                    <span className="row" style={{ gap: 8 }}>
-                      <span
-                        className="usage-dot"
-                        style={{ background: PROVIDER_COLOR[k.provider] }}
-                      />
-                      <span className="muted">
-                        {k.provider === 'codex' ? 'Codex (OpenAI key)' : PROVIDER_LABEL[k.provider]}
-                      </span>
-                    </span>
-                    <span className="num">
-                      {k.capUsd !== undefined
-                        ? `${formatUsd(Math.max(0, k.capUsd - k.spentUsd))} left`
-                        : formatUsd(k.spentUsd)}
+            {limits.cap && <KeyCapRow cap={limits.cap} />}
+            {limits.keys.map((k) => (
+              <Fragment key={k.provider}>
+                <span className="row spread usage-limit-label">
+                  <span className="row" style={{ gap: 8 }}>
+                    <span
+                      className="usage-dot"
+                      style={{ background: PROVIDER_COLOR[k.provider] }}
+                    />
+                    <span className="muted">
+                      {KEY_LABEL[k.provider] ?? PROVIDER_LABEL[k.provider]}
                     </span>
                   </span>
-                  {used === undefined ? (
-                    <span className="t-small">No monthly cap</span>
-                  ) : (
-                    <div
-                      className="usage-bar"
-                      role="img"
-                      aria-label={`${formatUsd(k.spentUsd)} of ${formatUsd(k.capUsd!)} this month`}
-                      title={`${formatUsd(k.spentUsd)} of your ${formatUsd(k.capUsd!)} monthly cap`}
-                    >
-                      <div className="usage-bar-track" />
-                      <div
-                        className="usage-bar-fill"
-                        style={{
-                          width: `${100 - used}%`,
-                          background: PROVIDER_COLOR[k.provider],
-                        }}
-                      />
-                    </div>
-                  )}
-                  <span className="t-small num usage-limit-side">
-                    {k.capUsd !== undefined
-                      ? `${formatUsd(k.spentUsd)} of ${formatUsd(k.capUsd)} · `
-                      : ''}
-                    {`${formatCount(k.runs)} ${k.runs === 1 ? 'run' : 'runs'}`}
-                  </span>
-                </Fragment>
-              );
-            })}
+                  <span className="num">{formatUsd(k.spentUsd)}</span>
+                </span>
+                <span className="t-small num usage-limit-side">
+                  {`${formatCount(k.runs)} ${k.runs === 1 ? 'run' : 'runs'}`}
+                </span>
+              </Fragment>
+            ))}
+            {!limits.cap && <span className="t-small">No monthly cap</span>}
           </div>
         </section>
       )}
       <span className="t-small">Checked {formatDateTime(limits.checkedAt)}</span>
     </div>
+  );
+}
+
+const KEY_LABEL: Partial<Record<UsageProvider, string>> = {
+  claude: 'Claude (Anthropic key)',
+  codex: 'Codex (OpenAI key)',
+};
+
+/** The one monthly cap, shared by every key, as a bar of what's left. */
+function KeyCapRow({ cap }: { cap: KeyCapView }) {
+  const used = cap.capUsd > 0 ? Math.min(100, (cap.spentUsd / cap.capUsd) * 100) : 100;
+  return (
+    <>
+      <span className="row spread usage-limit-label">
+        <span className="muted">All keys together</span>
+        <span className="num">{`${formatUsd(Math.max(0, cap.capUsd - cap.spentUsd))} left`}</span>
+      </span>
+      <div
+        className="usage-bar"
+        role="img"
+        aria-label={`${formatUsd(cap.spentUsd)} of ${formatUsd(cap.capUsd)} this month`}
+        title={`${formatUsd(cap.spentUsd)} of your ${formatUsd(cap.capUsd)} monthly cap`}
+      >
+        <div className="usage-bar-track" />
+        <div
+          className="usage-bar-fill"
+          style={{ width: `${100 - used}%`, background: 'var(--ac)' }}
+        />
+      </div>
+      <span className="t-small num usage-limit-side">
+        {`${formatUsd(cap.spentUsd)} of ${formatUsd(cap.capUsd)}`}
+      </span>
+    </>
   );
 }
 

@@ -37,7 +37,8 @@ import type { VigilCore } from './service.js';
 import { labelKey } from './label-filter.js';
 import { TEST_RULE } from './test-alert.js';
 import { WORTH_A_LOOK_RULE, WorthALook } from './worth-a-look.js';
-import { monthStart, type UsageService } from './usage.js';
+import { monthStart, sumCost, type UsageService } from './usage.js';
+import { isKeyBilled } from '../shared/usage.js';
 
 const KEY_PREFS = 'ai.prefs';
 const KEY_PINS = 'ai.pins';
@@ -235,7 +236,7 @@ export class AiBridge extends EventEmitter<{
       getOpenAiApiKey: keyOf('openai'),
       ...(api ? { getApiKey: keyOf(api.provider) } : {}),
       ...(this.o.keys.list().typesafe ? { getJevApiKey: keyOf('typesafe') } : {}),
-      spentThisMonthUsd: async (p) => this.spentThisMonthUsd(p),
+      spentThisMonthUsd: async () => this.spentThisMonthUsd(),
       ...(this.o.isBusy ? { isBusy: this.o.isBusy } : {}),
     });
     this.instance = { ai, key };
@@ -255,12 +256,9 @@ export class AiBridge extends EventEmitter<{
     }
   }
 
-  /** What Vigil's runs on one provider cost since the 1st, for the monthly cap. */
-  spentThisMonthUsd(provider: ProviderId): number {
-    return this.o.store
-      .listAiRuns(monthStart(this.now()))
-      .filter((r) => r.provider === provider)
-      .reduce((sum, r) => sum + (r.costUsd ?? 0), 0);
+  /** What Vigil charged to the user's keys since the 1st, all providers together, for the cap. */
+  spentThisMonthUsd(): number {
+    return sumCost(this.o.store.listAiRuns(monthStart(this.now())).filter(isKeyBilled));
   }
 
   /** Binaries recorded at setup, kept in the app's database. */
@@ -274,24 +272,14 @@ export class AiBridge extends EventEmitter<{
     };
   }
 
-  /** Plan limits and key caps for the Usage page. */
+  /** Plan limits and the key cap for the Usage page. */
   async limits() {
     const snapshot = await this.ai().spending([]);
     const cap = this.prefs().monthlyCapUsd;
-    const settings = this.settings();
     return {
       plans: snapshot.plans,
       backgroundSharePercent: snapshot.limits.backgroundSharePercent,
-      ...(cap !== undefined
-        ? {
-            caps: {
-              api: cap,
-              jev: cap,
-              ...(settings.claude.mode === 'apiKey' ? { claude: cap } : {}),
-              ...(settings.codex.mode === 'apiKey' ? { codex: cap } : {}),
-            },
-          }
-        : {}),
+      ...(cap !== undefined ? { capUsd: cap } : {}),
     };
   }
 
@@ -679,7 +667,8 @@ const Explanation = z.object({
 const EXPLAIN_INSTRUCTIONS =
   "A security rule on this person's Mac raised the alert in the data. Explain it to someone who " +
   'is not a security expert: what the program is, what it did, and why the rule cares, in two or ' +
-  'three short sentences for `summary`. Put anything longer in `details`. Give your read as ' +
+  'three short sentences for `summary`. Say what Vigil actually did from `actions` (a failed or ' +
+  'pending action did not happen). Put anything longer in `details`. Give your read as ' +
   '`verdict` and how sure you are as `confidence`. Say `unsure` rather than guess. Never tell the ' +
   'person to allow, release or trust anything; they decide that themselves.';
 
@@ -696,7 +685,12 @@ function explainData(d: AlertDetail) {
     ...(d.rule
       ? { rule: { name: d.rule.name, description: d.rule.description, mode: d.rule.mode } }
       : {}),
-    actions: d.actions.map((a) => ({ kind: a.action.kind, status: a.status })),
+    // What really happened, so the explanation never claims a block or release that failed.
+    actions: d.actions.map((a) => ({
+      kind: a.action.kind,
+      status: a.status,
+      ...(a.result?.error ? { error: a.result.error.slice(0, 200) } : {}),
+    })),
     events: d.events.slice(0, MAX_EVENTS),
   };
 }

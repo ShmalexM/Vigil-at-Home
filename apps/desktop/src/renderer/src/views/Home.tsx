@@ -9,7 +9,7 @@ import { LEVEL_RULES } from '../../../shared/levels';
 import { PageHead } from './AppShell';
 
 const levelSentence = {
-  good: 'Vigil is working. Nothing needs you.',
+  good: 'Protection is on. Nothing needs you.',
   fair: 'Something needs a look.',
   poor: 'Something needs you now.',
 };
@@ -20,6 +20,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
   const [actions] = useLive(() => vigil.listActions());
   const needs = (alerts ?? []).filter(needsDecision);
   const noticed = (alerts ?? []).filter(isNoticed);
+  const allRunning = !!status && status.sensors.every((s) => s.state === 'ok');
 
   return (
     <div className="page">
@@ -98,40 +99,52 @@ export function HomeView({ go }: { go: (r: string) => void }) {
 
         <Card>
           <SectionHead title="Protection" sub="The layers that watch and block" />
-          <div className="col">
-            {status?.sensors.map((s) => (
-              <div key={s.id} className="row">
-                <StatusMark
-                  state={s.state === 'ok' ? 'done' : s.state === 'down' ? 'failed' : 'warn'}
-                  label={s.state.replace('_', ' ')}
-                />
-                <div className="col grow" style={{ gap: 0 }}>
-                  <span className="t-h3">{s.name}</span>
-                  <span className="t-small">{s.detail}</span>
-                </div>
-                <span className="col" style={{ gap: 0, alignItems: 'flex-end' }}>
-                  <span className="t-small">
-                    {
+          <details className="layers" open={!allRunning}>
+            <summary className="row t-small">
+              {allRunning ? (
+                <>
+                  <CircleCheck size={16} color="var(--good)" /> All {status?.sensors.length} layers
+                  are running.
+                </>
+              ) : (
+                'Layers'
+              )}
+            </summary>
+            <div className="col">
+              {status?.sensors.map((s) => (
+                <div key={s.id} className="row">
+                  <StatusMark
+                    state={s.state === 'ok' ? 'done' : s.state === 'down' ? 'failed' : 'warn'}
+                    label={s.state.replace('_', ' ')}
+                  />
+                  <div className="col grow" style={{ gap: 0 }}>
+                    <span className="t-h3">{s.name}</span>
+                    <span className="t-small">{s.detail}</span>
+                  </div>
+                  <span className="col" style={{ gap: 0, alignItems: 'flex-end' }}>
+                    <span className="t-small">
                       {
-                        ok: 'Running',
-                        degraded: 'Needs attention',
-                        down: 'Stopped',
-                        not_installed: 'Not installed',
-                      }[s.state]
-                    }
-                  </span>
-                  {s.note && (
-                    <span className="t-small" style={{ color: 'var(--tx3)', textAlign: 'right' }}>
-                      {s.note}
+                        {
+                          ok: 'Running',
+                          degraded: 'Needs attention',
+                          down: 'Stopped',
+                          not_installed: 'Not installed',
+                        }[s.state]
+                      }
                     </span>
-                  )}
-                  {s.id === 'helper' && s.state !== 'ok' && status.helperInstallable && (
-                    <InstallHelper reinstall={s.state === 'down'} />
-                  )}
-                </span>
-              </div>
-            ))}
-          </div>
+                    {s.note && (
+                      <span className="t-small" style={{ color: 'var(--tx3)', textAlign: 'right' }}>
+                        {s.note}
+                      </span>
+                    )}
+                    {s.id === 'helper' && s.state !== 'ok' && status.helperInstallable && (
+                      <InstallHelper reinstall={s.state === 'down'} />
+                    )}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </details>
         </Card>
       </div>
 
@@ -151,8 +164,8 @@ export function HomeView({ go }: { go: (r: string) => void }) {
           title="Recent actions"
           sub="What Vigil and you did"
           right={
-            <button type="button" className="btn sm ghost" onClick={() => go('activity')}>
-              All activity
+            <button type="button" className="btn sm ghost" onClick={() => go('history')}>
+              History
             </button>
           }
         />

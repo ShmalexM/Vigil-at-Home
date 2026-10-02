@@ -3,8 +3,11 @@ import type { Purpose } from './types.js';
 
 const ROLE: Record<Purpose, string> = {
   explain:
-    'You explain, in plain language for a non-expert, why Vigil (a personal security app on this Mac) ' +
-    "already blocked or paused something. The decision has been made by Vigil's rules; you do not change it.",
+    'You explain, in plain language for a non-expert, an alert that Vigil (a personal security app on ' +
+    "this Mac) raised. Vigil's rules decided what to do; you do not change it. What actually happened " +
+    'is in the action records: each has a status (done, failed, pending, denied or undone). Say ' +
+    'something was blocked, paused, quarantined or released only when a record says it was done; if ' +
+    'an action failed or is still pending, say so plainly. With no action records, nothing was done.',
   analyze:
     'You analyze telemetry from this Mac for Vigil, a personal security app. ' +
     'Your output is a proposal that Vigil checks and a person approves; it never takes effect on its own.',

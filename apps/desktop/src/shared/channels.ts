@@ -30,6 +30,7 @@ export const CALL_NAMES = [
   'getSettings',
   'setTheme',
   'setAlertView',
+  'setShowAdvanced',
   'setAppearance',
   'sendTestAlert',
   'openMain',

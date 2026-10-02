@@ -29,7 +29,7 @@ export function RulesView({
     <div className="page">
       <PageHead
         title="Rules"
-        purpose="Rules decide instantly and offline; the AI never blocks on its own. New and AI-drafted rules start in Shadow, where they only log matches. Promote one when its matches look right."
+        purpose="Rules decide instantly and offline; the AI never blocks on its own. Rules you write start in Shadow, where they only log matches. Suggested changes, from the AI or from your answers, wait until you accept them. Only you move a rule up or down."
         right={
           <>
             <Segmented

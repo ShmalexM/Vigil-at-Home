@@ -21,13 +21,22 @@ export const DEFAULT_DEMOTION: DemotionPolicy = { windowDays: 30, minWrong: 3, w
 
 export interface DecisionResult {
   exception?: RuleException;
-  /** Set when the rule was moved down a mode because it keeps being wrong. */
-  demoted?: { ruleId: string; from: RuleMode; to: RuleMode; message: string };
+  /**
+   * Set when the rule keeps being wrong and could move down a mode. Nothing
+   * changes: the app queues it as a suggestion only the user can approve.
+   */
+  suggestDemotion?: { ruleId: string; from: RuleMode; to: 'alert' | 'shadow'; message: string };
   /** Set when the user confirmed a threat: the Santa rule to add so it cannot start again. */
   santa?: NonNullable<Detection['santa']>;
 }
 
-const QUIETER: Partial<Record<RuleMode, RuleMode>> = { block: 'alert', alert: 'shadow' };
+const QUIETER: Partial<Record<RuleMode, 'alert' | 'shadow'>> = { block: 'alert', alert: 'shadow' };
+const MODE_NAME: Record<RuleMode, string> = {
+  block: 'Block',
+  alert: 'Alert',
+  shadow: 'Shadow',
+  disabled: 'Off',
+};
 
 /** The narrowest exception for the scope the user picked, or undefined when the event lacks it. */
 function exceptionMatch(
@@ -83,7 +92,8 @@ export class Feedback {
    * - malicious: adds the hash to the user-blocked list and returns the Santa rule to add.
    * - benign or expected with `remember`: adds an exception for this binary or signer, or
    *   quiets the whole rule for `this_rule`.
-   * Benign and expected answers count toward demoting a rule that keeps being wrong.
+   * Benign and expected answers count toward suggesting a quieter mode for a rule that keeps
+   * being wrong; the rule itself stays as it is until the user approves.
    */
   recordDecision(d: Detection, decision: UserDecision, origin: UserOrigin): DecisionResult {
     assertUserOrigin(origin);
@@ -140,12 +150,11 @@ export class Feedback {
         wrong / vs.length >= this.policy.wrongShare &&
         canChangeMode('rule', current, to)
       ) {
-        this.engine._setMode(ruleId, to);
-        result.demoted = {
+        result.suggestDemotion = {
           ruleId,
           from: current,
           to,
-          message: `"${rule.name}" was not a real threat ${wrong} of the last ${vs.length} times, so Vigil moved it from ${current} to ${to}. You can move it back in Rules.`,
+          message: `You marked "${rule.name}" as not a real threat ${wrong} of the last ${vs.length} times. Move it from ${MODE_NAME[current]} to ${MODE_NAME[to]}?`,
         };
       }
     }
