@@ -85,6 +85,13 @@ export const MAX_UNREAD = 256 * 1024;
 /** Busy replies in a row before a connection is closed: it keeps sending into a full bucket. */
 export const MAX_BUSY_IN_A_ROW = 8;
 
+/**
+ * When Vigil looks at its socket again after listening, in ms. macOS starts a
+ * folder watch (FSEvents) on its own thread and misses changes made before it
+ * is running, so these cover that start-up.
+ */
+export const WATCH_SETTLE_MS = [250, 1000, 3000] as const;
+
 /** Longest socket path used as is; macOS allows 104 bytes in all. */
 export const MAX_SOCKET_PATH = 100;
 
@@ -206,6 +213,7 @@ export class AgentEndpoint {
   /** The socket Vigil made, and the watch on its folder. */
   private own: SocketId | undefined;
   private watcher: FSWatcher | undefined;
+  private settle: NodeJS.Timeout[] = [];
   private retaking: Promise<void> | undefined;
 
   constructor(private readonly opts: AgentEndpointOptions) {
@@ -291,12 +299,14 @@ export class AgentEndpoint {
     } catch {
       // status() still checks.
     }
+    this.settle = WATCH_SETTLE_MS.map((ms) => setTimeout(() => this.verify(), ms).unref());
   }
 
   /** Stops listening and closes every connection. */
   private async close(): Promise<void> {
     this.watcher?.close();
     this.watcher = undefined;
+    for (const t of this.settle.splice(0)) clearTimeout(t);
     this.own = undefined;
     const server = this.server;
     this.server = undefined;

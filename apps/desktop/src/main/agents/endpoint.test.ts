@@ -20,6 +20,7 @@ import {
   MAX_BUSY_IN_A_ROW,
   MAX_UNREAD,
   TOOLS_BUSY,
+  WATCH_SETTLE_MS,
   socketPathFor,
   type AgentEndpointOptions,
   type EndpointRequest,
@@ -532,6 +533,21 @@ describe('AgentEndpoint', () => {
     expect(tampered).toEqual(['replaced', 'removed']);
     expect(await until(() => ep.status().state === 'listening' && existsSync(path))).toBe(true);
     expect(await (await client(path)).ask(request())).toEqual(deny);
+  });
+
+  it('catches a change made before the system starts watching its folder', async () => {
+    const tampered: SocketTamper[] = [];
+    const { ep, path } = await endpoint({ onTamper: (why) => tampered.push(why) });
+    // As on macOS, where the folder watch starts a moment after listening.
+    const own = ep as unknown as { watcher?: { close(): void } | undefined };
+    own.watcher?.close();
+    own.watcher = undefined;
+    rmSync(path);
+    await impostor(path, { v: 1, decision: 'none' });
+    // Nothing asks for the status: Vigil looks again by itself.
+    expect(await until(() => tampered.length > 0, WATCH_SETTLE_MS[1] + 1000)).toBe(true);
+    expect(tampered).toEqual(['replaced']);
+    expect(await until(() => ep.status().state === 'listening')).toBe(true);
   });
 
   it('checks its socket when asked for its status', async () => {
