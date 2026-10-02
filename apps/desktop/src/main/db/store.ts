@@ -37,6 +37,7 @@ const UsageRunRow = z.object({
   cachedInputTokens: Tokens,
   outputTokens: Tokens,
   costUsd: z.number().nonnegative().nullable(),
+  billed: z.boolean().optional(),
 }) satisfies z.ZodType<UsageRun>;
 
 /**
@@ -517,7 +518,8 @@ export class Store {
 
   addAiRun(run: UsageRun): void {
     const r = UsageRunRow.parse(run);
-    this.stmt('INSERT OR REPLACE INTO ai_runs (id, ts, provider, body) VALUES (?, ?, ?, ?)').run(
+    // Each attempt has its own id, so a row is never overwritten.
+    this.stmt('INSERT OR IGNORE INTO ai_runs (id, ts, provider, body) VALUES (?, ?, ?, ?)').run(
       r.id,
       r.at,
       r.provider,

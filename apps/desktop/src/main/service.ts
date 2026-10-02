@@ -294,6 +294,15 @@ export class VigilCore {
     this.store.setSetting('alertView', AlertView.parse(view));
   }
 
+  /** Off by default: the sidebar shows only Home, History and Settings. */
+  showAdvanced(): boolean {
+    return this.store.getSetting('showAdvanced', z.boolean(), false);
+  }
+
+  setShowAdvanced(show: boolean): void {
+    this.store.setSetting('showAdvanced', show);
+  }
+
   appearance(): AppearanceSettings {
     return this.store.getSetting('appearance', Appearance, DEFAULT_APPEARANCE);
   }

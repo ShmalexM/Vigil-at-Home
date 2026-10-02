@@ -26,7 +26,10 @@ export const AiPrefs = z.object({
   claudePlan: z.boolean(),
   /** Codex through the user's ChatGPT plan sign-in, or a saved OpenAI API key. */
   codexUses: z.enum(['subscription', 'apiKey']),
-  /** Vigil stops using paid keys (API, Jev, Claude on a key) for the month past this. */
+  /**
+   * One limit on everything Vigil charges to the user's keys this month, all
+   * together (Cloud API, Jev, Claude on an Anthropic key, Codex on an OpenAI key).
+   */
   monthlyCapUsd: z.number().min(0).max(10_000).optional(),
 });
 export type AiPrefs = z.infer<typeof AiPrefs>;

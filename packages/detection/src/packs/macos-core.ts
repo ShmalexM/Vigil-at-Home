@@ -477,7 +477,8 @@ export const macosCoreRules: DetectionRuleInput[] = [
   rule({
     id: 'quarantine-removed',
     name: 'Download safety check removed',
-    description: 'xattr removed the quarantine flag that makes macOS check downloaded apps.',
+    description:
+      "xattr deleted the quarantine flag that makes macOS check downloaded apps, or cleared all of a file's attributes.",
     mode: 'alert',
     severity: 'medium',
     fidelity: 'medium',
@@ -487,8 +488,16 @@ export const macosCoreRules: DetectionRuleInput[] = [
         { field: 'process.name', op: 'eq', value: 'xattr' },
         {
           any: [
-            { field: 'process.args', op: 'eq', value: 'com.apple.quarantine' },
-            { field: 'process.args', op: 'in', value: ['-c', '-cr', '-rc'] },
+            // -d com.apple.quarantine, with -r/-s/-v in the same flag or apart.
+            // -w (write) and -p (read) set or show the flag and never fire.
+            {
+              all: [
+                { field: 'process.args', op: 'regex', value: '^-[rsv]*d[rsv]*$' },
+                { field: 'process.args', op: 'eq', value: 'com.apple.quarantine' },
+              ],
+            },
+            // -c clears every attribute, the quarantine flag included.
+            { field: 'process.args', op: 'regex', value: '^-[rsv]*c[rsv]*$' },
           ],
         },
       ],

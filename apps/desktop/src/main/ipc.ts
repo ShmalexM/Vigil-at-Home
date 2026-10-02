@@ -82,6 +82,7 @@ export function registerIpc(
       dataDir: app.getPath('userData'),
       version: app.getVersion(),
       commit: typeof __VIGIL_COMMIT__ === 'string' ? __VIGIL_COMMIT__ : '',
+      showAdvanced: core.showAdvanced(),
     }),
     setTheme: (theme) => {
       core.setTheme(theme);
@@ -90,6 +91,10 @@ export function registerIpc(
     setAlertView: (view) => {
       core.setAlertView(view);
       windows.setNeedsYou(core.status().badge);
+      windows.broadcast('changed');
+    },
+    setShowAdvanced: (show) => {
+      core.setShowAdvanced(show);
       windows.broadcast('changed');
     },
     setAppearance: (appearance) => {

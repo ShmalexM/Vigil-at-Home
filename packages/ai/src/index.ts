@@ -13,7 +13,7 @@ import { createOllamaAdapter } from './providers/ollama.js';
 import { createApiAdapter, type ApiModel } from './providers/openaiCompatible.js';
 import { allowedByMode, createAiRunner, type AiRunner } from './runner.js';
 import type { AiSettings } from './settings.js';
-import type { PromptLog, ProviderAdapter, ProviderId } from './types.js';
+import type { PromptLog, ProviderAdapter } from './types.js';
 
 export * from './types.js';
 export {
@@ -100,8 +100,11 @@ export interface VigilAiOptions {
   readonly getApiKey?: () => Promise<string | undefined>;
   /** Reads the TypeSafe key for Jev from the Keychain. No key means Jev isn't used. */
   readonly getJevApiKey?: () => Promise<string | undefined>;
-  /** What Vigil's runs on this provider cost this calendar month (for the API-key cap). */
-  readonly spentThisMonthUsd?: (provider: ProviderId) => Promise<number>;
+  /**
+   * What Vigil charged to the user's keys this calendar month, all providers
+   * together (log entries with `billed`), for the one monthly cap.
+   */
+  readonly spentThisMonthUsd?: () => Promise<number>;
   /** The app says when the Mac is busy or on low battery, so event labelling waits. */
   readonly isBusy?: () => boolean;
 }
@@ -234,7 +237,7 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
               log: options.log,
             }),
             ...(cap !== undefined && spent
-              ? { jevAllowed: async () => (await spent('jev')) < cap }
+              ? { jevAllowed: async () => (await spent()) < cap }
               : {}),
           }
         : {}),

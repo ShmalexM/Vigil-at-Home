@@ -152,7 +152,7 @@ export function seedUsageDemo(usage: UsageService, now = Date.now()): void {
         ],
       },
     ],
-    caps: { jev: 5 },
+    capUsd: 5,
     backgroundSharePercent: 10,
   }));
 }

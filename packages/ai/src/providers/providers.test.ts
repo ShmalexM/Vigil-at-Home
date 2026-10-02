@@ -62,6 +62,24 @@ async function tempDir(prefix: string) {
   return dir;
 }
 
+// Every file under dir. Codex removes its scratch folders while it shuts
+// down, so a folder that vanishes mid-walk is skipped rather than fatal.
+async function filesUnder(dir: string): Promise<string[]> {
+  const entries = await readdir(dir, { withFileTypes: true }).catch(
+    (err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') return [];
+      throw err;
+    },
+  );
+  const files: string[] = [];
+  for (const entry of entries) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...(await filesUnder(path)));
+    else files.push(path);
+  }
+  return files;
+}
+
 describe('Claude adapter settings', () => {
   const opts = claudeQueryOptions({
     executablePath: '/usr/local/bin/claude',
@@ -317,25 +335,31 @@ describe.skipIf(!bundledCodex())('What Codex offers the model', () => {
   }, 60_000);
 });
 
-describe.skipIf(!bundledClaude() || !bundledCodex())('Plan usage from the real CLIs', () => {
-  it('asks each CLI for its plan without calling a model or hanging', async () => {
-    const claude = createClaudeAdapter({
-      mode: 'subscription',
-      pins: memoryPinStore(),
-      executablePath: bundledClaude()!,
-    });
-    const codex = createCodexAdapter({
-      codexHome: await tempDir('vigil-codex-usage-'),
-      pins: memoryPinStore(),
-      executablePath: bundledCodex()!,
-    });
-    const started = Date.now();
-    // Neither is signed in here, so both report no plan rather than failing.
-    expect(await claude.readUsage!()).toBeUndefined();
-    expect(await codex.readUsage!()).toBeUndefined();
-    expect(Date.now() - started).toBeLessThan(40_000);
-  }, 60_000);
-});
+// Starts the real CLIs, which read the machine's own Claude and Codex logins,
+// so the result depends on who is signed in there. Opt in with
+// VIGIL_TEST_REAL_CLI_USAGE=1 (CI does; it has no logins).
+describe.skipIf(!process.env.VIGIL_TEST_REAL_CLI_USAGE || !bundledClaude() || !bundledCodex())(
+  'Plan usage from the real CLIs',
+  () => {
+    it('asks each CLI for its plan without calling a model or hanging', async () => {
+      const claude = createClaudeAdapter({
+        mode: 'subscription',
+        pins: memoryPinStore(),
+        executablePath: bundledClaude()!,
+      });
+      const codex = createCodexAdapter({
+        codexHome: await tempDir('vigil-codex-usage-'),
+        pins: memoryPinStore(),
+        executablePath: bundledCodex()!,
+      });
+      const started = Date.now();
+      // Nobody is signed in on CI, so both report no plan rather than failing.
+      expect(await claude.readUsage!()).toBeUndefined();
+      expect(await codex.readUsage!()).toBeUndefined();
+      expect(Date.now() - started).toBeLessThan(40_000);
+    }, 60_000);
+  },
+);
 
 describe('Claude plan opt-in', () => {
   const pins = memoryPinStore();
@@ -463,8 +487,8 @@ describe.skipIf(!bundledCodex())('Codex with an OpenAI API key, real binary', ()
         expect((r.input ?? []).flatMap((i) => i.tools ?? [])).toEqual([]);
       }
       // Nothing in Vigil's Codex folder holds the key.
-      for (const name of await readdir(codexHome, { recursive: true })) {
-        const path = join(codexHome, name);
+      expect(existsSync(codexHome)).toBe(true);
+      for (const path of await filesUnder(codexHome)) {
         // Codex's own databases come and go while it shuts down.
         const text = await lstat(path)
           .then((st) => (st.isFile() ? readFile(path, 'utf8') : ''))
