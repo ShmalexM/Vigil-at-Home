@@ -283,10 +283,12 @@ try {
     const { execFile } = process.getBuiltinModule('node:child_process');
     const link = globalThis.vigil.core.executor;
     globalThis.__approvals = 0;
-    const approver = (nonce) =>
+    // One dialog can approve several commands (a release plus the sync that
+    // remembers its exception), so approve every nonce it covers.
+    const approver = (nonce, _prompt, also = []) =>
       new Promise((res) => {
         globalThis.__approvals++;
-        execFile('sudo', ['-n', helper, 'approve', nonce], (err) => res(!err));
+        execFile('sudo', ['-n', helper, 'approve', nonce, ...also], (err) => res(!err));
       });
     const Client = link.client.constructor;
     link.client.approver = approver;

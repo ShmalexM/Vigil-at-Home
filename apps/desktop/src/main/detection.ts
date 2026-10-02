@@ -20,7 +20,9 @@ import {
   type AnalyzeRunner,
   type FeedStatus,
   type FlaggedEvent,
+  type Proposal,
   type ReviewState,
+  type RuleException,
   type SqliteDetectionStores,
 } from '@vigil/detection';
 import { fastPathRules } from '@vigil/detection/fastpath';
@@ -37,6 +39,37 @@ const DAY = 24 * 60 * 60 * 1000;
 export const LEARNING_DAYS = 7;
 /** How often to check whether a threat feed is due. Each feed has its own interval. */
 export const FEED_CHECK_MS = 30 * 60 * 1000;
+
+/**
+ * What became of a rule change on the helper's copy. `declined`: it loosened
+ * the rules, the user cancelled the password, and the change was undone here
+ * too. `unavailable`: the helper isn't connected or failed; it gets the change
+ * on the next sync.
+ */
+export type HelperSyncOutcome = 'applied' | 'declined' | 'unavailable';
+
+/**
+ * How to send the helper its rules. `hold`: let the next password dialog ask
+ * for it, and call `onHeld` once it waits on that. `byUser`: the user just
+ * made this change, so ask even if they declined the same rules before.
+ */
+export interface HelperSyncOptions {
+  hold?: boolean;
+  onHeld?: () => void;
+  byUser?: boolean;
+}
+
+/** Sends the helper the current rules. */
+export type HelperSync = (opts?: HelperSyncOptions) => Promise<HelperSyncOutcome>;
+
+/** Everything a user change can touch that the helper's copy follows. */
+interface Snapshot {
+  rules: Map<string, DetectionRule>;
+  modes: Map<string, RuleMode | undefined>;
+  saved: Map<string, DetectionRule>;
+  exceptions: RuleException[];
+  proposals: Map<string, Proposal>;
+}
 
 export interface DetectorOptions {
   /** When Vigil was first installed on this Mac. */
@@ -65,8 +98,11 @@ export class Detector {
   private checkedByKind = new Map<string, number>();
   private readonly now: () => number;
   private readonly selfPaths: string[];
-  /** Called after rules, modes or exceptions change, so the helper's copy can follow. */
-  onRulesChanged: (() => void) | undefined;
+  /** Set by the app: sends the helper its copy after rules, modes or exceptions change. */
+  syncHelper: HelperSync | undefined;
+  /** User changes one at a time, so undoing a declined one can't undo another. */
+  private changing: Promise<unknown> = Promise.resolve();
+  private waiting = 0;
 
   constructor(
     private readonly db: DatabaseSync,
@@ -147,10 +183,15 @@ export class Detector {
     return this.reviewer?.status();
   }
 
-  /** The user approves an AI proposal. New rules go live in alert mode unless they choose. */
-  approveProposal(id: string, mode?: RuleMode): void {
-    this.pipeline.approve(id, userOrigin('rules-screen'), mode ? { mode } : {});
-    this.recount();
+  /**
+   * The user approves an AI proposal. New rules go live in alert mode unless
+   * they choose. If it loosens a blocking rule and the user cancels the
+   * password, nothing changes (`declined`).
+   */
+  approveProposal(id: string, mode?: RuleMode): Promise<HelperSyncOutcome> {
+    return this.change(() => {
+      this.pipeline.approve(id, userOrigin('rules-screen'), mode ? { mode } : {});
+    }).then((r) => r.helper);
   }
 
   rejectProposal(id: string, note?: string): void {
@@ -236,17 +277,23 @@ export class Detector {
    * user-blocked list, and demotion of rules that keep being wrong. Returns
    * the Santa rule to add when the user confirmed it as malicious.
    */
-  learn(alertId: string, decision: UserDecision): DecisionResult & { suggested?: boolean } {
+  async learn(
+    alertId: string,
+    decision: UserDecision,
+    opts: Omit<HelperSyncOptions, 'byUser'> = {},
+  ): Promise<DecisionResult & { suggested?: boolean; helper?: HelperSyncOutcome }> {
     const d = this.store.getAlertDetection(alertId) as Detection | undefined;
     if (!d) return {};
-    const result = this.feedback.recordDecision(d, decision, userOrigin('alert'));
-    // A rule that keeps being wrong is only suggested for a quieter mode; the
-    // user approves it in Rules like any other suggested change.
-    const suggested = result.suggestDemotion
-      ? this.pipeline.suggestDemotion(result.suggestDemotion, [alertId])
-      : undefined;
-    this.recount();
-    return { ...result, suggested: suggested?.ok === true };
+    const { value, helper } = await this.change(() => {
+      const result = this.feedback.recordDecision(d, decision, userOrigin('alert'));
+      // A rule that keeps being wrong is only suggested for a quieter mode; the
+      // user approves it in Rules like any other suggested change.
+      const suggested = result.suggestDemotion
+        ? this.pipeline.suggestDemotion(result.suggestDemotion, [alertId])
+        : undefined;
+      return { ...result, suggested: suggested?.ok === true };
+    }, opts);
+    return { ...value, helper };
   }
 
   /** Every rule the engine runs, with the mode it actually applies. */
@@ -277,25 +324,104 @@ export class Detector {
     return this.engine.getRule(id) !== undefined;
   }
 
-  /** From the Rules screen, so the actor is the user. */
-  setMode(id: string, mode: RuleMode): void {
-    this.feedback.setMode(id, mode, userOrigin('rules-screen'));
-    this.recount();
+  /**
+   * From the Rules screen, so the actor is the user. Turning a blocking rule
+   * down needs the password; if the user cancels, the mode stays (`declined`).
+   */
+  setMode(id: string, mode: RuleMode): Promise<HelperSyncOutcome> {
+    return this.change(() => this.feedback.setMode(id, mode, userOrigin('rules-screen'))).then(
+      (r) => r.helper,
+    );
+  }
+
+  /**
+   * Make a user change, then wait for the helper to take it. A change that
+   * loosens the helper's rules needs the admin password there; if the user
+   * cancels, everything the change touched goes back, so the app never shows
+   * a rule as off or excepted while the helper still blocks with it.
+   */
+  private change<T>(
+    fn: () => T,
+    opts: HelperSyncOptions = {},
+  ): Promise<{ value: T; helper: HelperSyncOutcome }> {
+    // Applied at once, so the screens show it straight away, unless an earlier
+    // change still waits on the password: then after it, so undoing one can
+    // never undo the other.
+    const apply = () => {
+      const before = this.snapshot();
+      const value = fn();
+      this.recount(false);
+      return { before, value };
+    };
+    const settle = async ({ before, value }: { before: Snapshot; value: T }) => {
+      const helper = this.syncHelper
+        ? await this.syncHelper({ ...opts, byUser: true })
+        : ('unavailable' as const);
+      if (helper === 'declined') {
+        this.restore(before);
+        this.recount(false);
+      }
+      return { value, helper };
+    };
+    let next: Promise<{ value: T; helper: HelperSyncOutcome }>;
+    if (this.waiting === 0) {
+      next = settle(apply());
+    } else {
+      next = this.changing.then(() => settle(apply()));
+    }
+    this.waiting++;
+    const done = next.finally(() => this.waiting--);
+    this.changing = done.catch(() => undefined);
+    return done;
+  }
+
+  private snapshot(): Snapshot {
+    const rules = new Map(this.engine.allRules().map((r) => [r.id, structuredClone(r)]));
+    return {
+      rules,
+      modes: new Map([...rules.keys()].map((id) => [id, this.stores.ruleState.get(id)?.mode])),
+      saved: new Map(this.stores.rules.list().map((r) => [r.id, structuredClone(r)])),
+      exceptions: this.stores.exceptions.all().map((e) => structuredClone(e)),
+      proposals: new Map(this.stores.proposals.list().map((p) => [p.id, structuredClone(p)])),
+    };
+  }
+
+  private restore(s: Snapshot): void {
+    const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+    for (const r of this.engine.allRules()) if (!s.rules.has(r.id)) this.engine.removeRule(r.id);
+    for (const [id, r] of s.rules) if (!same(this.engine.getRule(id), r)) this.engine.upsertRule(r);
+    for (const [id, mode] of s.modes) {
+      const st = this.stores.ruleState.get(id);
+      if (st?.mode === mode) continue;
+      const { mode: _m, ...rest } = st ?? { ruleId: id, fired: 0 };
+      this.stores.ruleState.put(mode === undefined ? rest : { ...rest, mode });
+    }
+    const ts = this.now();
+    const saved = new Map(this.stores.rules.list().map((r) => [r.id, r]));
+    for (const id of saved.keys()) if (!s.saved.has(id)) this.stores.rules.remove(id);
+    for (const [id, r] of s.saved) if (!same(saved.get(id), r)) this.stores.rules.save(r, ts);
+    const had = new Set(s.exceptions.map((e) => e.id));
+    for (const e of this.stores.exceptions.all())
+      if (!had.has(e.id)) this.stores.exceptions.remove(e.id);
+    const now = new Set(this.stores.exceptions.all().map((e) => e.id));
+    for (const e of s.exceptions) if (!now.has(e.id)) this.stores.exceptions.add(e);
+    for (const [, p] of s.proposals)
+      if (!same(this.stores.proposals.get(p.id), p)) this.stores.proposals.put(p);
   }
 
   feedStatus(): FeedStatus[] {
     return this.feeds.status();
   }
 
-  /** How many active rules look at each kind of event, for the feed. */
-  private recount(): void {
+  /** How many active rules look at each kind of event, for the feed. Then the helper's copy follows. */
+  private recount(sync = true): void {
     const counts = new Map<string, number>();
     for (const r of this.engine.listRules()) {
       if (r.effectiveMode === 'disabled') continue;
       for (const k of r.eventKinds) counts.set(k, (counts.get(k) ?? 0) + 1);
     }
     this.checkedByKind = counts;
-    this.onRulesChanged?.();
+    if (sync) void this.syncHelper?.();
   }
 }
 
