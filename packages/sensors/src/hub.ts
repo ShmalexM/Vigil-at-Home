@@ -8,7 +8,7 @@ import { osqueryHealth, osqueryLineToEvents } from './osquery/resultParser.js';
 import { DEFAULT_PATHS } from './santa/profile.js';
 import { OSQUERY_RESULTS_LOG } from './osquery/config.js';
 import type { SensorEvent, SensorEventSink } from './types.js';
-import { ProcessEnricher } from './enrich.js';
+import { ProcessEnricher, type SignatureInfo } from './enrich.js';
 import { NetworkBurst, type OsqueryRunner } from './osquery/burst.js';
 
 export interface SensorHubOptions {
@@ -20,6 +20,11 @@ export interface SensorHubOptions {
   onError?: (source: string, err: Error) => void;
   /** Drop noisy event kinds before they reach the sink. */
   filter?: (event: SensorEvent) => boolean;
+  /**
+   * Reads the signature of a program no sensor described (one that started
+   * before Vigil). Answers fill in later events from that program.
+   */
+  signatureLookup?: (path: string) => Promise<SignatureInfo | undefined>;
   /**
    * Runs one-off osquery queries. When set, programs worth a closer look get
    * their connections checked every 2 s for a minute (see osquery/burst.ts).
@@ -36,10 +41,22 @@ export class SensorHub {
   private readonly tailers = new Map<string, FileTailer>();
   private readonly seen = new Set<string>();
   private readonly activity: SensorActivity = { santa: null, osquery: null };
-  private readonly enricher = new ProcessEnricher();
+  private readonly enricher: ProcessEnricher;
   private readonly burst: NetworkBurst | undefined;
 
   constructor(private readonly opts: SensorHubOptions) {
+    const lookup = opts.signatureLookup;
+    this.enricher = new ProcessEnricher(
+      lookup
+        ? {
+            onUnknownSignature: (path) => {
+              lookup(path)
+                .then((info) => info && this.enricher.learnSignature(path, info))
+                .catch(() => {});
+            },
+          }
+        : {},
+    );
     if (opts.osqueryRunner)
       this.burst = new NetworkBurst({ run: opts.osqueryRunner, emit: (e) => this.emit(e) });
     const santa = opts.santaLogPath ?? DEFAULT_PATHS.santaLog;

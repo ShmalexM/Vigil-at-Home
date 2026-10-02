@@ -6,6 +6,7 @@ export * from './executor.js';
 export * from './server.js';
 export * from './system.js';
 export * from './daemon.js';
+export * from './signature.js';
 export { ActionError } from './commands/errors.js';
 export { identifyProcess, isProtectedProcess, parseLstart } from './commands/process.js';
 export {
