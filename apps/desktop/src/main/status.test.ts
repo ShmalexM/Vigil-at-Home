@@ -23,20 +23,27 @@ const alert = (over: Partial<Alert>): Alert => ({
 describe('computeStatus', () => {
   const ok = [{ id: 'osquery', name: 'osquery', state: 'ok' as const }];
 
-  it('is good when nothing needs the user', () => {
+  it('is good when every layer runs and nothing needs the user', () => {
     expect(computeStatus([], ok)).toEqual({ level: 'good', needsYou: 0, noticed: 0, reasons: [] });
   });
 
-  it('is fair when a contained alert waits on the user', () => {
-    expect(computeStatus([alert({})], ok)).toMatchObject({ level: 'fair', needsYou: 1 });
+  it('keeps protection good while an alert waits on the user, and counts it apart', () => {
+    expect(computeStatus([alert({})], ok)).toEqual({
+      level: 'good',
+      needsYou: 1,
+      noticed: 0,
+      reasons: [],
+    });
+    expect(computeStatus([alert({ containment: 'none', severity: 'critical' })], ok)).toMatchObject(
+      { level: 'good', needsYou: 1 },
+    );
   });
 
-  it('is poor when a serious alert is not contained or a sensor is down', () => {
-    expect(computeStatus([alert({ containment: 'none' })], ok).level).toBe('poor');
+  it('is poor when an installed layer has stopped', () => {
     expect(computeStatus([], [{ id: 'santa', name: 'Santa', state: 'down' }]).level).toBe('poor');
   });
 
-  it('stays good when Vigil only noticed something', () => {
+  it('counts what Vigil only noticed without touching the level', () => {
     const noticed = alert({
       severity: 'medium',
       fidelity: 'medium',
@@ -51,12 +58,12 @@ describe('computeStatus', () => {
     });
   });
 
-  it('is fair when a sensor is missing', () => {
+  it('is fair when a layer is missing', () => {
     const s = computeStatus([], [{ id: 'santa', name: 'Santa', state: 'not_installed' }]);
     expect(s).toMatchObject({ level: 'fair', reasons: ['Santa is not installed'] });
   });
 
-  it('puts the reason that sets the level first', () => {
+  it('puts the reason that sets the level first, and leaves alerts out of the reasons', () => {
     const s = computeStatus(
       [alert({})],
       [
@@ -65,10 +72,7 @@ describe('computeStatus', () => {
       ],
     );
     expect(s.level).toBe('poor');
-    expect(s.reasons).toEqual([
-      'osquery has stopped',
-      '1 alert waiting on you',
-      'Santa is not installed',
-    ]);
+    expect(s.needsYou).toBe(1);
+    expect(s.reasons).toEqual(['osquery has stopped', 'Santa is not installed']);
   });
 });
