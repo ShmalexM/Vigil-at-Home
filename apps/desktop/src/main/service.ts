@@ -165,7 +165,8 @@ export class VigilCore {
           reason: 'You confirmed it as malicious',
         });
       }
-      if (learned.demoted) console.info(`[detection] ${learned.demoted.message}`);
+      if (learned.suggested && learned.suggestDemotion)
+        console.info(`[detection] suggested: ${learned.suggestDemotion.message}`);
     }
     return this.store.getAlert(alertId) ?? alert;
   }
