@@ -72,7 +72,11 @@ Santa / osquery ─► SensorHub ─► FastPath (same engine as the app) ─►
   on its own say-so. One that turns a rule off or changes what it blocks, adds an
   exception or adds one of Vigil's own paths gets a needs-approval answer and only applies
   after the admin password, the same flow releases use. Wording changes (name, reasons,
-  severity) and new rules need none. The app doesn't ask again for a set the user declined.
+  severity) and new rules need none. If the user cancels, the app undoes the change on its
+  side too (`Detector.setMode`, `learn` and `approveProposal` resolve to `declined`), and
+  it doesn't ask again on its own for a set the user declined. Releasing an alert with
+  "remember" holds the exception's sync (`HelperClient.hold`) so the release's dialog
+  approves both: one password, `vigil-helper approve <nonce> <nonce>`.
 - Indicator lists change daily as feeds age entries out, so they need no password; instead
   an entry a list drops keeps blocking for a week (`RETIRE_MS`), and a list may drop at
   most `RETIRED_MAX` entries in that time. A list's old contents stay in force until the

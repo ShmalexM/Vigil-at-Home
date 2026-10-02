@@ -63,9 +63,9 @@ beforeAll(async () => {
   server = new HelperServer({ socketPath: join(root, 'helper.sock'), executor });
   await server.listen();
   // Stands in for the password dialog: only a yes writes the root-owned approval.
-  client = await HelperClient.connect(join(root, 'helper.sock'), async (nonce, prompt) => {
+  client = await HelperClient.connect(join(root, 'helper.sock'), async (nonce, prompt, also) => {
     prompts.push(prompt);
-    if (approve) Approvals.writeApproval(approvalsDir, nonce);
+    if (approve) for (const n of [nonce, ...(also ?? [])]) Approvals.writeApproval(approvalsDir, n);
     return approve;
   });
 });
@@ -249,6 +249,49 @@ describe('blocking rules in the helper', () => {
     expect(fast.status().rules).toBe(rest.length);
     expect(fast.status().rev).toBeGreaterThan(rev);
     await client.call(sync);
+  });
+
+  it('lets a held rule change ride on the next password dialog', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    approve = true;
+    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    prompts.length = 0;
+    const exception = {
+      id: 'x9',
+      ruleId: 'known-bad-hash',
+      match: { 'process.path': '/tmp/ok' },
+      createdAt: 2,
+    };
+    let held = false;
+    const syncing = client.hold({ ...sync, exceptions: [exception] }, () => (held = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(held).toBe(true);
+    // A release (here: removing a Santa rule) asks for the password, for both at once.
+    await client.call({
+      kind: 'santa.rule.set',
+      ruleType: 'binary',
+      identifier: BAD,
+      policy: 'block',
+    });
+    await client.call({ kind: 'santa.rule.remove', ruleType: 'binary', identifier: BAD });
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain('add an exception to known-bad-hash');
+    await client.approveHeld();
+    await syncing;
+    expect(prompts).toHaveLength(1);
+    expect(fast.status().rules).toBeGreaterThan(0);
+
+    // Nothing else asks: approveHeld asks once for what is still waiting, and a no settles it as refused.
+    approve = false;
+    const refused = client.hold({
+      ...sync,
+      exceptions: [],
+      selfPaths: [...sync.selfPaths, '/tmp'],
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    await client.approveHeld();
+    await expect(refused).rejects.toMatchObject({ code: 'refused' });
+    expect(prompts).toHaveLength(2);
   });
 
   it('keeps an entry a list drops blocking for a week', async () => {

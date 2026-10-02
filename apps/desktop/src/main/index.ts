@@ -10,7 +10,12 @@ import { AiBridge } from './ai.js';
 import { Store } from './db/store.js';
 import { seedDemo, startDemoFeed } from './demo.js';
 import { seedUsageDemo } from './usage-demo.js';
-import { Detector } from './detection.js';
+import {
+  Detector,
+  type HelperSync,
+  type HelperSyncOptions,
+  type HelperSyncOutcome,
+} from './detection.js';
 import { helperBundleDir, helperInstallCommand, runHelperScript } from './helper-install.js';
 import { HelperLink } from './helper.js';
 import { registerIpc } from './ipc.js';
@@ -202,22 +207,34 @@ function start(): void {
   let helperRulesDeclined: string | undefined;
   // The helper runs the blocking rules it can on its own, so blocks happen
   // even while the app is closed, and hands Santa the pre-launch ones.
-  let helperRulesSync = Promise.resolve();
-  const syncHelperRules = () => (helperRulesSync = helperRulesSync.then(sendHelperRules));
-  const sendHelperRules = async () => {
-    if (!core.detector) return;
+  let helperRulesSync: Promise<unknown> = Promise.resolve();
+  const syncHelperRules: HelperSync = (opts = {}) => {
+    const next = helperRulesSync.then(() => sendHelperRules(opts));
+    helperRulesSync = next;
+    return next;
+  };
+  const sendHelperRules = async (opts: HelperSyncOptions): Promise<HelperSyncOutcome> => {
+    if (!core.detector) return 'unavailable';
     const set = core.detector.helperRules();
     const lists = Object.entries(set.lists).map(([l, entries]) => [l, listDigest(entries)]);
     const key = JSON.stringify({ ...set, lists });
-    if (key === helperRulesSent || key === helperRulesDeclined) return;
+    if (key === helperRulesSent) return 'applied';
+    if (key === helperRulesDeclined && !opts.byUser) return 'declined';
     try {
-      if (await helper.syncRules(set)) helperRulesSent = key;
+      const how = opts.hold ? { hold: true, ...(opts.onHeld ? { onHeld: opts.onHeld } : {}) } : {};
+      if (!(await helper.syncRules(set, how))) return 'unavailable';
+      helperRulesSent = key;
+      return 'applied';
     } catch (err) {
-      if (err instanceof HelperCallError && err.code === 'refused') helperRulesDeclined = key;
+      if (err instanceof HelperCallError && err.code === 'refused') {
+        helperRulesDeclined = key;
+        return 'declined';
+      }
       console.warn('[helper rules] could not update the helper:', err);
+      return 'unavailable';
     }
   };
-  if (core.detector) core.detector.onRulesChanged = () => void syncHelperRules();
+  if (core.detector) core.detector.syncHelper = syncHelperRules;
   helper.on('state', (state) => {
     void checkHealth();
     if (state === 'connected') {

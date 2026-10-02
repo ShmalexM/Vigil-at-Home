@@ -163,22 +163,30 @@ export class HelperLink
    * unconnected. If the rules turn something off or add an exception, the
    * helper asks for the admin password first; a cancelled dialog throws a
    * HelperCallError with code refused and leaves the helper's rules as they were.
+   * With `hold`, that password is asked for by the next dialog instead (a
+   * release's) or by approveHeld().
    */
-  async syncRules(set: HelperRuleSet): Promise<HelperRulesOutcome | null> {
+  async syncRules(
+    set: HelperRuleSet,
+    opts: { hold?: boolean; onHeld?: () => void } = {},
+  ): Promise<HelperRulesOutcome | null> {
     const client = this.client;
     if (!client) return null;
     try {
       const digests = Object.fromEntries(
         Object.entries(set.lists).map(([name, entries]) => [name, listDigest(entries)]),
       );
+      const sync = {
+        kind: 'detection.sync' as const,
+        rules: set.rules,
+        exceptions: set.exceptions,
+        selfPaths: set.selfPaths,
+        lists: digests,
+      };
       const out = await withTimeout(
-        client.call<HelperRulesOutcome>({
-          kind: 'detection.sync',
-          rules: set.rules,
-          exceptions: set.exceptions,
-          selfPaths: set.selfPaths,
-          lists: digests,
-        }),
+        opts.hold
+          ? client.hold<HelperRulesOutcome>(sync, opts.onHeld)
+          : client.call<HelperRulesOutcome>(sync),
         // A sync that loosens the rules waits on the admin password, like a release.
         RELEASE_TIMEOUT_MS,
       );
@@ -204,6 +212,11 @@ export class HelperLink
       if (!(err instanceof HelperCallError)) this.dropped(client);
       throw err;
     }
+  }
+
+  /** Ask for the password for anything syncRules held, once, and send it. */
+  async approveHeld(): Promise<void> {
+    await this.client?.approveHeld();
   }
 
   /** Check the connection is alive. Called on the health timer. */

@@ -42,7 +42,7 @@ export class RuleSuggestions {
   }
 
   accept(id: string, mode?: RuleMode): void {
-    this.detector.approveProposal(id, mode);
+    void this.detector.approveProposal(id, mode);
   }
 
   dismiss(id: string, note?: string): void {

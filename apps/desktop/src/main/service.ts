@@ -1,6 +1,13 @@
 import { EventEmitter } from 'node:events';
 import { z } from 'zod';
-import { canChangeMode, type Rule, type RuleMode, type SensorEvent } from '@vigil/core';
+import {
+  canChangeMode,
+  type Alert,
+  type Rule,
+  type RuleMode,
+  type SensorEvent,
+  type UserDecision,
+} from '@vigil/core';
 import {
   AlertView,
   Appearance,
@@ -156,9 +163,31 @@ export class VigilCore {
    * the user, so it can't run again.
    */
   async decide(alertId: string, input: DecisionInput) {
-    const alert = await this.alerts.decide(alertId, input);
-    if (this.detector && alert.decision) {
-      const learned = this.detector.learn(alertId, alert.decision);
+    // Learning comes first and its rule change is held, so releasing the
+    // block and remembering the exception take one password, not two.
+    const decision: UserDecision = {
+      at: this.now(),
+      verdict: input.verdict,
+      remember: input.remember ?? false,
+      ...(input.scope ? { scope: input.scope } : {}),
+      ...(input.note ? { note: input.note } : {}),
+    };
+    let held!: () => void;
+    const waiting = new Promise<void>((resolve) => (held = resolve));
+    const learning = this.detector?.learn(alertId, decision, { hold: true, onHeld: held });
+    // Until the rule change is held (or needed no password), so a release's dialog includes it.
+    if (learning) await Promise.race([waiting, learning]);
+    let alert: Alert;
+    try {
+      alert = await this.alerts.decide(alertId, input);
+    } catch (err) {
+      await this.executor.approveHeld?.();
+      await learning;
+      throw err;
+    }
+    await this.executor.approveHeld?.();
+    if (learning) {
+      const learned = await learning;
       if (learned.santa) {
         await this.alerts.run('user', learned.santa, {
           alertId,
@@ -256,7 +285,7 @@ export class VigilCore {
   /** From the UI, so the actor is the user. */
   setRuleMode(id: string, mode: RuleMode): Rule {
     if (this.detector?.hasRule(id)) {
-      this.detector.setMode(id, mode);
+      void this.detector.setMode(id, mode);
       const view = this.detector.rules().find((r) => r.rule.id === id);
       if (!view) throw new Error(`No rule ${id}`);
       return { ...view.rule, mode: view.mode };
