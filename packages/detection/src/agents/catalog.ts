@@ -16,6 +16,13 @@ export interface CatalogEntry extends AgentIdentity {
   installPaths: string[];
   /** The agent's hook can ask Vigil before each tool call. */
   preflightHost?: 'claude-code';
+  /**
+   * Keychain services (`security find-generic-password -s`) the agent saves
+   * its own sign-in under and reads back with its own code. agent-watch lets
+   * exactly that read pass (see ownKeychainLogin); the same read from a shell
+   * the agent runs for a tool still alerts. Only names seen on a real Mac.
+   */
+  keychainLogins?: string[];
 }
 
 /** Vigil's own process tree (its AI helpers). Reserved: never in the catalogue, never a user's id. */
@@ -82,6 +89,9 @@ export const AGENT_CATALOG: readonly CatalogEntry[] = [
     ],
     installPaths: ['~/.local/bin/claude', '/opt/homebrew/bin/claude', '/usr/local/bin/claude'],
     preflightHost: 'claude-code',
+    // Its claude.ai sign-in and its API key, read with `security` from its own
+    // code at every start (seen on a real Mac, 2026-10-02, Claude Code 2.1.280–2.1.286).
+    keychainLogins: ['Claude Code-credentials', 'Claude Code'],
   }),
   entry({
     id: 'claude-desktop',

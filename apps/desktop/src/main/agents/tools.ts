@@ -344,7 +344,8 @@ export class VigilTools {
           asks: a.asksToday,
           denies: a.deniesToday,
         },
-        preflightHook: a.preflightHost === 'claude-code',
+        // Only a hook that checked in while pre-flight is on is asked.
+        preflightHook: a.preflight === 'active',
         // Only an agent seen running has sessions.
         latestSessions:
           a.lastSeenAt === undefined

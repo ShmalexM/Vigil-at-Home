@@ -73,6 +73,7 @@ const agent: AgentView = {
   asksToday: 1,
   deniesToday: 1,
   preflightHost: 'claude-code',
+  preflight: 'active',
   builtin: true,
   edited: false,
 };

@@ -49,6 +49,16 @@ describe('ps parsing', () => {
     expect(rows[8]!.path).toMatch(/Code Helper \(Renderer\)$/);
   });
 
+  it('drops the padding ps puts before a bare name (seen on a real Mac)', () => {
+    const rows = parsePsComm(
+      [
+        '  530   512 Wed Oct  1 09:15:03 2026     -zsh',
+        ' 4242   530 Wed Oct  1 20:53:59 2026     claude',
+      ].join('\n'),
+    );
+    expect(rows.map((r) => r.path)).toEqual(['-zsh', 'claude']);
+  });
+
   it('adds command lines by pid, capped at 1 KB, without touching the input', () => {
     const rows = parsePsComm(COMM);
     const merged = mergePsArgs(rows, ARGS);

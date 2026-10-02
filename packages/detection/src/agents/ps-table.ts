@@ -49,7 +49,8 @@ export function parsePsComm(text: string): PsRow[] {
     if (!m) continue;
     const [, pid, ppid, mon, day, hh, mm, ss, year, comm] = m;
     const month = MONTHS[mon!];
-    const path = comm!.trimEnd();
+    // ps pads the column, so a bare name (`-zsh`, `claude`) can come with spaces before it.
+    const path = comm!.trim();
     if (month === undefined || path === '') continue;
     const startedAt = new Date(
       Number(year),

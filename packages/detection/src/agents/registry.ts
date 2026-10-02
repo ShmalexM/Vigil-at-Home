@@ -20,7 +20,7 @@ function basename(p: string): string {
 }
 
 function identityOf(e: CatalogEntry): AgentIdentity {
-  const { installPaths: _paths, preflightHost: _host, ...identity } = e;
+  const { installPaths: _paths, preflightHost: _host, keychainLogins: _k, ...identity } = e;
   return identity;
 }
 

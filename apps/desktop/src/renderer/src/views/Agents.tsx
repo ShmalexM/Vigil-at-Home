@@ -353,8 +353,15 @@ function AgentTitle({ agent: a, large }: { agent: AgentView; large?: boolean }) 
           <span className={`${large ? 't-h2' : 't-h3'} ellipsis`}>{a.name}</span>
           <Chip {...(origin.tone ? { tone: origin.tone } : {})}>{origin.label}</Chip>
           {a.edited && <Chip title="You changed how Vigil recognises it">Edited</Chip>}
-          {a.preflightHost && (
-            <Chip title="Its hook can ask Vigil before each tool call">Pre-flight</Chip>
+          {a.preflight === 'active' && (
+            <Chip tone="good" title="Its hook asks Vigil before each tool call">
+              Pre-flight on
+            </Chip>
+          )}
+          {a.preflight === 'available' && (
+            <Chip title="Its hook can ask Vigil before each tool call. Set it up under Tool policy.">
+              Pre-flight available
+            </Chip>
           )}
         </span>
         <span className="t-small">
@@ -375,7 +382,8 @@ function TodayStats({ agent: a }: { agent: AgentView }) {
     { label: 'Sessions today', n: a.sessionsToday },
     { label: 'Rule matches', n: a.matchesToday, ...(a.matchesToday ? { tone: 'fair' } : {}) },
   ];
-  if (a.preflightHost) {
+  // Pre-flight counts once it is in use, or while today has any.
+  if (a.preflight === 'active' || a.asksToday > 0 || a.deniesToday > 0) {
     cells.push(
       { label: 'Steps asked', n: a.asksToday },
       { label: 'Steps stopped', n: a.deniesToday, ...(a.deniesToday ? { tone: 'poor' } : {}) },
