@@ -230,7 +230,7 @@ describe('agent matching', () => {
   it('keeps the catalogue valid and Vigil out of it', () => {
     expect(AGENT_CATALOG.map((c) => c.id)).not.toContain(VIGIL_SELF);
     for (const c of AGENT_CATALOG) {
-      const { installPaths: _paths, preflightHost: _host, ...id } = c;
+      const { installPaths: _paths, preflightHost: _host, keychainLogins: _k, ...id } = c;
       expect(AgentIdentity.safeParse(id).success).toBe(true);
       expect(c.origin).toBe('builtin');
       expect(AgentIdentity.safeParse(id).error?.issues ?? []).toEqual([]);
@@ -238,6 +238,8 @@ describe('agent matching', () => {
       expect(c.match.every((m) => !m.teamIds || m.signingIds?.length)).toBe(true);
     }
     expect(AGENT_CATALOG.filter((c) => c.preflightHost).map((c) => c.id)).toEqual(['claude-code']);
+    // Keychain services only as seen on a real Mac.
+    expect(AGENT_CATALOG.filter((c) => c.keychainLogins).map((c) => c.id)).toEqual(['claude-code']);
     expect(AGENT_CATALOG.filter((c) => !c.watch).map((c) => c.id)).toEqual([
       'cursor',
       'vscode',

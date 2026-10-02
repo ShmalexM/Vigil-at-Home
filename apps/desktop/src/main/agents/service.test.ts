@@ -457,6 +457,8 @@ describe('AgentService: agents', () => {
       asksToday: 1,
       deniesToday: 1,
       preflightHost: 'claude-code',
+      // Requests came in, but pre-flight is off here.
+      preflight: 'available',
       builtin: true,
     });
     expect(claude.matchesToday).toBeGreaterThanOrEqual(3);
@@ -576,6 +578,26 @@ describe('AgentService: the hook', () => {
     expect(agents.claudePreflightStep()).toEqual({ connected: true });
     clock.t += 8 * DAY;
     expect(agents.claudePreflightStep()).toEqual({ connected: false });
+  });
+
+  it('shows pre-flight as active only while it is on and the hook has checked in', async () => {
+    const { agents, clock } = setup();
+    const claude = () => agents.listAgents().find((a) => a.id === 'claude-code')!;
+    expect(claude().preflight).toBe('available');
+    agents.setPrefs({ preflightEnabled: true });
+    // On, but nothing proves Claude Code asks yet.
+    expect(claude().preflight).toBe('available');
+    agents.handleBridge({ v: 1, method: 'hello', host: 'claude-code', hookVersion: '1' });
+    await settle();
+    expect(claude().preflight).toBe('active');
+    expect(agents.getAgent('claude-code')?.preflight).toBe('active');
+    agents.setPrefs({ preflightEnabled: false });
+    expect(claude().preflight).toBe('available');
+    agents.setPrefs({ preflightEnabled: true });
+    clock.t += 8 * DAY;
+    expect(claude().preflight).toBe('available');
+    // Agents without a hook have no pre-flight state at all.
+    expect(agents.listAgents().find((a) => a.id === 'codex')?.preflight).toBeUndefined();
   });
 
   it('tells pages about requests as activity, and about the hook connecting as a change', async () => {

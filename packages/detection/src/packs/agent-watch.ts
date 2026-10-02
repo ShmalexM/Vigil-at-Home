@@ -1,3 +1,4 @@
+import { AGENT_CATALOG, type CatalogEntry } from '../agents/catalog.js';
 import type { Condition, DetectionRuleInput } from '../types.js';
 import {
   CREDENTIAL_STORE_GLOBS,
@@ -81,7 +82,9 @@ const SECRET_BODY = String.raw`(\.aws/(credentials|config|sso/cache)|\.ssh/id_(r
 
 /**
  * Credential files named in a command: an SSH private key, a kube/netrc config,
- * or a cloud-provider store. Matched case-insensitively (see cmdI). An SSH key
+ * a cloud-provider store, or the keychain's database (copying it out is how
+ * stealers take saved passwords to crack them elsewhere). Matched
+ * case-insensitively (see cmdI). An SSH key
  * does not count when the command is handing it to ssh/scp/sftp as the identity
  * file (`-i`), or to `ssh-add`/`ssh-keygen`/`chmod`, or via `IdentityFile=`: the
  * tool uses its own key, it is not being read out. A kube/netrc path does not
@@ -90,9 +93,30 @@ const SECRET_BODY = String.raw`(\.aws/(credentials|config|sso/cache)|\.ssh/id_(r
  */
 export const SECRET_PATH_SSH = String.raw`\.ssh/(?<!((^|[\s"'=/])(ssh|scp|sftp)(\s[^|;&]{0,64})?\s-i|(^|[\s"'=/])(ssh-add|ssh-keygen|chmod)\s[^|;&]{0,64}|IdentityFile=)\s?["']?[^\s"']{0,48}\.ssh/)id_(rsa|ed25519|ecdsa|dsa)($|[\s"';|&)])`;
 export const SECRET_PATH_KUBE = String.raw`(\.kube/(?<!(--kubeconfig[= ]|KUBECONFIG=)["']?[^\s"']{0,64}\.kube/)config|\.netrc(?<!--netrc-file[= ]["']?[^\s"']{0,64}\.netrc))`;
-export const SECRET_PATH_CLOUD = String.raw`(\.aws/(credentials|config|sso/cache)|\.config/gcloud/|\.docker/config\.json|\.azure/|(~|\$HOME|\$\{HOME\}|/Users/[^/\s"']+)/\.npmrc)`;
+export const SECRET_PATH_CLOUD = String.raw`(\.aws/(credentials|config|sso/cache)|\.config/gcloud/|\.docker/config\.json|\.azure/|(~|\$HOME|\$\{HOME\}|/Users/[^/\s"']+)/\.npmrc|Library/Keychains\b)`;
 /** The three credential-path checks, matched together (case-insensitive). */
 export const SECRET_PATH_RES = [SECRET_PATH_SSH, SECRET_PATH_KUBE, SECRET_PATH_CLOUD];
+/**
+ * Programs that copy, pack or send a file: opening the keychain's database
+ * counts for these alone (agent-secret-read).
+ */
+const KEYCHAIN_COPIERS = [
+  'cat',
+  'cp',
+  'ditto',
+  'rsync',
+  'scp',
+  'tar',
+  'zip',
+  'gzip',
+  'base64',
+  'xxd',
+  'strings',
+  'dd',
+  'curl',
+  'nc',
+  'sqlite3',
+];
 /** Programs that print, copy or pack a file (agent-secret-command). */
 const SECRET_READERS = [
   'cat',
@@ -117,6 +141,8 @@ const SECRET_READERS = [
  */
 export const SECRET_READ_RE =
   String.raw`(^|[\s;&|('"/\x60])(${SECRET_READERS.join('|')})\s[^|;&]*` + SECRET_BODY;
+/** One of SECRET_READERS (or ditto/rsync) given the keychain's database, or its folder. */
+export const KEYCHAIN_READ_RE = String.raw`(^|[\s;&|('"/\x60])(${SECRET_READERS.join('|')}|ditto|rsync)\s[^|;&]*Library/Keychains\b`;
 
 /** The same files opened directly, plus the browser and keychain stores. */
 export const SECRET_FILE_GLOBS = [
@@ -215,8 +241,12 @@ export const TAMPER_RES_NOCASE = [
   String.raw`tccutil\s+reset\b(?!\s+["']?\w+["']?\s+["']?(?![\w.-]*(vigil|santa))[\w-]+\.[\w.-]+["']?(\s|$|[;&|)]))`,
   // csrutil disabling System Integrity Protection.
   String.raw`csrutil\s+disable\b`,
-  // editing or deleting Vigil's or Santa's own files.
-  String.raw`(\b(rm|mv|cp|sqlite3|truncate|chmod|chown|tee)\b|>)(?:(?!Vigil|vigil-helper|com\.vigilathome|/var/db/santa|Santa\.app|\b(rm|mv|cp|sqlite3|truncate|chmod|chown|tee)\b)[^|;&>])*(Vigil\\? at\\? Home|vigil-helper|com\.vigilathome|/var/db/santa|Santa\.app)`,
+  // editing or deleting Vigil's or Santa's own files: the verb or redirect and
+  // a path to them on one line, at most 160 characters apart (which also keeps
+  // the gap linear). "Vigil at Home" counts only as a path (`…/Vigil at Home/`,
+  // `Vigil at Home.app`), so prose in a heredoc, a note or an agent's
+  // transcript that names Vigil does not.
+  String.raw`(\b(rm|mv|cp|sqlite3|truncate|chmod|chown|tee)\b|>)[^|;&>\n]{0,160}?(Vigil\\? at\\? Home(\.app\b|/)|vigil-helper|com\.vigilathome|/var/db/santa|Santa\.app)`,
   // turning the firewall off, or unloading Santa's system extension.
   String.raw`(socketfilterfw\b[^|;&]{0,64}--setglobalstate\s+off\b|--unload-system-extension\b|systemextensionsctl\s+uninstall\b[^|;&]{0,128}(santa|vigil))`,
   // telling Vigil or Santa to quit over AppleScript.
@@ -236,6 +266,70 @@ export const tamper = (field: string): Condition => ({
 // ------------------------------------------------------------- agent settings
 /** `security` printing a saved password (`-g`/`-w`) or exporting the keychain. */
 export const KEYCHAIN_SECRET_RE = String.raw`security\s+(find-(generic|internet)-password\b[^|;&]*\s-[gw]|export\b|dump-keychain\b)`;
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * An agent reading back its own saved sign-in: `security
+ * find-generic-password` for one of the agent's own services (catalogue
+ * `keychainLogins`, each also with the 8-hex-digit suffix Claude Code adds per
+ * config folder), launched by the agent's own program as is or through a bare
+ * `sh -c`, wherever that program runs in the tree (Vigil's own helpers start
+ * Claude Code too). The caller is the parent: its path or plain name fits the
+ * catalogue, or, for a shell that reached Vigil without its parent's path, it
+ * sits right under the agent itself.
+ *
+ * The whole command must be that one read: only -a, -s, -w and -g, one -s
+ * naming its own service, nothing that chains, redirects or substitutes. On a
+ * real Mac (2026-10-02, 341 shells under Claude Code) a Bash tool step always
+ * arrived wrapped (`zsh -c source …snapshot… && eval '…'`, or `sh -c env
+ * SANDBOX_RUNTIME=1 …`), never as a bare `sh -c <command>`, so the same read
+ * asked for by text the agent read still alerts. A hook or status-line command
+ * the user set to exactly this read would fit too.
+ */
+export function ownKeychainLogin(
+  agent: Pick<CatalogEntry, 'match' | 'keychainLogins'> & { id?: string },
+): Condition | undefined {
+  const agentId = agent.id;
+  const services = agent.keychainLogins ?? [];
+  const paths = agent.match.flatMap((m) => m.paths ?? []);
+  const names = agent.match.flatMap((m) => (m.argGlobs ? [] : (m.names ?? [])));
+  if (!services.length || !(paths.length || names.length)) return undefined;
+  const caller: Condition[] = [];
+  if (paths.length) caller.push({ field: 'process.parentPath', op: 'glob', value: paths });
+  if (names.length) caller.push({ field: 'process.parentName', op: 'in', value: names });
+  // A short-lived shell often reaches Vigil without its parent's path; directly
+  // under the agent itself, the tracker already identified that parent.
+  if (agentId)
+    caller.push({
+      all: [
+        { field: 'process.agent.id', op: 'eq', value: agentId },
+        { field: 'process.agent.depth', op: 'eq', value: 1 },
+      ],
+    });
+  const svc = String.raw`["']?(${services.map(escapeRe).join('|')})(-[0-9a-f]{8})?["']?`;
+  return {
+    all: [
+      { field: 'process.name', op: 'in', value: ['security', 'sh', 'bash'] },
+      { any: caller },
+      {
+        field: 'process.commandLine',
+        op: 'regex',
+        value: [
+          String.raw`^((/bin/)?(ba)?sh -c )?(/usr/bin/)?security find-generic-password ` +
+            String.raw`(?=[-\w .@"']{1,200}$)` +
+            String.raw`(?=(.* )?-s ${svc}( |$))(?!.* -s .* -s )(?!(.* )?-[^asgw\s])`,
+        ],
+      },
+    ],
+  };
+}
+
+/** One exclusion per catalogue agent that keeps its sign-in in the keychain. */
+const OWN_KEYCHAIN_LOGINS: Condition[] = AGENT_CATALOG.flatMap((a) => {
+  const c = ownKeychainLogin(a);
+  return c ? [c] : [];
+});
+
 /** Agent settings files, where hooks, permissions and MCP servers are configured. */
 export const AGENT_CONFIG_RE = String.raw`(\.claude/settings[A-Za-z.]*\.json|\.claude\.json|\.codex/config\.toml|\.mcp\.json|\.cursor/(hooks|mcp)\.json|claude_desktop_config\.json)`;
 /** A write verb (or redirect) landing on an agent settings file. Case-insensitive. */
@@ -247,8 +341,14 @@ export const CONFIG_INPLACE_RE =
   String.raw`(sed\s+(-[a-zA-Z]*i|--in-place)|perl\s+-[a-zA-Z]*i)[^\n]{0,200}?` + AGENT_CONFIG_RE;
 /** A script opening a file for writing; paired with AGENT_CONFIG_RE so it only counts on a settings file. */
 export const SCRIPT_WRITE_RE = String.raw`(python3?|node|ruby|bun|deno)\s[^\n]{0,256}?(open\([^)]*['"][wax]|write_text|writeFile|fs\.write|File\.write)`;
-/** `claude|codex|gemini mcp add...`, which registers a new MCP server (a new tool) without touching a file. */
-export const MCP_ADD_RE = String.raw`\b(claude|codex|gemini)\s+mcp\s+add(-json|-from-claude-desktop)?\b`;
+/**
+ * `claude|codex|gemini mcp add...`, which registers a new MCP server (a new
+ * tool) without touching a file. Only where a command starts: the start, after
+ * a separator, `$(`, a backtick, `sh -c` or `eval`, optionally by full path. The
+ * same words printed or quoted as data (`printf '%s' claude mcp add …`) are not
+ * a command.
+ */
+export const MCP_ADD_RE = String.raw`(^|[;&|(\x60\n]\s*|\s-c\s+["']?|\beval\s+["']?)(\S*/)?(claude|codex|gemini)\s+mcp\s+add(-json|-from-claude-desktop)?\b`;
 export const AGENT_CONFIG_GLOBS = [
   '~/.claude/settings*.json',
   '**/.claude/settings*.json',
@@ -317,6 +417,29 @@ export const agentWatchRules: DetectionRuleInput[] = [
         ],
       },
       { field: 'path', op: 'glob', value: ['~/.ssh/*.pub'] },
+      // Codex (in the ChatGPT app) talks to OpenAI's own ChatGPT extension for Chrome
+      // through its storage (seen on a real Mac, 2026-10-02; listed by OpenAI).
+      {
+        all: [
+          { field: 'process.agent.id', op: 'in', value: ['codex', 'codex-app'] },
+          {
+            field: 'path',
+            op: 'glob',
+            value: [
+              '~/Library/Application Support/Google/Chrome/*/Local Extension Settings/hehggadaopoacecdllhhajmbjkdcmajg/**',
+            ],
+          },
+        ],
+      },
+      // Every program that uses the keychain opens its database: the agent itself,
+      // `security`, git's credential helper. The items inside stay locked behind the
+      // keychain's own checks. A program that copies or packs files opening it does count.
+      {
+        all: [
+          { field: 'path', op: 'glob', value: ['~/Library/Keychains/**'] },
+          { not: { field: 'process.name', op: 'in', value: KEYCHAIN_COPIERS } },
+        ],
+      },
     ],
     reasons: [
       '{{process.name}}, running under {{process.agent.id}}, opened {{path}}.',
@@ -329,7 +452,7 @@ export const agentWatchRules: DetectionRuleInput[] = [
     id: 'agent-secret-command',
     name: 'AI agent ran a command that reads a credential file',
     description:
-      'A command an AI agent ran prints, copies or packs a file holding cloud keys, an SSH private key or a token.',
+      "A command an AI agent ran prints, copies or packs a file holding cloud keys, an SSH private key, a token or the keychain's passwords.",
     mode: 'alert',
     severity: 'medium',
     fidelity: 'medium',
@@ -338,10 +461,11 @@ export const agentWatchRules: DetectionRuleInput[] = [
       all: [
         AGENT,
         CHILD,
-        via(SECRET_READERS),
+        via([...SECRET_READERS, 'ditto', 'rsync']),
         // A shell passes via() whatever it runs, so the reader must be in the command too.
-        cmdI(SECRET_READ_RE),
-        cmdI(...SECRET_PATH_RES),
+        {
+          any: [{ all: [cmdI(SECRET_READ_RE), cmdI(...SECRET_PATH_RES)] }, cmdI(KEYCHAIN_READ_RE)],
+        },
       ],
     },
     reasons: [
@@ -504,6 +628,8 @@ export const agentWatchRules: DetectionRuleInput[] = [
     condition: {
       all: [AGENT, CHILD, via(['security']), cmd(KEYCHAIN_SECRET_RE)],
     },
+    // An agent signing itself in with its own saved login is not this.
+    exclusions: OWN_KEYCHAIN_LOGINS,
     response: [SUSPEND],
     reasons: [
       '{{process.agent.id}} ran: {{process.commandLine}}',

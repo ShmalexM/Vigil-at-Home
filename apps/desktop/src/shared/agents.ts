@@ -50,6 +50,12 @@ export interface AgentView {
   deniesToday: number;
   /** Its hook can ask Vigil before each tool call. */
   preflightHost?: 'claude-code';
+  /**
+   * With a pre-flight host: `active` once pre-flight is on and its hook has
+   * checked in (see hookConnected), else `available`. Only a hook that was
+   * heard from proves Vigil is asked.
+   */
+  preflight?: 'active' | 'available';
   /** From Vigil's catalogue: it can be reset or ignored, not removed. */
   builtin: boolean;
   /** A built-in whose matchers you changed. */

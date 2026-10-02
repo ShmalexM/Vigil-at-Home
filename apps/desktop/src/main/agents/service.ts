@@ -349,7 +349,8 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
     const since = this.startOfDay();
     const stats = this.o.store.agentStats(since);
     const host = this.hostCounts(since);
-    return this.o.detector.registry.list().map((r) => this.view(r, stats.get(r.id), host));
+    const active = this.preflightActive();
+    return this.o.detector.registry.list().map((r) => this.view(r, stats.get(r.id), host, active));
   }
 
   /**
@@ -367,7 +368,12 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
     const r = this.agentRecord(id);
     if (!r) return null;
     const since = this.startOfDay();
-    const view = this.view(r, this.o.store.agentStats(since).get(id), this.hostCounts(since));
+    const view = this.view(
+      r,
+      this.o.store.agentStats(since).get(id),
+      this.hostCounts(since),
+      this.preflightActive(),
+    );
     const rules = this.o.detector
       .rules()
       .filter(
@@ -405,7 +411,12 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
     const since = this.startOfDay();
     return {
       ok: true,
-      agent: this.view(r, this.o.store.agentStats(since).get(r.id), this.hostCounts(since)),
+      agent: this.view(
+        r,
+        this.o.store.agentStats(since).get(r.id),
+        this.hostCounts(since),
+        this.preflightActive(),
+      ),
     };
   }
 
@@ -1039,10 +1050,16 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
     return this.o.store.toolRequestCounts(since);
   }
 
+  /** Pre-flight is on and Claude Code's hook has checked in. */
+  private preflightActive(): boolean {
+    return this.prefs().preflightEnabled && hookConnected(this.hook, this.now());
+  }
+
   private view(
     r: AgentRecord,
     s: AgentStats | undefined,
     host: { ask: number; deny: number },
+    preflightActive: boolean,
   ): AgentView {
     const preflight = r.preflightHost === 'claude-code';
     const v: AgentView = {
@@ -1061,7 +1078,10 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
       edited: r.edited,
     };
     if (s?.lastSeenAt !== undefined) v.lastSeenAt = s.lastSeenAt;
-    if (r.preflightHost === 'claude-code') v.preflightHost = 'claude-code';
+    if (preflight) {
+      v.preflightHost = 'claude-code';
+      v.preflight = preflightActive ? 'active' : 'available';
+    }
     return v;
   }
 
