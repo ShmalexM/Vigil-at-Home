@@ -56,6 +56,7 @@ function fakeAi(opts: VigilAiOptions, calls: RunRequest<unknown>[]): VigilAi {
         systemPrompt: '',
         userPrompt: '',
         outcome: 'ok',
+        billed: true,
         usage: {
           inputTokens: 10,
           cachedInputTokens: 0,
@@ -177,7 +178,7 @@ describe('AiBridge explanations', () => {
       summary: 'An unsigned program ran from /tmp.',
     });
     expect(core.usage.report(1).totals.runs).toBe(1);
-    expect(ai.spentThisMonthUsd('claude')).toBeCloseTo(0.01);
+    expect(ai.spentThisMonthUsd()).toBeCloseTo(0.01);
   });
 
   it('uses the Claude plan only for an explanation the user asks for', async () => {
@@ -256,15 +257,37 @@ describe('AiBridge view', () => {
     expect(await ai.limits()).toEqual({
       plans: [],
       backgroundSharePercent: 10,
-      // Claude's own work always runs on an Anthropic key now, so the cap covers it.
-      caps: { api: 20, jev: 20, claude: 20 },
+      // One cap over every key; the runner decides which runs it counts.
+      capUsd: 20,
     });
   });
 
-  it('caps Codex runs on an OpenAI key too', async () => {
-    const { ai } = setup();
-    ai.setPrefs({ monthlyCapUsd: 20, codexUses: 'apiKey' });
-    expect((await ai.limits()).caps).toEqual({ api: 20, jev: 20, claude: 20, codex: 20 });
+  it('counts every key-billed run, Codex on an OpenAI key included, toward one cap', () => {
+    const { ai, store } = setup();
+    const run = (
+      id: string,
+      provider: 'codex' | 'jev' | 'claude',
+      costUsd: number | null,
+      billed?: boolean,
+    ) =>
+      store.addAiRun({
+        id,
+        at: NOW,
+        provider,
+        purpose: 'explain',
+        ok: true,
+        inputTokens: 1,
+        cachedInputTokens: 0,
+        outputTokens: 1,
+        costUsd,
+        ...(billed !== undefined ? { billed } : {}),
+      });
+    run('a', 'codex', 0.5, true);
+    run('b', 'jev', 0.25, true);
+    // A plan run's estimate and a ChatGPT plan run never count.
+    run('c', 'claude', 3, false);
+    run('d', 'codex', null);
+    expect(ai.spentThisMonthUsd()).toBeCloseTo(0.75);
   });
 });
 
