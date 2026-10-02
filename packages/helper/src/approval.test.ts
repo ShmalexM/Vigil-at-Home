@@ -76,5 +76,11 @@ describe('approvals', () => {
     );
     expect(() => approvalAppleScript("/tmp/x'; rm -rf /; '", 'a'.repeat(32), 'p')).toThrow();
     expect(() => approvalAppleScript('/tmp/x', 'zz; reboot', 'p')).toThrow();
+    // One password for several commands.
+    expect(approvalAppleScript('/h', ['a'.repeat(32), 'b'.repeat(32)], 'p')).toContain(
+      `'/h' approve ${'a'.repeat(32)} ${'b'.repeat(32)}"`,
+    );
+    expect(() => approvalAppleScript('/h', ['a'.repeat(32), 'zz; reboot'], 'p')).toThrow();
+    expect(() => approvalAppleScript('/h', [], 'p')).toThrow();
   });
 });
