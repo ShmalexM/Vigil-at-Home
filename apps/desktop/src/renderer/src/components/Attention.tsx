@@ -6,7 +6,7 @@ import { seenTimes, timeAgo } from '../format';
 import type { AlertView, WatchSummary } from '../../../shared/ipc';
 import { Segmented } from './ui';
 
-/** "Vigil is working": proof it is running, in one line. */
+/** Proof Vigil is running, in one line. */
 export function WatchLine({ watch }: { watch: WatchSummary }) {
   const parts = [
     `Checked ${watch.checkedToday.toLocaleString()} ${watch.checkedToday === 1 ? 'thing' : 'things'} today`,
@@ -16,12 +16,26 @@ export function WatchLine({ watch }: { watch: WatchSummary }) {
   return <span className="t-small watch-line">{parts.join(' · ')}</span>;
 }
 
-/** The headline when nothing needs the user. */
-export function WorkingHeadline() {
+/** The popover headline when every protection layer runs, worded like Home's. */
+export function WorkingHeadline({ needsYou }: { needsYou: number }) {
   return (
     <span className="row working">
       <CircleCheck size={16} />
-      <span className="t-h3">Vigil is working</span>
+      <span className="t-h3">
+        {needsYou === 0 ? 'Protection is on. Nothing needs you.' : 'Protection is on.'}
+      </span>
+    </span>
+  );
+}
+
+/** Needs you, kept apart from the protection level. */
+export function NeedsYouLine({ count }: { count: number }) {
+  return (
+    <span className="row needs-line">
+      <span className="count hot">{count}</span>
+      <span className="t-h3">
+        {count === 1 ? 'thing needs your decision' : 'things need your decision'}
+      </span>
     </span>
   );
 }
@@ -52,11 +66,14 @@ export function NoticedList({
   view,
   open,
   limit,
+  toggle = true,
 }: {
   alerts: readonly Alert[];
   view: AlertView;
   open: (id: string) => void;
   limit?: number;
+  /** Show the Show me less / more button. History always lists them, so it hides it. */
+  toggle?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   if (alerts.length === 0) return null;
@@ -79,13 +96,15 @@ export function NoticedList({
           <span className="count">{alerts.length}</span>
         </span>
         <span className="row" style={{ gap: 2 }}>
-          <button
-            type="button"
-            className="btn sm ghost"
-            onClick={() => void vigil.setAlertView(more ? 'less' : 'more')}
-          >
-            {more ? 'Show me less' : 'Show me more'}
-          </button>
+          {toggle && (
+            <button
+              type="button"
+              className="btn sm ghost"
+              onClick={() => void vigil.setAlertView(more ? 'less' : 'more')}
+            >
+              {more ? 'Show me less' : 'Show me more'}
+            </button>
+          )}
           <button
             type="button"
             className="btn sm ghost"

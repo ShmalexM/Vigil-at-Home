@@ -35,7 +35,7 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
         <Card>
           <SectionHead
             title="Alerts"
-            sub="Show me less lists only what needs your decision and folds the rest into one line. Show me more lists everything Vigil noticed and counts it on the menu-bar icon. What Vigil blocks is the same either way."
+            sub="Show me less keeps Home and the menu bar to what needs your decision, with everything Vigil only noticed in History. Show me more lists those on Home too and counts them on the menu-bar icon. What Vigil blocks is the same either way."
           />
           <div className="row spread">
             <span>How much to show</span>
@@ -48,7 +48,10 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
         <SectionHead title="About" />
         <dl className="kv">
           <dt>Version</dt>
-          <dd>{settings.version}</dd>
+          <dd>
+            {settings.version}
+            {settings.commit && <span className="mono"> ({settings.commit})</span>}
+          </dd>
           <dt>Updates</dt>
           <dd>
             <UpdatesRow />

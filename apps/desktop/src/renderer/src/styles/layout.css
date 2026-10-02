@@ -448,3 +448,22 @@ div.history-row:hover {
   cursor: pointer;
   margin-bottom: 8px;
 }
+
+/* Home's one quiet line for what Vigil only noticed, linking to History. */
+.noticed-hint {
+  gap: 6px;
+  padding: 2px 4px;
+  border: 0;
+  background: none;
+  color: var(--tx2);
+  text-align: left;
+  cursor: pointer;
+}
+.noticed-hint:hover {
+  color: var(--tx1);
+}
+
+/* Needs you, shown next to (never inside) the protection level. */
+.needs-line {
+  gap: 8px;
+}

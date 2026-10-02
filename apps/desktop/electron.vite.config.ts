@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'electron-vite';
@@ -7,8 +8,19 @@ import { defineConfig } from 'electron-vite';
 // (for example one that spawns its own binary) goes in `dependencies` and needs
 // externalizeDepsPlugin here.
 
+/** The commit being built, shown in Settings › About so a report names the exact build. */
+function buildCommit(): string {
+  const sha = process.env['GITHUB_SHA'];
+  if (sha) return sha.slice(0, 7);
+  try {
+    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim();
+  } catch {
+    return '';
+  }
+}
+
 export default defineConfig({
-  main: {},
+  main: { define: { __VIGIL_COMMIT__: JSON.stringify(buildCommit()) } },
   preload: {
     build: {
       rollupOptions: {

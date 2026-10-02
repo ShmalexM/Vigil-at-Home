@@ -5,7 +5,15 @@ import { useLive, vigil } from '../api';
 import { HoldButton } from '../components/HoldButton';
 import { useToast } from '../components/Toasts';
 import { Button, Card, Chip, SectionHead, SeverityMark, StatusMark } from '../components/ui';
-import { actorLabel, clock, describeAction, describeEvent, seenTimes, timeAgo } from '../format';
+import {
+  actorLabel,
+  clock,
+  describeAction,
+  describeEvent,
+  releaseFailed,
+  seenTimes,
+  timeAgo,
+} from '../format';
 import { ExcludeFromAlert } from '../components/ExcludeFromAlert';
 import { PageHead } from './AppShell';
 
@@ -111,7 +119,11 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
   const contained = alert.containment === 'active';
 
   const decide = async (verdict: 'malicious' | 'benign' | 'expected', release: boolean) => {
-    await vigil.decide(alert.id, { verdict, release });
+    const out = await vigil.decide(alert.id, { verdict, release });
+    if (release && !out.decision) {
+      toast({ text: releaseFailed(out), ms: 10000 });
+      return;
+    }
     toast({
       text: release
         ? 'Released and marked safe'
@@ -255,8 +267,13 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
                   size="sm"
                   kind="ghost"
                   onClick={async () => {
-                    await vigil.undoAction(r.id);
-                    toast({ text: `Undone: ${describeAction(r.action)}` });
+                    const out = await vigil.undoAction(r.id);
+                    toast({
+                      text:
+                        out.status === 'done'
+                          ? `Undone: ${describeAction(r.action)}`
+                          : `Couldn’t undo: ${describeAction(r.action)}. It’s still in force.`,
+                    });
                   }}
                 >
                   Undo

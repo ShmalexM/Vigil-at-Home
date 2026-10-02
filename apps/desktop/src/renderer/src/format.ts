@@ -148,3 +148,10 @@ export function seenTimes(a: Alert): string | undefined {
   const min = Math.max(1, Math.round((r.lastAt - a.createdAt) / 60_000));
   return `Seen ${r.count} times in ${min} min`;
 }
+
+/** What to say when the user asked to release an alert and the release didn't go through. */
+export function releaseFailed(a: Alert): string {
+  return a.containment === 'active'
+    ? 'Couldn’t release it, so it’s still blocked and still needs you.'
+    : 'Couldn’t finish releasing it, so it still needs you.';
+}

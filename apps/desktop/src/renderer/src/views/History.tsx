@@ -1,6 +1,8 @@
 import { useLive, vigil } from '../api';
+import { NoticedList } from '../components/Attention';
 import { Card, Chip, SeverityMark } from '../components/ui';
 import { actorLabel, describeRecord } from '../format';
+import { isNoticed } from '../../../shared/attention';
 import { PageHead } from './AppShell';
 import { DAYS, historyEntries, LIMIT, outcome, type Entry } from './history-entries';
 
@@ -21,7 +23,9 @@ function dayLabel(ts: number, now = Date.now()): string {
 export function HistoryView({ go }: { go: (r: string) => void }) {
   const [alerts] = useLive(() => vigil.listAlerts('resolved'));
   const [actions] = useLive(() => vigil.listActions());
+  const [open] = useLive(() => vigil.listAlerts('open'));
   if (!alerts || !actions) return null;
+  const noticed = (open ?? []).filter(isNoticed);
   const entries = historyEntries(alerts, actions);
   const days: { label: string; items: Entry[] }[] = [];
   for (const e of entries) {
@@ -37,7 +41,17 @@ export function HistoryView({ go }: { go: (r: string) => void }) {
         title="History"
         purpose={`What Vigil handled in the last ${DAYS} days. Nothing here needs you.`}
       />
-      {days.length === 0 && (
+      {noticed.length > 0 && (
+        <Card>
+          <NoticedList
+            alerts={noticed}
+            view="more"
+            toggle={false}
+            open={(id) => go(`alerts/${id}`)}
+          />
+        </Card>
+      )}
+      {days.length === 0 && noticed.length === 0 && (
         <Card>
           <span className="t-small">Nothing yet. Vigil lists what it handled here.</span>
         </Card>
