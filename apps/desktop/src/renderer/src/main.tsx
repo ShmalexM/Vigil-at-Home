@@ -51,7 +51,8 @@ function useTheme() {
       family ? root.style.setProperty(name, family) : root.style.removeProperty(name);
     font('--font-sans', appearance.uiFont && `${appearance.uiFont}, system-ui, sans-serif`);
     font('--font-mono', appearance.codeFont && `${appearance.codeFont}, ui-monospace, monospace`);
-    // Text size scales the main window only; the popover and popup keep their fitted sizes.
+    // Text size scales the main window's page here; the popover and popup are
+    // zoomed by the main process, which also grows their windows (windows.ts).
     if (surface !== 'popup' && surface !== 'popover') {
       root.style.zoom = String(appearance.uiFontSize / DEFAULT_UI_FONT_SIZE);
     }

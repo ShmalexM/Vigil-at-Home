@@ -266,12 +266,12 @@ describe('OnboardingService', () => {
     expect(mac.runs.filter((r) => r.includes('santactl'))).toHaveLength(2);
   });
 
-  it('needs a mode before finishing, and can be run again', async () => {
+  it('finishes without choosing an AI, and can be run again', async () => {
     const { svc } = service(fakeMac({}));
-    expect(() => svc.finish()).toThrow();
-    svc.setMode('cloud');
     svc.finish();
     expect(svc.finished()).toBe(true);
+    expect(svc.mode()).toBeUndefined();
+    svc.setMode('cloud');
     svc.restart();
     expect(svc.finished()).toBe(false);
     expect(svc.mode()).toBe('cloud');
