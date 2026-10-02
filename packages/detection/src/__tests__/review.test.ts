@@ -250,4 +250,28 @@ describe('rare built-in tool commands in the telemetry summary', () => {
       { program: '/bin/bash', example: 'bash ~/tmp/x.sh', count: 1 },
     ]);
   });
+
+  it("queues Vigil's own turn-down without the AI budget, once, and never turns a rule up", () => {
+    const { engine, pipeline } = withLiveAiRule();
+    const ask = { ruleId: 'ai-paste', to: 'shadow' as const, message: 'Marked safe 3 of 3.' };
+    const res = pipeline.suggestDemotion(ask, ['a1'])!;
+    expect(res).toMatchObject({ ok: true, status: 'awaiting_review' });
+    expect(pipeline.get(res.proposalId!)).toMatchObject({ provider: 'vigil', retireTo: 'shadow' });
+    expect(engine.modeOf(engine.getRule('ai-paste')!)).toBe('alert');
+    // One waiting is enough.
+    expect(pipeline.suggestDemotion(ask)).toBeUndefined();
+    // The user turned it down by hand first: approving can't raise it back.
+    engine._setMode('ai-paste', 'disabled');
+    expect(() => pipeline.approve(res.proposalId!, userOrigin('rules-screen'))).toThrow(/already/);
+    expect(engine.modeOf(engine.getRule('ai-paste')!)).toBe('disabled');
+  });
+
+  it('after the user says no, Vigil waits 30 days before asking again', () => {
+    const { pipeline } = withLiveAiRule();
+    const ask = { ruleId: 'ai-paste', to: 'shadow' as const, message: 'x' };
+    const res = pipeline.suggestDemotion(ask)!;
+    pipeline.reject(res.proposalId!, userOrigin('rules-screen'));
+    expect(pipeline.suggestDemotion(ask)).toBeUndefined();
+    expect(pipeline.suggestDemotion({ ...ask, ruleId: 'nope' })).toBeUndefined();
+  });
 });

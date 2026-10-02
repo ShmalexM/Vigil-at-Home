@@ -12,6 +12,7 @@ import {
   macosCoreRules,
   mergeRules,
   sqliteStores,
+  type DecisionResult,
   type Detection,
   type DetectionRule,
   type EventHistory,
@@ -233,12 +234,17 @@ export class Detector {
    * user-blocked list, and demotion of rules that keep being wrong. Returns
    * the Santa rule to add when the user confirmed it as malicious.
    */
-  learn(alertId: string, decision: UserDecision) {
+  learn(alertId: string, decision: UserDecision): DecisionResult & { suggested?: boolean } {
     const d = this.store.getAlertDetection(alertId) as Detection | undefined;
     if (!d) return {};
     const result = this.feedback.recordDecision(d, decision, userOrigin('alert'));
+    // A rule that keeps being wrong is only suggested for a quieter mode; the
+    // user approves it in Rules like any other suggested change.
+    const suggested = result.suggestDemotion
+      ? this.pipeline.suggestDemotion(result.suggestDemotion, [alertId])
+      : undefined;
     this.recount();
-    return result;
+    return { ...result, suggested: suggested?.ok === true };
   }
 
   /** Every rule the engine runs, with the mode it actually applies. */

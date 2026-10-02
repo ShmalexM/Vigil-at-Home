@@ -340,7 +340,7 @@ export interface RuleSuggestionView {
   /** Tuning: the exclusion it adds, in words. */
   exclusion?: string;
   /** Retire: the quieter mode. */
-  retireTo?: 'shadow' | 'disabled';
+  retireTo?: 'alert' | 'shadow' | 'disabled';
   /** New rule: the whole rule, for reading or copying into the editor. */
   ruleJson?: string;
   replay?: ReplayPreview;
