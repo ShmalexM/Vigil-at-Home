@@ -2,7 +2,7 @@ import type { Alert } from '@vigil/core';
 import { CircleCheck, Eye } from 'lucide-react';
 import { useState } from 'react';
 import { vigil } from '../api';
-import { timeAgo } from '../format';
+import { seenTimes, timeAgo } from '../format';
 import type { AlertView, WatchSummary } from '../../../shared/ipc';
 import { Segmented } from './ui';
 
@@ -109,7 +109,7 @@ export function NoticedList({
               <div className="col grow" style={{ gap: 2, minWidth: 0 }}>
                 <span className="row spread" style={{ gap: 8 }}>
                   <span className="ellipsis">{a.title}</span>
-                  <span className="t-small nowrap">{timeAgo(a.createdAt)}</span>
+                  <span className="t-small nowrap">{seenTimes(a) ?? timeAgo(a.createdAt)}</span>
                 </span>
                 <span className="t-small clamp-2" title={a.summary}>
                   {a.summary}

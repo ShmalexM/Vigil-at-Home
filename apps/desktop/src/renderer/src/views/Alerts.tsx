@@ -5,7 +5,7 @@ import { useLive, vigil } from '../api';
 import { HoldButton } from '../components/HoldButton';
 import { useToast } from '../components/Toasts';
 import { Button, Card, Chip, SectionHead, SeverityMark, StatusMark } from '../components/ui';
-import { actorLabel, clock, describeAction, describeEvent, timeAgo } from '../format';
+import { actorLabel, clock, describeAction, describeEvent, seenTimes, timeAgo } from '../format';
 import { ExcludeFromAlert } from '../components/ExcludeFromAlert';
 import { PageHead } from './AppShell';
 
@@ -93,6 +93,7 @@ function AlertRow({
         <span className="row t-small">
           <SeverityMark severity={alert.severity} />
           <span>· {timeAgo(alert.createdAt)}</span>
+          {seenTimes(alert) && <Chip>{seenTimes(alert)}</Chip>}
           {alert.containment === 'active' && <Chip tone="good">Blocked</Chip>}
           {alert.ai && <Chip tone="ai">AI read</Chip>}
         </span>
@@ -126,6 +127,7 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
       <Card>
         <div className="row">
           <SeverityMark severity={alert.severity} />
+          {seenTimes(alert) && <Chip>{seenTimes(alert)}</Chip>}
           {contained && <Chip tone="good">Blocked</Chip>}
           {alert.containment === 'released' && <Chip tone="fair">Released</Chip>}
           {alert.status === 'resolved' && <Chip>Resolved</Chip>}

@@ -62,5 +62,18 @@ export const Alert = z.object({
     .optional(),
   ai: AiAssessment.optional(),
   decision: UserDecision.optional(),
+  /**
+   * Set on alerts that may fold in identical repeats (see the app's
+   * AlertService): `key` is the evidence that must match exactly, `count`
+   * how many detections this row stands for, and `lastAt` the latest one.
+   * Every repeat's events stay in `eventIds`.
+   */
+  repeats: z
+    .object({
+      key: z.string(),
+      count: z.number().int().positive(),
+      lastAt: Timestamp,
+    })
+    .optional(),
 });
 export type Alert = z.infer<typeof Alert>;
