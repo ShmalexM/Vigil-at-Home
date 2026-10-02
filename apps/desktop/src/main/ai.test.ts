@@ -10,6 +10,7 @@ import { AiBridge, type KeySource } from './ai.js';
 import { DryRunExecutor } from './executor.js';
 import { VigilCore } from './service.js';
 import { sendTestAlert } from './test-alert.js';
+import { isNoticed } from '../shared/attention.js';
 import { makeExec, makeRule, memoryStore } from './testing.js';
 import type { ApiKeyProvider, SetupMode } from '../shared/setup.js';
 
@@ -270,7 +271,14 @@ describe('AiBridge view', () => {
 describe('AiBridge event labels', () => {
   const unmatched = { checked: 21, matches: [] };
 
-  function labelling(answer: (ids: string[]) => { labels: string[]; deferred: string[] }) {
+  function labelling(
+    answer: (ids: string[]) => { labels: string[]; deferred: string[] },
+    as: { label: 'unusual' | 'suspicious'; score: number; by: 'model' | 'jev' } = {
+      label: 'unusual',
+      score: 0,
+      by: 'model',
+    },
+  ) {
     const store = memoryStore();
     const core = new VigilCore(store, new DryRunExecutor(), true, () => NOW);
     const sent: string[][] = [];
@@ -294,10 +302,13 @@ describe('AiBridge event labels', () => {
                       ok: true as const,
                       labels: r.labels.map((id) => ({
                         eventId: id,
-                        label: 'unusual' as const,
-                        score: 0,
-                        reason: 'Local model hint: unusual',
-                        by: 'model' as const,
+                        label: as.label,
+                        score: as.score,
+                        reason:
+                          as.by === 'jev'
+                            ? 'Unsigned program reading browser data'
+                            : 'Local model hint: unusual',
+                        by: as.by,
                       })),
                       deferred: r.deferred,
                     };
@@ -362,6 +373,43 @@ describe('AiBridge event labels', () => {
     await ai.labelBatch(core.store);
     await ai.labelBatch(core.store);
     expect(sent).toEqual([events.map((e) => e.id), [events[1]!.id]]);
+  });
+
+  it('raises a quiet "worth a look" alert for a strong catch, never for a local hint', async () => {
+    const jev = labelling((ids) => ({ labels: ids, deferred: [] }), {
+      label: 'suspicious',
+      score: 0.9,
+      by: 'jev',
+    });
+    jev.ai.labelEventsFrom(jev.core);
+    const e = makeExec('/tmp/stealer');
+    jev.core.ingest(e, unmatched);
+    jev.core.events.flush();
+    await jev.ai.labelBatch(jev.core.store);
+    const [alert] = jev.core.store.listAlerts({});
+    expect(alert).toMatchObject({
+      ruleId: 'vigil.worth-a-look',
+      title: 'Worth a look: stealer',
+      severity: 'low',
+      notify: 'silent',
+      containment: 'none',
+      actionIds: [],
+    });
+    expect(alert!.summary).toBe(
+      'Unsigned program reading browser data. No rule matched this and nothing was blocked. Labelled by Jev.',
+    );
+    expect(isNoticed(alert!)).toBe(true);
+
+    const local = labelling((ids) => ({ labels: ids, deferred: [] }), {
+      label: 'suspicious',
+      score: 0,
+      by: 'model',
+    });
+    local.ai.labelEventsFrom(local.core);
+    local.core.ingest(makeExec('/tmp/stealer'), unmatched);
+    local.core.events.flush();
+    await local.ai.labelBatch(local.core.store);
+    expect(local.core.store.listAlerts({})).toEqual([]);
   });
 
   it('sends nothing when labelling is off', async () => {
