@@ -85,7 +85,7 @@ describe('AI rule suggestions in the app', () => {
 
     // Nothing is live until the user accepts.
     expect(detector.hasRule('ai-paste-site')).toBe(false);
-    ui.accept(s.id);
+    expect(await ui.accept(s.id)).toBe('unavailable');
     expect(detector.rules().find((r) => r.rule.id === 'ai-paste-site')?.mode).toBe('alert');
     expect(ui.view().pending).toHaveLength(0);
     expect(ui.view().recent[0]).toMatchObject({ status: 'approved', ruleName: 'Paste site' });
@@ -95,7 +95,7 @@ describe('AI rule suggestions in the app', () => {
     const db = new DatabaseSync(':memory:');
     const first = setup(answer, db);
     await first.detector.reviewRules({ force: true });
-    first.ui.accept(first.ui.view().pending[0]!.id);
+    await first.ui.accept(first.ui.view().pending[0]!.id);
     const again = setup(answer, db);
     expect(again.detector.hasRule('ai-paste-site')).toBe(true);
     expect(again.ui.view().review.lastOkAt).toBeDefined();
@@ -108,7 +108,7 @@ describe('AI rule suggestions in the app', () => {
     await detector.reviewRules({ force: true });
     const id = ui.view().pending[0]!.id;
     detector.syncHelper = async () => 'declined';
-    expect(await detector.approveProposal(id, 'block')).toBe('declined');
+    expect(await ui.accept(id, 'block')).toBe('declined');
     expect(detector.hasRule('ai-paste-site')).toBe(false);
     expect(detector.stores.rules.list().map((r) => r.id)).not.toContain('ai-paste-site');
     expect(ui.view().pending.map((p) => p.id)).toEqual([id]);

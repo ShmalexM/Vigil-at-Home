@@ -2,7 +2,7 @@ import { Check, RefreshCw, Sparkles, X } from 'lucide-react';
 import { useState } from 'react';
 import type { RuleSuggestionView, RuleSuggestionsView } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
-import { timeAgo } from '../format';
+import { helperNote, PASSWORD_CANCELLED, timeAgo } from '../format';
 import { ImpactSummary, ReplaySummary } from './RuleEditor';
 import { useToast } from './Toasts';
 import { Button, Card, Chip, SectionHead, SeverityMark } from './ui';
@@ -95,15 +95,20 @@ function Suggestion({ s, onDone }: { s: RuleSuggestionView; onDone: () => void }
   const [showJson, setShowJson] = useState(false);
   const fromVigil = s.provider === 'vigil';
   const accept = async () => {
-    await vigil.acceptRuleSuggestion(s.id);
-    toast({
-      text:
-        s.kind === 'new_rule'
-          ? `${s.ruleName} is on, in Alert mode`
-          : s.kind === 'retire'
-            ? `${s.ruleName} turned down to ${RETIRE_TO[s.retireTo ?? 'shadow']}`
-            : `${s.ruleName} updated`,
-    });
+    const { helper } = await vigil.acceptRuleSuggestion(s.id);
+    if (helper === 'declined') {
+      // Everything went back, so the suggestion is still here to accept later.
+      toast({ text: `${s.ruleName}: ${PASSWORD_CANCELLED}` });
+      onDone();
+      return;
+    }
+    const done =
+      s.kind === 'new_rule'
+        ? `${s.ruleName} is on, in Alert mode`
+        : s.kind === 'retire'
+          ? `${s.ruleName} turned down to ${RETIRE_TO[s.retireTo ?? 'shadow']}`
+          : `${s.ruleName} updated`;
+    toast({ text: `${done}.${helperNote(helper)}` });
     onDone();
   };
   const dismiss = async () => {
