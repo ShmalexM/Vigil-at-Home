@@ -71,6 +71,18 @@ export const Threshold = z.object({
 export type Threshold = z.infer<typeof Threshold>;
 
 /**
+ * Earlier steps that must have happened, in order, for the same key (for
+ * example the same downloaded app) within `windowSec` before the rule's own
+ * condition counts. The rule fires on the event that matches its condition.
+ */
+export const Sequence = z.object({
+  steps: z.array(z.object({ eventKinds: z.array(EventKind).min(1), condition: Condition })).min(1),
+  key: z.array(z.string()).min(1),
+  windowSec: z.number().int().positive(),
+});
+export type Sequence = z.infer<typeof Sequence>;
+
+/**
  * What a matching rule does.
  * - disabled: nothing.
  * - shadow: records the match for review; no alert, no popup, no block.
@@ -106,6 +118,7 @@ export const Rule = z.object({
   eventKinds: z.array(EventKind).min(1),
   condition: Condition,
   threshold: Threshold.optional(),
+  sequence: Sequence.optional(),
   /** Any match here suppresses the rule. AI tuning adds exclusions rather than editing the condition. */
   exclusions: z.array(Condition).default([]),
   /**
