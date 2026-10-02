@@ -221,6 +221,9 @@ export const PERSIST_WRITE = String.raw`((^|[\s;&|(/])(cp|mv|tee|ln|ditto|rsync|
 export const PERSIST_RES = [PERSIST_LAUNCHCTL, PERSIST_CRONTAB, PERSIST_WRITE];
 
 // --------------------------------------------------------------------- tamper
+/** A path to Vigil's or Santa's own files. */
+const GUARDED_PATH = String.raw`(Vigil\\? at\\? Home(\.app\b|/)|vigil-helper|com\.vigilathome|/var/db/santa|Santa\.app)`;
+
 /**
  * Stopping or editing Vigil or Santa, or switching off a macOS protection.
  * Matched case-insensitively; paths may escape their spaces (`Vigil\ at\ Home`).
@@ -234,19 +237,21 @@ export const TAMPER_RES_NOCASE = [
   String.raw`launchctl\s+(bootout|unload|remove|disable|kill)\b[^|;&]*(vigil|santa)`,
   // santactl adding an allow/remove rule.
   String.raw`santactl\s+rule\b[^|;&]*--(allow|remove|whitelist)`,
-  // spctl turning Gatekeeper off (or adding a blanket allowance).
-  String.raw`spctl\s+--(master-disable|global-disable|disable|add)\b`,
+  // spctl turning Gatekeeper off (or adding a blanket allowance), or csrutil
+  // disabling System Integrity Protection.
+  String.raw`(spctl\s+--(master-disable|global-disable|disable|add)|csrutil\s+disable)\b`,
   // tccutil resetting privacy — but a per-app reset of some other app is fine;
   // resetting All, or an app whose id names vigil/santa, is not.
   String.raw`tccutil\s+reset\b(?!\s+["']?\w+["']?\s+["']?(?![\w.-]*(vigil|santa))[\w-]+\.[\w.-]+["']?(\s|$|[;&|)]))`,
-  // csrutil disabling System Integrity Protection.
-  String.raw`csrutil\s+disable\b`,
   // editing or deleting Vigil's or Santa's own files: the verb or redirect and
   // a path to them on one line, at most 160 characters apart (which also keeps
   // the gap linear). "Vigil at Home" counts only as a path (`…/Vigil at Home/`,
   // `Vigil at Home.app`), so prose in a heredoc, a note or an agent's
-  // transcript that names Vigil does not.
-  String.raw`(\b(rm|mv|cp|sqlite3|truncate|chmod|chown|tee)\b|>)[^|;&>\n]{0,160}?(Vigil\\? at\\? Home(\.app\b|/)|vigil-helper|com\.vigilathome|/var/db/santa|Santa\.app)`,
+  // transcript that names Vigil does not. sqlite3 opening a database read-only
+  // (`-readonly`, `?mode=ro`) only reads it, like any other reader.
+  String.raw`(\b(rm|mv|cp|truncate|chmod|chown|tee)\b|\bsqlite3\b(?![^|;&>\n]{0,160}(\s-readonly\b|[?&]mode=ro\b))|>)[^|;&>\n]{0,160}?${GUARDED_PATH}`,
+  // ...unless it writes a copy or its output there.
+  String.raw`\bsqlite3\b[^|;&>\n]{0,160}?([\s"']\.(output|once|save|backup|clone|excel)|\bvacuum\s+into)\b[^|;&>\n]{0,160}?${GUARDED_PATH}`,
   // turning the firewall off, or unloading Santa's system extension.
   String.raw`(socketfilterfw\b[^|;&]{0,64}--setglobalstate\s+off\b|--unload-system-extension\b|systemextensionsctl\s+uninstall\b[^|;&]{0,128}(santa|vigil))`,
   // telling Vigil or Santa to quit over AppleScript.

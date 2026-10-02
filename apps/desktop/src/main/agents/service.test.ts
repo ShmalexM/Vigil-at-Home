@@ -16,6 +16,7 @@ import type { AgentIdentityInput, EventOfKind, PreflightRequest } from '@vigil/c
 import {
   PREFLIGHT_PROBING_RULE_ID,
   PREFLIGHT_SOCKET_RULE_ID,
+  type PsRow,
   type UserOrigin,
 } from '@vigil/detection';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -348,6 +349,39 @@ describe('AgentService: recording tool requests', () => {
     expect(
       agents.handleBridge({ v: 1, method: 'hello', host: 'claude-code', hookVersion: '1' }),
     ).toEqual({ v: 1, ok: true });
+  });
+
+  it('files a request under its agent when the hook asks before the sensors report it', async () => {
+    let rows: PsRow[] = [];
+    const readPs = vi.fn(async () => rows);
+    const { agents, clock, core, detector, store } = setup({ readPs });
+    await agents.start();
+    // `claude -p` starts and calls a tool at once: ps lists it, the sensors haven't yet.
+    rows = [
+      { pid: 7000, ppid: 1, startedAt: 1, path: '/bin/zsh', args: ['zsh'] },
+      { pid: 7001, ppid: 7000, startedAt: 2, path: CLAUDE, args: ['claude', '-p', 'hi'] },
+    ];
+    clock.t += 10_000;
+    const reply = agents.handleBridge(request({ ppid: 7001, tool: 'Read', filePath: '/tmp/x' }));
+    // The answer goes out at once; filing waits for ps.
+    expect(reply).toEqual({ v: 1, decision: 'none' });
+    await vi.waitFor(() => expect(readPs).toHaveBeenCalledTimes(2));
+    await settle();
+    core.events.flush();
+    const tag = detector.tracker.lookup(7001)?.tag;
+    expect(tag).toMatchObject({ id: 'claude-code', depth: 0 });
+    const [stored] = store.sessionEvents(tag!.session, 10, { kind: 'agent.tool_request' });
+    expect(stored?.event).toMatchObject({ tool: 'Read', agent: { session: tag!.session } });
+
+    // Another miss right after doesn't read ps again: it is filed as it came.
+    agents.handleBridge(request({ ppid: 7999, hookSession: 'h9' }));
+    await settle();
+    expect(readPs).toHaveBeenCalledTimes(2);
+    // A request ps already knows doesn't either.
+    clock.t += 10_000;
+    agents.handleBridge(request({ ppid: 7000 }));
+    await settle();
+    expect(readPs).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import {
   newId,
+  type AgentTag,
   type AgentToolRequestEvent,
   type PreflightReply,
   type PreflightRequest,
@@ -297,6 +298,11 @@ export class Detector {
     const detections = this.engine.check(event);
     const reply = decide(detections, (id) => this.engine.getRule(id)?.name ?? id);
     return { reply, event, detections };
+  }
+
+  /** The agent session a running process belongs to, if the tracker knows it. */
+  agentOf(pid: number): AgentTag | undefined {
+    return this.tracker.lookup(pid)?.tag;
   }
 
   /**
