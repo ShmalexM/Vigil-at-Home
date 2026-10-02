@@ -4,7 +4,7 @@ import { useLive, vigil } from '../api';
 import { HoldButton } from '../components/HoldButton';
 import { Shield } from '../components/Shield';
 import { Button, Chip, IconButton, SeverityMark, StatusMark } from '../components/ui';
-import { describeAction, headline, timeAgo } from '../format';
+import { describeAction, headline, releaseFailed, timeAgo } from '../format';
 
 /**
  * The always-on-top detection popup. It appears without taking focus, says
@@ -32,6 +32,7 @@ export function Popup({ initialId }: { initialId: string }) {
   const [detail] = useLive(() => vigil.getAlertDetail(id), id);
   const [status] = useLive(() => vigil.getStatus());
   const [open] = useLive(() => vigil.listAlerts('open'));
+  const [failure, setFailure] = useState<{ id: string; text: string }>();
 
   if (!detail) return null;
   const { alert, actions, proposals } = detail;
@@ -41,7 +42,11 @@ export function Popup({ initialId }: { initialId: string }) {
   const decided = !!alert.decision;
 
   const decide = async (verdict: 'malicious' | 'benign' | 'expected', release: boolean) => {
-    await vigil.decide(alert.id, { verdict, release });
+    const out = await vigil.decide(alert.id, { verdict, release });
+    if (release && !out.decision) {
+      setFailure({ id: alert.id, text: releaseFailed(out) });
+      return;
+    }
     await vigil.closePopup();
   };
   const blockIt = async () => {
@@ -138,6 +143,12 @@ export function Popup({ initialId }: { initialId: string }) {
             </span>
           </div>
         </div>
+      )}
+
+      {failure?.id === alert.id && (
+        <p role="alert" className="t-small" style={{ margin: 0, color: 'var(--poor)' }}>
+          {failure.text}
+        </p>
       )}
 
       <div className="popup-actions">
