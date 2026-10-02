@@ -13,7 +13,8 @@ Santa (Endpoint Security)
                          └── RuleStore (Vigil's rules)  │                 streams them to the app)
 osquery ── osqueryd.results.log ──► osqueryLineToEvents ┘   outbound connections, listening
                                                             ports, browser extensions, launchd
-                                                            and cron changes, every 10–300 s
+                                                            and cron changes, every 30–300 s
+osqueryd -S ◄── SensorHub: suspicious programs' sockets every 2 s for a minute
 ```
 
 ## Santa as the blocker

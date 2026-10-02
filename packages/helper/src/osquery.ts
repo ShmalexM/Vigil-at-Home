@@ -16,6 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
+import { release } from 'node:os';
 import {
   OSQUERY_CONFIG_PATH,
   OSQUERY_FLAGS_PATH,
@@ -24,6 +25,8 @@ import {
   QUERY_NAMES,
   osqueryConfig,
   osqueryFlags,
+  parseOsqueryJson,
+  type OsqueryConfigOptions,
 } from '@vigil/sensors';
 import type { System } from './system.js';
 
@@ -105,11 +108,36 @@ async function unload(sys: System, target: string): Promise<void> {
   }
 }
 
+/** Santa logs launch item changes through Endpoint Security from macOS 13 (Darwin 22). */
+export function santaReportsLaunchItems(darwinRelease: string = release()): boolean {
+  return Number(darwinRelease.split('.')[0]) >= 22;
+}
+
+/**
+ * Runs one query in osquery's shell mode (osqueryd -S, the same binary as
+ * osqueryi) for the closer look at a program's connections. Extensions and
+ * the event publishers stay off, so it starts quickly and leaves the daemon's
+ * database alone.
+ */
+export function osqueryShellRunner(
+  sys: System,
+): (sql: string) => Promise<Record<string, string>[] | undefined> {
+  return async (sql) => {
+    const r = await sys.run(
+      'osqueryd',
+      ['-S', '--json', '--disable_extensions', '--disable_events', '--logger_plugin=stdout', sql],
+      { timeoutMs: 5_000 },
+    );
+    return r.code === 0 ? parseOsqueryJson(r.stdout) : undefined;
+  };
+}
+
 export type OsqueryState = 'not-installed' | 'unchanged' | 'started' | 'restarted';
 
 export async function ensureOsquery(
   sys: System,
   p: OsqueryPaths = defaultOsqueryPaths(),
+  config: OsqueryConfigOptions = {},
 ): Promise<OsqueryState> {
   if (!existsSync(p.osqueryd)) return 'not-installed';
   mkdirSync(dirname(p.config), { recursive: true, mode: 0o755 });
@@ -124,7 +152,7 @@ export async function ensureOsquery(
   const current = read(p.plist);
   if (current !== undefined && !current.includes(MARKER)) backUpOnce(p.plist);
 
-  let changed = put(p.config, osqueryConfig());
+  let changed = put(p.config, osqueryConfig(config));
   changed = put(p.flags, osqueryFlags()) || changed;
   const plistChanged = put(p.plist, plist);
 
