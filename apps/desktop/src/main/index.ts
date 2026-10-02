@@ -109,7 +109,16 @@ function start(): void {
   const setup: OnboardingService = new OnboardingService({
     store,
     keys,
-    ...(demo ? { probe: demoProbe(), supported: true } : { probe: systemProbe() }),
+    ...(demo
+      ? { probe: demoProbe(), supported: true }
+      : {
+          probe: systemProbe(undefined, async () => {
+            if (await helper.ping()) return true;
+            // Just installed: connect now rather than on the next retry.
+            await helper.tryConnect();
+            return helper.ping();
+          }),
+        }),
     // Setup's Codex step can use the user's own Codex sign-in (set up below).
     ...(demo
       ? {}
