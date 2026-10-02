@@ -51,7 +51,7 @@ describe('connectors', () => {
     expect(readFileSync(join(dir, 'pack-secrets.json'), 'utf8')).not.toContain('secret-value-123');
 
     const tools = await c.tools('demo-issues');
-    expect(tools.map((t) => [t.name, t.readOnly])).toEqual([
+    expect(tools.map((t) => [t.name, t.readOnlyHint])).toEqual([
       ['list_issues', true],
       ['create_issue', false],
     ]);

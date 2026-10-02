@@ -60,8 +60,8 @@ export interface RemoteTool {
   title: string;
   description: string;
   inputSchema: Record<string, unknown>;
-  /** The server says the tool only reads. A hint from the server, not a promise. */
-  readOnly: boolean;
+  /** The server says the tool only reads. MCP hints are untrusted: shown, never used to skip a check. */
+  readOnlyHint: boolean;
 }
 
 /** What the rest of the pack needs; tests use a fake. */
@@ -205,7 +205,7 @@ export class Connectors implements ConnectorHub {
           title: t.title ?? t.annotations?.title ?? t.name,
           description: (t.description ?? '').slice(0, 1000),
           inputSchema: t.inputSchema as Record<string, unknown>,
-          readOnly: t.annotations?.readOnlyHint === true,
+          readOnlyHint: t.annotations?.readOnlyHint === true,
         });
       }
       cursor = page.nextCursor;

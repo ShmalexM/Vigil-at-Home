@@ -152,8 +152,10 @@ export interface ToolView {
   name: string;
   title: string;
   description: string;
-  /** Vigil's tools, and connector tools whose server marks them read-only. */
+  /** Only Vigil's own tools. A connector's tools never count as read-only. */
   readOnly: boolean;
+  /** The connector's server says the tool only reads: shown, never trusted. */
+  serverHint: boolean;
   choice: ToolChoice;
 }
 

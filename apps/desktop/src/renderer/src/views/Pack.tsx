@@ -359,9 +359,11 @@ function ActionCard({
   tools: ToolView[];
   reload: () => void;
 }) {
-  // Unknown tools (a connector not listed yet) count as able to change things.
-  const changes = (key: string) =>
-    !(tools.find((t) => t.key === key)?.readOnly ?? key.startsWith('vigil.'));
+  // Connector tools, listed or not, count as able to change things unless set to Always allow.
+  const changes = (key: string) => {
+    const t = tools.find((x) => x.key === key);
+    return t ? !t.readOnly && t.choice !== 'allow' : !key.startsWith('vigil.');
+  };
   const target = a.dogId ? dogs.get(a.dogId) : undefined;
   const breed = (a.dog?.breed ?? target?.breed) as Breed | undefined;
   const name = a.dog?.name ?? target?.name ?? 'a dog';
@@ -828,11 +830,7 @@ function DogEditor({
                     </span>
                     <span className="t-small muted ellipsis">{t.description}</span>
                   </span>
-                  {t.readOnly ? (
-                    <Chip>Reads only</Chip>
-                  ) : (
-                    <Chip tone="fair">Can change things</Chip>
-                  )}
+                  <ToolKind t={t} />
                 </label>
               ))}
             </div>
@@ -892,7 +890,9 @@ function ToolsTab({ pack, reload }: { pack: PackView; reload: () => void }) {
             <b>Your choice</b> for the tool comes next: Always ask, or Always allow.
           </li>
           <li>
-            <b>Tools that only read</b> go ahead.
+            <b>Vigil’s own tools</b> only read, so they go ahead. A connector’s tools count as able
+            to change things even when its server says they only read, because Vigil can’t check
+            that. Set one to Always allow if you trust it.
           </li>
           <li>
             Anything else follows the <b>permission mode</b> at the top of the page.
@@ -911,13 +911,26 @@ function ToolsTab({ pack, reload }: { pack: PackView; reload: () => void }) {
   );
 }
 
+/** Whether a tool only reads. Only Vigil's own tools are trusted to; a server's word is shown, not used. */
+function ToolKind({ t }: { t: ToolView }) {
+  if (t.readOnly) return <Chip>Reads only</Chip>;
+  if (t.serverHint) {
+    return (
+      <span title="The server says this tool only reads. Vigil can’t check that, so it still follows your permission mode.">
+        <Chip tone="fair">Server says it only reads</Chip>
+      </span>
+    );
+  }
+  return <Chip tone="fair">Can change things</Chip>;
+}
+
 function ToolRow({ t, reload }: { t: ToolView; reload: () => void }) {
   return (
     <div className="tool-row">
       <div className="col grow" style={{ gap: 1, minWidth: 0 }}>
         <span className="row" style={{ gap: 6 }}>
           <span className="t-h3">{t.title}</span>
-          {t.readOnly ? <Chip>Reads only</Chip> : <Chip tone="fair">Can change things</Chip>}
+          <ToolKind t={t} />
         </span>
         <span className="t-small muted clamp-2">{t.description}</span>
       </div>

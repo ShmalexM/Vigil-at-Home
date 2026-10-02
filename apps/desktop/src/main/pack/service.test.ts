@@ -30,14 +30,14 @@ const REMOTE: RemoteTool[] = [
     title: 'List issues',
     description: '',
     inputSchema: { type: 'object', properties: {} },
-    readOnly: true,
+    readOnlyHint: true,
   },
   {
     name: 'create_issue',
     title: 'Create issue',
     description: '',
     inputSchema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'] },
-    readOnly: false,
+    readOnlyHint: false,
   },
 ];
 
@@ -282,6 +282,69 @@ describe('the pack', () => {
     expect(judgeRuns).toHaveLength(2);
     for (const r of judgeRuns) expect(r).toMatchObject({ purpose: 'analyze' });
     for (const r of judgeRuns) expect(r.requestedByUser).toBeUndefined();
+  });
+
+  it('never trusts a server’s read-only hint: connector tools ask unless you set Always allow', async () => {
+    const { pack, handlers, connectorCalls } = setup();
+    const dog = pack.adopt({ ...CREATE, tools: ['github.list_issues'] } as never);
+    const tools = (await pack.view()).tools.find((t) => t.key === 'github.list_issues');
+    expect(tools).toMatchObject({ readOnly: false, serverHint: true });
+    handlers.push(async (req) => {
+      const call = tool(req, 'github_list_issues').run({});
+      await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+      expect((await pack.view()).approvals[0]).toMatchObject({ why: 'mode' });
+      pack.decideTool((await pack.view()).approvals[0]!.id, 'deny');
+      await call;
+      return { summary: 'x', findings: [] };
+    });
+    await pack.runDog(dog.id);
+    expect(connectorCalls).toEqual([]);
+
+    // Marked by the user, it runs without asking.
+    pack.setToolChoice('github.list_issues', 'allow');
+    handlers.push(async (req) => {
+      await tool(req, 'github_list_issues').run({});
+      return { summary: 'x', findings: [] };
+    });
+    await pack.runDog(dog.id);
+    expect(connectorCalls).toEqual([['github', 'list_issues', {}]]);
+  });
+
+  it('in Let AI decide, waits before giving a dog a connector tool its server calls read-only', async () => {
+    const { pack, handlers } = setup();
+    pack.setMode('auto');
+    handlers.push(() => ({
+      reply: 'ok',
+      actions: [{ ...CREATE, name: 'Lint', tools: ['github.list_issues'] }],
+    }));
+    await pack.say('x');
+    expect(pack.dogs().some((d) => d.name === 'Lint')).toBe(false);
+    expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'pending' });
+
+    pack.setToolChoice('github.list_issues', 'allow');
+    handlers.push(() => ({
+      reply: 'ok',
+      actions: [{ ...CREATE, name: 'Lint', tools: ['github.list_issues'] }],
+    }));
+    await pack.say('again');
+    expect(pack.dogs().some((d) => d.name === 'Lint')).toBe(true);
+  });
+
+  it('checks again right before the call: a tool switched off while you were asked does not run', async () => {
+    const { pack, handlers, connectorCalls } = setup();
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    let answer: unknown;
+    handlers.push(async (req) => {
+      const call = tool(req, 'github_create_issue').run({ title: 'x' });
+      await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+      pack.setToolChoice('github.create_issue', 'off');
+      pack.decideTool((await pack.view()).approvals[0]!.id, 'allow-once');
+      answer = await call;
+      return { summary: 'x', findings: [] };
+    });
+    await pack.runDog(dog.id);
+    expect(String(answer)).toContain('switched this tool off');
+    expect(connectorCalls).toEqual([]);
   });
 
   it('hides tools the user switched off', async () => {

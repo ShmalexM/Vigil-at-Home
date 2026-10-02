@@ -33,9 +33,9 @@ flowchart TD
   rules -- ask --> ask[You are asked]
   rules -- nothing --> choice{Your choice for the tool}
   choice -- Always ask --> ask
-  choice -- Always allow --> run[Runs]
-  choice -- Follow mode --> ro{Reads only?}
-  ro -- yes --> run
+  choice -- Always allow --> run[Checked again, then runs]
+  choice -- Follow mode --> ro{One of Vigil's own tools?}
+  ro -- yes, they only read --> run
   ro -- no --> mode{Permission mode}
   mode -- Ask for approval --> ask
   mode -- Full access --> run
@@ -45,6 +45,8 @@ flowchart TD
   ask -- Allow once --> run
   ask -- Deny or 10 minutes pass --> refused
 ```
+
+Right before any call goes out, Vigil checks again that the tool is still on, the dog still has it and isn't napping, the connector is still on, and no rule stops it. Waiting for you or for the AI can take minutes, and a change you made meanwhile wins.
 
 Vigil's rules come first in every mode, Full access included. Connector calls are checked as if a watched agent's hook had asked about an MCP tool (`mcp__<connector>__<tool>`, with the arguments as the command), so the agent pre-flight rules and your own tool rules from Agents › Tool policy apply. Nothing is recorded for these checks.
 
@@ -63,7 +65,7 @@ If only a Claude plan is set up, pack jobs can't run and Let AI decide asks abou
 
 Connectors are your own MCP servers, added on the Pack page under Tools and connectors: a command on this Mac (stdio) or a URL (streamable HTTP). Vigil is the MCP client; the model sees only the tools and their results, never a token. Environment values and bearer tokens are encrypted with the Keychain-backed key the API keys use, in `pack-secrets.json` (mode 0600). Vigil never reads another app's MCP settings.
 
-Each connector tool gets the same four choices as Vigil's own: Follow mode, Always ask, Always allow, Off. A server's read-only hint counts as reads only; it is the server's word, so a tool you don't trust that far can be set to Always ask.
+Each connector tool gets the same four choices as Vigil's own: Follow mode, Always ask, Always allow, Off. A connector tool never counts as read-only, even when its server marks it so: MCP treats those hints as untrusted, and Vigil can't check them. The page shows the server's claim ("Server says it only reads"), but the tool still follows your permission mode, and in Let AI decide a dog given one waits for your OK. Set a tool you trust to Always allow and it is treated as read-only from then on.
 
 Connections close after five idle minutes.
 

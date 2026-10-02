@@ -243,7 +243,10 @@ interface ToolEntry {
   name: string;
   title: string;
   description: string;
+  /** Only Vigil's own tools. A connector's tools never count as read-only. */
   readOnly: boolean;
+  /** The connector's server says the tool only reads. A hint, never trusted. */
+  serverHint: boolean;
   inputSchema: Record<string, unknown>;
 }
 
@@ -520,7 +523,7 @@ export class PackService {
             .map((t) => ({
               key: t.key,
               title: t.title,
-              readOnly: t.readOnly,
+              readOnly: this.treatedAsReadOnly(t.key),
               description: t.description.slice(0, 200),
             })),
         },
@@ -581,7 +584,7 @@ export class PackService {
     if (Object.keys(dog).length) action.dog = dog;
     const before = action.dogId ? (dogs.find((d) => d.id === action.dogId)?.tools ?? []) : [];
     const added = (dog.tools ?? []).filter((k) => !before.includes(k));
-    const grantsWrite = added.some((k) => !this.entry(k)?.readOnly);
+    const grantsWrite = added.some((k) => !this.treatedAsReadOnly(k));
     if (gateAction(this.mode(), a.kind, grantsWrite) === 'ask') {
       return {
         ...action,
@@ -712,6 +715,7 @@ export class PackService {
       title: t.title,
       description: t.description,
       readOnly: true,
+      serverHint: true,
       inputSchema: t.inputSchema,
     }));
   }
@@ -739,6 +743,11 @@ export class PackService {
     });
   }
 
+  /** Vigil's own tools, and connector tools the user set to Always allow. */
+  private treatedAsReadOnly(key: string): boolean {
+    return !!this.entry(key)?.readOnly || this.choiceOf(key) === 'allow';
+  }
+
   private choiceOf(key: string): z.infer<typeof ToolChoice> {
     return this.choices()[key] ?? 'auto';
   }
@@ -752,6 +761,7 @@ export class PackService {
       title: t.title,
       description: t.description,
       readOnly: t.readOnly,
+      serverHint: t.serverHint,
       choice: this.choiceOf(t.key),
     }));
   }
@@ -798,23 +808,11 @@ export class PackService {
     ctx: { requestedByUser: boolean; used: string[] },
   ): Promise<unknown> {
     const argText = clip(JSON.stringify(redactValue(args, {})), 4000);
-    let rules: { decision: 'deny' | 'ask' | 'none'; reason?: string } = { decision: 'none' };
-    if (t.source !== 'vigil') {
-      const r = this.o.preflight({
-        v: 1,
-        method: 'preflight.check',
-        host: 'claude-code',
-        tool: `mcp__${t.source}__${t.name}`.slice(0, 128),
-        // Rules see the arguments as sent; the user sees them redacted.
-        command: clip(JSON.stringify(args), 4000),
-      });
-      rules = { decision: r.decision, ...(r.reason ? { reason: r.reason } : {}) };
-    }
     let decision = gateTool({
       mode: this.mode(),
       choice: this.choiceOf(t.key),
       readOnly: t.readOnly,
-      rules,
+      rules: this.rulesFor(t, args),
     });
     if (decision.kind === 'judge') {
       this.setMood(dog.id, 'thinking', `Checking whether ${t.title} is safe`);
@@ -828,6 +826,10 @@ export class PackService {
         return 'Not run: the person said no to this call. Carry on without it.';
       }
     }
+    // A wait for the user or the judge can be long: check again right before
+    // the call that nothing has since switched it off or a rule now stops it.
+    const stop = this.recheck(dog, t, args);
+    if (stop) return `Not run: ${stop}`;
     ctx.used.push(t.key);
     const vigil = t.source === 'vigil';
     this.setMood(
@@ -846,6 +848,38 @@ export class PackService {
     } finally {
       this.setMood(dog.id, 'thinking', 'Thinking');
     }
+  }
+
+  /** What Vigil's rules say about a connector call. Vigil's own tools have none. */
+  private rulesFor(
+    t: ToolEntry,
+    args: Record<string, unknown>,
+  ): { decision: 'deny' | 'ask' | 'none'; reason?: string } {
+    if (t.source === 'vigil') return { decision: 'none' };
+    const r = this.o.preflight({
+      v: 1,
+      method: 'preflight.check',
+      host: 'claude-code',
+      tool: `mcp__${t.source}__${t.name}`.slice(0, 128),
+      // Rules see the arguments as sent; the user sees them redacted.
+      command: clip(JSON.stringify(args), 4000),
+    });
+    return { decision: r.decision, ...(r.reason ? { reason: r.reason } : {}) };
+  }
+
+  /** Why a call must not go ahead now, or undefined. Checked right before dispatch. */
+  private recheck(dog: Dog, t: ToolEntry, args: Record<string, unknown>): string | undefined {
+    const current = this.dogs().find((d) => d.id === dog.id);
+    if (!current || !current.tools.includes(t.key)) return 'this dog no longer has that tool.';
+    if (!current.enabled) return `${current.name} is napping.`;
+    if (this.choiceOf(t.key) === 'off') return 'you switched this tool off.';
+    if (t.source !== 'vigil') {
+      const c = this.o.connectors.list().find((x) => x.id === t.source);
+      if (!c?.enabled) return `${t.sourceName} is switched off.`;
+    }
+    const rules = this.rulesFor(t, args);
+    if (rules.decision === 'deny') return rules.reason ?? 'a Vigil rule stops this call.';
+    return undefined;
   }
 
   private async judge(
@@ -868,7 +902,8 @@ export class PackService {
           name: t.name,
           from: t.sourceName,
           description: t.description.slice(0, 600),
-          serverSaysReadOnly: t.readOnly,
+          // The server's own word, which may be wrong or a lie.
+          serverSaysReadOnly: t.serverHint,
         },
         arguments: args,
       },
@@ -1030,7 +1065,10 @@ function remoteEntry(id: string, name: string, t: RemoteTool): ToolEntry {
     name: t.name,
     title: t.title,
     description: t.description,
-    readOnly: t.readOnly,
+    // MCP tool hints come from the server, so they are never trusted: a
+    // connector tool counts as able to change things unless the user marks it.
+    readOnly: false,
+    serverHint: t.readOnlyHint,
     inputSchema: t.inputSchema,
   };
 }

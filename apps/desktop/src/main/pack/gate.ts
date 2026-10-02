@@ -6,8 +6,9 @@
 //   2. Vigil's rules say stop: refused. Rules say ask: the user is asked.
 //      This holds in every mode, Full access included.
 //   3. The user's own choice for the tool: always ask, or always allow.
-//   4. Tools that only read (Vigil's own, and connector tools their server
-//      marks read-only) go ahead.
+//   4. Vigil's own tools, which only read, go ahead. A connector's tools
+//      never count as read-only, whatever their server says (MCP hints are
+//      untrusted): they follow the mode unless the user set Always allow.
 //   5. Otherwise the mode decides: Ask for approval asks; Full access goes
 //      ahead; Let AI decide asks the user's AI, and anything it doesn't rate
 //      low risk (or can't rate) is asked.
