@@ -161,7 +161,13 @@ export function lintRule(rule: DetectionRule, opts: LintOptions = {}): LintResul
     if (!hasSpecificTest(x))
       errors.push('an exclusion must name something specific, or it would hide everything');
   }
+  for (const st of rule.sequence?.steps ?? []) {
+    lintCondition(st.condition, errors, lists, warnings);
+    if (!hasSpecificTest(st.condition))
+      errors.push('each step of a sequence must test something specific');
+  }
   const extraFields = [
+    ...(rule.sequence?.key ?? []),
     ...(rule.threshold?.groupBy ?? []),
     ...(rule.dedupe?.key ?? []),
     ...(rule.santa ? [rule.santa.from] : []),

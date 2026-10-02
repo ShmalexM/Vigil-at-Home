@@ -21,6 +21,20 @@ const COMPUTED: Record<string, FieldGetter> = {
   'process.name': (e) => ('process' in e ? basename(e.process?.path) : undefined),
   'process.parentName': (e) => ('process' in e ? basename(e.process?.parentPath) : undefined),
   'process.commandLine': (e) => ('process' in e ? e.process?.args?.join(' ') : undefined),
+  /**
+   * The download a process comes from: the nearest downloaded ancestor, or the
+   * process itself when it carries the quarantine flag. Chain rules key on it.
+   */
+  'process.downloadRoot': (e) => {
+    const p = 'process' in e ? e.process : undefined;
+    return p?.downloadedAncestor?.path ?? (p?.quarantine ? p.path : undefined);
+  },
+  /** The signature of that download (see process.downloadRoot). */
+  'process.downloadRootSigning': (e) => {
+    const p = 'process' in e ? e.process : undefined;
+    if (p?.downloadedAncestor) return p.downloadedAncestor.signing;
+    return p?.quarantine ? p.signing : undefined;
+  },
   /** Last component of the event's `path` (file, persistence item, Santa-protected file). */
   pathName: (e) => basename(read(e, 'path')),
   /** Last component of a persistence item's program. */
