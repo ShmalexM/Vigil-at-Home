@@ -421,6 +421,8 @@ export interface SettingsView {
   appearance: AppearanceSettings;
   dataDir: string;
   version: string;
+  /** Short commit hash of the build, '' when unknown. */
+  commit: string;
 }
 
 /** Return types, one per call. */
