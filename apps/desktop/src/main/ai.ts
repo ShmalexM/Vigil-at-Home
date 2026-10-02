@@ -35,7 +35,8 @@ import type { VigilCore } from './service.js';
 import { labelKey } from './label-filter.js';
 import { TEST_RULE } from './test-alert.js';
 import { WORTH_A_LOOK_RULE, WorthALook } from './worth-a-look.js';
-import { monthStart, type UsageService } from './usage.js';
+import { monthStart, sumCost, type UsageService } from './usage.js';
+import { isKeyBilled } from '../shared/usage.js';
 
 const KEY_PREFS = 'ai.prefs';
 const KEY_PINS = 'ai.pins';
@@ -229,7 +230,7 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
       getOpenAiApiKey: keyOf('openai'),
       ...(api ? { getApiKey: keyOf(api.provider) } : {}),
       ...(this.o.keys.list().typesafe ? { getJevApiKey: keyOf('typesafe') } : {}),
-      spentThisMonthUsd: async (p) => this.spentThisMonthUsd(p),
+      spentThisMonthUsd: async () => this.spentThisMonthUsd(),
       ...(this.o.isBusy ? { isBusy: this.o.isBusy } : {}),
     });
     this.instance = { ai, key };
@@ -249,12 +250,9 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
     }
   }
 
-  /** What Vigil's runs on one provider cost since the 1st, for the monthly cap. */
-  spentThisMonthUsd(provider: ProviderId): number {
-    return this.o.store
-      .listAiRuns(monthStart(this.now()))
-      .filter((r) => r.provider === provider)
-      .reduce((sum, r) => sum + (r.costUsd ?? 0), 0);
+  /** What Vigil charged to the user's keys since the 1st, all providers together, for the cap. */
+  spentThisMonthUsd(): number {
+    return sumCost(this.o.store.listAiRuns(monthStart(this.now())).filter(isKeyBilled));
   }
 
   /** Binaries recorded at setup, kept in the app's database. */
@@ -268,24 +266,14 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
     };
   }
 
-  /** Plan limits and key caps for the Usage page. */
+  /** Plan limits and the key cap for the Usage page. */
   async limits() {
     const snapshot = await this.ai().spending([]);
     const cap = this.prefs().monthlyCapUsd;
-    const settings = this.settings();
     return {
       plans: snapshot.plans,
       backgroundSharePercent: snapshot.limits.backgroundSharePercent,
-      ...(cap !== undefined
-        ? {
-            caps: {
-              api: cap,
-              jev: cap,
-              ...(settings.claude.mode === 'apiKey' ? { claude: cap } : {}),
-              ...(settings.codex.mode === 'apiKey' ? { codex: cap } : {}),
-            },
-          }
-        : {}),
+      ...(cap !== undefined ? { capUsd: cap } : {}),
     };
   }
 

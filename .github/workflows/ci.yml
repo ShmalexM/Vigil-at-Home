@@ -29,4 +29,7 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+        env:
+          # No Claude or Codex logins here, so the real-CLI plan usage test is safe to run.
+          VIGIL_TEST_REAL_CLI_USAGE: '1'
       - run: pnpm --filter @vigil/desktop build

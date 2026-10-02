@@ -37,14 +37,21 @@ export const PURPOSE_LABEL: Record<UsagePurpose, string> = {
 
 /**
  * Providers that can charge the user's own API key per call, so their cost is
- * a bill, not an estimate. Codex bills only on an OpenAI API key: those runs
- * carry a cost, while ChatGPT plan runs stay unpriced.
+ * a bill, not an estimate. Claude bills on an Anthropic key and Codex on an
+ * OpenAI key; their plan runs don't.
  */
-export const BILLED_PROVIDERS: readonly UsageProvider[] = ['codex', 'jev', 'api'];
+export const BILLED_PROVIDERS: readonly UsageProvider[] = ['claude', 'codex', 'jev', 'api'];
 
 /** Whether this run was charged to one of the user's keys. */
-export function isKeyBilled(run: { provider: UsageProvider; costUsd: number | null }): boolean {
-  if (run.provider === 'codex') return run.costUsd !== null;
+export function isKeyBilled(run: {
+  provider: UsageProvider;
+  costUsd: number | null;
+  billed?: boolean | undefined;
+}): boolean {
+  if (run.costUsd === null) return false;
+  if (run.billed !== undefined) return run.billed;
+  // Runs logged before `billed` existed.
+  if (run.provider === 'codex') return true;
   return run.provider === 'jev' || run.provider === 'api';
 }
 
@@ -66,6 +73,8 @@ export interface UsageRun {
    * and Jev billed. Null when the vendor gives no price (a ChatGPT plan).
    */
   costUsd: number | null;
+  /** Charged to one of the user's keys, as the runner decided. Absent on older runs. */
+  billed?: boolean | undefined;
 }
 
 export interface UsageTotals {
@@ -147,18 +156,25 @@ export interface PlanLimitsView {
   windows: LimitWindowView[];
 }
 
-/** What an API key spent this calendar month, against its cap if the user set one. */
+/** What one provider charged to the user's key this calendar month. */
 export interface KeySpendView {
   provider: UsageProvider;
   spentUsd: number;
   runs: number;
-  capUsd?: number;
+}
+
+/** The one monthly cap on everything Vigil charges to the user's keys. */
+export interface KeyCapView {
+  capUsd: number;
+  spentUsd: number;
 }
 
 export interface UsageLimitsView {
   checkedAt: number;
   plans: PlanLimitsView[];
   keys: KeySpendView[];
+  /** Present when the user set a monthly cap. */
+  cap?: KeyCapView;
   /** Vigil's share of each plan window for background work, in percent. */
   backgroundSharePercent?: number;
 }
