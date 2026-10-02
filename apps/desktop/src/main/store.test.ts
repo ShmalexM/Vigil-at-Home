@@ -11,6 +11,35 @@ import { Store, eventViewsQuery } from './db/store.js';
 import { makeExec, makeRule, memoryStore } from './testing.js';
 
 describe('Store', () => {
+  it('nests transactions as savepoints and rolls back only the inner one', () => {
+    const store = memoryStore();
+    const a = makeExec();
+    const b = makeExec();
+    store.tx(() => {
+      store.insertEvent(a);
+      expect(() =>
+        store.tx(() => {
+          store.insertEvent(b);
+          throw new Error('inner');
+        }),
+      ).toThrow('inner');
+      store.insertEvents([{ event: b }]);
+    });
+    expect(store.getEvents([a.id, b.id]).map((e) => e.id)).toEqual([a.id, b.id]);
+  });
+
+  it('recovers from a transaction left open outside tx', () => {
+    const db = new DatabaseSync(':memory:');
+    const store = new Store(db);
+    const a = makeExec();
+    db.exec('BEGIN');
+    store.insertEvent(a);
+    const b = makeExec();
+    expect(() => store.insertEvents([{ event: b }])).not.toThrow();
+    expect(db.isTransaction).toBe(false);
+    expect(store.getEvents([a.id, b.id])).toHaveLength(2);
+  });
+
   it('round-trips events, rules and settings', () => {
     const s = memoryStore();
     const e = makeExec();

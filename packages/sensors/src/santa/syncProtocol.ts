@@ -21,6 +21,8 @@ export type RulePolicy =
   | 'SILENT_BLOCKLIST'
   | 'SILENT_GUI_BLOCKLIST'
   | 'SILENT_TTY_BLOCKLIST'
+  /** Santa decides by running the rule's cel_expr (Santa 2025.8 and later). */
+  | 'CEL'
   | 'REMOVE';
 
 export const RULE_TYPES: readonly RuleType[] = [
@@ -37,6 +39,8 @@ export interface SantaRule {
   rule_type: RuleType;
   custom_msg?: string;
   custom_url?: string;
+  /** For policy CEL: the expression Santa evaluates at each launch. */
+  cel_expr?: string;
   event_detail_button_label?: string;
 }
 

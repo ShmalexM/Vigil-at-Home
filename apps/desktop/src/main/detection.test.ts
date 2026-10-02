@@ -93,6 +93,50 @@ describe('Detector', () => {
     expect(core.rules().find((r) => r.rule.id === 'known-bad-hash')?.rule.mode).toBe('alert');
   });
 
+  it('hands the helper the rules it can block with, and what they need', async () => {
+    const { core, popups } = setup();
+    core.detector!.stores.lists.add('known_bad_sha256', BAD, { source: 'test', updatedAt: 1 });
+    await core.handleEvent(exec('/Users/you/Downloads/evil', BAD));
+    await core.decide(popups[0]!, {
+      verdict: 'benign',
+      release: true,
+      remember: true,
+      scope: 'this_binary',
+    });
+    const set = core.detector!.helperRules();
+    expect(set.rules.map((r) => r.id)).toContain('known-bad-hash');
+    expect(set.rules.every((r) => r.mode === 'block')).toBe(true);
+    expect(set.lists['known_bad_sha256']).toEqual([BAD]);
+    expect(set.selfPaths).toEqual(['/Applications/Vigil at Home.app']);
+    // The user's "this is fine" reaches the helper, so it stops blocking it too.
+    expect(set.exceptions.length).toBeGreaterThan(0);
+    core.setRuleMode('known-bad-hash', 'alert');
+    expect(core.detector!.helperRules().rules.map((r) => r.id)).not.toContain('known-bad-hash');
+  });
+
+  it('keeps agent and pre-flight rules, and rules it can’t honour exceptions for, in the app', () => {
+    const { core } = setup();
+    // Even turned to block, an agent rule needs the app's agent tracker or tool requests.
+    core.setRuleMode('agent-secret-upload', 'block');
+    const ruleIds = () => core.detector!.helperRules().rules.map((r) => r.id);
+    expect(core.rules().find((r) => r.rule.id === 'preflight-secret-exfil')?.rule.mode).toBe(
+      'block',
+    );
+    expect(ruleIds()).toContain('known-bad-hash');
+    expect(
+      ruleIds().filter((id) => id.startsWith('agent-') || id.startsWith('preflight-')),
+    ).toEqual([]);
+    // An exception the helper can't check (it never sees an agent's tag) would make the
+    // helper block what the app lets through, so that rule stays in the app.
+    core.detector!.stores.exceptions.add({
+      id: 'ex-agent',
+      ruleId: 'known-bad-hash',
+      match: { 'process.sha256': BAD, 'process.agent.id': 'claude-code' },
+      createdAt: 1,
+    });
+    expect(ruleIds()).not.toContain('known-bad-hash');
+  });
+
   it('refreshes threat feeds on the scheduler and survives being offline', async () => {
     const { core, fetches } = setup();
     core.start();

@@ -315,6 +315,23 @@ export function throughSensors(e: SensorEvent, opts: SensorOptions = {}): Sensor
       ]);
       break;
     case 'persistence':
+      // Santa (macOS 13+) reports the launch item as it is added, with the
+      // process that added it; osquery's launchd query sees the plist later.
+      if (e.process && e.mechanism !== 'cron')
+        lines.push([
+          'santa',
+          santaLine(e.ts, {
+            action: e.change === 'removed' ? 'LAUNCH_ITEM_REMOVE' : 'LAUNCH_ITEM_ADD',
+            item_type: e.mechanism === 'launch_daemon' ? 'DAEMON' : 'AGENT',
+            item_path: e.path,
+            exec_path: e.program,
+            event_pid: e.process.pid,
+            event_ppid: e.process.ppid,
+            event_processpath: e.process.path,
+            event_uid: e.process.uid ?? 501,
+            event_user: 'sam',
+          }),
+        ]);
       lines.push([
         'osquery',
         osqueryLine(e.ts, QUERY_NAMES.launchd, {

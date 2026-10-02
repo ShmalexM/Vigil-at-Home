@@ -125,6 +125,9 @@ function fieldsRead(c: Condition, out: Set<string>): void {
  * must leave no trace (engine.check), so the parts that act or remember are out.
  */
 function lintPreflight(rule: DetectionRule, errors: string[], warnings: string[]): void {
+  // Tool requests are only ever checked, and a check never moves a chain on.
+  if (rule.sequence?.steps.some((st) => st.eventKinds.includes(TOOL_REQUEST)))
+    errors.push(`a sequence step cannot be an ${TOOL_REQUEST}; checking a request moves no chain`);
   if (!rule.eventKinds.includes(TOOL_REQUEST)) return;
   if (rule.eventKinds.every((k) => k === TOOL_REQUEST)) {
     const read = new Set<string>(rule.dedupe?.key ?? []);
@@ -145,6 +148,8 @@ function lintPreflight(rule: DetectionRule, errors: string[], warnings: string[]
     errors.push('pre-flight rules decide ask or deny; they cannot run actions');
   if (rule.threshold)
     errors.push('pre-flight rules decide each request on its own; they cannot use a threshold');
+  if (rule.sequence)
+    errors.push('pre-flight rules decide each request on its own; they cannot use a sequence');
   if (usesFirstSeen(rule.condition) || rule.exclusions.some(usesFirstSeen))
     errors.push('pre-flight rules cannot use firstSeen; checking a request learns nothing');
   if (rule.santa) errors.push('pre-flight rules cannot add Santa rules');
@@ -217,7 +222,13 @@ export function lintRule(rule: DetectionRule, opts: LintOptions = {}): LintResul
     if (!hasSpecificTest(x))
       errors.push('an exclusion must name something specific, or it would hide everything');
   }
+  for (const st of rule.sequence?.steps ?? []) {
+    lintCondition(st.condition, errors, lists, warnings);
+    if (!hasSpecificTest(st.condition))
+      errors.push('each step of a sequence must test something specific');
+  }
   const extraFields = [
+    ...(rule.sequence?.key ?? []),
     ...(rule.threshold?.groupBy ?? []),
     ...(rule.dedupe?.key ?? []),
     ...(rule.santa ? [rule.santa.from] : []),

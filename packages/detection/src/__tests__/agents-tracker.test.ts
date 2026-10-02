@@ -861,3 +861,87 @@ describe('agent tracker and a slow ps', () => {
     expect(t.lookup(pid)?.tag).toBeUndefined();
   });
 });
+
+describe('agent tracker and the ancestry the sensor hub fills in', () => {
+  // The helper's sensor hub (packages/sensors enrich.ts) names a launch's
+  // ancestors from the launches it saw: basenames, nearest first, at most four,
+  // the same shape the tracker uses.
+
+  it('keeps what the hub says when the tracker never saw the parent', () => {
+    const { t } = tracker();
+    const git = t.observe(
+      exec(
+        proc({
+          path: '/usr/bin/git',
+          pid: 4200,
+          ppid: 4199,
+          ancestors: ['zsh', 'login', 'Terminal'],
+        }),
+      ),
+    ) as ExecEvent;
+    expect(git.process.ancestors).toEqual(['zsh', 'login', 'Terminal']);
+    // The tracker remembers it for later events the hub sent without it, and for children.
+    const open = t.observe(
+      fileOpen(proc({ path: '/usr/bin/git', pid: 4200, ppid: 4199 }), '/tmp/x'),
+    );
+    expect(procOf(open)?.ancestors).toEqual(['zsh', 'login', 'Terminal']);
+    const child = t.observe(
+      exec(proc({ path: '/usr/libexec/git-core/git-remote-https', pid: 4201, ppid: 4200 })),
+    ) as ExecEvent;
+    expect(child.process.ancestors).toEqual(['git', 'zsh', 'login', 'Terminal']);
+  });
+
+  it('keeps what the hub says when the two disagree', () => {
+    const { launch } = tracker();
+    const terminal = launch(TERMINAL, 1);
+    const zsh = launch('/bin/zsh', terminal.process.pid);
+    // The hub saw this pid run something else (say, a re-exec Vigil missed).
+    const git = launch('/usr/bin/git', zsh.process.pid, { ancestors: ['bash', 'Terminal'] });
+    expect(git.process.ancestors).toEqual(['bash', 'Terminal']);
+    // Nothing the tracker knows takes away what a sensor said on a later event.
+    const { t } = tracker();
+    const known = t.observe(exec(proc({ path: '/usr/bin/ssh', pid: 4300, ppid: 1 }))) as ExecEvent;
+    expect(known.process.ancestors).toBeUndefined();
+    const open = t.observe(
+      fileOpen(proc({ path: '/usr/bin/ssh', pid: 4300, ppid: 1, ancestors: ['launchd'] }), '/x'),
+    );
+    expect(procOf(open)?.ancestors).toEqual(['launchd']);
+  });
+
+  it('carries the hub’s chain further up when the tracker knows more of it (ps)', () => {
+    const { t } = tracker();
+    // Claude Code started before Vigil, so only ps knows it.
+    t.seed([{ pid: 4400, ppid: 600, startedAt: T0 - 60_000, path: CLAUDE_BIN }]);
+    const sh = t.observe(
+      exec(proc({ path: '/bin/zsh', pid: 4401, ppid: 4400, args: ['zsh', '-c', 'cat x'] })),
+    ) as ExecEvent;
+    expect(sh.process.ancestors).toEqual(['2.0.14']);
+    expect(sh.process.agent).toMatchObject({ id: 'claude-code', depth: 1 });
+    // The hub saw the shell start, but not Claude Code: it names only the shell.
+    const cat = t.observe(
+      exec(proc({ path: '/bin/cat', pid: 4402, ppid: 4401, ancestors: ['zsh'] })),
+    ) as ExecEvent;
+    expect(cat.process.ancestors).toEqual(['zsh', '2.0.14']);
+    expect(cat.process.agent).toMatchObject({ id: 'claude-code', depth: 2 });
+  });
+
+  it('returns the same event when the hub already said everything', () => {
+    const { t, launch } = tracker();
+    const terminal = launch(TERMINAL, 1);
+    const zsh = launch('/bin/zsh', terminal.process.pid);
+    const e = exec(
+      proc({ path: '/usr/bin/true', pid: 4500, ppid: zsh.process.pid, ancestors: ['zsh'] }),
+    );
+    // The tracker knows ['zsh', 'Terminal'], which carries the hub's chain on.
+    expect((t.observe(e) as ExecEvent).process.ancestors).toEqual(['zsh', 'Terminal']);
+    const full = exec(
+      proc({
+        path: '/usr/bin/true',
+        pid: 4501,
+        ppid: zsh.process.pid,
+        ancestors: ['zsh', 'Terminal'],
+      }),
+    );
+    expect(t.observe(full)).toBe(full);
+  });
+});

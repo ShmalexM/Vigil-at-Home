@@ -43,14 +43,25 @@ export const QUERY_NAMES = {
 } as const;
 
 export interface OsqueryConfigOptions {
-  /** Seconds between connection snapshots. Short-lived connections between runs are missed. */
+  /**
+   * Seconds between connection snapshots. Short-lived connections between
+   * runs are missed; programs worth a closer look get a 2 s check of their own
+   * (osquery/burst.ts), so this can stay slow.
+   */
   networkIntervalSeconds?: number;
   persistenceIntervalSeconds?: number;
+  /**
+   * Santa reports launch agents and daemons as they are added (macOS 13 and
+   * later), so osquery's launchd query is only a safety net there and runs
+   * every 5 minutes instead of every minute.
+   */
+  santaReportsLaunchItems?: boolean;
 }
 
 export function osqueryConfig(opts: OsqueryConfigOptions = {}): string {
-  const net = opts.networkIntervalSeconds ?? 10;
+  const net = opts.networkIntervalSeconds ?? 30;
   const persist = opts.persistenceIntervalSeconds ?? 60;
+  const launchd = opts.santaReportsLaunchItems ? persist * 5 : persist;
   const config = {
     options: {
       host_identifier: 'uuid',
@@ -96,7 +107,7 @@ export function osqueryConfig(opts: OsqueryConfigOptions = {}): string {
         query:
           'SELECT path, name, label, program, program_arguments, run_at_load, keep_alive FROM launchd ' +
           "WHERE path NOT LIKE '/System/%';",
-        interval: persist,
+        interval: launchd,
         description: 'Launch agents and daemons outside the read-only system volume',
       },
       // Logs every row on every run, even when nothing else changed: proof

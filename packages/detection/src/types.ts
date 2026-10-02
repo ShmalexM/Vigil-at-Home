@@ -85,6 +85,22 @@ export const Condition: z.ZodType<Condition> = z.lazy(() =>
 export const DetectionRule = CoreRule.extend({
   eventKinds: z.array(DetectionEventKind).min(1),
   condition: Condition,
+  /** Steps that must come first for the same key (see core's Sequence). */
+  sequence: z
+    .object({
+      steps: z
+        .array(
+          z
+            .object({ eventKinds: z.array(DetectionEventKind).min(1), condition: Condition })
+            .strict(),
+        )
+        .min(1)
+        .max(4),
+      key: z.array(FieldPath).min(1).max(4),
+      windowSec: z.number().int().min(1).max(86_400),
+    })
+    .strict()
+    .optional(),
   /** Any exclusion matching stops the rule firing. AI tuning adds these. */
   exclusions: z.array(Condition).max(50).default([]),
   /** Plain-language reasons for the popup, rendered locally with no AI. `{{field.path}}` is filled from the event. */

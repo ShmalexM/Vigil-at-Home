@@ -81,6 +81,38 @@ describe('pre-flight rules', () => {
     );
   });
 
+  it('cannot chain requests, and no chain can step on one', () => {
+    const step = (eventKinds: string[], field: string) => ({
+      steps: [{ eventKinds, condition: { field, op: 'contains', value: '.ssh/id_' } }],
+      key: ['agent.session'],
+      windowSec: 600,
+    });
+    // A check never moves a chain on, so these could never fire.
+    expect(pre({ sequence: step(['agent.tool_request'], 'command') }).errors).toEqual([
+      'a sequence step cannot be an agent.tool_request; checking a request moves no chain',
+      'pre-flight rules decide each request on its own; they cannot use a sequence',
+    ]);
+    expect(pre({ sequence: step(['file'], 'path') }).errors).toContain(
+      'pre-flight rules decide each request on its own; they cannot use a sequence',
+    );
+    const onLaunch = lint({
+      id: 'exec-after-request',
+      condition: { field: 'process.name', op: 'eq', value: 'curl' },
+      sequence: { ...step(['agent.tool_request'], 'command'), key: ['process.agent.session'] },
+    });
+    expect(onLaunch.errors).toEqual([
+      'a sequence step cannot be an agent.tool_request; checking a request moves no chain',
+    ]);
+    // Chains of launches and file reads are fine.
+    expect(
+      lint({
+        id: 'exec-after-read',
+        condition: { field: 'process.name', op: 'eq', value: 'curl' },
+        sequence: { ...step(['file'], 'path'), key: ['process.agent.session'] },
+      }).errors,
+    ).toEqual([]);
+  });
+
   it('know the tool request fields', () => {
     const fields = [
       'tool',

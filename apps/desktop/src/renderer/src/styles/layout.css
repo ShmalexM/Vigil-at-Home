@@ -411,3 +411,18 @@ body.transparent {
 .level-rules p {
   margin: 0;
 }
+
+/* ---------------------------------------------------------------- "it's working" and Noticed */
+.working {
+  gap: 6px;
+  color: var(--good);
+}
+.working .t-h3 {
+  color: var(--tx0);
+}
+.watch-line {
+  color: var(--tx2);
+}
+.noticed .list .list-row {
+  padding: 8px 12px;
+}

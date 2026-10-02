@@ -3,9 +3,11 @@ import {
   AgentTracker,
   DetectionEngine,
   compileAgentMatchers,
+  macosCoreRules,
   memoryStores,
   type DetectionRuleInput,
 } from '@vigil/detection';
+import { ProcessEnricher } from '@vigil/sensors';
 import { describe, expect, it } from 'vitest';
 import { slimForStorage } from './event-slim.js';
 
@@ -99,6 +101,96 @@ describe('slimForStorage', () => {
     const fired = (e: SensorEvent) =>
       new DetectionEngine(rules, memoryStores()).evaluate(e).map((d) => d.match.ruleId);
     expect(fired(live)).toEqual(['office-shell']);
+    expect(fired(stored)).toEqual(fired(live));
+  });
+
+  it('keeps what chain rules read, so a stored download chain replays like the live one', () => {
+    // The helper's sensor hub fills in the tree (parentPath, ancestors and the
+    // downloaded ancestor); the app's tracker comes after it.
+    const hub = new ProcessEnricher();
+    const t = new AgentTracker({ matcher: () => compileAgentMatchers([]) });
+    const app = '/Volumes/Free Game/Free Game.app/Contents/MacOS/Free Game';
+    const cookies = '/Users/you/Library/Application Support/Google/Chrome/Default/Cookies';
+    const raw: SensorEvent[] = [
+      {
+        id: 'g',
+        ts: 1000,
+        source: 'santa',
+        kind: 'process.exec',
+        process: {
+          pid: 700,
+          ppid: 1,
+          path: app,
+          signing: 'adhoc',
+          quarantine: { originUrl: 'https://games.example/free-game.dmg' },
+        },
+      },
+      {
+        id: 's',
+        ts: 1100,
+        source: 'santa',
+        kind: 'process.exec',
+        process: {
+          pid: 701,
+          ppid: 700,
+          path: '/bin/sh',
+          signing: 'apple',
+          args: ['sh', '-c', 'x'],
+        },
+      },
+      {
+        id: 'c',
+        ts: 1200,
+        source: 'santa',
+        kind: 'process.exec',
+        process: { pid: 702, ppid: 701, path: '/bin/cp', signing: 'apple', args: ['cp', cookies] },
+      },
+      {
+        id: 'r',
+        ts: 1300,
+        source: 'santa',
+        kind: 'file',
+        op: 'open',
+        path: cookies,
+        process: { pid: 702, path: '/bin/cp' },
+      },
+      {
+        id: 'u',
+        ts: 1400,
+        source: 'santa',
+        kind: 'process.exec',
+        process: { pid: 703, ppid: 701, path: '/usr/bin/curl', signing: 'apple' },
+      },
+      {
+        id: 'n',
+        ts: 1500,
+        source: 'osquery',
+        kind: 'network.connection',
+        direction: 'outbound',
+        protocol: 'tcp',
+        remoteAddress: '198.51.100.23',
+        remotePort: 443,
+        process: { pid: 703, path: '/usr/bin/curl' },
+      },
+    ];
+    const live = raw.map((e) => t.observe(hub.enrich(e)));
+    const curl = live.at(-1)!;
+    expect(curl.kind === 'network.connection' && curl.process).toMatchObject({
+      parentPath: '/bin/sh',
+      ancestors: ['sh', 'Free Game'],
+      downloadedAncestor: { path: app, signing: 'adhoc' },
+    });
+    const stored = live.map((e) => JSON.parse(JSON.stringify(slimForStorage(e, false))));
+    // The tree's names go, and what the chain rule and parentName read stays.
+    expect(stored.at(-1)).not.toHaveProperty('process.ancestors');
+    expect(stored.at(-1)).toMatchObject({
+      process: { parentPath: '/bin/sh', downloadedAncestor: { path: app } },
+    });
+    const fired = (events: SensorEvent[]) => {
+      const engine = new DetectionEngine(macosCoreRules, memoryStores());
+      return events.flatMap((e) => engine.evaluate(e).map((d) => d.match.ruleId));
+    };
+    expect(fired(live)).toContain('untrusted-download-collect-then-connect');
     expect(fired(stored)).toEqual(fired(live));
   });
 

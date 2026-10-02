@@ -201,6 +201,9 @@ describe('AgentService: recording tool requests', () => {
       title: expect.stringMatching(/^Stopped: /),
     });
     expect(popups).toEqual([]);
+    // No popup, but a stopped exfiltration is critical: it is under Needs you and on
+    // the badge, even in the default "Show me less" view.
+    expect(core.status()).toMatchObject({ needsYou: 1, noticed: 0, badge: 1 });
     // The alert's own match is the only one for that request: none counted twice.
     expect(store.ruleMatchCounts(0).get('preflight-secret-exfil')).toBe(2);
 

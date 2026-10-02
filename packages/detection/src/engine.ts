@@ -48,6 +48,13 @@ interface CompiledRule {
   dedupeKey: FieldGetter[];
   dedupeWindowMs: number;
   santaFrom: FieldGetter | undefined;
+  sequence:
+    | {
+        steps: { kinds: Set<string>; condition: CompiledCondition }[];
+        key: FieldGetter[];
+        windowMs: number;
+      }
+    | undefined;
 }
 
 /** Candidate dedupe keys when a rule names none: the first one present on the event wins. */
@@ -90,6 +97,16 @@ export function compileRule(
       dedupeKey: (rule.dedupe?.key ?? []).map(compileField),
       dedupeWindowMs: (rule.dedupe?.windowSec ?? defaultDedupeWindowSec) * 1000,
       santaFrom: rule.santa ? compileField(rule.santa.from) : undefined,
+      sequence: rule.sequence
+        ? {
+            steps: rule.sequence.steps.map((st) => ({
+              kinds: new Set<string>(st.eventKinds),
+              condition: compileCondition(st.condition, scopePrefix),
+            })),
+            key: rule.sequence.key.map(compileField),
+            windowMs: rule.sequence.windowSec * 1000,
+          }
+        : undefined,
     };
   } catch (err) {
     throw new RuleCompileError(rule.id, (err as Error).message);
@@ -160,6 +177,8 @@ export class DetectionEngine {
   private learnByKind = new Map<DetectionEventKind, FirstSeenSpec[]>();
   private readonly safety: SafetyFloor;
   private readonly thresholds = new WindowMap();
+  /** Chain progress per rule and key: how many steps are done, and when the first was. */
+  private readonly chains = new Map<string, { done: number; start: number }>();
   private readonly dedupe = new Map<string, number>();
   private readonly learningUntil: number;
   private readonly defaultDedupeWindowSec: number;
@@ -239,7 +258,9 @@ export class DetectionEngine {
     this.byKind = new Map();
     this.learnByKind = new Map();
     for (const c of this.byId.values()) {
-      for (const k of c.rule.eventKinds) {
+      const kinds = new Set(c.rule.eventKinds);
+      for (const st of c.rule.sequence?.steps ?? []) for (const k of st.eventKinds) kinds.add(k);
+      for (const k of kinds) {
         let list = this.byKind.get(k);
         if (!list) this.byKind.set(k, (list = []));
         list.push(c);
@@ -273,7 +294,9 @@ export class DetectionEngine {
    * Evaluate without leaving a trace: no history, no baseline learning, no
    * dedupe or threshold state, no rule statistics. The pre-flight path uses
    * it, so asking about a tool call many times changes nothing. Each mode is
-   * the one `evaluate` would apply; threshold rules never match here.
+   * the one `evaluate` would apply; threshold rules never match here, and a
+   * chain rule matches only once its earlier steps are already done (the
+   * check never advances a chain).
    */
   check(e: DetectionEvent): Detection[] {
     const out: Detection[] = [];
@@ -316,6 +339,15 @@ export class DetectionEngine {
     if (mode === 'disabled') return undefined;
     // A threshold needs counting, which is state.
     if (dry && rule.threshold) return undefined;
+    if (dry) {
+      // An event that only advances a chain's earlier steps can't match, and
+      // a dry check reads the chain's progress without moving it.
+      if (!rule.eventKinds.includes(e.kind)) return undefined;
+      if (c.sequence && !this.chainDone(c, e)) return undefined;
+    } else {
+      if (c.sequence && !this.chainReady(c, e)) return undefined;
+      if (!rule.eventKinds.includes(e.kind)) return undefined;
+    }
     if (!c.condition.test(e, this.state)) return undefined;
     if (c.exclusions.some((x) => x.test(e, this.state))) return undefined;
     if (this.isExcepted(rule.id, e)) return undefined;
@@ -421,6 +453,47 @@ export class DetectionEngine {
       }
     }
     return d;
+  }
+
+  /**
+   * Advances a chain rule's earlier steps on this event. True when every step
+   * is done for the event's key within the window, so the rule's own
+   * condition may be checked.
+   */
+  private chainReady(c: CompiledRule, e: DetectionEvent): boolean {
+    const seq = c.sequence!;
+    const k = keyOf(seq.key, e);
+    if (k === undefined) return false;
+    const ckey = `${c.rule.id}␞${k}`;
+    let st = this.chains.get(ckey);
+    if (st && e.ts - st.start > seq.windowMs) {
+      this.chains.delete(ckey);
+      st = undefined;
+    }
+    const done = st?.done ?? 0;
+    if (done >= seq.steps.length) return true;
+    const step = seq.steps[done]!;
+    if (step.kinds.has(e.kind) && step.condition.test(e, this.state)) {
+      this.chains.delete(ckey); // re-insert to keep recency order
+      this.chains.set(ckey, { done: done + 1, start: st?.start ?? e.ts });
+      if (this.chains.size > MAX_WINDOW_ENTRIES)
+        this.chains.delete(this.chains.keys().next().value!);
+    }
+    return false;
+  }
+
+  /**
+   * `chainReady` without changing anything: true when every earlier step is
+   * already done for the event's key within the window. It is what
+   * `chainReady` would answer for this event, since the event itself can
+   * only complete a step, never the rule.
+   */
+  private chainDone(c: CompiledRule, e: DetectionEvent): boolean {
+    const seq = c.sequence!;
+    const k = keyOf(seq.key, e);
+    if (k === undefined) return false;
+    const st = this.chains.get(`${c.rule.id}␞${k}`);
+    return !!st && e.ts - st.start <= seq.windowMs && st.done >= seq.steps.length;
   }
 
   private isExcepted(ruleId: string, e: DetectionEvent): boolean {

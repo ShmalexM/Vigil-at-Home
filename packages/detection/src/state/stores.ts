@@ -30,6 +30,8 @@ export interface ListStore {
   add(list: string, entry: string, meta: ListEntryMeta): void;
   names(): string[];
   size(list: string): number;
+  /** Every entry as stored (lower-cased; subnets as written), for copying a list elsewhere. */
+  entries(list: string): string[];
 }
 
 /**
@@ -117,8 +119,8 @@ export class MemoryBaselineStore implements BaselineStore {
 
 class IndicatorList {
   readonly exact = new Set<string>();
+  readonly cidrs: string[] = [];
   private blocks: BlockList | undefined;
-  private cidrCount = 0;
 
   add(raw: string): void {
     const entry = raw.trim().toLowerCase();
@@ -127,7 +129,7 @@ class IndicatorList {
     if (prefix !== undefined && addr && isIP(addr)) {
       this.blocks ??= new BlockList();
       this.blocks.addSubnet(addr, Number(prefix), isIP(addr) === 4 ? 'ipv4' : 'ipv6');
-      this.cidrCount++;
+      this.cidrs.push(entry);
       return;
     }
     this.exact.add(entry);
@@ -150,7 +152,7 @@ class IndicatorList {
   }
 
   get size(): number {
-    return this.exact.size + this.cidrCount;
+    return this.exact.size + this.cidrs.length;
   }
 }
 
@@ -174,6 +176,10 @@ export class MemoryListStore implements ListStore {
   }
   size(list: string): number {
     return this.lists.get(list)?.size ?? 0;
+  }
+  entries(list: string): string[] {
+    const l = this.lists.get(list);
+    return l ? [...l.exact, ...l.cidrs] : [];
   }
 }
 

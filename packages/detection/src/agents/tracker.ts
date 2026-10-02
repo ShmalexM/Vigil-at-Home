@@ -184,7 +184,7 @@ interface Node {
   psPath?: true;
   /** The launch event that last set its program, counted by `exec` (see `mark`). */
   seq?: number;
-  /** Program names of the parent, grandparent and so on, nearest first. */
+  /** Program names of the parent, grandparent and so on, nearest first (see mergeAncestors). */
   ancestors?: string[];
   /** The parent's tag when last known, used once the parent itself is forgotten. */
   parentTag?: AgentTag | undefined;
@@ -205,6 +205,21 @@ interface ShellWindow {
 function basename(p: string): string {
   const i = p.lastIndexOf('/');
   return (i === -1 ? p : p.slice(i + 1)).slice(0, MAX_NAME);
+}
+
+/**
+ * The ancestry to report: the sensor hub's when it has one, since it saw the
+ * launches itself; the tracker's when the hub had none (a parent that started
+ * before Vigil, found with `ps`), or when the tracker's carries on further up
+ * the same chain. Both are basenames, nearest first, at most four.
+ */
+function mergeAncestors(
+  sensor: string[] | undefined,
+  tracked: string[] | undefined,
+): string[] | undefined {
+  if (!sensor?.length) return tracked ?? sensor;
+  if (!tracked || tracked.length <= sensor.length) return sensor;
+  return sensor.every((a, i) => tracked[i] === a) ? tracked : sensor;
 }
 
 function childOf(t: AgentTag | undefined): AgentTag | undefined {
@@ -257,8 +272,9 @@ export class AgentTracker {
   }
 
   /**
-   * Learn from the event and return it with `process.ancestors` and
-   * `process.agent` filled in. The same object comes back when there is
+   * Learn from the event and return it with `process.agent` set and
+   * `process.ancestors` filled in where the sensor hub left it out or knew
+   * less (see mergeAncestors). The same object comes back when there is
    * nothing to add.
    */
   observe<E extends SensorEvent>(e: E): E {
@@ -448,6 +464,9 @@ export class AgentTracker {
       n.tag = this.resolve(n, identity, childOf(parent?.tag));
     }
 
+    // What the sensor hub knows of the chain is what its children will carry too.
+    const ancestors = mergeAncestors(p.ancestors, n.ancestors);
+    if (ancestors?.length) n.ancestors = ancestors;
     n.seq = ++this.execSeq;
 
     if (parent && this.opts.onCandidate && isShellCommand(n.name, p.args)) {
@@ -548,13 +567,24 @@ export class AgentTracker {
     const out: string[] = [];
     const seen: number[] = [n.pid];
     let pid = n.ppid;
+    let top: Node | undefined;
     while (out.length < MAX_ANCESTORS && pid !== undefined && pid > 0 && !seen.includes(pid)) {
       const a = this.peek(pid);
       if (!a) break;
       out.push(a.name);
       seen.push(pid);
+      top = a;
       pid = a.ppid;
     }
+    // The walk stopped below a parent Vigil no longer has (or never had): the
+    // ancestry the last process found had when it launched (often from the
+    // sensor hub) goes on top.
+    const looped = pid !== undefined && seen.includes(pid);
+    if (top?.ancestors && !looped)
+      for (const a of top.ancestors) {
+        if (out.length >= MAX_ANCESTORS) break;
+        out.push(a);
+      }
     if (out.length) n.ancestors = out;
     else delete n.ancestors;
   }
@@ -598,10 +628,12 @@ export class AgentTracker {
   private withTree<E extends SensorEvent>(
     e: E,
     tag: AgentTag | undefined,
-    ancestors: string[] | undefined,
+    tracked: string[] | undefined,
   ): E {
     const p = (e as { process?: ProcessRef }).process;
-    if (!p || (p.agent === tag && p.ancestors === ancestors)) return e;
+    if (!p) return e;
+    const ancestors = mergeAncestors(p.ancestors, tracked);
+    if (p.agent === tag && p.ancestors === ancestors) return e;
     const process: ProcessRef = { ...p };
     if (ancestors) process.ancestors = ancestors;
     else delete process.ancestors;

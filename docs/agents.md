@@ -74,6 +74,12 @@ on their own. Four of them (uploading credentials, paste-site uploads,
 tampering and keychain secrets) offer to pause the agent's child process,
 never the agent, and it is paused only when you approve.
 
+Agent and pre-flight rules always run in the app. The root helper runs
+block-mode rules on its own so blocks still happen while the app is closed,
+but only the app knows which processes belong to an agent, and tool requests
+come only to the app; so an agent rule set to Block acts while Vigil is open,
+and none of them become Santa launch rules.
+
 ## Pre-flight for Claude Code
 
 ### Set it up

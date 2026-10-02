@@ -4,7 +4,7 @@
  */
 export const LEVEL_RULES = {
   poor: 'A high or critical alert isn’t contained yet, or a protection layer that is installed has stopped.',
-  fair: 'An alert is waiting for your decision, or a protection layer is not installed or not working fully.',
+  fair: 'An alert is waiting for your decision, or a protection layer is not installed or not working fully. Things Vigil only noticed don’t count.',
   good: 'None of the above. Everything is running and nothing needs you.',
 } as const;
 

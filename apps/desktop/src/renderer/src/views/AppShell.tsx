@@ -83,8 +83,8 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
             >
               {n.icon}
               <span className="grow">{n.label}</span>
-              {n.id === 'alerts' && status && status.needsYou > 0 && (
-                <span className="count hot">{status.needsYou}</span>
+              {n.id === 'alerts' && status && status.badge > 0 && (
+                <span className="count hot">{status.badge}</span>
               )}
               {n.id === 'agents' && suggestions > 0 && (
                 <span className="count" title="Suggested agents waiting on you">

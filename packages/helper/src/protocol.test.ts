@@ -1,10 +1,38 @@
 import { describe, expect, it } from 'vitest';
+import { macosCoreRules } from '@vigil/detection';
 import { needsApproval, parseRequest, type HelperCommand } from './protocol.js';
 
 const req = (command: unknown, extra: object = {}) =>
   parseRequest(JSON.stringify({ id: 'r1', command, ...extra }));
 
 describe('request validation', () => {
+  it('accepts the helper rule set and list parts without asking for approval', () => {
+    const rule = macosCoreRules.find((r) => r.id === 'fake-password-prompt')!;
+    const sync = {
+      kind: 'detection.sync',
+      rules: [rule],
+      exceptions: [{ id: 'x', ruleId: '*', match: { 'process.path': '/a' }, createdAt: 1 }],
+      selfPaths: ['/Applications/Vigil at Home.app'],
+      lists: { known_bad_sha256: 'a'.repeat(64) },
+    };
+    const parsed = req(sync);
+    expect('command' in parsed && parsed.command.kind).toBe('detection.sync');
+    if ('command' in parsed) expect(needsApproval(parsed.command)).toBe(false);
+    expect(req({ ...sync, extra: 1 })).toHaveProperty('error');
+    expect(req({ ...sync, rules: [{ id: 'x' }] })).toHaveProperty('error');
+    expect(req({ ...sync, lists: { 'Bad Name': 'a'.repeat(64) } })).toHaveProperty('error');
+    const part = {
+      kind: 'detection.list.set',
+      list: 'known_bad_sha256',
+      digest: 'a'.repeat(64),
+      part: 0,
+      parts: 1,
+      entries: ['x'],
+    };
+    expect(req(part)).toHaveProperty('command');
+    expect(req({ ...part, entries: Array(1001).fill('x') })).toHaveProperty('error');
+  });
+
   it('accepts the core actions and the helper queries', () => {
     for (const command of [
       { kind: 'process.suspend', pid: 123, path: '/tmp/x' },
