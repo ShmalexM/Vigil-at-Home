@@ -64,7 +64,7 @@ export const Appearance = z.object({
   light: VariantTheme,
   dark: VariantTheme,
   contrast: z.number().int().min(0).max(100),
-  uiFontSize: z.number().int().min(11).max(16),
+  uiFontSize: z.number().int().min(11).max(26),
   uiFont: FontFamily,
   codeFont: FontFamily,
 }) satisfies z.ZodType<AppearanceSettings>;

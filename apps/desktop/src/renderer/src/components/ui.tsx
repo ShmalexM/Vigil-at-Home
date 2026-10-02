@@ -2,6 +2,7 @@ import { Check, Minus, X } from 'lucide-react';
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
 import type { Severity } from '@vigil/core';
 import { severityLabel } from '../format';
+import { onRovingKeyDown, rovingTabIndex } from './roving';
 
 type Kind = 'primary' | 'secondary' | 'ghost' | 'outline' | 'danger' | 'good';
 
@@ -141,13 +142,24 @@ export function Segmented<T extends string>({
   disabled?: boolean;
 }) {
   return (
-    <span className="seg" role="tablist" aria-label={label} aria-disabled={disabled || undefined}>
-      {options.map((o) => (
+    <span
+      className="seg"
+      role="tablist"
+      aria-label={label}
+      aria-disabled={disabled || undefined}
+      onKeyDown={onRovingKeyDown}
+    >
+      {options.map((o, i) => (
         <button
           key={o.value}
           type="button"
           role="tab"
           aria-selected={o.value === value}
+          tabIndex={rovingTabIndex(
+            o.value === value,
+            i,
+            options.some((x) => x.value === value),
+          )}
           disabled={disabled}
           onClick={() => onChange(o.value)}
         >

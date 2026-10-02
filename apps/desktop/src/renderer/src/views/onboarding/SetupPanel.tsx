@@ -1,10 +1,10 @@
 import { RefreshCw, SquareTerminal, Wrench } from 'lucide-react';
-import { useEffect, useState } from 'react';
-import type { SetupMode, SetupView } from '../../../../shared/setup';
+import { useState } from 'react';
+import type { SetupMode } from '../../../../shared/setup';
 import { vigil } from '../../api';
 import { Button, Card, SectionHead, Segmented } from '../../components/ui';
 import { ApiKeys } from './ApiKeys';
-import { StepCard, useSetupPolling } from './SetupWizard';
+import { StepCard, useSetupPolling, useSetupView } from './SetupWizard';
 import './onboarding.css';
 
 /**
@@ -12,10 +12,9 @@ import './onboarding.css';
  * where the AI runs, and API keys, without walking through setup again.
  */
 export function SetupPanel() {
-  const [view, setView] = useState<SetupView>();
+  const [view, setView, reload] = useSetupView();
   const [checking, setChecking] = useState(false);
-  useEffect(() => void vigil.getSetup().then(setView), []);
-  useSetupPolling(true, setView);
+  useSetupPolling(true, reload);
   if (!view) return null;
 
   const group = (g: 'protection' | 'ai') => view.steps.filter((s) => s.group === g);
