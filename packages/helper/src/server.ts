@@ -11,9 +11,11 @@ import { chmodSync, chownSync, rmSync } from 'node:fs';
 import type { SensorEvent } from '@vigil/sensors';
 import { parseRequest, type HelperResponse } from './protocol.js';
 import type { Executor } from './executor.js';
+import type { HelperRan } from './fastpath.js';
 import { ActionError } from './commands/errors.js';
 
-const MAX_LINE = 64 * 1024;
+// Large enough for detection.sync with a full rule set; still bounded.
+const MAX_LINE = 1024 * 1024;
 const RECENT_EVENTS = 2000;
 
 export interface HelperServerOptions {
@@ -28,7 +30,8 @@ export class HelperServer {
   private server: Server | undefined;
   private readonly subscribers = new Set<Socket>();
   private readonly connections = new Set<Socket>();
-  private readonly recent: SensorEvent[] = [];
+  private readonly recent: string[] = [];
+  private readonly recentIds: string[] = [];
 
   constructor(private readonly opts: HelperServerOptions) {}
 
@@ -51,11 +54,19 @@ export class HelperServer {
     rmSync(this.opts.socketPath, { force: true });
   }
 
-  /** Fan a sensor event out to subscribed connections and keep it for late subscribers. */
-  publish(event: SensorEvent): void {
-    this.recent.push(event);
-    if (this.recent.length > RECENT_EVENTS) this.recent.shift();
-    const line = JSON.stringify({ type: 'event', event }) + '\n';
+  /**
+   * Fan a sensor event out to subscribed connections and keep it for late
+   * subscribers, with whatever the helper's own rules already did about it.
+   */
+  publish(event: SensorEvent, ran: HelperRan[] = []): void {
+    const line =
+      JSON.stringify(ran.length ? { type: 'event', event, ran } : { type: 'event', event }) + '\n';
+    this.recent.push(line);
+    this.recentIds.push(event.id);
+    if (this.recent.length > RECENT_EVENTS) {
+      this.recent.shift();
+      this.recentIds.shift();
+    }
     for (const s of this.subscribers) {
       // A subscriber that stops reading must not make the helper buffer forever.
       if (s.writableLength > 8 * 1024 * 1024) s.destroy();
@@ -100,10 +111,9 @@ export class HelperServer {
     }
     if (req.command.kind === 'events.subscribe') {
       const since = req.command.since;
-      const start = since ? this.recent.findIndex((e) => e.id === since) + 1 : this.recent.length;
+      const start = since ? this.recentIds.indexOf(since) + 1 : this.recent.length;
       this.send(sock, { id: req.id, ok: true, result: { subscribed: true } });
-      for (const e of this.recent.slice(start))
-        sock.write(JSON.stringify({ type: 'event', event: e }) + '\n');
+      for (const line of this.recent.slice(start)) sock.write(line);
       this.subscribers.add(sock);
       return;
     }

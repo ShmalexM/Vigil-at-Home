@@ -10,6 +10,7 @@ import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import type { SensorEvent } from '@vigil/sensors';
 import type { HelperCommand, HelperResponse } from './protocol.js';
+import type { HelperRan } from './fastpath.js';
 import { approvalAppleScript } from './approval.js';
 import { defaultPaths } from './config.js';
 
@@ -39,7 +40,7 @@ export function osascriptApprover(helperExecutable = defaultPaths().helperExecut
 export class HelperClient {
   private buf = '';
   private readonly pending = new Map<string, (r: HelperResponse) => void>();
-  private readonly listeners = new Set<(e: SensorEvent) => void>();
+  private readonly listeners = new Set<(e: SensorEvent, ran: HelperRan[]) => void>();
 
   private constructor(
     private readonly sock: Socket,
@@ -69,7 +70,8 @@ export class HelperClient {
     this.sock.end();
   }
 
-  onEvent(fn: (e: SensorEvent) => void): () => void {
+  /** `ran` lists what the helper's own rules already did about the event. */
+  onEvent(fn: (e: SensorEvent, ran: HelperRan[]) => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
   }
@@ -105,14 +107,15 @@ export class HelperClient {
     while ((nl = this.buf.indexOf('\n')) >= 0) {
       const line = this.buf.slice(0, nl);
       this.buf = this.buf.slice(nl + 1);
-      let msg: { type?: string; event?: SensorEvent; id?: string } | undefined;
+      let msg: { type?: string; event?: SensorEvent; ran?: HelperRan[]; id?: string } | undefined;
       try {
         msg = JSON.parse(line);
       } catch {
         continue;
       }
       if (msg?.type === 'event') {
-        for (const fn of this.listeners) fn(msg.event as SensorEvent);
+        const ran = Array.isArray(msg.ran) ? msg.ran : [];
+        for (const fn of this.listeners) fn(msg.event as SensorEvent, ran);
         continue;
       }
       const id = msg?.id;

@@ -45,6 +45,7 @@ const UsageRunRow = z.object({
  */
 export class Store {
   private readonly statements = new Map<string, StatementSync>();
+  private txDepth = 0;
 
   constructor(private readonly db: DatabaseSync) {
     db.exec(`
@@ -79,15 +80,34 @@ export class Store {
     }
   }
 
+  /**
+   * Runs `fn` in a transaction. A call inside another tx becomes a savepoint,
+   * so nesting is safe. A transaction left open by code outside tx (a bare
+   * BEGIN) is committed and logged first, so one leak can't make every later
+   * write fail with "cannot start a transaction within a transaction" and
+   * lose alerts. `fn` must be synchronous.
+   */
   tx<T>(fn: () => T): T {
-    this.db.exec('BEGIN');
+    if (this.txDepth === 0 && this.db.isTransaction) {
+      console.warn('[store] a transaction was left open outside Store.tx; committing it');
+      this.db.exec('COMMIT');
+    }
+    const name = `tx${this.txDepth}`;
+    this.db.exec(`SAVEPOINT ${name}`);
+    this.txDepth++;
     try {
       const out = fn();
-      this.db.exec('COMMIT');
+      if (out instanceof Promise) throw new Error('Store.tx needs a synchronous function');
+      this.db.exec(`RELEASE ${name}`);
       return out;
     } catch (err) {
-      this.db.exec('ROLLBACK');
+      if (this.db.isTransaction) {
+        this.db.exec(`ROLLBACK TO ${name}`);
+        this.db.exec(`RELEASE ${name}`);
+      }
       throw err;
+    } finally {
+      this.txDepth--;
     }
   }
 
@@ -240,6 +260,20 @@ export class Store {
       byGroup,
       newest: newest.ts,
     };
+  }
+
+  /** Events stored since `since`. */
+  countEventsSince(since: number): number {
+    const row = this.stmt('SELECT COUNT(*) AS n FROM events WHERE ts >= ?').get(since) as {
+      n: number;
+    };
+    return row.n;
+  }
+
+  /** When the newest event of any source arrived, or null if none yet. */
+  newestEventAt(): number | null {
+    const row = this.stmt('SELECT MAX(ts) AS ts FROM events').get() as { ts: number | null };
+    return row.ts;
   }
 
   /** When this sensor last reported anything, or null if never. */
@@ -434,6 +468,17 @@ export class Store {
           'SELECT body FROM actions ORDER BY requested_at DESC LIMIT ?',
           limit,
         );
+  }
+
+  /** Containment a rule carried out since `since`, counting ones the user later released. */
+  countRuleBlocksSince(since: number): number {
+    const row = this.stmt(
+      `SELECT COUNT(*) AS n FROM actions
+         WHERE requested_at >= ? AND status IN ('done', 'undone')
+           AND json_extract(body, '$.actor') = 'rule'
+           AND json_extract(body, '$.undoes') IS NULL`,
+    ).get(since) as { n: number };
+    return row.n;
   }
 
   // ---------------------------------------------------------------- proposals

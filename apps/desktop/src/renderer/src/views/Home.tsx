@@ -1,13 +1,15 @@
 import { CircleCheck, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import { useLive, vigil } from '../api';
+import { NoticedList, WatchLine } from '../components/Attention';
 import { Card, Chip, LevelPill, SectionHead, SeverityMark, StatusMark } from '../components/ui';
 import { actorLabel, describeRecord, timeAgo } from '../format';
+import { isNoticed, needsDecision } from '../../../shared/attention';
 import { LEVEL_RULES } from '../../../shared/levels';
 import { PageHead } from './AppShell';
 
 const levelSentence = {
-  good: 'Nothing needs you. Vigil is watching.',
+  good: 'Vigil is working. Nothing needs you.',
   fair: 'Something needs a look.',
   poor: 'Something needs you now.',
 };
@@ -16,7 +18,8 @@ export function HomeView({ go }: { go: (r: string) => void }) {
   const [status] = useLive(() => vigil.getStatus());
   const [alerts] = useLive(() => vigil.listAlerts('open'));
   const [actions] = useLive(() => vigil.listActions());
-  const needs = (alerts ?? []).filter((a) => !a.decision);
+  const needs = (alerts ?? []).filter(needsDecision);
+  const noticed = (alerts ?? []).filter(isNoticed);
 
   return (
     <div className="page">
@@ -31,6 +34,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
             <LevelPill level={status.level} />
             <span className="t-h2">{levelSentence[status.level]}</span>
           </div>
+          <WatchLine watch={status.watch} />
           {status.reasons.length > 0 && (
             <ul className="reasons">
               {status.reasons.map((r) => (
@@ -130,6 +134,17 @@ export function HomeView({ go }: { go: (r: string) => void }) {
           </div>
         </Card>
       </div>
+
+      {status && noticed.length > 0 && (
+        <Card>
+          <NoticedList
+            alerts={noticed}
+            view={status.alertView}
+            open={(id) => go(`alerts/${id}`)}
+            limit={8}
+          />
+        </Card>
+      )}
 
       <Card>
         <SectionHead

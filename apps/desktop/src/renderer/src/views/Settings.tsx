@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { BellRing } from 'lucide-react';
 import { useLive, vigil } from '../api';
+import { AlertViewSwitch } from '../components/Attention';
 import { useToast } from '../components/Toasts';
 import { Button, Card, SectionHead } from '../components/ui';
 import { AiSection } from './Ai';
@@ -11,6 +12,7 @@ import { SetupPanel } from './onboarding/SetupPanel';
 
 export function SettingsView() {
   const [settings, reload] = useLive(() => vigil.getSettings());
+  const [status] = useLive(() => vigil.getStatus());
   const toast = useToast();
   // The theme can change from another window too.
   useEffect(() => vigil.on('theme', reload), [reload]);
@@ -29,6 +31,18 @@ export function SettingsView() {
           }}
         />
       </Card>
+      {status && (
+        <Card>
+          <SectionHead
+            title="Alerts"
+            sub="Show me less lists only what needs your decision and folds the rest into one line. Show me more lists everything Vigil noticed and counts it on the menu-bar icon. What Vigil blocks is the same either way."
+          />
+          <div className="row spread">
+            <span>How much to show</span>
+            <AlertViewSwitch value={status.alertView} />
+          </div>
+        </Card>
+      )}
       <Card>
         <AiSection />
       </Card>

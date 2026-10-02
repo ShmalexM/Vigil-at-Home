@@ -36,6 +36,8 @@ export interface RuleChange {
   policy: Exclude<RulePolicy, 'REMOVE'>;
   reason?: string | undefined;
   customMessage?: string | undefined;
+  /** Required for policy CEL, ignored otherwise. */
+  celExpr?: string | undefined;
 }
 
 export function ruleKey(ruleType: RuleType, identifier: string): string {
@@ -113,6 +115,10 @@ export class RuleStore {
       rule_type: change.ruleType,
     };
     if (change.customMessage) rule.custom_msg = change.customMessage;
+    if (change.policy === 'CEL') {
+      if (!change.celExpr) throw new Error('A CEL rule needs an expression');
+      rule.cel_expr = change.celExpr;
+    }
     const stored: StoredRule = {
       rule,
       rev,
