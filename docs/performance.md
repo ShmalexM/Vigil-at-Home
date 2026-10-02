@@ -51,7 +51,7 @@ this page, and nothing here ever slows or pauses it.
 flowchart LR
   subgraph sensors["Sensors (separate processes)"]
     santa["Santa: every launch, block, file access"]
-    osq["osquery: connections every 10 s, startup items, extensions"]
+    osq["osquery: connections every 30 s (2 s for suspicious programs), startup items, extensions"]
   end
   santa -- santa.log --> tail["Log tailing"]
   osq -- results log --> tail
@@ -157,7 +157,13 @@ about 22 MB per 1,000 events for 0.5 MB stored and used twice the CPU.
 | Log tailing, `fs.watch` + 2 s poll | 0.05%, 1.5/s          | 0.03%, 1.2/s  |           |
 
 The network connection query is osquery's biggest cost (about 0.4 s of its
-own work every 10 s). Reading the two logs every 200 ms wakes the Mac more
+own work per run). It ran every 10 s at the time of these measurements and
+now runs every 30 s; a program worth a closer look (unsigned, ad hoc or
+downloaded) gets a one-off query of just its own sockets every 2 s for a
+minute after it starts, capped at 300 queries an hour
+(`packages/sensors/src/osquery/burst.ts`). While Santa is reporting launch
+items (macOS 13 and later), osquery's launchd query runs every 5 minutes
+instead of every minute. Reading the two logs every 200 ms wakes the Mac more
 than the rest of Vigil put together; the Sensors change that watches the
 log folder and polls every 2 s only as a fallback (PR #19) fits the budget.
 
