@@ -191,7 +191,10 @@ export interface PromptLog {
 }
 
 export interface PromptLogEntry {
+  /** This attempt's own id: a retry or a fallback to the next provider gets a new one. */
   readonly id: string;
+  /** Shared by every attempt of one `run()`. */
+  readonly runId?: string;
   readonly at: number;
   readonly purpose: Purpose;
   readonly urgency: Urgency;
@@ -204,4 +207,9 @@ export interface PromptLogEntry {
   readonly usage?: RunUsage;
   /** Same as usage.model, kept at the top so the usage page can group runs by model. */
   readonly model?: string;
+  /**
+   * Charged to one of the user's keys (Cloud API, Jev, Codex on an OpenAI key,
+   * Claude on an Anthropic key), so its cost counts toward the monthly cap.
+   */
+  readonly billed?: boolean;
 }

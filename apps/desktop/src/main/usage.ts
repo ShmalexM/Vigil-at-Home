@@ -3,6 +3,7 @@ import {
   BILLED_PROVIDERS,
   isKeyBilled,
   USAGE_PROVIDERS,
+  type KeyCapView,
   type KeySpendView,
   type LimitWindowView,
   type ModelTotals,
@@ -37,6 +38,7 @@ export interface PromptLogLike {
   readonly provider: UsageProvider | null;
   readonly outcome: string;
   readonly model?: string;
+  readonly billed?: boolean;
   readonly usage?: {
     readonly inputTokens: number;
     readonly cachedInputTokens: number;
@@ -53,8 +55,8 @@ export type PlanSource = Omit<PlanLimitsView, 'windows'> & {
 /** Where plan limits and key caps come from. The app wires this to @vigil/ai. */
 export type LimitsSource = () => Promise<{
   readonly plans: readonly PlanSource[];
-  /** Monthly caps on the user's own keys, in US dollars. */
-  readonly caps?: Partial<Record<UsageProvider, number>>;
+  /** The one monthly cap on everything charged to the user's keys, in US dollars. */
+  readonly capUsd?: number;
   readonly backgroundSharePercent?: number;
 }>;
 
@@ -114,7 +116,7 @@ export class UsageService {
             return durationMins === undefined ? { ...w } : { ...w, durationMins };
           }),
         })),
-      keys: keySpend(this.store.listAiRuns(monthStart(at)), read.caps ?? {}),
+      ...keySpend(this.store.listAiRuns(monthStart(at)), read.capUsd),
       ...(read.backgroundSharePercent !== undefined
         ? { backgroundSharePercent: read.backgroundSharePercent }
         : {}),
@@ -149,6 +151,7 @@ export function toRun(e: PromptLogLike): UsageRun | undefined {
         : typeof u?.costUsd === 'number' && u.costUsd >= 0
           ? u.costUsd
           : null,
+    ...(e.billed !== undefined ? { billed: e.billed } : {}),
   };
 }
 
@@ -304,22 +307,21 @@ export function monthStart(now: number): number {
   return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
 }
 
-/** This month's spend on each key-billed provider that was used or has a cap. */
+/** This month's spend on each key-billed provider that was used, and the one cap over all of them. */
 export function keySpend(
   monthRuns: readonly UsageRun[],
-  caps: Partial<Record<UsageProvider, number>>,
-): KeySpendView[] {
-  return BILLED_PROVIDERS.flatMap((provider) => {
-    const runs = monthRuns.filter((r) => r.provider === provider && isKeyBilled(r));
-    const cap = caps[provider];
-    if (runs.length === 0 && cap === undefined) return [];
-    return [
-      {
-        provider,
-        runs: runs.length,
-        spentUsd: runs.reduce((sum, r) => sum + (r.costUsd ?? 0), 0),
-        ...(cap !== undefined ? { capUsd: cap } : {}),
-      },
-    ];
+  capUsd: number | undefined,
+): { keys: KeySpendView[]; cap?: KeyCapView } {
+  const billed = monthRuns.filter(isKeyBilled);
+  const keys = BILLED_PROVIDERS.flatMap((provider) => {
+    const runs = billed.filter((r) => r.provider === provider);
+    if (runs.length === 0) return [];
+    return [{ provider, runs: runs.length, spentUsd: sumCost(runs) }];
   });
+  return { keys, ...(capUsd !== undefined ? { cap: { capUsd, spentUsd: sumCost(billed) } } : {}) };
+}
+
+/** What these runs cost, in US dollars. */
+export function sumCost(runs: readonly UsageRun[]): number {
+  return runs.reduce((sum, r) => sum + (r.costUsd ?? 0), 0);
 }

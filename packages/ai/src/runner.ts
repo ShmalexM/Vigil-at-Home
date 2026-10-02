@@ -50,10 +50,10 @@ export interface AiRunnerDeps {
   readonly log: PromptLog;
   readonly now?: () => number;
   /**
-   * What Vigil's Claude runs cost this calendar month, from the app's prompt
-   * log. Needed only for the API-key monthly cap.
+   * What Vigil charged to the user's keys this calendar month, all providers
+   * together (log entries with `billed`). Needed only for the monthly cap.
    */
-  readonly spentThisMonthUsd?: (provider: ProviderId) => Promise<number>;
+  readonly spentThisMonthUsd?: () => Promise<number>;
   /** Another runner's quota, so a second runner on the same plans keeps within one share. */
   readonly quota?: QuotaTracker;
 }
@@ -100,14 +100,32 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
     );
   }
 
-  /** The API-key cap applies only to Claude on the user's own key. */
-  async function overMonthlyCap(id: ProviderId): Promise<boolean> {
+  /**
+   * Whether a run on this provider is charged to one of the user's keys: the
+   * Cloud API, Jev, Codex on an OpenAI key, and Claude unless this run goes to
+   * the user's plan.
+   */
+  function billsKey(id: ProviderId, planOk: boolean): boolean {
+    switch (id) {
+      case 'api':
+      case 'jev':
+        return true;
+      case 'codex':
+        return deps.settings.codex.mode === 'apiKey';
+      case 'claude':
+        return (
+          !(planOk && deps.settings.claude.allowPlan) && deps.settings.claude.mode === 'apiKey'
+        );
+      default:
+        return false;
+    }
+  }
+
+  /** One cap for everything Vigil charges to the user's keys this month, all providers together. */
+  async function overMonthlyCap(id: ProviderId, planOk: boolean): Promise<boolean> {
     const cap = deps.settings.quota.apiKeyMonthlyCapUsd;
-    const paid =
-      id === 'api' || id === 'jev' || (id === 'claude' && deps.settings.claude.mode === 'apiKey');
-    if (!paid || cap === undefined) return false;
-    if (!deps.spentThisMonthUsd) return false;
-    return (await deps.spentThisMonthUsd(id)) >= cap;
+    if (cap === undefined || !deps.spentThisMonthUsd || !billsKey(id, planOk)) return false;
+    return (await deps.spentThisMonthUsd()) >= cap;
   }
 
   async function statusOf(adapter: ProviderAdapter, fresh = false): Promise<ProviderStatus> {
@@ -184,7 +202,11 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
     },
 
     async run<T>(request: RunRequest<T>) {
-      const logId = randomUUID();
+      // Every attempt is its own log entry with its own id, so a retry never
+      // overwrites what the attempt before it cost. runId ties them together.
+      const runId = randomUUID();
+      let logId = runId;
+      let entries = 0;
       const tools = redactingTools(request.tools ?? []);
       const systemPrompt = buildSystemPrompt(
         request.purpose,
@@ -203,9 +225,11 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
         audit?: ToolAudit,
         detail?: string,
         usage?: RunUsage,
-      ) =>
+      ) => {
+        logId = entries++ === 0 ? runId : randomUUID();
         deps.log.record({
           id: logId,
+          runId,
           at: now(),
           purpose: request.purpose,
           urgency: request.urgency,
@@ -217,7 +241,9 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
           ...(detail ? { detail } : {}),
           ...(usage ? { usage } : {}),
           ...(usage?.model ? { model: usage.model } : {}),
+          ...(provider !== null ? { billed: billsKey(provider, planOk) } : {}),
         });
+      };
 
       const planOk = mayUsePlan(request);
       let lastReason: RunFailureReason = 'no_provider';
@@ -232,7 +258,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
         if (status.state !== 'ready') continue;
         const allowed =
           (request.urgency === 'now' ? quota.allowNow(id) : quota.allowBackground(id)) &&
-          !(await overMonthlyCap(id));
+          !(await overMonthlyCap(id, planOk));
         if (!allowed) {
           lastReason = 'quota';
           continue;

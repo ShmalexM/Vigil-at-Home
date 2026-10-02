@@ -166,6 +166,7 @@ export function createJevClient(options: JevOptions) {
           systemPrompt: INSTRUCTIONS,
           userPrompt: JSON.stringify(state),
           outcome,
+          billed: true,
           ...(detail ? { detail } : {}),
           ...(usage
             ? {

@@ -317,25 +317,31 @@ describe.skipIf(!bundledCodex())('What Codex offers the model', () => {
   }, 60_000);
 });
 
-describe.skipIf(!bundledClaude() || !bundledCodex())('Plan usage from the real CLIs', () => {
-  it('asks each CLI for its plan without calling a model or hanging', async () => {
-    const claude = createClaudeAdapter({
-      mode: 'subscription',
-      pins: memoryPinStore(),
-      executablePath: bundledClaude()!,
-    });
-    const codex = createCodexAdapter({
-      codexHome: await tempDir('vigil-codex-usage-'),
-      pins: memoryPinStore(),
-      executablePath: bundledCodex()!,
-    });
-    const started = Date.now();
-    // Neither is signed in here, so both report no plan rather than failing.
-    expect(await claude.readUsage!()).toBeUndefined();
-    expect(await codex.readUsage!()).toBeUndefined();
-    expect(Date.now() - started).toBeLessThan(40_000);
-  }, 60_000);
-});
+// Starts the real CLIs, which read the machine's own Claude and Codex logins,
+// so the result depends on who is signed in there. Opt in with
+// VIGIL_TEST_REAL_CLI_USAGE=1 (CI does; it has no logins).
+describe.skipIf(!process.env.VIGIL_TEST_REAL_CLI_USAGE || !bundledClaude() || !bundledCodex())(
+  'Plan usage from the real CLIs',
+  () => {
+    it('asks each CLI for its plan without calling a model or hanging', async () => {
+      const claude = createClaudeAdapter({
+        mode: 'subscription',
+        pins: memoryPinStore(),
+        executablePath: bundledClaude()!,
+      });
+      const codex = createCodexAdapter({
+        codexHome: await tempDir('vigil-codex-usage-'),
+        pins: memoryPinStore(),
+        executablePath: bundledCodex()!,
+      });
+      const started = Date.now();
+      // Nobody is signed in on CI, so both report no plan rather than failing.
+      expect(await claude.readUsage!()).toBeUndefined();
+      expect(await codex.readUsage!()).toBeUndefined();
+      expect(Date.now() - started).toBeLessThan(40_000);
+    }, 60_000);
+  },
+);
 
 describe('Claude plan opt-in', () => {
   const pins = memoryPinStore();
