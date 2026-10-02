@@ -7,6 +7,7 @@ import { HoldButton } from '../components/HoldButton';
 import { NewRulePanel, RuleEditorPanel } from '../components/RuleEditor';
 import { RuleSuggestions } from '../components/RuleSuggestions';
 import { useToast } from '../components/Toasts';
+import { helperNote, PASSWORD_CANCELLED } from '../format';
 import { Button, Card, Chip, Segmented, SeverityMark } from '../components/ui';
 import '../styles/rules.css';
 import { PageHead } from './AppShell';
@@ -101,8 +102,15 @@ function RuleRow({
       return;
     }
     const before = rule.mode;
-    await vigil.setRuleMode(rule.id, mode);
-    toast({ text: `${rule.name}: ${mode}`, undo: () => void vigil.setRuleMode(rule.id, before) });
+    const { helper } = await vigil.setRuleMode(rule.id, mode);
+    if (helper === 'declined') {
+      toast({ text: `${rule.name}: ${PASSWORD_CANCELLED}` });
+      return;
+    }
+    toast({
+      text: `${rule.name}: ${mode}.${helperNote(helper)}`,
+      undo: () => void vigil.setRuleMode(rule.id, before),
+    });
   };
 
   return (
@@ -161,8 +169,10 @@ function RuleRow({
             label="Hold to turn on blocking"
             doneLabel="Blocking"
             onConfirm={async () => {
-              await vigil.setRuleMode(rule.id, 'block');
+              const { helper } = await vigil.setRuleMode(rule.id, 'block');
               setConfirmBlock(false);
+              if (helper === 'unavailable')
+                toast({ text: `${rule.name}: block.${helperNote(helper)}` });
             }}
           />
         </div>
