@@ -65,10 +65,7 @@ export function Popover() {
             <span className="empty-icon">
               <CircleCheck size={20} />
             </span>
-            <span className="t-h3">Nothing needs you</span>
-            <span className="t-small">
-              Vigil is watching. It will pop up if something needs a decision.
-            </span>
+            <span className="t-small">Vigil will pop up if something needs a decision.</span>
           </div>
         )}
 
