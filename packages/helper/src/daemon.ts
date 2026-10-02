@@ -33,6 +33,7 @@ import {
   type OsqueryPaths,
 } from './osquery.js';
 import { HelperServer } from './server.js';
+import { signatureLookup } from './signature.js';
 import { BINARIES, realSystem, type System } from './system.js';
 
 export interface DaemonOptions {
@@ -124,6 +125,8 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     santaLogPath: paths.santaLog,
     osqueryResultsPath: paths.osqueryResults,
     sink: (e) => server.publish(e),
+    // Signatures of programs that started before Vigil (codesign is macOS-only).
+    ...(process.platform === 'darwin' ? { signatureLookup: signatureLookup(sys) } : {}),
     // The closer look at suspicious programs' connections needs osquery and root.
     ...(existsSync(bins.osquery) && process.getuid?.() === 0 && opts.osquery !== false
       ? { osqueryRunner: osqueryShellRunner(sys) }

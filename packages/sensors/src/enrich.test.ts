@@ -78,3 +78,71 @@ describe('process enrichment', () => {
     expect(x.enrich(signed)).toBe(signed);
   });
 });
+
+describe('process tree', () => {
+  it('names the parent and ancestors, nearest first, on the launch and later events', () => {
+    const x = new ProcessEnricher();
+    x.enrich(exec(10, '/Applications/Safari.app/Contents/MacOS/Safari', { signing: 'apple' }));
+    x.enrich(
+      exec(20, '/Volumes/Setup/Installer.app/Contents/MacOS/Installer', {
+        ppid: 10,
+        signing: 'unsigned',
+        quarantine: { originUrl: 'https://evil.example/setup.dmg' },
+      }),
+    );
+    x.enrich(exec(30, '/bin/sh', { ppid: 20, signing: 'apple' }));
+    const curl = proc(x.enrich(exec(40, '/usr/bin/curl', { ppid: 30, signing: 'apple' })));
+    expect(curl?.parentPath).toBe('/bin/sh');
+    expect(curl?.ancestors).toEqual(['sh', 'Installer', 'Safari']);
+    expect(curl?.downloadedAncestor).toEqual({
+      path: '/Volumes/Setup/Installer.app/Contents/MacOS/Installer',
+      originUrl: 'https://evil.example/setup.dmg',
+      signing: 'unsigned',
+    });
+    // A later file read by curl carries the same context.
+    const read = proc(x.enrich(open(40, '/usr/bin/curl')));
+    expect(read?.ancestors).toEqual(['sh', 'Installer', 'Safari']);
+    expect(read?.downloadedAncestor?.originUrl).toBe('https://evil.example/setup.dmg');
+  });
+
+  it('keeps at most four ancestors and nothing for a parent it never saw', () => {
+    const x = new ProcessEnricher();
+    let ppid: number | undefined;
+    for (let pid = 1; pid <= 6; pid++) {
+      x.enrich(exec(100 + pid, `/bin/p${pid}`, { signing: 'apple', ...(ppid ? { ppid } : {}) }));
+      ppid = 100 + pid;
+    }
+    expect(proc(x.enrich(exec(200, '/bin/leaf', { ppid, signing: 'apple' })))?.ancestors).toEqual([
+      'p6',
+      'p5',
+      'p4',
+      'p3',
+    ]);
+    expect(proc(x.enrich(exec(300, '/bin/orphan', { ppid: 999, signing: 'apple' })))).toEqual({
+      pid: 300,
+      path: '/bin/orphan',
+      ppid: 999,
+      signing: 'apple',
+    });
+  });
+});
+
+describe('signature lookup', () => {
+  it('asks once per unknown program and fills later events from the answer', () => {
+    const asked: string[] = [];
+    const x = new ProcessEnricher({ onUnknownSignature: (p) => asked.push(p) });
+    expect(proc(x.enrich(open(70, '/usr/local/bin/old')))?.signing).toBeUndefined();
+    x.enrich(open(70, '/usr/local/bin/old'));
+    expect(asked).toEqual(['/usr/local/bin/old']);
+    x.learnSignature('/usr/local/bin/old', { signing: 'adhoc' });
+    expect(proc(x.enrich(open(70, '/usr/local/bin/old')))?.signing).toBe('adhoc');
+  });
+
+  it('never asks about a program whose launch it saw', () => {
+    const asked: string[] = [];
+    const x = new ProcessEnricher({ onUnknownSignature: (p) => asked.push(p) });
+    x.enrich(exec(80, '/tmp/x', { signing: 'unsigned' }));
+    x.enrich(open(80, '/tmp/x'));
+    expect(asked).toEqual([]);
+  });
+});
