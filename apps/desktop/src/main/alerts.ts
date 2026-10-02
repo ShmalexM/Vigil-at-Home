@@ -28,6 +28,8 @@ export interface Detection {
   title?: string;
   summary?: string;
   subject?: Alert['subject'];
+  /** Never fold into an earlier alert (a test alert must pop up every time). */
+  standalone?: boolean;
 }
 
 export interface AlertEvents {
@@ -84,6 +86,9 @@ export class AlertService extends EventEmitter<AlertEvents> {
     }
     if (d.events.length === 0) throw new Error('A detection needs at least one event');
     const at = this.now();
+    const key = repeatKey(d);
+    const same = key ? this.openRepeatOf(key, at) : undefined;
+    if (same) return this.foldRepeat(same, d, at);
     let alert: Alert = {
       id: newId(at),
       createdAt: at,
@@ -100,6 +105,7 @@ export class AlertService extends EventEmitter<AlertEvents> {
       eventIds: d.events.map((e) => e.id),
       actionIds: [],
       ...(d.subject ? { subject: d.subject } : {}),
+      ...(key ? { repeats: { key, count: 1, lastAt: at } } : {}),
     };
     this.store.tx(() => {
       for (const e of d.events) this.store.insertEvent(e);
@@ -133,6 +139,56 @@ export class AlertService extends EventEmitter<AlertEvents> {
     if (alert.notify === 'popup') this.emit('popup', alert);
     this.emit('raised', alert);
     return alert;
+  }
+
+  /**
+   * An open alert this detection repeats exactly, if one started within the
+   * last {@link REPEAT_WINDOW_MS}. Anything the user or a rule has acted on, or
+   * that carries a suggestion, stands alone.
+   */
+  private openRepeatOf(key: string, at: number): Alert | undefined {
+    return this.store
+      .listAlerts({ status: 'open' })
+      .find(
+        (a) =>
+          a.repeats?.key === key &&
+          !a.decision &&
+          a.containment === 'none' &&
+          a.actionIds.length === 0 &&
+          at - a.createdAt <= REPEAT_WINDOW_MS &&
+          !a.ai?.proposalIds.length &&
+          this.store.listProposals({ alertId: a.id }).length === 0 &&
+          this.store.listActions({ alertId: a.id }).length === 0,
+      );
+  }
+
+  /**
+   * Fold an identical repeat into its open alert: its events and rule match
+   * are kept, the row's count goes up, and nobody is interrupted again (no
+   * popup, and the AI isn't asked twice).
+   */
+  private foldRepeat(alert: Alert, d: Detection, at: number): Alert {
+    const next: Alert = {
+      ...alert,
+      updatedAt: at,
+      eventIds: [...alert.eventIds, ...d.events.map((e) => e.id)],
+      repeats: { ...alert.repeats!, count: alert.repeats!.count + 1, lastAt: at },
+    };
+    this.store.tx(() => {
+      for (const e of d.events) this.store.insertEvent(e);
+      this.store.saveAlert(next);
+      this.store.insertRuleMatch({
+        id: newId(at),
+        ruleId: d.rule.id,
+        ruleVersion: d.rule.version,
+        mode: d.rule.mode,
+        ts: at,
+        eventIds: d.events.map((e) => e.id),
+        alertId: alert.id,
+      });
+    });
+    this.emit('changed', next);
+    return next;
   }
 
   /** Authorize, log and execute one action. Never throws for a denied or failed action. */
@@ -318,6 +374,43 @@ export class AlertService extends EventEmitter<AlertEvents> {
     this.emit('changed', next);
     return next;
   }
+}
+
+/** How long one row may keep folding in identical repeats, counted from its first detection. */
+export const REPEAT_WINDOW_MS = 15 * 60_000;
+
+/**
+ * The evidence a repeat must match exactly to share a row: the rule and its
+ * version, what the alert says, and every event with its process (executable
+ * identity and signature, pid and start time, command line, working
+ * directory, user, parent) and resource, with only the event's id, time and
+ * raw sensor record left out. Detections that run or suggest an action,
+ * critical ones, and ones marked standalone never share a row.
+ */
+export function repeatKey(d: Detection): string | undefined {
+  if (d.standalone || d.actions.length > 0 || d.rule.severity === 'critical') return undefined;
+  return JSON.stringify([
+    d.rule.id,
+    d.rule.version,
+    d.title ?? null,
+    d.summary ?? null,
+    d.subject ?? null,
+    d.events.map(({ id: _id, ts: _ts, raw: _raw, ...rest }) => sorted(rest)),
+  ]);
+}
+
+/** The same value with object keys in a fixed order, so equal evidence gives an equal key. */
+function sorted(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(sorted);
+  if (v && typeof v === 'object') {
+    return Object.fromEntries(
+      Object.entries(v as Record<string, unknown>)
+        .filter(([, x]) => x !== undefined)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([k, x]) => [k, sorted(x)]),
+    );
+  }
+  return v;
 }
 
 /**

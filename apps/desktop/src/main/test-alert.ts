@@ -42,5 +42,6 @@ export function sendTestAlert(alerts: AlertService, now = Date.now()) {
     actions: [],
     title: 'Test alert',
     subject: { kind: 'process', label: 'true', path: '/usr/bin/true' },
+    standalone: true,
   });
 }

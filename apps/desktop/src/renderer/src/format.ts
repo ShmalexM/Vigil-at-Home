@@ -141,6 +141,14 @@ export function headline(a: Alert): string {
   return 'Vigil needs you';
 }
 
+/** "Seen 3 times in 4 min" for an alert that folded in identical repeats, else undefined. */
+export function seenTimes(a: Alert): string | undefined {
+  const r = a.repeats;
+  if (!r || r.count < 2) return undefined;
+  const min = Math.max(1, Math.round((r.lastAt - a.createdAt) / 60_000));
+  return `Seen ${r.count} times in ${min} min`;
+}
+
 /** What to say when the user asked to release an alert and the release didn't go through. */
 export function releaseFailed(a: Alert): string {
   return a.containment === 'active'

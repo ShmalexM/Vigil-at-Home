@@ -234,8 +234,13 @@ describe('AiBridge explanations', () => {
     ai.explainAlertsFrom(core);
     core.scheduler.pause();
     const quiet = makeRule({ mode: 'alert', fidelity: 'low', severity: 'low' });
+    // Six different processes: identical repeats would fold into one alert.
     for (let i = 0; i < 6; i++)
-      await core.alerts.raise({ rule: quiet, events: [makeExec()], actions: [] });
+      await core.alerts.raise({
+        rule: quiet,
+        events: [makeExec('/tmp/evil', 100 + i)],
+        actions: [],
+      });
     core.scheduler.resume();
     await settle();
     expect(calls).toHaveLength(3);
