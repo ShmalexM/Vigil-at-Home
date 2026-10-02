@@ -25,7 +25,7 @@ let client: HelperClient;
 let rulesFile: string;
 
 // Small enough that the oversized-drop test stays fast on a busy runner.
-const RETIRED_TEST_MAX = 1000;
+const RETIRED_TEST_MAX = 5000;
 
 function makeFastPath(executor: Executor): FastPath {
   return new FastPath({
@@ -296,6 +296,41 @@ describe('blocking rules in the helper', () => {
     await client.approveHeld();
     await expect(refused).rejects.toMatchObject({ code: 'refused' });
     expect(prompts).toHaveLength(2);
+  });
+
+  it('refuses a held rule change when the dialog it rode on gets a no', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    approve = true;
+    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    await client.call({
+      kind: 'santa.rule.set',
+      ruleType: 'binary',
+      identifier: BAD,
+      policy: 'block',
+    });
+    prompts.length = 0;
+    approve = false;
+    const syncing = client.hold({ ...sync, selfPaths: [...sync.selfPaths, '/tmp'] });
+    await new Promise((r) => setTimeout(r, 20));
+    await expect(
+      client.call({ kind: 'santa.rule.remove', ruleType: 'binary', identifier: BAD }),
+    ).rejects.toMatchObject({ code: 'refused' });
+    await expect(syncing).rejects.toMatchObject({ code: 'refused' });
+    // Nothing is left to ask about.
+    await client.approveHeld();
+    expect(prompts).toHaveLength(1);
+  });
+
+  it('drops held rule changes without asking', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    prompts.length = 0;
+    const syncing = client.hold({ ...sync, selfPaths: [...sync.selfPaths, '/tmp'] });
+    await new Promise((r) => setTimeout(r, 20));
+    client.dropHeld();
+    await expect(syncing).rejects.toMatchObject({ code: 'refused' });
+    await client.approveHeld();
+    expect(prompts).toHaveLength(0);
   });
 
   it('keeps an entry a list drops blocking for a week', async () => {

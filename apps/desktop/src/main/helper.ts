@@ -219,6 +219,11 @@ export class HelperLink
     await this.client?.approveHeld();
   }
 
+  /** Refuse anything syncRules held, so the app puts its side back. */
+  dropHeld(): void {
+    this.client?.dropHeld();
+  }
+
   /** Check the connection is alive. Called on the health timer. */
   async ping(): Promise<boolean> {
     if (!this.client) {

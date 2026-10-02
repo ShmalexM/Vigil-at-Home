@@ -11,6 +11,8 @@ export interface ActionExecutor {
   readonly simulated?: boolean;
   /** Ask once for the password for rule changes held for the next dialog (HelperLink). */
   approveHeld?(): Promise<void>;
+  /** Refuse those held rule changes without asking (HelperLink). */
+  dropHeld?(): void;
 }
 
 /** Records what would happen without touching the system. Used until the helper is installed. */

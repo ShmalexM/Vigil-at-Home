@@ -265,8 +265,7 @@ export class FastPath {
       for (const e of this.state.lists[name] ?? []) if (!keep.has(e) && !(e in r)) r[e] = now;
       const n = Object.keys(r).length;
       const max = this.opts.retiredMax ?? RETIRED_MAX;
-      if (n > max)
-        throw new PolicyRefused(`list ${name} would drop ${n} entries; at most ${max}`);
+      if (n > max) throw new PolicyRefused(`list ${name} would drop ${n} entries; at most ${max}`);
       if (n) out[name] = r;
     }
     return out;

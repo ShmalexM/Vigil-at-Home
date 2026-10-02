@@ -116,7 +116,12 @@ export class HelperClient {
         prompt,
         waiting.map((h) => h.nonce),
       );
-      if (!approved) throw new HelperCallError('not approved', 'refused');
+      if (!approved) {
+        // A "no" covers the held commands it asked about too: never ask twice.
+        this.held = this.held.filter((h) => !waiting.includes(h));
+        for (const h of waiting) h.settle(new HelperCallError('not approved', 'refused'));
+        throw new HelperCallError('not approved', 'refused');
+      }
       for (const h of waiting) h.approved = true;
       resp = await this.send(command, resp.nonce);
     }
@@ -160,6 +165,13 @@ export class HelperClient {
       if (!h.approved && !approved) h.settle(new HelperCallError('not approved', 'refused'));
       else h.settle(await this.send(h.command, h.nonce));
     }
+  }
+
+  /** Refuse every held command without asking, approved or not. */
+  dropHeld(): void {
+    const held = this.held;
+    this.held = [];
+    for (const h of held) h.settle(new HelperCallError('not sent', 'refused'));
   }
 
   private send(command: HelperCommand, approval?: string): Promise<HelperResponse> {

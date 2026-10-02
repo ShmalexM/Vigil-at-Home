@@ -181,11 +181,15 @@ export class VigilCore {
     try {
       alert = await this.alerts.decide(alertId, input);
     } catch (err) {
-      await this.executor.approveHeld?.();
+      this.executor.dropHeld?.();
       await learning;
       throw err;
     }
-    await this.executor.approveHeld?.();
+    // A release that failed or was cancelled leaves the alert undecided, so
+    // nothing is remembered either: the held change is refused and the
+    // detector puts its side back. Otherwise ask for anything still held.
+    if (alert.decision) await this.executor.approveHeld?.();
+    else this.executor.dropHeld?.();
     if (learning) {
       const learned = await learning;
       if (learned.santa) {

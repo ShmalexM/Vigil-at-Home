@@ -172,6 +172,38 @@ describe('Detector', () => {
     expect(d.stores.exceptions.all()).toHaveLength(1);
   });
 
+  it('remembers nothing and asks no more when the release is cancelled', async () => {
+    const { core, popups, executor, store } = setup();
+    const d = core.detector!;
+    const order: string[] = [];
+    let refuse = () => {};
+    Object.assign(executor, {
+      approveHeld: async () => void order.push('password'),
+      dropHeld: () => (order.push('dropped'), refuse()),
+    });
+    d.syncHelper = (opts) => {
+      if (!opts?.hold) return Promise.resolve('applied');
+      opts.onHeld?.();
+      return new Promise((resolve) => (refuse = () => resolve('declined')));
+    };
+    d.stores.lists.add('known_bad_sha256', BAD, { source: 'test', updatedAt: 1 });
+    await core.handleEvent(exec('/Users/you/Downloads/evil', BAD));
+    // The user cancels the release's password dialog.
+    executor.execute = async () => {
+      throw new Error('not approved');
+    };
+    const alert = await core.decide(popups[0]!, {
+      verdict: 'benign',
+      release: true,
+      remember: true,
+      scope: 'this_binary',
+    });
+    expect(order).toEqual(['dropped']);
+    expect(alert.decision).toBeUndefined();
+    expect(store.getAlert(popups[0]!)?.decision).toBeUndefined();
+    expect(d.stores.exceptions.all()).toHaveLength(0);
+  });
+
   it('refreshes threat feeds on the scheduler and survives being offline', async () => {
     const { core, fetches } = setup();
     core.start();
