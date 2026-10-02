@@ -4,6 +4,7 @@ import trayIcon from '../../resources/trayTemplate.png?asset';
 import trayAlertIcon from '../../resources/trayAlertTemplate.png?asset';
 import type { Pushes, ThemePref } from '../shared/ipc.js';
 import { DEFAULT_APPEARANCE, windowBackground, type AppearanceSettings } from '../shared/themes.js';
+import { isAppFrameUrl } from './app-frame.js';
 
 const POPOVER = { width: 380, height: 540 };
 const POPUP = { width: 420, height: 400 };
@@ -19,8 +20,11 @@ const RELEASE_POPUP_MS = 60 * 1000;
 const POPUP_SHOW_FALLBACK_MS = 1500;
 
 /** Where renderer pages are served from, for loading and for checking IPC senders. */
-export function rendererOrigin(): string {
-  return process.env['ELECTRON_RENDERER_URL'] ?? 'file://';
+const INDEX_HTML = join(import.meta.dirname, '../renderer/index.html');
+
+/** True for a frame showing Vigil's own page; see isAppFrameUrl. */
+export function isAppFrame(url: string): boolean {
+  return isAppFrameUrl(url, process.env['ELECTRON_RENDERER_URL'], INDEX_HTML);
 }
 
 function secure(win: BrowserWindow): BrowserWindow {
@@ -36,7 +40,7 @@ function secure(win: BrowserWindow): BrowserWindow {
 function load(win: BrowserWindow, route: string): void {
   const dev = process.env['ELECTRON_RENDERER_URL'];
   if (dev) void win.loadURL(`${dev}#${route}`);
-  else void win.loadFile(join(import.meta.dirname, '../renderer/index.html'), { hash: route });
+  else void win.loadFile(INDEX_HTML, { hash: route });
 }
 
 const webPreferences = () => ({

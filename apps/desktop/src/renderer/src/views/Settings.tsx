@@ -48,7 +48,10 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
         <SectionHead title="About" />
         <dl className="kv">
           <dt>Version</dt>
-          <dd>{settings.version}</dd>
+          <dd>
+            {settings.version}
+            {settings.commit && <span className="mono"> ({settings.commit})</span>}
+          </dd>
           <dt>Updates</dt>
           <dd>
             <UpdatesRow />
