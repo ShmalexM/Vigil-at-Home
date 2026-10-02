@@ -259,8 +259,9 @@ for (const [name, code] of Object.entries(variants)) {
   results.tailing[name] = await measure([child.pid], Math.min(SECONDS, 60));
   child.kill();
 }
-// What the sensors package does today.
-results.tailing.current = results.tailing[`poll${SENSOR_BUDGET.tailIntervals[0]}ms`];
+// What the sensors package does today: FileTailer watches the log folder and
+// polls every 2 s only as a fallback (PR #19), which watchPlus2s reproduces.
+results.tailing.current = results.tailing.watchPlus2s;
 rmSync(logs, { recursive: true, force: true });
 
 // -------------------------------------------------------------- report
