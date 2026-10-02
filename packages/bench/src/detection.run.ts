@@ -14,6 +14,13 @@ import { writeResult } from './report.js';
 // and through Vigil's sensor parsers, then four weeks of normal use (one
 // learning week, three measured) for two kinds of user. Results go to
 // bench-results/detection.json.
+
+// Held-out ratchet: the score on attacks the rules were never written for may
+// not drop below the best seen so far. Raise these when it improves; never
+// lower them to get a change through. Only counts are checked, so nothing
+// about the held-out cases leaks into what rule authors or reviewers see.
+const HELDOUT_FLOOR = { caughtIdeal: 9, caughtSensors: 9 } as const; // of 25, 2026-10-02
+
 describe('detection benchmark', () => {
   it('runs', () => {
     const attacks = runAttacks();
@@ -32,12 +39,13 @@ describe('detection benchmark', () => {
     ];
     const summary = summarize(attacks);
     const heldout = runHeldout();
+    const heldoutSummary = summarizeHeldout(heldout);
     writeResult('detection', {
       at: new Date().toISOString(),
       platform: `${process.platform}-${process.arch}`,
       node: process.version,
       summary,
-      heldoutSummary: summarizeHeldout(heldout),
+      heldoutSummary,
       heldout,
       rules: scoreRules(attacks, workload),
       attacks,
@@ -51,5 +59,7 @@ describe('detection benchmark', () => {
     });
     // Regression guard: every canonical attack is caught when the telemetry is there.
     expect(summary.canonical.caughtIdeal).toBe(summary.canonical.total);
+    expect(heldoutSummary.caughtIdeal).toBeGreaterThanOrEqual(HELDOUT_FLOOR.caughtIdeal);
+    expect(heldoutSummary.caughtSensors).toBeGreaterThanOrEqual(HELDOUT_FLOOR.caughtSensors);
   });
 });
