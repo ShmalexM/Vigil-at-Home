@@ -308,6 +308,8 @@ export class Detector {
         summary: d.alert.summary,
         ...(d.alert.subject ? { subject: d.alert.subject } : {}),
       });
+      // A folded repeat keeps the first detection here; its own events and match are stored.
+      if (alert.repeats?.count !== undefined && alert.repeats.count > 1) return;
       this.store.saveAlertDetection(alert.id, d);
       return;
     }
