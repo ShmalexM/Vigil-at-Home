@@ -1,6 +1,6 @@
 import type { Alert, SensorEvent } from '@vigil/core';
 import { Bell, RotateCcw, ShieldAlert, ShieldCheck, Sparkles } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useLive, vigil } from '../api';
 import { HoldButton } from '../components/HoldButton';
 import { useToast } from '../components/Toasts';
@@ -8,6 +8,7 @@ import { Button, Card, Chip, SectionHead, SeverityMark, StatusMark } from '../co
 import { actorLabel, clock, describeAction, describeEvent, timeAgo } from '../format';
 import { ExcludeFromAlert } from '../components/ExcludeFromAlert';
 import { PageHead } from './AppShell';
+import { shownAlert, tabFor } from './alerts-selection';
 
 export function AlertsView({
   selected,
@@ -20,7 +21,19 @@ export function AlertsView({
   const [open] = useLive(() => vigil.listAlerts('open'));
   const [resolved] = useLive(() => vigil.listAlerts('resolved'));
   const list = (tab === 'open' ? open : resolved) ?? [];
-  const current = selected ?? list[0]?.id;
+  const current = shownAlert(selected, list);
+
+  // An alert opened by link (from History, Home or a popup) brings up the tab
+  // it is in. Only when the link changes: deciding an alert moves it out of
+  // Open, and then the next open one shows instead of jumping tabs.
+  const synced = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!selected || synced.current === selected) return;
+    const t = tabFor(selected, open, resolved);
+    if (!t) return;
+    synced.current = selected;
+    setTab(t);
+  }, [selected, open, resolved]);
 
   return (
     <div className="page">
