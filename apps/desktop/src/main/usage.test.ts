@@ -117,6 +117,9 @@ describe('UsageService', () => {
   it('reports each plan window with its length, and this month on each key', async () => {
     const u = service();
     u.record(entry({ provider: 'jev', purpose: 'classify' }));
+    // Claude on an Anthropic key is billed; Claude on the plan is not.
+    u.record(entry({ id: 'k', provider: 'claude', billed: true }));
+    u.record(entry({ id: 'p', provider: 'claude', billed: false }));
     u.setLimitsSource(async () => ({
       plans: [
         {
@@ -135,12 +138,17 @@ describe('UsageService', () => {
         },
         { provider: 'codex', available: false, windows: [] },
       ],
-      caps: { jev: 5 },
+      capUsd: 5,
     }));
     const view = await u.limits();
     expect(view.plans).toHaveLength(1);
     expect(view.plans[0]?.windows[0]?.durationMins).toBe(300);
-    expect(view.keys).toEqual([{ provider: 'jev', runs: 1, spentUsd: 0.02, capUsd: 5 }]);
+    expect(view.keys).toEqual([
+      { provider: 'claude', runs: 1, spentUsd: 0.02 },
+      { provider: 'jev', runs: 1, spentUsd: 0.02 },
+    ]);
+    // One cap over every key, not one per provider.
+    expect(view.cap).toEqual({ capUsd: 5, spentUsd: 0.04 });
   });
 
   it('shows nothing rather than failing when the vendors cannot be read', async () => {

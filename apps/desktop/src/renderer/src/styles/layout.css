@@ -425,3 +425,26 @@ body.transparent {
 .noticed .list .list-row {
   padding: 8px 12px;
 }
+.nav-group {
+  padding: 12px 10px 4px;
+  color: var(--tx3);
+  font-weight: 600;
+}
+div.history-row,
+div.history-row:hover {
+  cursor: default;
+  background: transparent;
+}
+.settings-advanced {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.settings-advanced > summary {
+  cursor: pointer;
+  padding: 4px 0;
+}
+.layers > summary {
+  cursor: pointer;
+  margin-bottom: 8px;
+}

@@ -155,7 +155,7 @@ export interface EventClassifierOptions {
    * over the monthly cap, down), the batch goes to `runner` instead.
    */
   readonly jev?: JevClient;
-  /** False once Jev's spending this month reached the cap. */
+  /** False once spending on the user's keys this month reached the cap. */
   readonly jevAllowed?: () => Promise<boolean>;
   readonly maxEventsPerBatch: number;
   /** Most batches per hour wherever they run, local or cloud. */
