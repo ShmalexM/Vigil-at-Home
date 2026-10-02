@@ -1,3 +1,4 @@
+import type { HelperOutcome } from '../../shared/ipc';
 import type { Action, ActionRecord, Alert, SensorEvent, Severity } from '@vigil/core';
 
 export const severityLabel: Record<Severity, string> = {
@@ -158,4 +159,14 @@ export function releaseFailed(a: Alert): string {
   return a.containment === 'active'
     ? 'Couldn’t release it, so it’s still blocked and still needs you.'
     : 'Couldn’t finish releasing it, so it still needs you.';
+}
+
+/** Shown when a rule change was cancelled at the password, instead of the change. */
+export const PASSWORD_CANCELLED = 'Not changed: the password was cancelled';
+
+/** Added to a change's toast when the helper didn't take it yet. */
+export function helperNote(helper: HelperOutcome): string {
+  return helper === 'unavailable'
+    ? ' The background helper isn’t connected, so it picks this up when it reconnects.'
+    : '';
 }

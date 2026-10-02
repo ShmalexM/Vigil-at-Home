@@ -341,6 +341,19 @@ export interface AlertDetail {
   rule?: Rule;
 }
 
+/**
+ * What became of a rule change on the helper, which blocks with the app
+ * closed. `declined`: it loosened blocking, the user cancelled the password,
+ * and nothing changed. `unavailable`: the helper isn't connected; Vigil made
+ * the change and the helper gets it when it reconnects.
+ */
+export type HelperOutcome = 'applied' | 'declined' | 'unavailable';
+
+export interface RuleModeResult {
+  rule: Rule;
+  helper: HelperOutcome;
+}
+
 export interface RuleView {
   rule: Rule;
   /** Matches in the last 14 days (the detection engine's replay window), all modes. */
@@ -530,7 +543,7 @@ export interface CallResults {
   approveProposal: ActionRecord;
   rejectProposal: void;
   listRules: RuleView[];
-  setRuleMode: Rule;
+  setRuleMode: RuleModeResult;
   getRuleEditor: RuleEditorView | null;
   previewRule: RuleCheck;
   saveRule: RuleCheck;
@@ -541,7 +554,7 @@ export interface CallResults {
   removeException: void;
   excludeFromAlert: RuleCheck;
   listRuleSuggestions: RuleSuggestionsView;
-  acceptRuleSuggestion: void;
+  acceptRuleSuggestion: { helper: HelperOutcome };
   dismissRuleSuggestion: void;
   reviewRulesNow: RuleSuggestionsView;
   listActions: ActionRecord[];

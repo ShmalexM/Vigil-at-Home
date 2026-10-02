@@ -63,7 +63,12 @@ export function registerIpc(
     approveProposal: (id) => core.alerts.approveProposal(id),
     rejectProposal: (id) => core.alerts.rejectProposal(id),
     listRules: () => core.rules(),
-    setRuleMode: (id: string, mode) => core.setRuleMode(id, mode),
+    setRuleMode: async (id: string, mode) => {
+      const result = await core.setRuleMode(id, mode);
+      // A cancelled password put the rule back; show that, not the click.
+      windows.broadcast('changed');
+      return result;
+    },
     getRuleEditor: (id) => core.ruleEditing()?.view(id) ?? null,
     previewRule: (json) => editing(core).preview(json),
     saveRule: (json) => editing(core).save(json),
@@ -74,9 +79,10 @@ export function registerIpc(
     removeException: (id) => editing(core).removeException(id),
     excludeFromAlert: (id, scope) => editing(core).excludeFromAlert(id, scope),
     listRuleSuggestions: () => suggestions().view(),
-    acceptRuleSuggestion: (id, mode) => {
-      suggestions().accept(id, mode);
+    acceptRuleSuggestion: async (id, mode) => {
+      const helper = await suggestions().accept(id, mode);
       windows.broadcast('changed');
+      return { helper };
     },
     dismissRuleSuggestion: (id, note) => suggestions().dismiss(id, note),
     reviewRulesNow: () => suggestions().reviewNow(),
