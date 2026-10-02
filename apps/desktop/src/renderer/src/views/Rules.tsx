@@ -7,6 +7,7 @@ import { HoldButton } from '../components/HoldButton';
 import { NewRulePanel, RuleEditorPanel } from '../components/RuleEditor';
 import { RuleSuggestions } from '../components/RuleSuggestions';
 import { useToast } from '../components/Toasts';
+import { helperNote, PASSWORD_CANCELLED } from '../format';
 import { Button, Card, Chip, Segmented, SeverityMark } from '../components/ui';
 import { confirmsFirst, isToolRule, modeLabel, modesFor } from '../rule-modes';
 import '../styles/rules.css';
@@ -97,9 +98,13 @@ function RuleRow({
     setConfirmBlock(confirm);
     if (confirm) return;
     const before = rule.mode;
-    await vigil.setRuleMode(rule.id, mode);
+    const { helper } = await vigil.setRuleMode(rule.id, mode);
+    if (helper === 'declined') {
+      toast({ text: `${rule.name}: ${PASSWORD_CANCELLED}` });
+      return;
+    }
     toast({
-      text: `${rule.name}: ${modeLabel(rule, mode)}`,
+      text: `${rule.name}: ${modeLabel(rule, mode)}.${helperNote(helper)}`,
       undo: () => void vigil.setRuleMode(rule.id, before),
     });
   };
@@ -167,8 +172,10 @@ function RuleRow({
             label={tool ? 'Hold to turn on Deny' : 'Hold to turn on blocking'}
             doneLabel={tool ? 'Denying' : 'Blocking'}
             onConfirm={async () => {
-              await vigil.setRuleMode(rule.id, 'block');
+              const { helper } = await vigil.setRuleMode(rule.id, 'block');
               setConfirmBlock(false);
+              if (helper === 'unavailable')
+                toast({ text: `${rule.name}: ${modeLabel(rule, 'block')}.${helperNote(helper)}` });
             }}
           />
         </div>

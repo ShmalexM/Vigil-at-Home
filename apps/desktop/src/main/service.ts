@@ -3,7 +3,6 @@ import { z } from 'zod';
 import {
   canChangeMode,
   type Alert,
-  type Rule,
   type RuleMode,
   type SensorEvent,
   type UserDecision,
@@ -15,6 +14,7 @@ import {
   type AlertDetail,
   type EventOutcome,
   type EventStats,
+  type RuleModeResult,
   type RuleView,
   type StatusView,
 } from '../shared/ipc.js';
@@ -291,19 +291,23 @@ export class VigilCore {
   }
 
   /** From the UI, so the actor is the user. */
-  setRuleMode(id: string, mode: RuleMode): Rule {
+  /**
+   * Waits for the helper: turning a blocking rule down asks for the admin
+   * password, and if the user cancels, the rule keeps its mode (`declined`).
+   */
+  async setRuleMode(id: string, mode: RuleMode): Promise<RuleModeResult> {
     if (this.detector?.hasRule(id)) {
-      void this.detector.setMode(id, mode);
+      const helper = await this.detector.setMode(id, mode);
       const view = this.detector.rules().find((r) => r.rule.id === id);
       if (!view) throw new Error(`No rule ${id}`);
-      return { ...view.rule, mode: view.mode };
+      return { rule: { ...view.rule, mode: view.mode }, helper };
     }
     const rule = this.store.getRule(id);
     if (!rule) throw new Error(`No rule ${id}`);
     if (!canChangeMode('user', rule.mode, mode)) throw new Error('Not allowed');
     const next = { ...rule, mode, updatedAt: this.now() };
     this.store.upsertRule(next);
-    return next;
+    return { rule: next, helper: 'applied' };
   }
 
   /** First launch on this Mac, recorded once. "First seen" rules learn for a week after it. */
