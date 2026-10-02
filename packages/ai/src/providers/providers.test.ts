@@ -62,6 +62,24 @@ async function tempDir(prefix: string) {
   return dir;
 }
 
+// Every file under dir. Codex removes its scratch folders while it shuts
+// down, so a folder that vanishes mid-walk is skipped rather than fatal.
+async function filesUnder(dir: string): Promise<string[]> {
+  const entries = await readdir(dir, { withFileTypes: true }).catch(
+    (err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') return [];
+      throw err;
+    },
+  );
+  const files: string[] = [];
+  for (const entry of entries) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...(await filesUnder(path)));
+    else files.push(path);
+  }
+  return files;
+}
+
 describe('Claude adapter settings', () => {
   const opts = claudeQueryOptions({
     executablePath: '/usr/local/bin/claude',
@@ -469,8 +487,8 @@ describe.skipIf(!bundledCodex())('Codex with an OpenAI API key, real binary', ()
         expect((r.input ?? []).flatMap((i) => i.tools ?? [])).toEqual([]);
       }
       // Nothing in Vigil's Codex folder holds the key.
-      for (const name of await readdir(codexHome, { recursive: true })) {
-        const path = join(codexHome, name);
+      expect(existsSync(codexHome)).toBe(true);
+      for (const path of await filesUnder(codexHome)) {
         // Codex's own databases come and go while it shuts down.
         const text = await lstat(path)
           .then((st) => (st.isFile() ? readFile(path, 'utf8') : ''))

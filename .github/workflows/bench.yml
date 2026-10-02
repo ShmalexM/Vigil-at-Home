@@ -36,9 +36,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: pnpm
@@ -50,7 +50,7 @@ jobs:
           BENCH_OUT: ${{ github.workspace }}/bench-results
       - if: always()
         run: node packages/bench/scripts/summary.mjs bench-results >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: bench-detection
@@ -71,16 +71,16 @@ jobs:
       OLLAMA_MODELS: /home/runner/.ollama-models
       BENCH_OUT: ${{ github.workspace }}/bench-results
     steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: /home/runner/.ollama-models
           key: ollama-${{ matrix.model }}
@@ -94,7 +94,7 @@ jobs:
       - run: pnpm --filter @vigil/bench bench:labels
       - if: always()
         run: node packages/bench/scripts/summary.mjs bench-results >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: bench-labels-${{ strategy.job-index }}
@@ -104,9 +104,9 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: pnpm
@@ -139,7 +139,7 @@ jobs:
       - name: Remove the helper
         if: always()
         run: sudo "$RUNNER_TEMP/Vigil at Home.app/Contents/Resources/helper/uninstall.sh" || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: bench-flow
