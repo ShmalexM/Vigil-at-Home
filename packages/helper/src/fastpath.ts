@@ -59,6 +59,8 @@ export interface FastPathOptions {
   log?: (msg: string) => void;
   /** For tests. */
   now?: () => number;
+  /** For tests: a smaller RETIRED_MAX. */
+  retiredMax?: number;
 }
 
 /** How long an entry a list drops keeps blocking. */
@@ -262,8 +264,9 @@ export class FastPath {
         if (!keep.has(e) && now - at < RETIRE_MS) r[e] = at;
       for (const e of this.state.lists[name] ?? []) if (!keep.has(e) && !(e in r)) r[e] = now;
       const n = Object.keys(r).length;
-      if (n > RETIRED_MAX)
-        throw new PolicyRefused(`list ${name} would drop ${n} entries; at most ${RETIRED_MAX}`);
+      const max = this.opts.retiredMax ?? RETIRED_MAX;
+      if (n > max)
+        throw new PolicyRefused(`list ${name} would drop ${n} entries; at most ${max}`);
       if (n) out[name] = r;
     }
     return out;

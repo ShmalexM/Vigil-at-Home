@@ -8,7 +8,7 @@ import { RuleStore, type SensorEvent } from '@vigil/sensors';
 import { Approvals } from './approval.js';
 import { HelperClient } from './client.js';
 import { Executor, type ActionOutcome } from './executor.js';
-import { FastPath, RETIRED_MAX, RETIRE_MS, type HelperRan } from './fastpath.js';
+import { FastPath, RETIRE_MS, type HelperRan } from './fastpath.js';
 import { Journal } from './journal.js';
 import { LIST_PART_MAX, type DetectionSync } from './protocol.js';
 import { HelperServer } from './server.js';
@@ -24,10 +24,14 @@ let server: HelperServer;
 let client: HelperClient;
 let rulesFile: string;
 
+// Small enough that the oversized-drop test stays fast on a busy runner.
+const RETIRED_TEST_MAX = 1000;
+
 function makeFastPath(executor: Executor): FastPath {
   return new FastPath({
     file: rulesFile,
     now: () => clock,
+    retiredMax: RETIRED_TEST_MAX,
     run: async (action) => {
       const out = await executor.execute(action);
       if (out.kind !== 'done') throw new Error('needs the admin password');
@@ -325,7 +329,7 @@ describe('blocking rules in the helper', () => {
   });
 
   it('refuses a list that would drop more than it may in a week', async () => {
-    const many = Array.from({ length: RETIRED_MAX + 1 }, (_, i) =>
+    const many = Array.from({ length: RETIRED_TEST_MAX + 1 }, (_, i) =>
       i.toString(16).padStart(64, '0'),
     );
     const { sync, lists } = appSet({ known_bad_sha256: many });
@@ -335,7 +339,7 @@ describe('blocking rules in the helper', () => {
     ).rejects.toMatchObject({
       code: 'refused',
     });
-    expect(fast.status().lists['known_bad_sha256']).toBe(RETIRED_MAX + 1);
+    expect(fast.status().lists['known_bad_sha256']).toBe(RETIRED_TEST_MAX + 1);
   });
 
   it('tells subscribers what it already did about each event, replays included', async () => {
