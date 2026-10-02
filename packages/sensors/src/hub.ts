@@ -8,7 +8,7 @@ import { osqueryHealth, osqueryLineToEvents } from './osquery/resultParser.js';
 import { DEFAULT_PATHS } from './santa/profile.js';
 import { OSQUERY_RESULTS_LOG } from './osquery/config.js';
 import type { SensorEvent, SensorEventSink } from './types.js';
-import { ProcessEnricher } from './enrich.js';
+import { ProcessEnricher, type SignatureInfo } from './enrich.js';
 
 export interface SensorHubOptions {
   sink: SensorEventSink;
@@ -19,6 +19,11 @@ export interface SensorHubOptions {
   onError?: (source: string, err: Error) => void;
   /** Drop noisy event kinds before they reach the sink. */
   filter?: (event: SensorEvent) => boolean;
+  /**
+   * Reads the signature of a program no sensor described (one that started
+   * before Vigil). Answers fill in later events from that program.
+   */
+  signatureLookup?: (path: string) => Promise<SignatureInfo | undefined>;
 }
 
 const DEDUPE_WINDOW = 5000;
@@ -30,9 +35,21 @@ export class SensorHub {
   private readonly tailers = new Map<string, FileTailer>();
   private readonly seen = new Set<string>();
   private readonly activity: SensorActivity = { santa: null, osquery: null };
-  private readonly enricher = new ProcessEnricher();
+  private readonly enricher: ProcessEnricher;
 
   constructor(private readonly opts: SensorHubOptions) {
+    const lookup = opts.signatureLookup;
+    this.enricher = new ProcessEnricher(
+      lookup
+        ? {
+            onUnknownSignature: (path) => {
+              lookup(path)
+                .then((info) => info && this.enricher.learnSignature(path, info))
+                .catch(() => {});
+            },
+          }
+        : {},
+    );
     const santa = opts.santaLogPath ?? DEFAULT_PATHS.santaLog;
     if (santa)
       this.addTailer('santa', santa, (line) => {

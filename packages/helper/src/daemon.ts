@@ -26,6 +26,7 @@ import { Executor } from './executor.js';
 import { Journal } from './journal.js';
 import { ensureOsquery, defaultOsqueryPaths, type OsqueryPaths } from './osquery.js';
 import { HelperServer } from './server.js';
+import { signatureLookup } from './signature.js';
 import { BINARIES, realSystem, type System } from './system.js';
 
 export interface DaemonOptions {
@@ -117,6 +118,8 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     santaLogPath: paths.santaLog,
     osqueryResultsPath: paths.osqueryResults,
     sink: (e) => server.publish(e),
+    // Signatures of programs that started before Vigil (codesign is macOS-only).
+    ...(process.platform === 'darwin' ? { signatureLookup: signatureLookup(sys) } : {}),
     onError: (source, err) => log(`${source} sensor: ${err.message}`),
   });
   await hub.start();
