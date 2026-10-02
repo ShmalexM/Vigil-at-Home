@@ -1,10 +1,20 @@
 import { describe, expect, it } from 'vitest';
+import { macosCoreRules } from '@vigil/detection';
 import { needsApproval, parseRequest, type HelperCommand } from './protocol.js';
 
 const req = (command: unknown, extra: object = {}) =>
   parseRequest(JSON.stringify({ id: 'r1', command, ...extra }));
 
 describe('request validation', () => {
+  it('accepts the pre-launch rule list without asking for approval', () => {
+    const rule = macosCoreRules.find((r) => r.id === 'fake-password-prompt')!;
+    const parsed = req({ kind: 'santa.preexec.set', rules: [rule] });
+    expect('command' in parsed && parsed.command.kind).toBe('santa.preexec.set');
+    if ('command' in parsed) expect(needsApproval(parsed.command)).toBe(false);
+    expect(req({ kind: 'santa.preexec.set', rules: [rule], extra: 1 })).toHaveProperty('error');
+    expect(req({ kind: 'santa.preexec.set', rules: [{ id: 'x' }] })).toHaveProperty('error');
+  });
+
   it('accepts the core actions and the helper queries', () => {
     for (const command of [
       { kind: 'process.suspend', pid: 123, path: '/tmp/x' },

@@ -193,9 +193,26 @@ function start(): void {
   // Sensor events arrive through the helper, which reads Santa's and osquery's logs as root.
   helper.on('event', (e) => void core.handleEvent(e));
   const checkHealth = () => reportHealth(core.sensors, probe);
+  // Santa stops what it can of Vigil's launch-blocking rules before the
+  // program runs. Re-sent on every connection and whenever the rules change.
+  let preexecSent: string | undefined;
+  const syncPreexec = async () => {
+    const rules = core.detector?.blockingLaunchRules() ?? [];
+    const key = JSON.stringify(rules);
+    if (key === preexecSent) return;
+    try {
+      if (await helper.setPreexecRules(rules)) preexecSent = key;
+    } catch (err) {
+      console.warn('[preexec] could not update Santa rules:', err);
+    }
+  };
   helper.on('state', (state) => {
     void checkHealth();
-    if (state === 'connected') void saveSantaProfile();
+    if (state === 'connected') {
+      void saveSantaProfile();
+      preexecSent = undefined;
+      void syncPreexec();
+    }
   });
   if (process.platform === 'darwin') {
     helper.start();
@@ -205,6 +222,7 @@ function start(): void {
       async () => {
         await helper.ping();
         await checkHealth();
+        await syncPreexec();
       },
       true,
     );

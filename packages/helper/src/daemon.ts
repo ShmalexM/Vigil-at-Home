@@ -33,6 +33,7 @@ import {
   type OsqueryPaths,
 } from './osquery.js';
 import { HelperServer } from './server.js';
+import { PreexecSync } from './preexec.js';
 import { signatureLookup } from './signature.js';
 import { BINARIES, realSystem, type System } from './system.js';
 
@@ -111,6 +112,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       await sys.run('santactl', ['sync'], { timeoutMs: 60_000 });
     },
     statusExtra: () => ({ sensors: sensors() }),
+    preexec: new PreexecSync(sys, rules, existsSync),
   });
 
   const server = new HelperServer({

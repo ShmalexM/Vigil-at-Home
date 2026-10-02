@@ -1,7 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { isRelease, type Action, type ActionResult, type SensorEvent } from '@vigil/core';
-import { defaultPaths } from '@vigil/helper';
+import { defaultPaths, type PreexecOutcome } from '@vigil/helper';
+import type { DetectionRule } from '@vigil/detection';
 import { HelperCallError, HelperClient } from '@vigil/helper/client';
 import { DryRunExecutor, type ActionExecutor } from './executor.js';
 
@@ -122,6 +123,24 @@ export class HelperLink
     } catch (err) {
       // A closed or hung connection: drop it and start reconnecting.
       this.dropped(client);
+      throw err;
+    }
+  }
+
+  /**
+   * Hand the helper the rules Vigil enforces in block mode, so Santa can stop
+   * the ones it can express before the program runs. Null while unconnected.
+   */
+  async setPreexecRules(rules: DetectionRule[]): Promise<PreexecOutcome | null> {
+    const client = this.client;
+    if (!client) return null;
+    try {
+      return await withTimeout(
+        client.call<PreexecOutcome>({ kind: 'santa.preexec.set', rules }),
+        ACTION_TIMEOUT_MS,
+      );
+    } catch (err) {
+      if (!(err instanceof HelperCallError)) this.dropped(client);
       throw err;
     }
   }

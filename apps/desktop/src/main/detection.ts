@@ -243,6 +243,18 @@ export class Detector {
     }));
   }
 
+  /**
+   * Rules applied in block mode that act on a program starting. The helper
+   * turns the ones Santa can express into pre-launch rules; the engine keeps
+   * running all of them either way.
+   */
+  blockingLaunchRules(): DetectionRule[] {
+    return this.engine
+      .listRules()
+      .filter((r) => r.effectiveMode === 'block' && r.eventKinds.includes('process.exec'))
+      .map(({ effectiveMode: _mode, ...r }) => r as DetectionRule);
+  }
+
   hasRule(id: string): boolean {
     return this.engine.getRule(id) !== undefined;
   }
