@@ -27,7 +27,9 @@ export function HomeView({ go }: { go: (r: string) => void }) {
   const allRunning = !!status && status.sensors.every((s) => s.state === 'ok');
   const [pack] = usePack({ settings: false });
   const lead = pack?.dogs.find((d) => d.role === 'lead');
-  const scout = homeMood(pack, needs.length > 0 || (!!status && status.level !== 'good'));
+  // Ears up for a decision, or for protection that has stopped; a layer that
+  // was never installed is the status line's to explain, not a reason to fret.
+  const scout = homeMood(pack, !!status && (status.needsYou > 0 || status.level === 'poor'));
 
   return (
     <div className="page">

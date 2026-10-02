@@ -54,7 +54,7 @@ Vigil's rules come first in every mode, Full access included. Connector calls ar
 
 The Pack page sits under Advanced. Two parts of it reach the rest of the app:
 
-- **Scout on Home.** The Lead dog sits next to Home's status line and acts it out: relaxed when nothing needs you, ears up (the waiting pose) when an alert needs your decision or protection isn't fully on, and busy while a dog's AI job runs. The status words don't change; the dog only shows them. Clicking it opens Ask.
+- **Scout on Home.** The Lead dog sits next to Home's status line and acts it out: relaxed when nothing needs you, ears up (the waiting pose) when something needs your decision (the Needs you count) or a protection layer has stopped, and busy while a dog's AI job runs. The status words don't change; the dog only shows them. Clicking it opens Ask.
 - **Ask.** A bar at the bottom of every page (except Pack and setup) opens a chat drawer with the Lead dog. It is closed until you open it (click the bar or press ⌘K; Esc closes it). It is the same conversation as the Pack page, sent as your own chat, so the same rules apply: a Claude plan only if you turned it on, and no dog blocks, allows or changes a rule. The drawer tells the Lead dog which page you're on and the id of what you have selected there (an alert, rule, agent or event), so "what's this?" works; the Lead dog reads the details with its read-only tools.
 
 ```mermaid
