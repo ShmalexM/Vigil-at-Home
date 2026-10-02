@@ -1,7 +1,7 @@
 import { CircleCheck, Eye, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import { useLive, vigil } from '../api';
-import { NoticedList, WatchLine } from '../components/Attention';
+import { NeedsYouLine, NoticedList, WatchLine } from '../components/Attention';
 import { Card, Chip, LevelPill, SectionHead, SeverityMark, StatusMark } from '../components/ui';
 import { timeAgo } from '../format';
 import { isNoticed, needsDecision } from '../../../shared/attention';
@@ -9,9 +9,9 @@ import { LEVEL_RULES } from '../../../shared/levels';
 import { PageHead } from './AppShell';
 
 const levelSentence = {
-  good: 'Protection is on. Nothing needs you.',
-  fair: 'Something needs a look.',
-  poor: 'Something needs you now.',
+  good: 'Protection is on.',
+  fair: 'Protection is only partly on.',
+  poor: 'Protection has stopped.',
 };
 
 export function HomeView({ go }: { go: (r: string) => void }) {
@@ -32,8 +32,12 @@ export function HomeView({ go }: { go: (r: string) => void }) {
         <Card>
           <div className="row" style={{ gap: 12 }}>
             <LevelPill level={status.level} />
-            <span className="t-h2">{levelSentence[status.level]}</span>
+            <span className="t-h2">
+              {levelSentence[status.level]}
+              {status.needsYou === 0 && ' Nothing needs you.'}
+            </span>
           </div>
+          {status.needsYou > 0 && <NeedsYouLine count={status.needsYou} />}
           <div className="row spread" style={{ flexWrap: 'wrap' }}>
             <WatchLine watch={status.watch} />
             <button type="button" className="btn sm ghost" onClick={() => go('history')}>
@@ -57,8 +61,8 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               ))}
             </ul>
             <p className="t-small">
-              The first reason above is the one that sets the level. Protection layers are Santa,
-              osquery and the Vigil helper.
+              The level is only about protection: Santa, osquery and the Vigil helper. Alerts
+              waiting on you are counted separately, so they never make protection look broken.
             </p>
           </details>
           {status.dryRun && (

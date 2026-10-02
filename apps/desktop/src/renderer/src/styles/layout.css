@@ -462,3 +462,8 @@ div.history-row:hover {
 .noticed-hint:hover {
   color: var(--tx1);
 }
+
+/* Needs you, shown next to (never inside) the protection level. */
+.needs-line {
+  gap: 8px;
+}
