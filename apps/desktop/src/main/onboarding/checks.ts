@@ -21,6 +21,8 @@ export interface Probe {
     opts?: { timeoutMs?: number },
   ): Promise<{ code: number; stdout: string; timedOut?: boolean }>;
   getJson(url: string): Promise<unknown>;
+  /** Ask the running helper for its status over its socket; true when it answers. */
+  helperAnswers?(): Promise<boolean>;
   home: string;
 }
 
@@ -85,7 +87,14 @@ export const CHECKS: Record<CheckId, (p: Probe) => Promise<CheckResult>> = {
     return bin.some((f) => p.exists(f)) ? { ok: true } : { ok: false };
   },
 
-  helper: async (p) => (p.exists(HELPER_SOCKET) ? { ok: true } : { ok: false }),
+  helper: async (p) => {
+    if (!p.exists(HELPER_SOCKET)) return { ok: false };
+    // A socket file can outlive the helper, so only an answer counts.
+    if (!(await p.helperAnswers?.())) {
+      return { ok: false, detail: 'Installed, but the helper isn’t answering' };
+    }
+    return { ok: true, detail: 'Running and answering' };
+  },
 
   ollama: async (p) => {
     const tags = await ollamaModels(p);
@@ -162,7 +171,7 @@ const INHERITED_ENV = [
   'SSL_CERT_FILE',
 ] as const;
 
-export function systemProbe(home = homedir()): Probe {
+export function systemProbe(home = homedir(), helperAnswers?: () => Promise<boolean>): Probe {
   // Finder-launched apps get a minimal PATH. Vendor CLIs installed with npm
   // are node scripts, so node has to be findable too.
   const env: Record<string, string> = {};
@@ -174,6 +183,7 @@ export function systemProbe(home = homedir()): Probe {
   env['PATH'] = [...BIN_DIRS(home), '/usr/bin', '/bin'].join(':');
   return {
     home,
+    ...(helperAnswers ? { helperAnswers } : {}),
     exists: (path) => existsSync(path),
     executable: (path) => {
       try {

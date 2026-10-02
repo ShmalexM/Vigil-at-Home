@@ -12,6 +12,7 @@ import {
   macosCoreRules,
   mergeRules,
   sqliteStores,
+  type DecisionResult,
   type Detection,
   type DetectionRule,
   type EventHistory,
@@ -278,13 +279,18 @@ export class Detector {
     alertId: string,
     decision: UserDecision,
     opts: Omit<HelperSyncOptions, 'byUser'> = {},
-  ): Promise<ReturnType<Feedback['recordDecision']> & { helper?: HelperSyncOutcome }> {
+  ): Promise<DecisionResult & { suggested?: boolean; helper?: HelperSyncOutcome }> {
     const d = this.store.getAlertDetection(alertId) as Detection | undefined;
     if (!d) return {};
-    const { value, helper } = await this.change(
-      () => this.feedback.recordDecision(d, decision, userOrigin('alert')),
-      opts,
-    );
+    const { value, helper } = await this.change(() => {
+      const result = this.feedback.recordDecision(d, decision, userOrigin('alert'));
+      // A rule that keeps being wrong is only suggested for a quieter mode; the
+      // user approves it in Rules like any other suggested change.
+      const suggested = result.suggestDemotion
+        ? this.pipeline.suggestDemotion(result.suggestDemotion, [alertId])
+        : undefined;
+      return { ...result, suggested: suggested?.ok === true };
+    }, opts);
     return { ...value, helper };
   }
 

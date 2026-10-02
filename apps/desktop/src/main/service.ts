@@ -194,7 +194,8 @@ export class VigilCore {
           reason: 'You confirmed it as malicious',
         });
       }
-      if (learned.demoted) console.info(`[detection] ${learned.demoted.message}`);
+      if (learned.suggested && learned.suggestDemotion)
+        console.info(`[detection] suggested: ${learned.suggestDemotion.message}`);
     }
     return this.store.getAlert(alertId) ?? alert;
   }
@@ -321,6 +322,15 @@ export class VigilCore {
 
   setAlertView(view: AlertView): void {
     this.store.setSetting('alertView', AlertView.parse(view));
+  }
+
+  /** Off by default: the sidebar shows only Home, History and Settings. */
+  showAdvanced(): boolean {
+    return this.store.getSetting('showAdvanced', z.boolean(), false);
+  }
+
+  setShowAdvanced(show: boolean): void {
+    this.store.setSetting('showAdvanced', show);
   }
 
   appearance(): AppearanceSettings {

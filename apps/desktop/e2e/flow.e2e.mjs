@@ -21,7 +21,8 @@
 //   4. Launch agent named like Apple's: a real plist, seen by osquery. The
 //      popup suggests disabling it; the user presses Block it; then undoes it.
 //   5. Timing: the same pause-and-popup path repeated to get a spread.
-//   6. Learning: answering "fine" three times demotes the rule from block to alert.
+//   6. Learning: answering "fine" three times suggests turning the rule down to alert;
+//      it keeps blocking until the suggestion is accepted.
 //   7. App closed: the helper runs the blocking rules the app handed it and
 //      blocks the same beacon with no app running.
 //
@@ -599,7 +600,7 @@ try {
       const paused = procState(pid).startsWith('T');
       const t1 = Date.now();
       // Undo the pause rather than answering "fine": three "fine" answers in a
-      // row teach Vigil to demote the rule, which scenario 6 checks on its own.
+      // row make Vigil suggest turning the rule down, which scenario 6 checks on its own.
       if (act) await main((_e, id) => globalThis.vigil.core.alerts.undo(id), act.id);
       const resumed = await waitUntil(() => !procState(pid).startsWith('T'), 20000);
       results.timings.push({
@@ -622,7 +623,8 @@ try {
   // ---------------------------------------------------------------- 6
   {
     // The user keeps saying "fine" to one rule: after three answers Vigil
-    // should stop blocking with it (block -> alert), and never raise it itself.
+    // suggests turning it down (block -> alert) but leaves it blocking until
+    // the user accepts the suggestion.
     const modeOf = () =>
       main(
         () =>
@@ -632,7 +634,19 @@ try {
     const before = await modeOf();
     // Scenario 1 already answered "fine" once for this rule.
     let answers = 1;
-    for (let i = 0; i < 4 && (await modeOf()) === 'block'; i++, answers++) {
+    const suggestion = () =>
+      main(() =>
+        globalThis.vigil.core.detector.pipeline
+          .list()
+          .find(
+            (p) =>
+              p.kind === 'retire' &&
+              p.provider === 'vigil' &&
+              p.status === 'awaiting_review' &&
+              p.rule.id === 'credential-theft-untrusted',
+          ),
+      );
+    for (let i = 0; i < 4 && !(await suggestion()); i++, answers++) {
       const child = sleeper(`Helper-${i}`);
       await sleep(200);
       const t0 = await inject({
@@ -657,22 +671,25 @@ try {
         );
       child.kill('SIGKILL');
     }
+    const suggested = await suggestion();
+    const stillBefore = await modeOf();
+    if (suggested)
+      await main((_e, id) => globalThis.vigil.core.detector.approveProposal(id), suggested.id);
     const after = await modeOf();
     results.scenarios.learning = {
-      name: '"Fine" answers demote the rule',
+      name: '"Fine" answers suggest turning the rule down',
       before,
+      afterAnswers: stillBefore,
       after,
       answers,
     };
     check('learning: rule was blocking before', before === 'block', before);
     check(
-      'learning: three "fine" answers demoted it to alert',
-      after === 'alert' && answers === 3,
-      {
-        after,
-        answers,
-      },
+      'learning: three "fine" answers suggested Alert and left it blocking',
+      !!suggested && suggested.retireTo === 'alert' && stillBefore === 'block' && answers === 3,
+      { suggested: suggested?.retireTo ?? null, mode: stillBefore, answers },
     );
+    check('learning: accepting the suggestion moved it to alert', after === 'alert', after);
   }
   results.approvals = await main(() => globalThis.__approvals);
 
