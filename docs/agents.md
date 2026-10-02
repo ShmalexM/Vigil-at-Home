@@ -341,6 +341,19 @@ Node.js starting up; Vigil's own answer takes under 5 ms. Between tool calls
 nothing runs. Following agents' process trees takes about 2 MB of memory. See
 [performance.md](performance.md).
 
+## How it is tested
+
+Besides the unit tests and the pre-flight bench, `apps/desktop/e2e/agents.e2e.mjs`
+(`pnpm --filter @vigil/desktop e2e:agents`) runs the real Claude Code CLI
+against the built app on every pull request, on GitHub's Mac runners. Claude
+Code gets the hooks snippet and MCP entry from the app, as a user would paste
+them, and talks to a stand-in API on 127.0.0.1 that asks for one tool call at
+a time, so no account is needed and nothing leaves the machine. It checks the
+"Pre-flight on" badge, that an ordinary step runs, that reading a credential
+file is asked about, that writing into Vigil's folder and uploading
+credentials are stopped with Vigil's reason, that Vigil's tools answer over
+MCP, and that with Vigil closed the hook asks.
+
 ## Limits
 
 - Pre-flight works with Claude Code only. Cursor and Codex hooks may follow.

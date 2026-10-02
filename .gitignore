@@ -10,4 +10,5 @@ coverage/
 e2e-results/
 /apps/desktop/build/
 perf-results/
+agents-results/
 bench-results/
