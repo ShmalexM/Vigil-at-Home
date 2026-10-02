@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { app, dialog, Notification, powerMonitor, safeStorage, shell } from 'electron';
 import { listDigest } from '@vigil/detection/fastpath';
+import { HelperCallError } from '@vigil/helper/client';
 import { z } from 'zod';
 import type { HelperInstallResult } from '../shared/ipc.js';
 import { AiBridge } from './ai.js';
@@ -196,6 +197,9 @@ function start(): void {
   const checkHealth = () => reportHealth(core.sensors, probe);
   // Re-sent on every connection and whenever the rules, exceptions or lists change.
   let helperRulesSent: string | undefined;
+  // A set the user declined to approve (a loosening needs their password). Not
+  // asked again until the rules change, so the health timer never re-prompts.
+  let helperRulesDeclined: string | undefined;
   // The helper runs the blocking rules it can on its own, so blocks happen
   // even while the app is closed, and hands Santa the pre-launch ones.
   let helperRulesSync = Promise.resolve();
@@ -205,10 +209,11 @@ function start(): void {
     const set = core.detector.helperRules();
     const lists = Object.entries(set.lists).map(([l, entries]) => [l, listDigest(entries)]);
     const key = JSON.stringify({ ...set, lists });
-    if (key === helperRulesSent) return;
+    if (key === helperRulesSent || key === helperRulesDeclined) return;
     try {
       if (await helper.syncRules(set)) helperRulesSent = key;
     } catch (err) {
+      if (err instanceof HelperCallError && err.code === 'refused') helperRulesDeclined = key;
       console.warn('[helper rules] could not update the helper:', err);
     }
   };
@@ -218,6 +223,7 @@ function start(): void {
     if (state === 'connected') {
       void saveSantaProfile();
       helperRulesSent = undefined;
+      helperRulesDeclined = undefined;
       void syncHelperRules();
     }
   });

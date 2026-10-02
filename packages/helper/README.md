@@ -68,6 +68,17 @@ Santa / osquery ─► SensorHub ─► FastPath (same engine as the app) ─►
   second time. Only containment runs here; releases still need the password.
 - The same rules feed Santa's pre-launch (CEL) rules, so the ones Santa can express stop
   the program before it runs at all.
+- Anything running as the user can reach the socket, so a sync can't weaken these rules
+  on its own say-so. One that turns a rule off or changes what it blocks, adds an
+  exception or adds one of Vigil's own paths gets a needs-approval answer and only applies
+  after the admin password, the same flow releases use. Wording changes (name, reasons,
+  severity) and new rules need none. The app doesn't ask again for a set the user declined.
+- Indicator lists change daily as feeds age entries out, so they need no password; instead
+  an entry a list drops keeps blocking for a week (`RETIRE_MS`), and a list may drop at
+  most `RETIRED_MAX` entries in that time. A list's old contents stay in force until the
+  new ones have fully arrived.
+- `helper-rules.json` is root-owned in a root-owned folder, and `helper.status` reports its
+  revision (`helperRules.rev`), which goes up with every change.
 
 Anything running as the user can reach the socket and send fewer rules. That only moves
 those blocks back to the app's engine, as before, so this needs no password.

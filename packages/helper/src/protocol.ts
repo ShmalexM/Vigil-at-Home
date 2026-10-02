@@ -7,7 +7,8 @@
 // rules) run straight away. Release actions (core's isRelease: resume,
 // unblock, restore, enable, Santa allow or rule removal) also need the
 // user's macOS admin password, because malware running as the user could
-// otherwise drive the app and release its own block.
+// otherwise drive the app and release its own block. So does a detection.sync
+// that weakens the helper's own rules (FastPath.loosening).
 
 import { z } from 'zod';
 import {
@@ -73,8 +74,10 @@ export const RuleExceptionSchema = z.strictObject({
  * `lists` names each indicator list the rules use with a digest of its
  * contents; the helper answers with the lists it needs sent.
  *
- * Fewer rules or more exceptions only move blocks back to the app's own
- * engine, which runs every rule either way, so this needs no admin password.
+ * The app runs every rule too, but only while it is open. A sync that drops
+ * or changes a rule, adds an exception or adds a self path therefore needs
+ * the admin password, like a release; one that only adds rules does not.
+ * Lists may change freely: an entry a list drops keeps blocking for a week.
  */
 export const DetectionSync = z.strictObject({
   kind: z.literal('detection.sync'),
@@ -124,7 +127,10 @@ export function isAction(cmd: HelperCommand): cmd is HelperAction {
   ].includes(cmd.kind);
 }
 
-/** Commands that loosen protection and so need the user's admin password. */
+/**
+ * Actions that loosen protection and so need the user's admin password.
+ * detection.sync depends on the rules in force, so the executor checks it.
+ */
 export function needsApproval(cmd: HelperCommand): boolean {
   if (!isAction(cmd)) return false;
   return isRelease(CoreAction.parse(cmd));

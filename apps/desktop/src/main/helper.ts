@@ -160,7 +160,9 @@ export class HelperLink
   /**
    * Hand the helper the blocking rules it can run itself (and Santa before
    * launch), then any indicator list it says it doesn't have yet. Null while
-   * unconnected.
+   * unconnected. If the rules turn something off or add an exception, the
+   * helper asks for the admin password first; a cancelled dialog throws a
+   * HelperCallError with code refused and leaves the helper's rules as they were.
    */
   async syncRules(set: HelperRuleSet): Promise<HelperRulesOutcome | null> {
     const client = this.client;
@@ -177,7 +179,8 @@ export class HelperLink
           selfPaths: set.selfPaths,
           lists: digests,
         }),
-        ACTION_TIMEOUT_MS,
+        // A sync that loosens the rules waits on the admin password, like a release.
+        RELEASE_TIMEOUT_MS,
       );
       for (const name of out.needLists) {
         const entries = [...new Set(set.lists[name] ?? [])];
