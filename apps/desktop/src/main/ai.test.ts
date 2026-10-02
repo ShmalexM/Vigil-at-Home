@@ -7,7 +7,7 @@ import type {
   VigilAiOptions,
 } from '@vigil/ai';
 import { AiBridge, type KeySource } from './ai.js';
-import { DryRunExecutor } from './executor.js';
+import { DryRunExecutor, type ActionExecutor } from './executor.js';
 import { VigilCore } from './service.js';
 import { sendTestAlert } from './test-alert.js';
 import { isNoticed } from '../shared/attention.js';
@@ -76,9 +76,15 @@ function fakeAi(opts: VigilAiOptions, calls: RunRequest<unknown>[]): VigilAi {
   };
 }
 
-function setup(o: { saved?: Partial<Record<ApiKeyProvider, string>>; mode?: SetupMode } = {}) {
+function setup(
+  o: {
+    saved?: Partial<Record<ApiKeyProvider, string>>;
+    mode?: SetupMode;
+    executor?: ActionExecutor;
+  } = {},
+) {
   const store = memoryStore();
-  const core = new VigilCore(store, new DryRunExecutor(), true, () => NOW);
+  const core = new VigilCore(store, o.executor ?? new DryRunExecutor(), true, () => NOW);
   const calls: RunRequest<unknown>[] = [];
   const made: VigilAiOptions[] = [];
   const opened: string[] = [];
@@ -192,6 +198,26 @@ describe('AiBridge explanations', () => {
     expect(await ai.explainOnRequest(core, alert.id)).toEqual({ ok: true });
     expect(calls[1]).toMatchObject({ purpose: 'explain', urgency: 'now', requestedByUser: true });
     expect(await ai.explainOnRequest(core, 'gone')).toMatchObject({ ok: false });
+  });
+
+  it('tells the AI what really happened, a failed block included', async () => {
+    const failing: ActionExecutor = {
+      execute: async () => {
+        throw new Error('helper not installed');
+      },
+    };
+    const { core, ai, calls } = setup({ executor: failing });
+    ai.explainAlertsFrom(core);
+    await core.alerts.raise({
+      rule: makeRule(),
+      events: [makeExec()],
+      actions: [{ kind: 'process.suspend', pid: 4242 }],
+    });
+    await settle();
+    expect(calls[0]?.data).toMatchObject({
+      actions: [{ kind: 'process.suspend', status: 'failed', error: 'helper not installed' }],
+    });
+    expect(calls[0]?.instructions).toContain('a failed or pending action did not happen');
   });
 
   it('never sends the test alert', async () => {
