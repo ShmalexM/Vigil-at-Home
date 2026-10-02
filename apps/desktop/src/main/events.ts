@@ -28,6 +28,8 @@ export class EventLog {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private dropped = 0;
   private invalid = 0;
+  /** The batch now waiting already failed to write once. */
+  private retrying = false;
   private readonly flushMs: number;
   private readonly maxBatch: number;
   private readonly maxPending: number;
@@ -62,8 +64,22 @@ export class EventLog {
     this.pending = [];
     try {
       this.invalid += this.store.insertEvents(batch);
+      this.retrying = false;
     } catch (err) {
       this.opts.onError?.(err);
+      // A failed batch wrote nothing (one transaction), so it is tried once
+      // more at the next flush; if that fails too it is counted as dropped.
+      if (this.retrying) {
+        this.dropped += batch.length;
+        this.retrying = false;
+        return;
+      }
+      this.retrying = true;
+      const room = Math.max(0, this.maxPending - this.pending.length);
+      const kept = batch.slice(0, room);
+      this.dropped += batch.length - kept.length;
+      this.pending = kept.concat(this.pending);
+      if (this.pending.length > 0) this.timer ??= setTimeout(() => this.flush(), this.flushMs);
     }
   }
 

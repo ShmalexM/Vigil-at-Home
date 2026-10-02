@@ -80,7 +80,7 @@ export const Appearance = z.object({
   light: VariantTheme,
   dark: VariantTheme,
   contrast: z.number().int().min(0).max(100),
-  uiFontSize: z.number().int().min(11).max(16),
+  uiFontSize: z.number().int().min(11).max(26),
   uiFont: FontFamily,
   codeFont: FontFamily,
 }) satisfies z.ZodType<AppearanceSettings>;
@@ -482,6 +482,8 @@ export interface SettingsView {
   appearance: AppearanceSettings;
   dataDir: string;
   version: string;
+  /** Short commit hash of the build, '' when unknown. */
+  commit: string;
   /** Advanced pages (Alerts, Rules, Activity, Usage) are listed in the sidebar. */
   showAdvanced: boolean;
 }

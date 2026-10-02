@@ -16,10 +16,21 @@ export function useLive<T>(
   const [data, setData] = useState<T>();
   const loader = useRef(load);
   loader.current = load;
+  // Each load gets a number and only the newest may land, so a slow answer
+  // to an older load (or for the previous key) never replaces a newer one.
+  const latest = useRef(0);
   const reload = useRef(() => {
-    loader.current().then(setData, (err: unknown) => console.error(err));
+    const n = ++latest.current;
+    loader.current().then(
+      (value) => {
+        if (n === latest.current) setData(() => value);
+      },
+      (err: unknown) => console.error(err),
+    );
   }).current;
   useEffect(() => {
+    // Don't show the previous key's data while this key's loads.
+    setData(undefined);
     reload();
     const off = vigil.on('changed', reload);
     const offAlso = also ? vigil.on(also, reload) : undefined;

@@ -4,6 +4,8 @@ import trayIcon from '../../resources/trayTemplate.png?asset';
 import trayAlertIcon from '../../resources/trayAlertTemplate.png?asset';
 import type { Pushes, ThemePref } from '../shared/ipc.js';
 import { DEFAULT_APPEARANCE, windowBackground, type AppearanceSettings } from '../shared/themes.js';
+import { isAppFrameUrl } from './app-frame.js';
+import { scaledSize, textScale } from './text-scale.js';
 
 const POPOVER = { width: 380, height: 540 };
 const POPUP = { width: 420, height: 400 };
@@ -19,8 +21,11 @@ const RELEASE_POPUP_MS = 60 * 1000;
 const POPUP_SHOW_FALLBACK_MS = 1500;
 
 /** Where renderer pages are served from, for loading and for checking IPC senders. */
-export function rendererOrigin(): string {
-  return process.env['ELECTRON_RENDERER_URL'] ?? 'file://';
+const INDEX_HTML = join(import.meta.dirname, '../renderer/index.html');
+
+/** True for a frame showing Vigil's own page; see isAppFrameUrl. */
+export function isAppFrame(url: string): boolean {
+  return isAppFrameUrl(url, process.env['ELECTRON_RENDERER_URL'], INDEX_HTML);
 }
 
 function secure(win: BrowserWindow): BrowserWindow {
@@ -36,7 +41,7 @@ function secure(win: BrowserWindow): BrowserWindow {
 function load(win: BrowserWindow, route: string): void {
   const dev = process.env['ELECTRON_RENDERER_URL'];
   if (dev) void win.loadURL(`${dev}#${route}`);
-  else void win.loadFile(join(import.meta.dirname, '../renderer/index.html'), { hash: route });
+  else void win.loadFile(INDEX_HTML, { hash: route });
 }
 
 const webPreferences = () => ({
@@ -82,8 +87,9 @@ export class Windows {
       return;
     }
     this.popover = this.loadPopover();
-    const pos = popoverPosition(this.tray?.getBounds());
-    this.popover.setPosition(pos.x, pos.y, false);
+    const size = this.popoverSize();
+    const pos = popoverPosition(this.tray?.getBounds(), size.width);
+    this.popover.setBounds({ ...pos, ...size }, false);
     this.popover.show();
     this.popover.focus();
   }
@@ -112,6 +118,7 @@ export class Windows {
         }),
       );
       this.popover.on('blur', () => this.popover?.hide());
+      this.followTextSize(this.popover);
       load(this.popover, 'popover');
     }
     return this.popover;
@@ -175,6 +182,7 @@ export class Windows {
       this.releaseWhenHidden(this.popup, RELEASE_POPUP_MS);
       this.popup.setAlwaysOnTop(true, 'screen-saver');
       this.popup.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+      this.followTextSize(this.popup);
       load(this.popup, `popup/${alertId}`);
       // A hidden transparent panel may never paint, so on macOS 'ready-to-show'
       // can fail to fire and the first popup would stay hidden. Show it on
@@ -200,20 +208,39 @@ export class Windows {
     if (!this.popup) return;
     const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
     const wa = display.workArea;
-    this.popup.setPosition(wa.x + wa.width - POPUP.width - 12, wa.y + 12, false);
+    const { width } = scaledSize(POPUP, this.scale(), wa);
+    this.popup.setPosition(wa.x + wa.width - width - 12, wa.y + 12, false);
     this.popup.showInactive();
   }
 
-  /** Resize the popup to its content, keeping it pinned to the top-right corner. */
+  /**
+   * Resize the popup to its content, keeping it pinned to the top-right corner.
+   * `height` is in page pixels, so it grows with the text size.
+   */
   fitPopup(height: number): void {
     if (!this.popup || this.popup.isDestroyed()) return;
     const wa = screen.getDisplayMatching(this.popup.getBounds()).workArea;
-    const h = Math.min(height, wa.height - 24);
-    this.popup.setBounds({
-      x: wa.x + wa.width - POPUP.width - 12,
-      y: wa.y + 12,
-      width: POPUP.width,
-      height: h,
+    const { width } = scaledSize(POPUP, this.scale(), wa);
+    const h = Math.min(Math.round(height * this.scale()), wa.height - 24);
+    this.popup.setBounds({ x: wa.x + wa.width - width - 12, y: wa.y + 12, width, height: h });
+  }
+
+  private scale(): number {
+    return textScale(this.appearance.uiFontSize);
+  }
+
+  private popoverSize(): { width: number; height: number } {
+    const wa = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+    return scaledSize(POPOVER, this.scale(), wa);
+  }
+
+  /**
+   * The popover and popup draw larger with the Appearance text size (up to
+   * 200%) by zooming the page; the main window scales its own page.
+   */
+  private followTextSize(win: BrowserWindow): void {
+    win.webContents.on('did-finish-load', () => {
+      if (!win.isDestroyed()) win.webContents.setZoomFactor(this.scale());
     });
   }
 
@@ -249,6 +276,13 @@ export class Windows {
   applyTheme(pref: ThemePref, appearance: AppearanceSettings = DEFAULT_APPEARANCE): void {
     nativeTheme.themeSource = pref;
     this.appearance = appearance;
+    for (const win of [this.popover, this.popup]) {
+      if (win && !win.isDestroyed()) win.webContents.setZoomFactor(this.scale());
+    }
+    if (this.popover && !this.popover.isDestroyed()) {
+      const { x, y } = this.popover.getBounds();
+      this.popover.setBounds({ x, y, ...this.popoverSize() }, false);
+    }
     this.broadcast('theme', pref);
   }
 
@@ -262,18 +296,21 @@ export class Windows {
   }
 }
 
-function popoverPosition(tray: Rectangle | undefined): { x: number; y: number } {
+function popoverPosition(
+  tray: Rectangle | undefined,
+  width = POPOVER.width,
+): { x: number; y: number } {
   const anchor = tray && tray.width > 0 ? tray : undefined;
   const display = anchor
     ? screen.getDisplayMatching(anchor)
     : screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
   const wa = display.workArea;
   const x = anchor
-    ? Math.round(anchor.x + anchor.width / 2 - POPOVER.width / 2)
-    : wa.x + wa.width - POPOVER.width - 12;
+    ? Math.round(anchor.x + anchor.width / 2 - width / 2)
+    : wa.x + wa.width - width - 12;
   const y = anchor ? anchor.y + anchor.height + 4 : wa.y + 4;
   return {
-    x: Math.min(Math.max(x, wa.x + 4), wa.x + wa.width - POPOVER.width - 4),
+    x: Math.min(Math.max(x, wa.x + 4), wa.x + wa.width - width - 4),
     y,
   };
 }

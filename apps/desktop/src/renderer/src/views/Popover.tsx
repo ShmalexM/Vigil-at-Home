@@ -1,6 +1,6 @@
 import { CircleCheck, Power, Settings } from 'lucide-react';
 import { useLive, vigil } from '../api';
-import { NoticedList, WatchLine, WorkingHeadline } from '../components/Attention';
+import { NeedsYouLine, NoticedList, WatchLine, WorkingHeadline } from '../components/Attention';
 import { Shield } from '../components/Shield';
 import { Button, Chip, IconButton, LevelPill, SeverityMark } from '../components/ui';
 import { timeAgo } from '../format';
@@ -24,7 +24,8 @@ export function Popover() {
           </div>
           {status && <LevelPill level={status.level} small />}
         </div>
-        {status && status.reasons.length === 0 && <WorkingHeadline />}
+        {status && status.reasons.length === 0 && <WorkingHeadline needsYou={status.needsYou} />}
+        {status && status.needsYou > 0 && <NeedsYouLine count={status.needsYou} />}
         {status && status.reasons.length > 0 && (
           <span className="t-small">{status.reasons.slice(0, 2).join(' · ')}</span>
         )}
@@ -65,10 +66,7 @@ export function Popover() {
             <span className="empty-icon">
               <CircleCheck size={20} />
             </span>
-            <span className="t-h3">Nothing needs you</span>
-            <span className="t-small">
-              Vigil is watching. It will pop up if something needs a decision.
-            </span>
+            <span className="t-small">Vigil will pop up if something needs a decision.</span>
           </div>
         )}
 

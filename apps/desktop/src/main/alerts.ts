@@ -189,7 +189,12 @@ export class AlertService extends EventEmitter<AlertEvents> {
     return out;
   }
 
-  /** The user's verdict. Only this path releases containment. */
+  /**
+   * The user's verdict. Only this path releases containment. If any part of a
+   * release fails, the alert stays open and undecided with whatever is still
+   * in force shown as blocked: the user is never told something was released
+   * when it wasn't. The failed undo is in the action log with its error.
+   */
   async decide(alertId: string, input: DecisionInput): Promise<Alert> {
     const alert = this.store.getAlert(alertId);
     if (!alert) throw new Error(`No alert ${alertId}`);
@@ -197,7 +202,16 @@ export class AlertService extends EventEmitter<AlertEvents> {
       const active = this.store
         .listActions({ alertId })
         .filter((r) => r.status === 'done' && !r.undoes && undoOf(r.action, r.result));
-      for (const r of active) await this.undo(r.id);
+      let failed = 0;
+      for (const r of active) {
+        try {
+          if ((await this.undo(r.id)).status !== 'done') failed++;
+        } catch (err) {
+          console.warn(`[alerts] could not undo ${r.id}:`, err);
+          failed++;
+        }
+      }
+      if (failed > 0) return this.refresh(alertId);
     }
     for (const p of this.store.listProposals({ alertId, status: 'pending' })) {
       this.store.saveProposal({ ...p, status: 'expired', decidedAt: this.now() });
