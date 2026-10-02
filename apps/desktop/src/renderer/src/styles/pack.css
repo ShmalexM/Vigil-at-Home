@@ -138,6 +138,9 @@
 .no-ai {
   color: var(--fair);
 }
+.send-error {
+  color: var(--poor);
+}
 .lead-log {
   overflow-x: hidden;
   display: flex;

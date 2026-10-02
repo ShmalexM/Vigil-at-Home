@@ -138,6 +138,17 @@ describe('the pack', () => {
     });
   });
 
+  it('tells the Lead dog which page and item the person had open', async () => {
+    const { pack, handlers, runs } = setup();
+    handlers.push(() => ({ reply: 'That one is a test.', actions: [] }));
+    await pack.say('what is this?', { page: 'alerts', selected: 'alert-123' });
+    expect(runs[0]!.data).toMatchObject({ lookingAt: { page: 'alerts', selected: 'alert-123' } });
+    handlers.push(() => ({ reply: 'Hi', actions: [] }));
+    await pack.say('hi');
+    expect(runs[1]!.data).not.toHaveProperty('lookingAt');
+    await expect(pack.say('x', { page: '../etc' })).rejects.toThrow();
+  });
+
   it('asks before the Lead dog changes the pack in Ask for approval', async () => {
     const { pack, handlers } = setup();
     handlers.push(() => ({ reply: 'Pip can do that.', actions: [CREATE] }));

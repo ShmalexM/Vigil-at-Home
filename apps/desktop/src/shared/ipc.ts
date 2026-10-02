@@ -29,6 +29,7 @@ import type {
   VigilHelperView,
 } from './agents.js';
 import {
+  ChatContext,
   ConnectorInput,
   DogInput,
   DogPatch,
@@ -273,7 +274,7 @@ export const calls = {
   listVigilHelpers: z.tuple([]),
   getPack: z.tuple([]),
   setPackMode: z.tuple([PermissionMode]),
-  sayToLead: z.tuple([z.string().min(1).max(4000)]),
+  sayToLead: z.tuple([z.string().min(1).max(4000), ChatContext.optional()]),
   clearLeadChat: z.tuple([]),
   decideLeadAction: z.tuple([Id, Id, z.boolean()]),
   decidePackTool: z.tuple([Id, ToolDecision]),

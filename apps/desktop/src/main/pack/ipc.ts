@@ -37,7 +37,7 @@ export function packHandlers(pack: PackService, connectors: Connectors): Pick<Ha
     getPack: () => pack.view(),
     setPackMode: (mode) => pack.setMode(mode),
     // The answer arrives as a push; the call returns once the Lead dog has replied.
-    sayToLead: (text) => result(() => pack.say(text)),
+    sayToLead: (text, context) => result(() => pack.say(text, context)),
     clearLeadChat: () => pack.clearChat(),
     decideLeadAction: (messageId, actionId, approve) =>
       pack.decideAction(messageId, actionId, approve),

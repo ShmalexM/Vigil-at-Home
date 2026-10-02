@@ -19,6 +19,7 @@ import {
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type {
   Breed,
+  ChatContext,
   ChatMessage,
   ConnectorView,
   DogMood,
@@ -31,8 +32,10 @@ import type {
   ToolView,
 } from '../../../shared/pack';
 import { vigil } from '../api';
+import { useDialogFocus } from '../components/dialog-focus';
 import { BREEDS, Dog, breedName } from '../components/Dog';
 import { useToast } from '../components/Toasts';
+import { leadChat, useLeadChat } from '../lead-chat';
 import { Button, Card, Chip, Segmented } from '../components/ui';
 import { timeAgo } from '../format';
 import '../styles/dog.css';
@@ -41,8 +44,15 @@ import { PageHead } from './AppShell';
 
 type PackDog = PackView['dogs'][number];
 
-/** The pack, reloaded whenever main says it changed. */
-function usePack(): [PackView | undefined, () => void] {
+/**
+ * The pack, reloaded whenever main says it changed. Pass `settings: false`
+ * where only the dogs matter (the bar on every page), to skip reloading on
+ * every alert and settings change.
+ */
+export function usePack({ settings = true }: { settings?: boolean } = {}): [
+  PackView | undefined,
+  () => void,
+] {
   const [pack, setPack] = useState<PackView>();
   const reload = useRef(() => {
     vigil.getPack().then(setPack, (err: unknown) => console.error(err));
@@ -50,12 +60,12 @@ function usePack(): [PackView | undefined, () => void] {
   useEffect(() => {
     reload();
     const a = vigil.on('pack', reload);
-    const b = vigil.on('changed', reload);
+    const b = settings ? vigil.on('changed', reload) : undefined;
     return () => {
       a();
-      b();
+      b?.();
     };
-  }, [reload]);
+  }, [reload, settings]);
   return [pack, reload];
 }
 
@@ -171,29 +181,8 @@ const STARTERS = [
   'What is the pack up to?',
 ];
 
-function LeadPanel({ pack, reload }: { pack: PackView; reload: () => void }) {
+export function LeadPanel({ pack, reload }: { pack: PackView; reload: () => void }) {
   const lead = pack.dogs.find((d) => d.role === 'lead')!;
-  const toast = useToast();
-  const [text, setText] = useState('');
-  const [sending, setSending] = useState(false);
-  const log = useRef<HTMLDivElement>(null);
-  const names = new Map(pack.dogs.map((d) => [d.id, d]));
-
-  useEffect(() => {
-    log.current?.scrollTo({ top: log.current.scrollHeight });
-  }, [pack.chat.length, pack.approvals.length]);
-
-  const send = async (words: string) => {
-    const t = words.trim();
-    if (!t || sending) return;
-    setText('');
-    setSending(true);
-    const r = await vigil.sayToLead(t);
-    setSending(false);
-    if (!r.ok) toast({ text: r.error ?? 'The Lead dog couldn’t answer' });
-    reload();
-  };
-
   return (
     <Card className="lead-panel">
       <div className="lead-head">
@@ -209,6 +198,42 @@ function LeadPanel({ pack, reload }: { pack: PackView; reload: () => void }) {
           <MoodLine dog={lead} fallback="Ready when you are" />
         </div>
       </div>
+      <LeadConversation pack={pack} reload={reload} />
+    </Card>
+  );
+}
+
+/**
+ * The chat with the Lead dog: its log, any approvals, and the message box.
+ * The same conversation shows on the Pack page and in the Ask drawer.
+ */
+export function LeadConversation({
+  pack,
+  reload,
+  context,
+  autoFocus,
+}: {
+  pack: PackView;
+  reload: () => void;
+  /** Where the person is, so "what's this?" has an answer. */
+  context?: ChatContext;
+  autoFocus?: boolean;
+}) {
+  const lead = pack.dogs.find((d) => d.role === 'lead')!;
+  const { draft, sending, error } = useLeadChat();
+  const log = useRef<HTMLDivElement>(null);
+  const names = new Map(pack.dogs.map((d) => [d.id, d]));
+  const canSend = !!draft.trim() && !sending && !pack.noAi;
+
+  useEffect(() => {
+    log.current?.scrollTo({ top: log.current.scrollHeight });
+  }, [pack.chat.length, pack.approvals.length, sending]);
+
+  const send = (words: string) =>
+    void leadChat.send(words, { noAi: pack.noAi, ...(context ? { context } : {}) }).finally(reload);
+
+  return (
+    <>
       <div className="lead-log scroll" ref={log}>
         {pack.chat.length === 0 && (
           <div className="lead-empty col">
@@ -217,11 +242,19 @@ function LeadPanel({ pack, reload }: { pack: PackView; reload: () => void }) {
               dog for it.
             </span>
             <div className="row wrap" style={{ gap: 6 }}>
-              {STARTERS.map((s) => (
-                <button key={s} type="button" className="starter" onClick={() => void send(s)}>
-                  {s}
-                </button>
-              ))}
+              {(context?.selected ? [`What’s this ${pageThing(context.page)}?`] : [])
+                .concat(STARTERS)
+                .map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    className="starter"
+                    disabled={pack.noAi || sending}
+                    onClick={() => send(s)}
+                  >
+                    {s}
+                  </button>
+                ))}
             </div>
           </div>
         )}
@@ -247,37 +280,38 @@ function LeadPanel({ pack, reload }: { pack: PackView; reload: () => void }) {
           Set up an AI in Settings › AI so {lead.name} can talk.
         </span>
       )}
-      {
-        <form
-          className="composer"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void send(text);
+      {error && (
+        <span className="t-small send-error" role="alert">
+          {error}
+        </span>
+      )}
+      <form
+        className="composer"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (canSend) send(draft);
+        }}
+      >
+        <textarea
+          className="field"
+          rows={2}
+          value={draft}
+          // The drawer opens to type in; the Pack page doesn't steal focus.
+          autoFocus={autoFocus}
+          aria-label={`Message ${lead.name}`}
+          placeholder={`Message ${lead.name}…`}
+          onChange={(e) => leadChat.setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              if (canSend) send(draft);
+            }
           }}
-        >
-          <textarea
-            className="field"
-            rows={2}
-            value={text}
-            placeholder={`Message ${lead.name}…`}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                void send(text);
-              }
-            }}
-          />
-          <button
-            type="submit"
-            className="btn primary send"
-            disabled={!text.trim() || sending || pack.noAi}
-            aria-label="Send"
-          >
-            <ArrowUp size={16} />
-          </button>
-        </form>
-      }
+        />
+        <button type="submit" className="btn primary send" disabled={!canSend} aria-label="Send">
+          <ArrowUp size={16} />
+        </button>
+      </form>
       <span className="t-small muted lead-foot">
         {pack.leadMayUsePlan
           ? 'Your messages may use your Claude plan. Pack jobs never do.'
@@ -292,8 +326,13 @@ function LeadPanel({ pack, reload }: { pack: PackView; reload: () => void }) {
           </button>
         )}
       </span>
-    </Card>
+    </>
   );
+}
+
+/** What "this" is on each page, for the starter question. */
+function pageThing(page: string): string {
+  return { alerts: 'alert', rules: 'rule', agents: 'agent', activity: 'event' }[page] ?? 'item';
 }
 
 function Message({
@@ -733,14 +772,19 @@ function DogEditor({
     }
   };
   const valid = name.trim() && (role !== 'pack' || job.trim());
+  const box = useRef<HTMLDivElement>(null);
+  useDialogFocus(box, onClose);
 
   return (
     <div className="scrim" onClick={onClose}>
       <div
+        ref={box}
         className="sheet dog-editor card"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
-        aria-label="Dog"
+        aria-modal="true"
+        aria-label={dog ? `Edit ${dog.name}` : 'Adopt a dog'}
+        tabIndex={-1}
       >
         <div className="row spread">
           <h2 className="t-h2">{dog ? `Edit ${dog.name}` : 'Adopt a dog'}</h2>

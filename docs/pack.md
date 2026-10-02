@@ -50,6 +50,24 @@ Right before any call goes out, Vigil checks again that the tool is still on, th
 
 Vigil's rules come first in every mode, Full access included. Connector calls are checked as if a watched agent's hook had asked about an MCP tool (`mcp__<connector>__<tool>`, with the arguments as the command), so the agent pre-flight rules and your own tool rules from Agents › Tool policy apply. Nothing is recorded for these checks.
 
+## On Home and every page
+
+The Pack page sits under Advanced. Two parts of it reach the rest of the app:
+
+- **Scout on Home.** The Lead dog sits next to Home's status line and acts it out: relaxed when nothing needs you, ears up (the waiting pose) when an alert needs your decision or protection isn't fully on, and busy while a dog's AI job runs. The status words don't change; the dog only shows them. Clicking it opens Ask.
+- **Ask.** A bar at the bottom of every page (except Pack and setup) opens a chat drawer with the Lead dog. It is closed until you open it (click the bar or press ⌘K; Esc closes it). It is the same conversation as the Pack page, sent as your own chat, so the same rules apply: a Claude plan only if you turned it on, and no dog blocks, allows or changes a rule. The drawer tells the Lead dog which page you're on and the id of what you have selected there (an alert, rule, agent or event), so "what's this?" works; the Lead dog reads the details with its read-only tools.
+
+```mermaid
+flowchart LR
+  P[Any page] -->|click the bar or ⌘K| D[Ask drawer]
+  H[Scout on Home] -->|click| D
+  D -->|your message + page + selected id| L[Lead dog: your own chat]
+  L --> T[Vigil's read-only tools]
+  L -->|changes to the pack| G[Permission mode decides]
+```
+
+A half-written message stays in the box when you change pages or close the drawer. If a message doesn't reach the Lead dog, the words go back in the box with the reason. With no AI set up, neither Enter nor the starter questions send anything.
+
 ## Which AI runs what
 
 | Work                                    | Purpose | May use a Claude plan                                  |

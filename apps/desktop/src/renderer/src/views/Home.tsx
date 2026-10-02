@@ -1,12 +1,16 @@
 import { CircleCheck, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import { useLive, vigil } from '../api';
+import { homeMood } from '../components/AskScout';
 import { NoticedList, WatchLine } from '../components/Attention';
+import { Dog } from '../components/Dog';
 import { Card, Chip, LevelPill, SectionHead, SeverityMark, StatusMark } from '../components/ui';
 import { actorLabel, describeRecord, timeAgo } from '../format';
 import { isNoticed, needsDecision } from '../../../shared/attention';
 import { LEVEL_RULES } from '../../../shared/levels';
+import { leadChat } from '../lead-chat';
 import { PageHead } from './AppShell';
+import { usePack } from './Pack';
 
 const levelSentence = {
   good: 'Protection is on. Nothing needs you.',
@@ -21,6 +25,9 @@ export function HomeView({ go }: { go: (r: string) => void }) {
   const needs = (alerts ?? []).filter(needsDecision);
   const noticed = (alerts ?? []).filter(isNoticed);
   const allRunning = !!status && status.sensors.every((s) => s.state === 'ok');
+  const [pack] = usePack({ settings: false });
+  const lead = pack?.dogs.find((d) => d.role === 'lead');
+  const scout = homeMood(pack, needs.length > 0 || (!!status && status.level !== 'good'));
 
   return (
     <div className="page">
@@ -31,9 +38,20 @@ export function HomeView({ go }: { go: (r: string) => void }) {
 
       {status && (
         <Card>
-          <div className="row" style={{ gap: 12 }}>
+          <div className="home-status">
             <LevelPill level={status.level} />
             <span className="t-h2">{levelSentence[status.level]}</span>
+            {lead && (
+              <button
+                type="button"
+                className="home-scout"
+                title={`${lead.name}: ${scout.says}. Ask ${lead.name}`}
+                aria-label={`Ask ${lead.name}`}
+                onClick={leadChat.open}
+              >
+                <Dog breed={lead.breed} mood={scout.mood} size={96} />
+              </button>
+            )}
           </div>
           <WatchLine watch={status.watch} />
           {status.reasons.length > 0 && (

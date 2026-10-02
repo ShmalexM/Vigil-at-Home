@@ -20,6 +20,7 @@ import { redactValue } from '@vigil/ai/redact';
 import { z } from 'zod';
 import {
   Breed,
+  ChatContext,
   DogInput,
   DogPatch,
   PermissionMode,
@@ -207,6 +208,7 @@ const LEAD_INSTRUCTIONS = [
   '',
   'What you cannot do, and must not offer: block, allow, release or quarantine anything; approve, edit or turn off a rule; change Vigil’s settings; touch a built-in helper’s job. If asked, say the person does that themselves in Vigil.',
   'Breeds: shepherd, doberman, husky, golden, beagle, corgi, dachshund, chihuahua. Match the breed to the job when you can (a beagle follows trails through logs, a doberman guards, a husky runs long overnight jobs).',
+  'data.lookingAt, when present, is the Vigil page the person had open and the id of what was selected there (an alert on alerts, a rule on rules, an agent on agents, an event on activity). When they say "this" or "what\'s this?", that is what they mean: look it up with your tools before answering.',
   'Keep `reply` short and friendly, plain words, no markdown headings. A little dog humour is fine; never at the expense of clarity.',
 ].join('\n');
 
@@ -465,8 +467,9 @@ export class PackService {
 
   // ---------------------------------------------------------------- talking to the Lead dog
 
-  async say(text: string): Promise<void> {
+  async say(text: string, context?: ChatContext): Promise<void> {
     const words = z.string().trim().min(1).max(4000).parse(text);
+    const lookingAt = ChatContext.optional().parse(context);
     if (this.chatting) throw new Error('The Lead dog is still answering');
     this.chatting = true;
     const mine: ChatMessage = { id: newId(this.now()), at: this.now(), from: 'you', text: words };
@@ -499,6 +502,7 @@ export class PackService {
         data: {
           now: new Date(this.now()).toISOString(),
           mode: this.mode(),
+          ...(lookingAt ? { lookingAt } : {}),
           earlier,
           pack: this.dogs().map((d) => ({
             id: d.id,

@@ -52,6 +52,20 @@ export type Schedule = z.infer<typeof Schedule>;
 /** A tool's key: `vigil.<name>` for Vigil's own, `<connectorId>.<name>` for a connector's. */
 export const ToolKey = z.string().regex(/^[a-z0-9-]{1,40}\.[A-Za-z0-9_.-]{1,64}$/);
 
+/**
+ * Where the person was in Vigil when they asked, so "what's this?" has an
+ * answer. Ids only; the Lead dog reads the details with its own tools.
+ */
+export const ChatContext = z.object({
+  page: z.string().regex(/^[a-z-]{1,24}$/),
+  /** The alert, rule, agent or event open on that page. */
+  selected: z
+    .string()
+    .regex(/^[A-Za-z0-9_.:-]{1,80}$/)
+    .optional(),
+});
+export type ChatContext = z.infer<typeof ChatContext>;
+
 export const DogName = z.string().trim().min(1).max(32);
 export const DogJob = z.string().trim().min(1).max(2000);
 

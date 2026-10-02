@@ -14,6 +14,7 @@ import {
 import { useEffect, useState, type ReactNode } from 'react';
 import { LEVEL_MEANING, LEVEL_RULES } from '../../../shared/levels';
 import { useLive, vigil } from '../api';
+import { AskScout } from '../components/AskScout';
 import { Shield } from '../components/Shield';
 import { Button, LevelPill } from '../components/ui';
 import { ActivityView } from './Activity';
@@ -177,6 +178,7 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
         {section === 'activity' && <ActivityView selected={param} go={go} />}
         {section === 'usage' && <UsageView />}
         {section === 'settings' && <SettingsView go={go} />}
+        <AskScout page={section} selected={param} go={go} />
       </main>
     </div>
   );
