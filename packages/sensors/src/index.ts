@@ -11,4 +11,5 @@ export * from './santa/profile.js';
 export * from './santa/tls.js';
 export * from './osquery/config.js';
 export * from './osquery/resultParser.js';
+export * from './osquery/burst.js';
 export * from './hub.js';

@@ -424,7 +424,7 @@ try {
     // A fresh osquery on a runner can take a while before its first scheduled
     // results (the first run of every query lands at once). Start the beacon
     // only once connection snapshots are flowing, so the wait below measures
-    // the 10 s snapshot interval rather than osquery's start-up.
+    // the 30 s snapshot interval rather than osquery's start-up.
     const g0 = Date.now();
     const flowing = await waitUntil(() => osqueryHasRun('vigil_network_connections'), 150000, 1000);
     s.osqueryReadyWaitedMs = Date.now() - g0;

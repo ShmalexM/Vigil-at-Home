@@ -7,6 +7,7 @@
 //   osquery ──results──┼─► SensorHub ─► publish ┤
 //   Santa ──sync HTTPS─┘   (blocks it made)     └── commands ◄── Vigil app
 //         ◄── rules ─── RuleStore ◄── santa.block / santa.allow
+//   osqueryd -S ◄── SensorHub: a 2 s look at suspicious programs' connections
 
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import { chmodSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -24,7 +25,13 @@ import { Approvals } from './approval.js';
 import { defaultPaths, SANTA_SYNC_PORT, type HelperPaths } from './config.js';
 import { Executor } from './executor.js';
 import { Journal } from './journal.js';
-import { ensureOsquery, defaultOsqueryPaths, type OsqueryPaths } from './osquery.js';
+import {
+  ensureOsquery,
+  defaultOsqueryPaths,
+  osqueryShellRunner,
+  santaReportsLaunchItems,
+  type OsqueryPaths,
+} from './osquery.js';
 import { HelperServer } from './server.js';
 import { BINARIES, realSystem, type System } from './system.js';
 
@@ -117,6 +124,10 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     santaLogPath: paths.santaLog,
     osqueryResultsPath: paths.osqueryResults,
     sink: (e) => server.publish(e),
+    // The closer look at suspicious programs' connections needs osquery and root.
+    ...(existsSync(bins.osquery) && process.getuid?.() === 0 && opts.osquery !== false
+      ? { osqueryRunner: osqueryShellRunner(sys) }
+      : {}),
     onError: (source, err) => log(`${source} sensor: ${err.message}`),
   });
   await hub.start();
@@ -150,7 +161,13 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   const osqueryPaths = opts.osquery ?? defaultOsqueryPaths();
   const keepOsquery = () => {
     if (!osqueryPaths || process.getuid?.() !== 0) return;
-    ensureOsquery(sys, osqueryPaths)
+    // osquery's startup-item query slows to a 5 minute safety net only while
+    // Santa is actually reporting (it can be installed but not yet approved).
+    const santaAt = hub.lastEventAt().santa;
+    const santaLive = santaAt !== null && Date.now() - santaAt < 10 * 60 * 1000;
+    ensureOsquery(sys, osqueryPaths, {
+      santaReportsLaunchItems: santaLive && santaReportsLaunchItems(),
+    })
       .then((state) => {
         if (state === 'started' || state === 'restarted') log(`osquery ${state}`);
       })

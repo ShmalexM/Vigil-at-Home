@@ -13,6 +13,7 @@ export const BINARIES = {
   plutil: '/usr/bin/plutil',
   santactl: '/Applications/Santa.app/Contents/MacOS/santactl',
   osascript: '/usr/bin/osascript',
+  osqueryd: '/opt/osquery/lib/osquery.app/Contents/MacOS/osqueryd',
 } as const;
 
 export type BinaryName = keyof typeof BINARIES;
