@@ -106,3 +106,8 @@
   flex-direction: row;
   margin-left: auto;
 }
+
+/* Leave room for the bar under the pinned list on split pages. */
+.content:has(.ask-dock) .split-list {
+  max-height: calc(100vh - 300px);
+}
