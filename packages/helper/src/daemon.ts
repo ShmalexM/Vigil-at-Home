@@ -2,10 +2,12 @@
 //   - the command socket the app talks to (HelperServer + Executor)
 //   - Santa's sync server over pinned HTTPS on 127.0.0.1
 //   - the log sensors (Santa's event log, osquery results), streamed to the app
+//   - the app's blocking rules, run on that stream before it leaves (FastPath)
 //
-//   Santa ──santa.log──┐                        ┌── socket ──► Vigil app (popup, rules, AI)
-//   osquery ──results──┼─► SensorHub ─► publish ┤
-//   Santa ──sync HTTPS─┘   (blocks it made)     └── commands ◄── Vigil app
+//   Santa ──santa.log──┐                                    ┌── socket ──► Vigil app (popup, rules, AI)
+//   osquery ──results──┼─► SensorHub ─► FastPath ─► publish ┤   (event + what the helper ran)
+//   Santa ──sync HTTPS─┘   (blocks it made)  │ kill/block     └── commands ◄── Vigil app
+//                                            ▼ Executor
 //         ◄── rules ─── RuleStore ◄── santa.block / santa.allow
 //   osqueryd -S ◄── SensorHub: a 2 s look at suspicious programs' connections
 
@@ -23,7 +25,8 @@ import {
 } from '@vigil/sensors';
 import { Approvals } from './approval.js';
 import { defaultPaths, SANTA_SYNC_PORT, type HelperPaths } from './config.js';
-import { Executor } from './executor.js';
+import { Executor, type ActionOutcome } from './executor.js';
+import { FastPath } from './fastpath.js';
 import { Journal } from './journal.js';
 import {
   ensureOsquery,
@@ -101,7 +104,19 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     };
   };
 
-  const executor = new Executor({
+  // Blocking rules from the app, run on the sensor stream before events reach it.
+  const fastPath: FastPath = new FastPath({
+    file: paths.helperRules,
+    run: async (action): Promise<ActionOutcome> => {
+      const out = await executor.execute(action);
+      if (out.kind !== 'done') throw new Error('needs the admin password');
+      return out.result as ActionOutcome;
+    },
+    log,
+  });
+  fastPath.load();
+
+  const executor: Executor = new Executor({
     sys,
     journal,
     approvals,
@@ -111,8 +126,9 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     triggerSantaSync: async () => {
       await sys.run('santactl', ['sync'], { timeoutMs: 60_000 });
     },
-    statusExtra: () => ({ sensors: sensors() }),
+    statusExtra: () => ({ sensors: sensors(), helperRules: fastPath.status() }),
     preexec: new PreexecSync(sys, rules, existsSync),
+    fastPath,
   });
 
   const server = new HelperServer({
@@ -123,10 +139,15 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   });
   await server.listen();
 
+  let delivered = Promise.resolve();
   const hub = new SensorHub({
     santaLogPath: paths.santaLog,
     osqueryResultsPath: paths.osqueryResults,
-    sink: (e) => server.publish(e),
+    // One event at a time, in order: a block finishes before the next event
+    // is looked at, and the app hears about each event with what was done.
+    sink: (e) => {
+      delivered = delivered.then(async () => server.publish(e, await fastPath.check(e)));
+    },
     // Signatures of programs that started before Vigil (codesign is macOS-only).
     ...(process.platform === 'darwin' ? { signatureLookup: signatureLookup(sys) } : {}),
     // The closer look at suspicious programs' connections needs osquery and root.
