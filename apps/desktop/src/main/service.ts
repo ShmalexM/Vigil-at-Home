@@ -24,6 +24,7 @@ import { Scheduler } from './scheduler.js';
 import { SensorRegistry } from './sensors.js';
 import { computeStatus } from './status.js';
 import { TEST_RULE } from './test-alert.js';
+import { WORTH_A_LOOK_RULE } from './worth-a-look.js';
 import { UsageService } from './usage.js';
 
 const HOUR = 60 * 60 * 1000;
@@ -80,6 +81,7 @@ export class VigilCore {
       onError: (name, err) => console.error(`[scheduler] ${name} failed:`, err),
     });
     store.upsertRule(TEST_RULE);
+    store.upsertRule(WORTH_A_LOOK_RULE);
   }
 
   start(): void {
@@ -236,7 +238,10 @@ export class VigilCore {
     }));
     const own = this.store
       .listRules()
-      .filter((r) => r.id !== TEST_RULE.id && !this.detector?.hasRule(r.id))
+      .filter(
+        (r) =>
+          r.id !== TEST_RULE.id && r.id !== WORTH_A_LOOK_RULE.id && !this.detector?.hasRule(r.id),
+      )
       .map((rule) => ({ rule, matches: counts.get(rule.id) ?? 0 }));
     return [...engine, ...own];
   }
