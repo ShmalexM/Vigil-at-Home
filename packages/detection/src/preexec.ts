@@ -140,6 +140,11 @@ export function preexecRules(rules: { rule: DetectionRule; mode: RuleMode }[]): 
   for (const { rule, mode } of rules) {
     if (mode !== 'block') continue;
     if (rule.eventKinds.length !== 1 || rule.eventKinds[0] !== 'process.exec') continue;
+    // Counts and earlier steps live in Vigil's engine; Santa sees one launch at a time.
+    if (rule.threshold || (rule as { sequence?: unknown }).sequence !== undefined) {
+      skipped.push({ ruleId: rule.id, reason: 'depends on other events' });
+      continue;
+    }
     // Stopping the launch matches a rule that kills; a rule that only pauses
     // leaves the user able to let the program carry on, so it stays in Vigil.
     if (!rule.response?.some((a) => a.kind === 'process.kill')) {

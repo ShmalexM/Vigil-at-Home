@@ -198,6 +198,23 @@ describe('preexecRules', () => {
     expect(celEval(program, ['osascript', 'x") || true || ("'])).toBe('BLOCKLIST');
   });
 
+  it('leaves rules that count or chain events to the engine', () => {
+    const cond = {
+      all: [
+        { field: 'process.name', op: 'eq' as const, value: 'osascript' },
+        { field: 'process.args', op: 'eq' as const, value: '-e' },
+      ],
+    };
+    const out = preexecRules([
+      {
+        rule: rule({ id: 'counted', condition: cond, threshold: { count: 3, windowSec: 60 } }),
+        mode: 'block',
+      },
+    ]);
+    expect(out.rules).toEqual([]);
+    expect(out.skipped).toEqual([{ ruleId: 'counted', reason: 'depends on other events' }]);
+  });
+
   it('only accepts plain program names', () => {
     const out = preexecRules([
       {
