@@ -16,12 +16,26 @@ export function WatchLine({ watch }: { watch: WatchSummary }) {
   return <span className="t-small watch-line">{parts.join(' · ')}</span>;
 }
 
-/** The headline when nothing needs the user, worded the same as Home's. */
-export function WorkingHeadline() {
+/** The popover headline when every protection layer runs, worded like Home's. */
+export function WorkingHeadline({ needsYou }: { needsYou: number }) {
   return (
     <span className="row working">
       <CircleCheck size={16} />
-      <span className="t-h3">Protection is on. Nothing needs you.</span>
+      <span className="t-h3">
+        {needsYou === 0 ? 'Protection is on. Nothing needs you.' : 'Protection is on.'}
+      </span>
+    </span>
+  );
+}
+
+/** Needs you, kept apart from the protection level. */
+export function NeedsYouLine({ count }: { count: number }) {
+  return (
+    <span className="row needs-line">
+      <span className="count hot">{count}</span>
+      <span className="t-h3">
+        {count === 1 ? 'thing needs your decision' : 'things need your decision'}
+      </span>
     </span>
   );
 }

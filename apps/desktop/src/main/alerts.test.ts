@@ -80,6 +80,54 @@ describe('AlertService', () => {
     expect(log.filter((r) => r.actor === 'user')).toHaveLength(2);
   });
 
+  it('keeps the alert open and blocked when a release fails', async () => {
+    class FailsResume extends DryRunExecutor {
+      override async execute(action: Action): Promise<ActionResult> {
+        if (action.kind === 'process.resume')
+          return { at: Date.now(), error: 'helper not running' };
+        return super.execute(action);
+      }
+    }
+    const { svc, store } = setup(new FailsResume());
+    const alert = await svc.raise({
+      rule: makeRule(),
+      events: [makeExec()],
+      actions: [suspend, { kind: 'network.block', address: '203.0.113.9' }],
+    });
+    const out = await svc.decide(alert.id, { verdict: 'benign', release: true });
+    expect(out.status).toBe('open');
+    expect(out.decision).toBeUndefined();
+    expect(out.containment).toBe('active');
+    expect(store.getAlert(alert.id)?.decision).toBeUndefined();
+    const undos = store.listActions({ alertId: alert.id }).filter((r) => r.undoes);
+    expect(undos.map((r) => r.status).sort()).toEqual(['done', 'failed']);
+
+    // Once the helper is back, the same choice goes through.
+    const ok = setup();
+    const again = await ok.svc.raise({
+      rule: makeRule(),
+      events: [makeExec()],
+      actions: [suspend],
+    });
+    expect((await ok.svc.decide(again.id, { verdict: 'benign', release: true })).status).toBe(
+      'resolved',
+    );
+  });
+
+  it('keeps the alert open when an undo throws', async () => {
+    class Throws extends DryRunExecutor {
+      override async execute(action: Action): Promise<ActionResult> {
+        if (action.kind === 'process.resume') throw new Error('socket closed');
+        return super.execute(action);
+      }
+    }
+    const { svc } = setup(new Throws());
+    const alert = await svc.raise({ rule: makeRule(), events: [makeExec()], actions: [suspend] });
+    const out = await svc.decide(alert.id, { verdict: 'benign', release: true });
+    expect(out.decision).toBeUndefined();
+    expect(out.containment).toBe('active');
+  });
+
   it('keeps containment when the user confirms malicious', async () => {
     const { svc } = setup();
     const alert = await svc.raise({ rule: makeRule(), events: [makeExec()], actions: [suspend] });
