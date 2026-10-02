@@ -91,6 +91,27 @@ describe('Detector', () => {
     expect(core.rules().find((r) => r.rule.id === 'known-bad-hash')?.rule.mode).toBe('alert');
   });
 
+  it('hands the helper the rules it can block with, and what they need', async () => {
+    const { core, popups } = setup();
+    core.detector!.stores.lists.add('known_bad_sha256', BAD, { source: 'test', updatedAt: 1 });
+    await core.handleEvent(exec('/Users/you/Downloads/evil', BAD));
+    await core.decide(popups[0]!, {
+      verdict: 'benign',
+      release: true,
+      remember: true,
+      scope: 'this_binary',
+    });
+    const set = core.detector!.helperRules();
+    expect(set.rules.map((r) => r.id)).toContain('known-bad-hash');
+    expect(set.rules.every((r) => r.mode === 'block')).toBe(true);
+    expect(set.lists['known_bad_sha256']).toEqual([BAD]);
+    expect(set.selfPaths).toEqual(['/Applications/Vigil at Home.app']);
+    // The user's "this is fine" reaches the helper, so it stops blocking it too.
+    expect(set.exceptions.length).toBeGreaterThan(0);
+    core.setRuleMode('known-bad-hash', 'alert');
+    expect(core.detector!.helperRules().rules.map((r) => r.id)).not.toContain('known-bad-hash');
+  });
+
   it('refreshes threat feeds on the scheduler and survives being offline', async () => {
     const { core, fetches } = setup();
     core.start();

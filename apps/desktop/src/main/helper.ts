@@ -1,9 +1,17 @@
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { isRelease, type Action, type ActionResult, type SensorEvent } from '@vigil/core';
-import { defaultPaths, type PreexecOutcome } from '@vigil/helper';
+import {
+  LIST_PART_MAX,
+  defaultPaths,
+  type HelperRan,
+  type PreexecOutcome,
+  type RuleExceptionSchema,
+} from '@vigil/helper';
 import type { DetectionRule } from '@vigil/detection';
+import { listDigest } from '@vigil/detection/fastpath';
 import { HelperCallError, HelperClient } from '@vigil/helper/client';
+import type { z } from 'zod';
 import { DryRunExecutor, type ActionExecutor } from './executor.js';
 
 export type HelperState = 'not_installed' | 'not_running' | 'connected';
@@ -15,6 +23,21 @@ const ACTION_TIMEOUT_MS = 15_000;
 const RELEASE_TIMEOUT_MS = 3 * 60_000;
 /** The helper keeps its last 2000 events; remember a little more than that. */
 const SEEN_EVENT_IDS = 4000;
+/** How long an action the helper already ran waits for the app's engine to ask for it. */
+const HELPER_RAN_MS = 60_000;
+
+/** The blocking rules the helper runs itself, and what they need. */
+export interface HelperRuleSet {
+  rules: DetectionRule[];
+  exceptions: z.infer<typeof RuleExceptionSchema>[];
+  selfPaths: string[];
+  lists: Record<string, string[]>;
+}
+
+export interface HelperRulesOutcome {
+  needLists: string[];
+  preexec: PreexecOutcome | null;
+}
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -53,6 +76,11 @@ export class HelperLink
   /** Recent event ids. After a helper restart it replays its whole buffer. */
   private seen = new Set<string>();
   readonly dryRun = new DryRunExecutor();
+  /**
+   * Results of actions the helper's own rules ran, by action, until the app's
+   * engine reaches the same rule on the same event and asks for them.
+   */
+  private helperRan = new Map<string, { results: ActionResult[]; at: number }>();
 
   constructor(
     private readonly socket = defaultPaths().socket,
@@ -89,6 +117,8 @@ export class HelperLink
   }
 
   async execute(action: Action): Promise<ActionResult> {
+    const already = this.takeHelperRan(action);
+    if (already) return already;
     const client = this.client;
     if (!client) return this.dryRun.execute(action);
     try {
@@ -128,17 +158,45 @@ export class HelperLink
   }
 
   /**
-   * Hand the helper the rules Vigil enforces in block mode, so Santa can stop
-   * the ones it can express before the program runs. Null while unconnected.
+   * Hand the helper the blocking rules it can run itself (and Santa before
+   * launch), then any indicator list it says it doesn't have yet. Null while
+   * unconnected.
    */
-  async setPreexecRules(rules: DetectionRule[]): Promise<PreexecOutcome | null> {
+  async syncRules(set: HelperRuleSet): Promise<HelperRulesOutcome | null> {
     const client = this.client;
     if (!client) return null;
     try {
-      return await withTimeout(
-        client.call<PreexecOutcome>({ kind: 'santa.preexec.set', rules }),
+      const digests = Object.fromEntries(
+        Object.entries(set.lists).map(([name, entries]) => [name, listDigest(entries)]),
+      );
+      const out = await withTimeout(
+        client.call<HelperRulesOutcome>({
+          kind: 'detection.sync',
+          rules: set.rules,
+          exceptions: set.exceptions,
+          selfPaths: set.selfPaths,
+          lists: digests,
+        }),
         ACTION_TIMEOUT_MS,
       );
+      for (const name of out.needLists) {
+        const entries = [...new Set(set.lists[name] ?? [])];
+        const parts = Math.max(1, Math.ceil(entries.length / LIST_PART_MAX));
+        for (let part = 0; part < parts; part++) {
+          await withTimeout(
+            client.call({
+              kind: 'detection.list.set',
+              list: name,
+              digest: digests[name]!,
+              part,
+              parts,
+              entries: entries.slice(part * LIST_PART_MAX, (part + 1) * LIST_PART_MAX),
+            }),
+            QUERY_TIMEOUT_MS,
+          );
+        }
+      }
+      return out;
     } catch (err) {
       if (!(err instanceof HelperCallError)) this.dropped(client);
       throw err;
@@ -182,7 +240,7 @@ export class HelperLink
         return;
       }
       this.client = client;
-      client.onEvent((e) => this.received(e));
+      client.onEvent((e, ran) => this.received(e, ran));
       await client.subscribe(this.lastEventId);
       this.setState('connected');
     } catch {
@@ -194,8 +252,9 @@ export class HelperLink
     }
   }
 
-  private received(e: SensorEvent): void {
+  private received(e: SensorEvent, ran: HelperRan[] = []): void {
     if (this.seen.has(e.id)) return;
+    if (ran.length) this.rememberHelperRan(ran);
     this.seen.add(e.id);
     if (this.seen.size > SEEN_EVENT_IDS) {
       // Sets iterate oldest first.
@@ -206,6 +265,30 @@ export class HelperLink
     }
     this.lastEventId = e.id;
     this.emit('event', e);
+  }
+
+  private rememberHelperRan(ran: HelperRan[]): void {
+    const now = Date.now();
+    for (const [k, v] of this.helperRan) if (now - v.at > HELPER_RAN_MS) this.helperRan.delete(k);
+    for (const r of ran) {
+      const at = typeof r.at === 'number' ? r.at : now;
+      const result: ActionResult = r.outcome
+        ? { at, ...(r.outcome.quarantineId ? { quarantineId: r.outcome.quarantineId } : {}) }
+        : { at, error: r.error ?? 'The Vigil helper could not do this' };
+      const key = JSON.stringify(r.action);
+      const entry = this.helperRan.get(key);
+      if (entry) entry.results.push(result);
+      else this.helperRan.set(key, { results: [result], at: now });
+    }
+  }
+
+  private takeHelperRan(action: Action): ActionResult | undefined {
+    const key = JSON.stringify(action);
+    const entry = this.helperRan.get(key);
+    if (!entry || Date.now() - entry.at > HELPER_RAN_MS) return undefined;
+    const result = entry.results.shift();
+    if (!entry.results.length) this.helperRan.delete(key);
+    return result;
   }
 
   private dropped(client: HelperClient): void {

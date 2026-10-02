@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { app, dialog, Notification, powerMonitor, safeStorage, shell } from 'electron';
+import { listDigest } from '@vigil/detection/fastpath';
 import { z } from 'zod';
 import type { HelperInstallResult } from '../shared/ipc.js';
 import { AiBridge } from './ai.js';
@@ -193,25 +194,31 @@ function start(): void {
   // Sensor events arrive through the helper, which reads Santa's and osquery's logs as root.
   helper.on('event', (e) => void core.handleEvent(e));
   const checkHealth = () => reportHealth(core.sensors, probe);
-  // Santa stops what it can of Vigil's launch-blocking rules before the
-  // program runs. Re-sent on every connection and whenever the rules change.
-  let preexecSent: string | undefined;
-  const syncPreexec = async () => {
-    const rules = core.detector?.blockingLaunchRules() ?? [];
-    const key = JSON.stringify(rules);
-    if (key === preexecSent) return;
+  // Re-sent on every connection and whenever the rules, exceptions or lists change.
+  let helperRulesSent: string | undefined;
+  // The helper runs the blocking rules it can on its own, so blocks happen
+  // even while the app is closed, and hands Santa the pre-launch ones.
+  let helperRulesSync = Promise.resolve();
+  const syncHelperRules = () => (helperRulesSync = helperRulesSync.then(sendHelperRules));
+  const sendHelperRules = async () => {
+    if (!core.detector) return;
+    const set = core.detector.helperRules();
+    const lists = Object.entries(set.lists).map(([l, entries]) => [l, listDigest(entries)]);
+    const key = JSON.stringify({ ...set, lists });
+    if (key === helperRulesSent) return;
     try {
-      if (await helper.setPreexecRules(rules)) preexecSent = key;
+      if (await helper.syncRules(set)) helperRulesSent = key;
     } catch (err) {
-      console.warn('[preexec] could not update Santa rules:', err);
+      console.warn('[helper rules] could not update the helper:', err);
     }
   };
+  if (core.detector) core.detector.onRulesChanged = () => void syncHelperRules();
   helper.on('state', (state) => {
     void checkHealth();
     if (state === 'connected') {
       void saveSantaProfile();
-      preexecSent = undefined;
-      void syncPreexec();
+      helperRulesSent = undefined;
+      void syncHelperRules();
     }
   });
   if (process.platform === 'darwin') {
@@ -222,7 +229,7 @@ function start(): void {
       async () => {
         await helper.ping();
         await checkHealth();
-        await syncPreexec();
+        await syncHelperRules();
       },
       true,
     );
@@ -245,7 +252,10 @@ function start(): void {
       app.on('before-quit', stop);
     });
   }
-  if (perf) Object.assign(globalThis, { vigil: { core, windows, power, readyAt: Date.now() } });
+  if (perf)
+    Object.assign(globalThis, {
+      vigil: { core, windows, power, syncHelperRules, readyAt: Date.now() },
+    });
   // First run opens setup; after that Vigil starts quietly in the menu bar.
   else if (!setup.finished()) windows.openMain('setup');
   else if (!app.isPackaged) windows.openMain();

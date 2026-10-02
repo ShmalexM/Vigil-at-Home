@@ -22,6 +22,8 @@
 //      popup suggests disabling it; the user presses Block it; then undoes it.
 //   5. Timing: the same pause-and-popup path repeated to get a spread.
 //   6. Learning: answering "fine" three times demotes the rule from block to alert.
+//   7. App closed: the helper runs the blocking rules the app handed it and
+//      blocks the same beacon with no app running.
 //
 // The admin password dialog can't be answered on a runner, so the helper's
 // approval step (which the dialog would run as root) runs through sudo
@@ -671,6 +673,41 @@ try {
     );
   }
   results.approvals = await main(() => globalThis.__approvals);
+
+  // ---------------------------------------------------------------- 7
+  {
+    const s = { name: 'App closed: the helper blocks on its own', sensor: 'real osquery' };
+    results.scenarios.appClosed = s;
+    // Scenario 3 undid its block; the address is still on the list.
+    const synced = await main(async () => {
+      await globalThis.vigil.syncHelperRules();
+      return (await globalThis.vigil.core.executor.query('helper.status'))?.helperRules ?? null;
+    });
+    s.helperRules = synced;
+    check('app closed: helper has the blocking rules', (synced?.rules ?? 0) > 0, synced);
+    check('app closed: helper has the threat list', (synced?.lists?.known_bad_ips ?? 0) > 0);
+    check('app closed: address unblocked before the test', !pfBlocked(C2));
+    await app.close();
+    const t0 = Date.now();
+    const beacon = nodeStandIn(
+      'beacon-2',
+      `const https=require('node:https');const agent=new https.Agent({keepAlive:true,maxSockets:1});` +
+        `const go=()=>https.get({host:'${C2}',path:'/',agent,timeout:5000},(r)=>r.resume()).on('error',()=>{});` +
+        `go();setInterval(go,2000)`,
+    );
+    const blocked = await waitUntil(() => pfBlocked(C2), 90000, 250);
+    s.connectToBlockMs = blocked ? Date.now() - t0 : null;
+    check('app closed: helper blocked the address with the app closed', blocked);
+    check('app closed: address is really unreachable', blocked && !reachable(C2));
+    beacon.kill('SIGKILL');
+    execFileSync(
+      'sudo',
+      ['-n', 'pfctl', '-a', 'com.apple/vigil', '-t', 'vigil_blocked', '-T', 'flush'],
+      {
+        stdio: 'ignore',
+      },
+    );
+  }
 } catch (err) {
   check('run completed', false, { error: String(err?.stack ?? err) });
 } finally {

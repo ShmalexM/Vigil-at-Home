@@ -19,6 +19,7 @@ import { needsApproval } from './protocol.js';
 import { Journal, type JournalEntry } from './journal.js';
 import type { Approvals } from './approval.js';
 import type { System } from './system.js';
+import type { FastPath } from './fastpath.js';
 import type { PreexecSync } from './preexec.js';
 import { ActionError } from './commands/errors.js';
 import {
@@ -55,6 +56,8 @@ export interface ExecutorDeps {
   statusExtra?: () => Record<string, unknown>;
   /** Turns block rules into Santa pre-launch rules; absent in tests that don't need it. */
   preexec?: PreexecSync;
+  /** Blocking rules the helper runs on the sensor stream itself. */
+  fastPath?: FastPath;
 }
 
 export type ExecOutcome =
@@ -324,12 +327,27 @@ export class Executor {
         };
       case 'helper.journal':
         return journal.recent(cmd.limit ?? 100);
-      case 'santa.preexec.set': {
-        if (!this.d.preexec) throw new ActionError('failed', 'pre-launch rules are not set up');
+      case 'detection.sync': {
+        if (!this.d.fastPath) throw new ActionError('failed', 'helper rules are not set up');
+        let synced;
+        try {
+          synced = this.d.fastPath.sync(cmd);
+        } catch (err) {
+          throw new ActionError('invalid', (err as Error).message);
+        }
+        if (!this.d.preexec) return { ...synced, preexec: null };
         const before = this.d.rules.rev;
-        const outcome = await this.d.preexec.apply(cmd.rules);
+        const preexec = await this.d.preexec.apply(cmd.rules);
         if (this.d.rules.rev !== before) await this.syncSanta();
-        return outcome;
+        return { ...synced, preexec };
+      }
+      case 'detection.list.set': {
+        if (!this.d.fastPath) throw new ActionError('failed', 'helper rules are not set up');
+        try {
+          return this.d.fastPath.putList(cmd);
+        } catch (err) {
+          throw new ActionError('invalid', (err as Error).message);
+        }
       }
       case 'santa.profile':
         return { mobileconfig: santaProfile({ syncPort: this.d.syncPort }) };

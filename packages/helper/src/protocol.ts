@@ -1,6 +1,6 @@
 // The helper's entire command surface: the response actions defined in
-// @vigil/core, four read-only queries, and the list of rules Santa should
-// enforce before launch (santa.preexec.set). Nothing else can be asked of the
+// @vigil/core, four read-only queries, and the blocking rules the helper runs
+// itself and hands to Santa (detection.sync, detection.list.set). Nothing else can be asked of the
 // root process: no shell, no programs to run, no generic "execute".
 //
 // Containment actions (suspend, kill, block, quarantine, disable, Santa block
@@ -53,21 +53,51 @@ export const HelperQuery = z.discriminatedUnion('kind', [
 ]);
 export type HelperQuery = z.infer<typeof HelperQuery>;
 
-/**
- * The rules Vigil is enforcing in block mode, for Santa to enforce before
- * launch where it can. The helper builds the Santa rules itself (preexec.ts)
- * and only ever targets Apple's own programs, so this can add blocks but
- * never allow anything. Sending fewer rules only moves those blocks back to
- * Vigil's own engine, which still kills the program after it starts, so it
- * needs no admin password.
- */
-export const SantaPreexecSet = z.strictObject({
-  kind: z.literal('santa.preexec.set'),
-  rules: z.array(DetectionRule).max(64),
-});
-export type SantaPreexecSet = z.infer<typeof SantaPreexecSet>;
+const Id = z.string().min(1).max(200);
+const ListName = z.string().regex(/^[a-z0-9_]{1,64}$/);
+const Digest = z.string().regex(/^[a-f0-9]{64}$/);
 
-export type HelperCommand = HelperAction | HelperQuery | SantaPreexecSet;
+export const RuleExceptionSchema = z.strictObject({
+  id: Id,
+  ruleId: Id,
+  match: z.record(z.string().max(100), z.string().max(1024)),
+  createdAt: z.number(),
+  note: z.string().max(1000).optional(),
+});
+
+/**
+ * The rules Vigil enforces in block mode that the helper can run itself
+ * (fastpath.ts), with the user's exceptions and Vigil's own paths. The helper
+ * runs them on every sensor event, so a block happens even while the app is
+ * closed, and hands Santa the ones it can stop before launch (preexec.ts).
+ * `lists` names each indicator list the rules use with a digest of its
+ * contents; the helper answers with the lists it needs sent.
+ *
+ * Fewer rules or more exceptions only move blocks back to the app's own
+ * engine, which runs every rule either way, so this needs no admin password.
+ */
+export const DetectionSync = z.strictObject({
+  kind: z.literal('detection.sync'),
+  rules: z.array(DetectionRule).max(64),
+  exceptions: z.array(RuleExceptionSchema).max(2000),
+  selfPaths: z.array(z.string().min(1).max(1024)).max(8),
+  lists: z.record(ListName, Digest),
+});
+export type DetectionSync = z.infer<typeof DetectionSync>;
+
+/** Sent in parts because feeds run to thousands of entries. */
+export const LIST_PART_MAX = 1000;
+export const DetectionListSet = z.strictObject({
+  kind: z.literal('detection.list.set'),
+  list: ListName,
+  digest: Digest,
+  part: z.number().int().min(0).max(199),
+  parts: z.number().int().min(1).max(200),
+  entries: z.array(z.string().max(255)).max(LIST_PART_MAX),
+});
+export type DetectionListSet = z.infer<typeof DetectionListSet>;
+
+export type HelperCommand = HelperAction | HelperQuery | DetectionSync | DetectionListSet;
 
 export interface HelperRequest {
   id: string;
@@ -89,7 +119,8 @@ export function isAction(cmd: HelperCommand): cmd is HelperAction {
     'helper.journal',
     'santa.profile',
     'events.subscribe',
-    'santa.preexec.set',
+    'detection.sync',
+    'detection.list.set',
   ].includes(cmd.kind);
 }
 
@@ -128,9 +159,11 @@ export function parseRequest(line: string): HelperRequest | { error: string; id?
     ['helper.status', 'helper.journal', 'santa.profile', 'events.subscribe'].includes(kind);
   const parsed = isQuery
     ? HelperQuery.safeParse(env.data.command)
-    : kind === 'santa.preexec.set'
-      ? SantaPreexecSet.safeParse(env.data.command)
-      : HelperAction.safeParse(env.data.command);
+    : kind === 'detection.sync'
+      ? DetectionSync.safeParse(env.data.command)
+      : kind === 'detection.list.set'
+        ? DetectionListSet.safeParse(env.data.command)
+        : HelperAction.safeParse(env.data.command);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     return withId(
