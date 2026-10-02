@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { lstat, mkdtemp, readFile, readdir, readlink, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, readlink, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createRequire } from 'node:module';
@@ -404,6 +404,23 @@ describe('Codex with an OpenAI API key', () => {
   });
 });
 
+/**
+ * Every file under `dir`, walked one level at a time. Codex deletes its own
+ * temporary folders (tmp/arg0/...) while it exits, and a recursive readdir
+ * throws ENOENT when a folder vanishes mid-walk, so a missing folder is skipped.
+ */
+async function filesUnder(dir: string): Promise<string[]> {
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+  const nested = await Promise.all(
+    entries.map(async (e) => {
+      const path = join(dir, e.name);
+      if (e.isDirectory()) return filesUnder(path);
+      return e.isFile() ? [path] : [];
+    }),
+  );
+  return nested.flat();
+}
+
 describe.skipIf(!bundledCodex())('Codex with an OpenAI API key, real binary', () => {
   it('asks for a key when none is saved, and has no sign-in', async () => {
     const adapter = createCodexAdapter({
@@ -469,12 +486,11 @@ describe.skipIf(!bundledCodex())('Codex with an OpenAI API key, real binary', ()
         expect((r.input ?? []).flatMap((i) => i.tools ?? [])).toEqual([]);
       }
       // Nothing in Vigil's Codex folder holds the key.
-      for (const name of await readdir(codexHome, { recursive: true })) {
-        const path = join(codexHome, name);
+      const files = await filesUnder(codexHome);
+      expect(files.length).toBeGreaterThan(0);
+      for (const path of files) {
         // Codex's own databases come and go while it shuts down.
-        const text = await lstat(path)
-          .then((st) => (st.isFile() ? readFile(path, 'utf8') : ''))
-          .catch(() => '');
+        const text = await readFile(path, 'utf8').catch(() => '');
         expect(text).not.toContain('sk-test-vigil');
       }
       expect(existsSync(join(codexHome, 'auth.json'))).toBe(false);
