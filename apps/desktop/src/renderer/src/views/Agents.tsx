@@ -47,15 +47,28 @@ import {
   type MarkState,
 } from '../components/ui';
 import { clock, timeAgo } from '../format';
+import {
+  confirmsFirst,
+  groupAgentRules,
+  modeLabel,
+  modesFor,
+  RAISED_MODE_LABEL,
+  RULE_MODE_LABEL,
+  TOOL_MODE_LABEL,
+} from '../rule-modes';
 import '../styles/agents.css';
 import { useAgentLinks, EventRow, type AgentLinks } from './Activity';
 import {
   activityRoute,
   agentRoute,
   describeMatcher,
+  loadOlderSessions,
+  mergeSessions,
+  noSessionsText,
   originLabel,
   parseAgentParam,
   plural,
+  watching,
 } from './agents-format';
 import { PageHead } from './AppShell';
 
@@ -101,7 +114,7 @@ export function AgentsView({
 }) {
   const [tab, setTab] = useState<Tab>(readTab);
   const [adding, setAdding] = useState(false);
-  const [agents] = useLive(() => vigil.listAgents());
+  const [agents] = useLive(() => vigil.listAgents(), null, 'agents');
   const { id, session } = parseAgentParam(selected);
   const links = useAgentLinks(go);
   // A link to one agent always lands on its tab.
@@ -177,7 +190,8 @@ const PRESENCE_MARK: Record<AgentPresence, MarkState> = {
 /** Why some kinds start unwatched, on their cards. */
 const KIND_WHY: Partial<Record<AgentKind, string>> = {
   ide: 'Off by default: its built-in terminal runs your own commands too, so watching it would mix your work with its agent’s.',
-  runtime: 'Listed only. A model runtime answers other programs; Vigil never tags what it runs.',
+  runtime:
+    'Listed only. A model runtime answers other programs and never starts a session of its own.',
 };
 
 function OnThisMac({
@@ -223,7 +237,8 @@ function OnThisMac({
           <span className="t-h3">No AI agents seen on this Mac yet</span>
           <span className="t-small" style={{ maxWidth: 460 }}>
             Vigil recognises Claude Code, Codex, Copilot, Gemini, Cursor and others as soon as they
-            run, and tags everything they start. Use “Add an agent” for one it doesn’t know.
+            run. It tags what command-line agents and agent apps start. Editors start unwatched, and
+            model runtimes are only listed. Use “Add an agent” for one it doesn’t know.
           </span>
         </div>
       ) : (
@@ -244,8 +259,8 @@ function OnThisMac({
             {showOthers ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
             <span className="t-h3">Other agents Vigil knows</span>
             <span className="t-small grow">
-              {plural(others.length, 'agent')} not found on this Mac. Vigil starts watching one the
-              moment it runs.
+              {plural(others.length, 'agent')} not found on this Mac. Vigil recognises one the
+              moment it runs, and watches what it starts if its switch is On.
             </span>
           </button>
           {showOthers && others.map((a) => <AgentLine key={a.id} agent={a} go={go} />)}
@@ -385,7 +400,8 @@ function WatchSwitch({ agent: a }: { agent: AgentView }) {
   return (
     <Segmented
       label={`Watch what ${a.name} starts`}
-      value={a.watch && !runtime ? 'on' : 'off'}
+      // What the matcher does: an ignored agent or a runtime is never tagged.
+      value={watching(a) ? 'on' : 'off'}
       disabled={runtime || ignored}
       options={[
         { value: 'off', label: 'Off' },
@@ -411,7 +427,9 @@ function AgentLine({ agent: a, go }: { agent: AgentView; go: (route: string) => 
       <button type="button" className="list-row grow" onClick={() => go(agentRoute(a.id))}>
         <span className="agent-icon sm">{KIND_ICON[a.kind]}</span>
         <span className="t-h3">{a.name}</span>
-        <span className="t-small grow ellipsis">{AGENT_KIND_LABEL[a.kind]}</span>
+        <span className="t-small grow ellipsis" title={KIND_WHY[a.kind]}>
+          {AGENT_KIND_LABEL[a.kind]}
+        </span>
       </button>
       {a.status === 'ignored' ? (
         <Button size="sm" kind="ghost" onClick={() => void vigil.setAgentStatus(a.id, 'active')}>
@@ -425,19 +443,6 @@ function AgentLine({ agent: a, go }: { agent: AgentView; go: (route: string) => 
 }
 
 // ---------------------------------------------------------------- one agent
-
-const MODES: Record<RuleMode, string> = {
-  disabled: 'Off',
-  shadow: 'Shadow',
-  alert: 'Alert',
-  block: 'Block',
-};
-const TOOL_MODE_LABEL: Record<RuleMode, string> = {
-  disabled: 'Off',
-  shadow: 'Record',
-  alert: 'Ask',
-  block: 'Deny',
-};
 
 function AgentPage({
   id,
@@ -453,7 +458,7 @@ function AgentPage({
   go: (route: string) => void;
 }) {
   const toast = useToast();
-  const [detail, reload] = useLive(() => vigil.getAgent(id), id);
+  const [detail, reload] = useLive(() => vigil.getAgent(id), id, 'agents');
   const [rules] = useLive(() => vigil.listRules());
   const [editing, setEditing] = useState(false);
   useEffect(() => setEditing(false), [id]);
@@ -479,12 +484,7 @@ function AgentPage({
   }
   const a = detail;
   const views = new Map((rules ?? []).map((r) => [r.rule.id, r]));
-  const watchRules = a.rules.filter(
-    (r) => !views.get(r.id)?.rule.eventKinds.includes('agent.tool_request'),
-  );
-  const toolRules = a.rules.filter((r) =>
-    views.get(r.id)?.rule.eventKinds.includes('agent.tool_request'),
-  );
+  const groups = groupAgentRules(a.rules, (rid) => views.get(rid)?.rule.eventKinds);
 
   return (
     <>
@@ -496,6 +496,11 @@ function AgentPage({
         </div>
         <TodayStats agent={a} />
         {KIND_WHY[a.kind] && <span className="t-small">{KIND_WHY[a.kind]}</span>}
+        {a.status === 'ignored' && (
+          <span className="t-small">
+            Ignored: Vigil doesn’t treat it as an agent, so it tags nothing it runs.
+          </span>
+        )}
         <div className="row spread agent-foot" style={{ flexWrap: 'wrap' }}>
           <div className="row">
             <span className="t-small">Watch what it starts</span>
@@ -602,12 +607,25 @@ function AgentPage({
             title="Rules that apply"
             sub="Change a rule’s mode or exclusions on the Rules page."
           />
-          <RuleList title="On what it starts" rules={watchRules} labels={MODES} go={go} />
-          {toolRules.length > 0 && (
+          <RuleList
+            title="On what it starts"
+            rules={groups.watch}
+            labels={RULE_MODE_LABEL}
+            go={go}
+          />
+          {groups.tool.length > 0 && (
             <RuleList
               title="On the steps it asks about"
-              rules={toolRules}
+              rules={groups.tool}
               labels={TOOL_MODE_LABEL}
+              go={go}
+            />
+          )}
+          {groups.raised.length > 0 && (
+            <RuleList
+              title="Vigil’s own checks"
+              rules={groups.raised}
+              labels={RAISED_MODE_LABEL}
               go={go}
             />
           )}
@@ -687,24 +705,23 @@ function Sessions({
   links: AgentLinks;
   go: (route: string) => void;
 }) {
-  const [first] = useLive(() => vigil.listAgentSessions(agent.id), agent.id);
+  const [first] = useLive(() => vigil.listAgentSessions(agent.id), agent.id, 'agents');
   const [older, setOlder] = useState<{ agent: string; rows: AgentSessionView[]; more: boolean }>();
   const pages = older?.agent === agent.id ? older : undefined;
-  const all = new Map<string, AgentSessionView>();
-  for (const s of [...(first ?? []), ...(pages?.rows ?? [])]) if (!all.has(s.id)) all.set(s.id, s);
-  const list = [...all.values()];
+  // The live first page comes first, so new sessions show at the top with fresh counts.
+  const list = mergeSessions(first ?? [], pages?.rows ?? []);
+  const all = new Set(list.map((s) => s.id));
   const more = pages ? pages.more : (first?.length ?? 0) === SESSIONS_PAGE;
   const toggle = (id: string) => go(agentRoute(agent.id, open === id ? undefined : id));
 
   const loadOlder = async () => {
-    const last = list.at(-1);
-    if (!last) return;
-    const rows = await vigil.listAgentSessions(agent.id, { before: last.startedAt });
-    setOlder({
-      agent: agent.id,
-      rows: [...(pages?.rows ?? []), ...rows],
-      more: rows.length === SESSIONS_PAGE,
-    });
+    const id = agent.id;
+    const page = await loadOlderSessions(
+      list,
+      (before) => vigil.listAgentSessions(id, { before }),
+      SESSIONS_PAGE,
+    );
+    if (page) setOlder({ agent: id, ...page });
   };
 
   return (
@@ -718,13 +735,7 @@ function Sessions({
           <SessionView id={open} links={links} go={go} />
         </div>
       )}
-      {first && list.length === 0 && (
-        <span className="t-small">
-          {agent.watch
-            ? 'No sessions yet. One starts the next time it runs.'
-            : 'No sessions: Vigil starts sessions only for agents it watches.'}
-        </span>
-      )}
+      {first && list.length === 0 && <span className="t-small">{noSessionsText(agent)}</span>}
       <div className="col" style={{ gap: 0 }}>
         {list.map((s) => (
           <div key={s.id} className={`session-row ${open === s.id ? 'open' : ''}`}>
@@ -779,7 +790,7 @@ function SessionView({
   links: AgentLinks;
   go: (route: string) => void;
 }) {
-  const [d] = useLive(() => vigil.getAgentSession(id), id);
+  const [d] = useLive(() => vigil.getAgentSession(id), id, 'agents');
   const [openEvent, setOpenEvent] = useState<string>();
   if (d === undefined) return <span className="t-small">Loading…</span>;
   if (d === null) return <span className="t-small">This session is no longer stored.</span>;
@@ -822,22 +833,6 @@ function SessionView({
 }
 
 // ---------------------------------------------------------------- tool policy
-
-/** Mirrors PREFLIGHT_PROBING_RULE_ID in @vigil/detection (not imported, to keep it out of the renderer). */
-const PROBING_RULE_ID = 'preflight-probing';
-
-const TOOL_MODES: { value: RuleMode; label: string }[] = [
-  { value: 'disabled', label: 'Off' },
-  { value: 'shadow', label: 'Record' },
-  { value: 'alert', label: 'Ask' },
-  { value: 'block', label: 'Deny' },
-];
-/** Probing is counted by Vigil and raises an alert; it doesn't answer a step. */
-const PROBING_MODES: { value: RuleMode; label: string }[] = [
-  { value: 'disabled', label: 'Off' },
-  { value: 'shadow', label: 'Record' },
-  { value: 'alert', label: 'Alert' },
-];
 
 function ToolPolicy() {
   const [rules] = useLive(() => vigil.listRules());
@@ -954,6 +949,8 @@ function TemplateCard({
         <input
           className="field"
           aria-label={t.input.label}
+          aria-invalid={bad || undefined}
+          aria-describedby={bad ? `${t.id}-hint` : undefined}
           placeholder={t.input.placeholder}
           value={raw}
           onChange={(e) => setRaw(e.target.value)}
@@ -962,7 +959,11 @@ function TemplateCard({
           }}
         />
       )}
-      {bad && t.input && <span className="t-small warn-text">{t.input.hint}</span>}
+      {bad && t.input && (
+        <span id={`${t.id}-hint`} className="t-small warn-text" role="alert">
+          {t.input.hint}
+        </span>
+      )}
       <div className="row">
         <Button size="sm" disabled={!!t.input && !raw.trim()} onClick={use}>
           Open in editor
@@ -984,19 +985,16 @@ function ToolRuleRow({
   const { rule, matches } = view;
   const toast = useToast();
   const [confirmDeny, setConfirmDeny] = useState(false);
-  const probing = rule.id === PROBING_RULE_ID;
-  const modes = probing ? PROBING_MODES : TOOL_MODES;
-  const label = (m: RuleMode) => modes.find((x) => x.value === m)?.label ?? m;
 
   const set = async (mode: RuleMode) => {
-    if (mode === 'block' && rule.mode !== 'block') {
-      setConfirmDeny(true);
-      return;
-    }
+    // Picking anything else dismisses a Deny confirmation still showing.
+    const confirm = confirmsFirst(rule.mode, mode);
+    setConfirmDeny(confirm);
+    if (confirm) return;
     const before = rule.mode;
     await vigil.setRuleMode(rule.id, mode);
     toast({
-      text: `${rule.name}: ${label(mode)}`,
+      text: `${rule.name}: ${modeLabel(rule, mode)}`,
       undo: () => void vigil.setRuleMode(rule.id, before),
     });
   };
@@ -1027,7 +1025,7 @@ function ToolRuleRow({
           <Segmented
             label={`What ${rule.name} does`}
             value={rule.mode}
-            options={modes}
+            options={modesFor(rule)}
             onChange={(m) => void set(m)}
           />
         </span>
@@ -1042,7 +1040,7 @@ function ToolRuleRow({
           {editing ? 'Close' : 'Edit'}
         </Button>
       </div>
-      {confirmDeny && (
+      {confirmDeny && rule.mode !== 'block' && (
         <div className="attn poor">
           <span className="grow">
             In Deny mode Claude Code stops every step this rule matches, without asking you.

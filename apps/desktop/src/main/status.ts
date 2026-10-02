@@ -1,4 +1,5 @@
 import { compareSeverity, type Alert } from '@vigil/core';
+import { isNoticed, needsDecision } from '../shared/attention.js';
 
 export type Level = 'good' | 'fair' | 'poor';
 
@@ -15,8 +16,10 @@ export interface SensorHealth {
 
 export interface Status {
   level: Level;
-  /** Open alerts that need the user's decision. */
+  /** Open alerts that need the user's decision (shared/attention.ts). */
   needsYou: number;
+  /** Open alerts Vigil only noticed: shown, but they don't count against the level. */
+  noticed: number;
   reasons: string[];
 }
 
@@ -25,8 +28,9 @@ export interface Status {
  * spelled out to the user in shared/levels.ts (LEVEL_RULES); keep them in step.
  * - Poor: a high or critical alert isn't contained, or an installed protection
  *   layer has stopped.
- * - Fair: alerts wait on the user, or a layer is missing or not working fully.
- * - Good: none of the above.
+ * - Fair: an alert needs the user's decision, or a layer is missing or not working fully.
+ * - Good: none of the above. Medium and low alerts that Vigil only noticed
+ *   (nothing held, no popup) don't lower the level; they are usually the user.
  * Reasons come most serious first, so the first one is always why the level is what it is.
  */
 export function computeStatus(
@@ -36,7 +40,8 @@ export function computeStatus(
   const poor: string[] = [];
   const fair: string[] = [];
 
-  const needsYou = openAlerts.filter((a) => !a.decision).length;
+  const needsYou = openAlerts.filter(needsDecision).length;
+  const noticed = openAlerts.filter(isNoticed).length;
   const uncontained = openAlerts.filter(
     (a) => a.containment !== 'active' && compareSeverity(a.severity, 'high') >= 0,
   );
@@ -54,7 +59,7 @@ export function computeStatus(
     }
   }
   const level: Level = poor.length ? 'poor' : fair.length ? 'fair' : 'good';
-  return { level, needsYou, reasons: [...poor, ...fair] };
+  return { level, needsYou, noticed, reasons: [...poor, ...fair] };
 }
 
 function plural(n: number, word: string): string {

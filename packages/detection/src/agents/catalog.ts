@@ -34,6 +34,24 @@ type Entry = Omit<CatalogEntry, 'origin' | 'status' | 'createdAt' | 'updatedAt' 
   watch?: boolean;
 };
 
+/**
+ * Where a Mac app can run from: /Applications, ~/Applications (a user who is
+ * not an admin, `brew --cask --appdir`), or translocated, when it was opened
+ * from Downloads or a disk image without being moved.
+ */
+function appGlobs(bundle: string): string[] {
+  return [
+    `/Applications/${bundle}.app/**`,
+    `~/Applications/${bundle}.app/**`,
+    `/private/var/folders/**/AppTranslocation/*/d/${bundle}.app/**`,
+  ];
+}
+
+/** Install locations to look for an app (translocated copies come and go, so they are left out). */
+function appInstalls(bundle: string): string[] {
+  return [`/Applications/${bundle}.app`, `~/Applications/${bundle}.app`];
+}
+
 function entry(e: Entry): CatalogEntry {
   return {
     origin: 'builtin',
@@ -54,7 +72,9 @@ export const AGENT_CATALOG: readonly CatalogEntry[] = [
       // VERIFY: the native install links ~/.local/bin/claude to a versioned binary.
       { names: ['claude'] },
       { paths: ['~/.local/share/claude/versions/*'] },
-      // VERIFY: the npm install runs as node with the package's cli.js.
+      // VERIFY: the npm install links bin/claude to cli.js (`#!/usr/bin/env node`), so a
+      // launch is `node …/bin/claude`, which `names` matches through the script name
+      // (match.ts). This matcher is for a direct `node …/claude-code/cli.js` (an IDE).
       { names: ['node'], argGlobs: ['*@anthropic-ai/claude-code*'] },
     ],
     installPaths: ['~/.local/bin/claude', '/opt/homebrew/bin/claude', '/usr/local/bin/claude'],
@@ -64,8 +84,8 @@ export const AGENT_CATALOG: readonly CatalogEntry[] = [
     id: 'claude-desktop',
     name: 'Claude app',
     kind: 'app',
-    match: [{ paths: ['/Applications/Claude.app/**'] }], // VERIFY
-    installPaths: ['/Applications/Claude.app'],
+    match: [{ paths: appGlobs('Claude') }], // VERIFY
+    installPaths: appInstalls('Claude'),
   }),
   entry({
     id: 'codex',
@@ -81,8 +101,8 @@ export const AGENT_CATALOG: readonly CatalogEntry[] = [
     id: 'codex-app',
     name: 'Codex app',
     kind: 'app',
-    match: [{ paths: ['/Applications/Codex.app/**'] }], // VERIFY
-    installPaths: ['/Applications/Codex.app'],
+    match: [{ paths: appGlobs('Codex') }], // VERIFY
+    installPaths: appInstalls('Codex'),
   }),
   entry({
     id: 'copilot-cli',
@@ -117,8 +137,8 @@ export const AGENT_CATALOG: readonly CatalogEntry[] = [
     name: 'Cursor',
     kind: 'ide',
     watch: false,
-    match: [{ paths: ['/Applications/Cursor.app/**'] }], // VERIFY
-    installPaths: ['/Applications/Cursor.app'],
+    match: [{ paths: appGlobs('Cursor') }], // VERIFY
+    installPaths: appInstalls('Cursor'),
     note: "Off by default: commands you type in its terminal would count as the agent's.",
   }),
   entry({
@@ -126,8 +146,8 @@ export const AGENT_CATALOG: readonly CatalogEntry[] = [
     name: 'Visual Studio Code',
     kind: 'ide',
     watch: false,
-    match: [{ paths: ['/Applications/Visual Studio Code.app/**'] }], // VERIFY
-    installPaths: ['/Applications/Visual Studio Code.app'],
+    match: [{ paths: appGlobs('Visual Studio Code') }], // VERIFY
+    installPaths: appInstalls('Visual Studio Code'),
     note: "Off by default: commands you type in its terminal would count as the agent's.",
   }),
   // Runtimes are listed so you can see them; they never tag anything.
@@ -137,9 +157,9 @@ export const AGENT_CATALOG: readonly CatalogEntry[] = [
     kind: 'runtime',
     watch: false,
     match: [
-      { paths: ['/Applications/Ollama.app/**'] }, // VERIFY
+      { paths: appGlobs('Ollama') }, // VERIFY
       { names: ['ollama'] },
     ],
-    installPaths: ['/Applications/Ollama.app', '/opt/homebrew/bin/ollama', '/usr/local/bin/ollama'],
+    installPaths: [...appInstalls('Ollama'), '/opt/homebrew/bin/ollama', '/usr/local/bin/ollama'],
   }),
 ];

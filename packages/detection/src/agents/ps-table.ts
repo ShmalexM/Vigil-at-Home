@@ -9,7 +9,11 @@ export interface PsRow {
   ppid: number;
   /** When the process started, in ms (ps reports whole seconds, local time). */
   startedAt: number;
-  /** The executable as `comm` prints it: a full path on macOS, a bare name for a few system processes. */
+  /**
+   * What `comm` prints. On macOS that is argv[0] (`-zsh`, `node`, `claude`, a
+   * full path only when the program was started by path), or a short name for
+   * another user's process: a hint, not the executable a sensor reports.
+   */
   path: string;
   /** From a second `ps` run. Kept in memory only, never stored. */
   args?: string[];

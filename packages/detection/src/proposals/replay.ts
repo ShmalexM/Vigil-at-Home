@@ -1,3 +1,4 @@
+import { conditionUsesFields } from '../agents/fields.js';
 import { DetectionEngine } from '../engine.js';
 import { compileField } from '../rules/fields.js';
 import {
@@ -9,7 +10,7 @@ import {
   type ExceptionStore,
   type ListStore,
 } from '../state/stores.js';
-import type { DetectionEvent, DetectionRule } from '../types.js';
+import type { Condition, DetectionEvent, DetectionRule } from '../types.js';
 
 export interface ReplaySample {
   ts: number;
@@ -65,11 +66,47 @@ export interface ReplayOptions {
 
 const DAY = 86_400_000;
 
+const MAX_SUBJECT = 120;
+
+/** What a tool request asks for: its command, file or URL, else the tool. */
+export function toolRequestSubject(e: Extract<DetectionEvent, { kind: 'agent.tool_request' }>) {
+  const s = e.command ?? e.filePath ?? e.url ?? e.tool;
+  return s.length > MAX_SUBJECT ? `${s.slice(0, MAX_SUBJECT - 1)}…` : s;
+}
+
+const PARENT_FIELDS = ['process.parentName', 'process.ancestors'];
+const readsParent = (c: Condition) =>
+  conditionUsesFields(c, (f) => PARENT_FIELDS.some((p) => f === p || f.startsWith(`${p}.`)));
+
+/** The condition can only match under an agent (it tests process.agent, and not its absence). */
+function agentScoped(c: Condition): boolean {
+  if ('all' in c) return c.all.some(agentScoped);
+  if (!('field' in c)) return false;
+  if (c.field !== 'process.agent' && !c.field.startsWith('process.agent.')) return false;
+  if (c.op === 'neq' || c.op === 'notIn') return false;
+  return !(c.op === 'exists' && c.value === false);
+}
+
+/**
+ * Stored history keeps a program's parent chain (which `process.parentName`
+ * usually comes from) only under an agent or when a rule matched, so a
+ * replay of a rule on it, not limited to agents, sees too little.
+ */
+export function replayMissesParents(rule: DetectionRule): boolean {
+  return [rule.condition, ...rule.exclusions].some(readsParent) && !agentScoped(rule.condition);
+}
+
+export const PARENT_REPLAY_NOTE =
+  "Vigil stores a program's parents only when it runs under an agent or a rule matched it, so this replay undercounts a rule on parent names. Watch it in shadow first.";
+
 function programOf(e: DetectionEvent): string | undefined {
+  // A Bash request's shell is a stand-in (always /bin/zsh); the tool says more.
+  if (e.kind === 'agent.tool_request') return e.tool;
   return 'process' in e ? e.process?.path : undefined;
 }
 
 function subjectOf(e: DetectionEvent): string {
+  if (e.kind === 'agent.tool_request') return toolRequestSubject(e);
   if ('path' in e && e.path) return e.path;
   if (e.kind === 'network.connection') return e.remoteHost ?? e.remoteAddress;
   if (e.kind === 'browser.extension') return e.extensionId;
@@ -140,7 +177,9 @@ export function replayRule(
 
   for (const e of ctx.history.range(opts.from, opts.to)) {
     eventsScanned++;
-    const ds = engine.evaluate(e);
+    // Judged the way the live path judges it: a tool request is checked (pre-flight,
+    // which never dedupes, so every match is a question), anything else evaluated.
+    const ds = e.kind === 'agent.tool_request' ? engine.check(e) : engine.evaluate(e);
     const mine = ds.find((d) => d.match.ruleId === candidate.id);
     if (!mine || e.ts < warmupUntil) continue;
     hits++;
@@ -168,8 +207,13 @@ export function replayRule(
   const hitsPerDay = hits / countedDays;
   const popupsPerDay = popups / countedDays;
   const notes: string[] = [];
+  const parentBlind = replayMissesParents(candidate);
+  if (parentBlind) notes.push(PARENT_REPLAY_NOTE);
   let verdict: ReplayReport['verdict'];
-  if (hits === 0) {
+  if (hits === 0 && parentBlind) {
+    // Not "never fired": the history it would fire on was not kept.
+    verdict = 'quiet';
+  } else if (hits === 0) {
     verdict = 'never_fired';
     notes.push(
       'It would not have fired at all in this window. That is fine for a rule about rare attacks, but check it is not misspelled.',

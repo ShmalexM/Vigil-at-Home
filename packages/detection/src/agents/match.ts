@@ -71,6 +71,34 @@ export function argGlobMatch(pattern: string, text: string): boolean {
   return p === pattern.length;
 }
 
+/**
+ * Programs that run a script named in their arguments. npm links a CLI's bin
+ * (`/opt/homebrew/bin/claude`) to a script whose shebang is `#!/usr/bin/env
+ * node`, so the launch is `node /opt/homebrew/bin/claude …`: the program is
+ * node, and the agent's name is the script's.
+ */
+const SCRIPT_HOSTS = new Set(['node', 'bun', 'deno']);
+/** Options after which a script host runs code from the command line, not a file. */
+const INLINE_CODE = new Set(['-e', '--eval', '-p', '--print']);
+
+/**
+ * The name of the script a script host runs: the first argument after the
+ * host's own options. Arguments are joined and split on spaces, because a
+ * retag sees them as one joined string.
+ */
+export function scriptName(p: AgentProc): string | undefined {
+  if (!p.args?.length || !SCRIPT_HOSTS.has(basename(p.path).toLowerCase())) return undefined;
+  const words = p.args.join(' ').slice(0, MAX_ARGS).split(' ');
+  for (let i = 1; i < words.length; i++) {
+    const w = words[i]!;
+    if (w === '') continue;
+    if (INLINE_CODE.has(w)) return undefined;
+    if (w.startsWith('-')) continue;
+    return basename(w);
+  }
+  return undefined;
+}
+
 function joinedArgs(p: AgentProc): string | undefined {
   if (!p.args?.length) return undefined;
   const s = p.args.join(' ');
@@ -84,6 +112,11 @@ function namesProgram(c: Clause, p: AgentProc, name: string): boolean {
   if (c.names && !c.names.has(name)) return false;
   if (c.paths && !c.paths.some((re) => re.test(p.path))) return false;
   return true;
+}
+
+/** The clause names the program by name alone, so it can name a script too. */
+function namesOnly(c: Clause): boolean {
+  return !!c.names && !c.teamIds && !c.signingIds && !c.paths;
 }
 
 /** A matcher's effective watch: only an active, watched agent that is not a runtime tags anything. */
@@ -146,19 +179,22 @@ export function compileAgentMatchers(ids: readonly AgentIdentity[]): CompiledAge
       const name = basename(p.path);
       let args: string | undefined | null = null; // null: not joined yet
       let best: Clause | undefined;
-      for (const list of candidates(p, name)) {
-        if (!list) continue;
-        for (const c of list) {
-          if (best && c.order >= best.order) continue;
-          if (!namesProgram(c, p, name)) continue;
-          if (c.argGlobs) {
-            if (args === null) args = joinedArgs(p);
-            const a = args;
-            if (a === undefined || !c.argGlobs.every((g) => argGlobMatch(g, a))) continue;
-          }
-          best = c;
+      const fits = (c: Clause, as: string) => {
+        if (best && c.order >= best.order) return;
+        if (!namesProgram(c, p, as)) return;
+        if (c.argGlobs) {
+          if (args === null) args = joinedArgs(p);
+          const a = args;
+          if (a === undefined || !c.argGlobs.every((g) => argGlobMatch(g, a))) return;
         }
-      }
+        best = c;
+      };
+      for (const list of candidates(p, name)) for (const c of list ?? []) fits(c, name);
+      // A script a host runs (`node /opt/homebrew/bin/claude`): a team ID, signing ID
+      // or path in a matcher describes the host binary, so only names count.
+      const script = scriptName(p);
+      if (script !== undefined && script !== name)
+        for (const c of byName.get(script) ?? []) if (namesOnly(c)) fits(c, script);
       return best?.identity;
     },
     byId: (id) => byId.get(id),
@@ -167,7 +203,8 @@ export function compileAgentMatchers(ids: readonly AgentIdentity[]): CompiledAge
       for (const list of candidates(p, name)) {
         for (const c of list ?? []) if (c.argGlobs && namesProgram(c, p, name)) return true;
       }
-      return false;
+      const script = scriptName(p);
+      return script !== undefined && (byName.get(script) ?? []).some(namesOnly);
     },
   };
 }

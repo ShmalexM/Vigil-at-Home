@@ -10,7 +10,9 @@ import {
   type WorkloadResult,
 } from './detection.js';
 import { runPreflight, summarizePreflight, type PreflightRun } from './preflight.js';
+import { rng } from './rng.js';
 import { santaWatchItems, throughSensors } from './sensors.js';
+import { workday } from './workday.js';
 
 // Quick checks on the benchmark itself, so it can't rot between bench runs.
 // The full benchmark is src/detection.run.ts (pnpm --filter @vigil/bench bench).
@@ -128,6 +130,22 @@ describe('AI agents', () => {
     expect(w.agentRules.alerts + w.agentRules.asks).toBeLessThanOrEqual(0.5);
     expect(w.perDay.denies).toBe(0);
   }, 60_000);
+
+  it('puts look-alike agent commands in that measured week, so the check above can fail', () => {
+    // Agent sessions draw from their own stream, seeded by the day, so these
+    // are the tool calls runWorkload sees whatever stream the rest uses.
+    const DAY = 86_400_000;
+    const r = rng(1);
+    const calls = { all: 0, lookalike: 0 };
+    for (let day = 7; day < 14; day++)
+      for (const w of workday('developer', START + day * DAY, r)) {
+        if (w.event.kind !== 'agent.tool_request') continue;
+        calls.all++;
+        if (w.lookalike) calls.lookalike++;
+      }
+    expect(calls.all / 7).toBeGreaterThanOrEqual(100);
+    expect(calls.lookalike / 7).toBeGreaterThanOrEqual(3);
+  });
 
   it('stores at most 40 bytes more per event to follow agents', () => {
     const { storedBytesPerEvent: b } = week();

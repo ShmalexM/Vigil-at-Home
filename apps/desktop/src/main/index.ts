@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { app, dialog, Notification, powerMonitor, safeStorage, shell } from 'electron';
+import { listDigest } from '@vigil/detection/fastpath';
 import { z } from 'zod';
 import type { HelperInstallResult } from '../shared/ipc.js';
 import { AgentService } from './agents/service.js';
@@ -259,13 +260,14 @@ function start(): void {
   setTimeout(() => windows.prewarmPopover(), 2000);
 
   const refresh = () => {
-    windows.setNeedsYou(core.status().needsYou);
+    windows.setNeedsYou(core.status().badge);
     windows.broadcast('changed');
   };
   core.alerts.on('changed', refresh);
   core.sensors.on('changed', refresh);
   setup.on('changed', () => windows.broadcast('changed'));
   agents.on('changed', () => windows.broadcast('changed'));
+  agents.on('activity', () => windows.broadcast('agents'));
   core.alerts.on('popup', (alert) => windows.showPopup(alert.id));
   core.feed.on('events', (n) => windows.broadcast('events', n));
   refresh();
@@ -279,9 +281,32 @@ function start(): void {
   // Sensor events arrive through the helper, which reads Santa's and osquery's logs as root.
   helper.on('event', (e) => void core.handleEvent(e));
   const checkHealth = () => reportHealth(core.sensors, probe);
+  // Re-sent on every connection and whenever the rules, exceptions or lists change.
+  let helperRulesSent: string | undefined;
+  // The helper runs the blocking rules it can on its own, so blocks happen
+  // even while the app is closed, and hands Santa the pre-launch ones.
+  let helperRulesSync = Promise.resolve();
+  const syncHelperRules = () => (helperRulesSync = helperRulesSync.then(sendHelperRules));
+  const sendHelperRules = async () => {
+    if (!core.detector) return;
+    const set = core.detector.helperRules();
+    const lists = Object.entries(set.lists).map(([l, entries]) => [l, listDigest(entries)]);
+    const key = JSON.stringify({ ...set, lists });
+    if (key === helperRulesSent) return;
+    try {
+      if (await helper.syncRules(set)) helperRulesSent = key;
+    } catch (err) {
+      console.warn('[helper rules] could not update the helper:', err);
+    }
+  };
+  if (core.detector) core.detector.onRulesChanged = () => void syncHelperRules();
   helper.on('state', (state) => {
     void checkHealth();
-    if (state === 'connected') void saveSantaProfile();
+    if (state === 'connected') {
+      void saveSantaProfile();
+      helperRulesSent = undefined;
+      void syncHelperRules();
+    }
   });
   if (process.platform === 'darwin') {
     helper.start();
@@ -291,6 +316,7 @@ function start(): void {
       async () => {
         await helper.ping();
         await checkHealth();
+        await syncHelperRules();
       },
       true,
     );
@@ -317,7 +343,9 @@ function start(): void {
       });
   }
   if (perf)
-    Object.assign(globalThis, { vigil: { core, windows, power, agents, readyAt: Date.now() } });
+    Object.assign(globalThis, {
+      vigil: { core, windows, power, agents, syncHelperRules, readyAt: Date.now() },
+    });
   // First run opens setup; after that Vigil starts quietly in the menu bar.
   else if (!setup.finished()) windows.openMain('setup');
   else if (!app.isPackaged) windows.openMain();

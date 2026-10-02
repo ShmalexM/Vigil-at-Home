@@ -12,6 +12,7 @@ export const AGENT_FIELD_PREFIXES: readonly string[] = [
   'tool',
   'command',
   'commandBytes',
+  'commandClipped',
   'filePath',
   'url',
   'mcpServer',
@@ -26,12 +27,37 @@ export function isAgentField(f: string): boolean {
   return AGENT_FIELD_PREFIXES.some((p) => f === p || f.startsWith(`${p}.`));
 }
 
+/**
+ * Fields an AI exclusion may not use. Parent fields name the program that
+ * started a process, which under an agent is the agent itself, and
+ * `process.parentName` falls back to `process.ancestors[0]`.
+ */
+export const AI_EXCLUSION_DENY: readonly string[] = [
+  ...AGENT_FIELD_PREFIXES,
+  'process.parentName',
+  'process.parentPath',
+];
+
+function deniedForAi(f: string): boolean {
+  return AI_EXCLUSION_DENY.some((p) => f === p || f.startsWith(`${p}.`));
+}
+
+/** True when any part of the condition reads a field `test` accepts: a test, a list lookup or a firstSeen key. */
+export function conditionUsesFields(c: Condition, test: (field: string) => boolean): boolean {
+  if ('all' in c) return c.all.some((x) => conditionUsesFields(x, test));
+  if ('any' in c) return c.any.some((x) => conditionUsesFields(x, test));
+  if ('not' in c) return conditionUsesFields(c.not, test);
+  if ('inList' in c) return test(c.inList.field);
+  if ('firstSeen' in c) return c.firstSeen.key.some(test);
+  return test(c.field);
+}
+
 /** True when any part of the condition reads an agent field: a test, a list lookup or a firstSeen key. */
 export function conditionUsesAgentFields(c: Condition): boolean {
-  if ('all' in c) return c.all.some(conditionUsesAgentFields);
-  if ('any' in c) return c.any.some(conditionUsesAgentFields);
-  if ('not' in c) return conditionUsesAgentFields(c.not);
-  if ('inList' in c) return isAgentField(c.inList.field);
-  if ('firstSeen' in c) return c.firstSeen.key.some(isAgentField);
-  return isAgentField(c.field);
+  return conditionUsesFields(c, isAgentField);
+}
+
+/** True when an exclusion would hide what an agent does: it reads an agent or parent field. */
+export function exclusionHidesAgent(c: Condition): boolean {
+  return conditionUsesFields(c, deniedForAi);
 }

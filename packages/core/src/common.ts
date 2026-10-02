@@ -71,10 +71,29 @@ export const ProcessRef = z.object({
       agent: z.string().optional(),
     })
     .optional(),
-  /** Program names of the parent, grandparent and so on, nearest first. Filled by Vigil, not sensors. */
+  /**
+   * Program names (basenames) of the parent, grandparent and so on, nearest
+   * first, at most four. Filled by Vigil, not by Santa or osquery: the
+   * helper's sensor hub sets it from the launches it saw, and the app's agent
+   * tracker fills it in when the hub could not (a program that started
+   * before Vigil, found with `ps`).
+   */
   ancestors: z.array(z.string().max(255)).max(4).optional(),
   /** Set when the process runs under a watched AI agent. */
   agent: AgentTag.optional(),
+  /**
+   * The nearest ancestor that was downloaded from the internet (had the
+   * quarantine flag), so a script started by a downloaded app still counts
+   * as coming from that download. Filled by Vigil, not sensors.
+   */
+  downloadedAncestor: z
+    .object({
+      path: z.string(),
+      originUrl: z.string().optional(),
+      /** That ancestor's signature, so rules can tell an unsigned download from an identified app. */
+      signing: SigningStatus.optional(),
+    })
+    .optional(),
 });
 export type ProcessRef = z.infer<typeof ProcessRef>;
 

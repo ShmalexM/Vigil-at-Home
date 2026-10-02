@@ -3,18 +3,24 @@ import {
   AGENT_CONFIG_GLOBS,
   AGENT_CONFIG_RE,
   agentWatchRules,
+  CONFIG_INPLACE_RE,
+  CONFIG_WRITE_RE,
+  COPY_OUT_RES,
   ENV_DUMP_RE,
   KEYCHAIN_SECRET_RE,
-  NET_SINK_RE,
+  MCP_ADD_RE,
   PASTE_HOST_RE,
-  PERSIST_RE,
+  PERSIST_RES,
+  PIPE_SINK_RE,
+  PREFLIGHT_PIPE_RE,
+  PREFLIGHT_PROCSUB_RE,
+  SCRIPT_WRITE_RE,
   SECRET_FILE_GLOBS,
-  SECRET_PATH_RE,
+  SECRET_PATH_RES,
   tamper,
-  UPLOAD_RE,
-  WRITE_VERB_RE,
+  UPLOAD_RES,
 } from './agent-watch.js';
-import { macosCoreRules, PIPE_TO_SHELL_RE } from './macos-core.js';
+import { macosCoreRules } from './macos-core.js';
 
 /**
  * Pre-flight rules: an agent's hook (Claude Code's PreToolUse) asks Vigil
@@ -51,6 +57,10 @@ function rule(r: PackRule): DetectionRuleInput {
 
 /** Counted by Vigil's agent service, not matched here; see the rule below. */
 export const PREFLIGHT_PROBING_RULE_ID = 'preflight-probing';
+/** Raised by Vigil's agent service when another program takes its agent socket; see below. */
+export const PREFLIGHT_SOCKET_RULE_ID = 'preflight-socket-tampered';
+/** The tool name on the event that alert carries: no hook's request can have it. */
+export const PREFLIGHT_SOCKET_TOOL = '#socket';
 
 const BASH = { field: 'tool', op: 'eq', value: 'Bash' } as const;
 const WRITES: Condition = {
@@ -59,11 +69,18 @@ const WRITES: Condition = {
   value: ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'],
 };
 
-/** The Bash command matches any of these regexes. */
+/** The Bash command matches any of these regexes (case-sensitive). */
 const command = (...patterns: string[]): Condition => ({
   field: 'command',
   op: 'regex',
   value: patterns,
+});
+/** The Bash command matches any of these regexes, ignoring case (APFS paths fold case). */
+const commandI = (...patterns: string[]): Condition => ({
+  field: 'command',
+  op: 'regex',
+  value: patterns,
+  nocase: true,
 });
 const filePath = (globs: string[]): Condition => ({ field: 'filePath', op: 'glob', value: globs });
 
@@ -82,16 +99,15 @@ export const agentPreflightRules: DetectionRuleInput[] = [
         {
           all: [
             BASH,
-            command(SECRET_PATH_RE),
+            commandI(...SECRET_PATH_RES),
             {
-              any: [
-                command(UPLOAD_RE, NET_SINK_RE),
-                { field: 'command', op: 'regex', value: [PASTE_HOST_RE], nocase: true },
-              ],
+              any: [command(...UPLOAD_RES), commandI(PIPE_SINK_RE), commandI(PASTE_HOST_RE)],
             },
           ],
         },
-        { all: [BASH, command(ENV_DUMP_RE), command(String.raw`\b(curl|wget|nc)\b`)] },
+        // scp/rsync of a credential to another host, or every env var piped out.
+        { all: [BASH, commandI(...COPY_OUT_RES)] },
+        { all: [BASH, commandI(ENV_DUMP_RE)] },
       ],
     },
     reasons: ['The command would send keys or tokens from this Mac to another computer.'],
@@ -135,7 +151,17 @@ export const agentPreflightRules: DetectionRuleInput[] = [
     condition: {
       any: [
         { all: [WRITES, filePath(AGENT_CONFIG_GLOBS)] },
-        { all: [BASH, command(AGENT_CONFIG_RE), command(WRITE_VERB_RE)] },
+        {
+          all: [
+            BASH,
+            {
+              any: [
+                commandI(CONFIG_WRITE_RE, CONFIG_INPLACE_RE, MCP_ADD_RE),
+                { all: [command(SCRIPT_WRITE_RE), command(AGENT_CONFIG_RE)] },
+              ],
+            },
+          ],
+        },
       ],
     },
     reasons: [
@@ -154,11 +180,18 @@ export const agentPreflightRules: DetectionRuleInput[] = [
       any: [
         {
           all: [
-            { field: 'tool', op: 'in', value: ['Read', 'Write', 'Edit', 'MultiEdit'] },
+            { field: 'tool', op: 'in', value: ['Read', 'Grep', 'Write', 'Edit', 'MultiEdit'] },
             filePath(SECRET_FILE_GLOBS),
           ],
         },
-        { all: [BASH, command(SECRET_PATH_RE, KEYCHAIN_SECRET_RE)] },
+        // Grep searches a folder as readily as a file, and prints what it finds.
+        {
+          all: [
+            { field: 'tool', op: 'eq', value: 'Grep' },
+            filePath(['~/.aws', '~/.aws/**', '~/.ssh', '~/.config/gcloud', '~/.azure', '~/.kube']),
+          ],
+        },
+        { all: [BASH, { any: [commandI(...SECRET_PATH_RES), command(KEYCHAIN_SECRET_RE)] }] },
       ],
     },
     exclusions: [filePath(['~/.ssh/*.pub'])],
@@ -177,9 +210,9 @@ export const agentPreflightRules: DetectionRuleInput[] = [
         BASH,
         {
           any: [
-            command(PIPE_TO_SHELL_RE),
-            { field: 'command', op: 'contains', value: ['$(curl', '$(wget'] },
-            command(String.raw`base64\s+(-d|--decode|-D)[^|]*\|\s*(ba|z|da)?sh\b`),
+            commandI(PREFLIGHT_PIPE_RE, PREFLIGHT_PROCSUB_RE),
+            { field: 'command', op: 'contains', value: ['$(curl', '$(wget'], nocase: true },
+            commandI(String.raw`base64\s+(-d|--decode|-D)[^|]*\|\s*(\S*/)?(ba|z|da|k)?sh\b`),
           ],
         },
       ],
@@ -206,7 +239,7 @@ export const agentPreflightRules: DetectionRuleInput[] = [
             ]),
           ],
         },
-        { all: [BASH, command(PERSIST_RE)] },
+        { all: [BASH, commandI(...PERSIST_RES)] },
       ],
     },
     reasons: [
@@ -217,12 +250,15 @@ export const agentPreflightRules: DetectionRuleInput[] = [
     id: 'preflight-long-command',
     name: 'Agent step too long to check',
     description:
-      'Before a Bash step runs: the command is longer than the 4 KB Vigil reads, so the rest could hide anything. Vigil asks you first.',
+      'Before a Bash step runs: the command is longer than the 4,096 characters Vigil reads, so the rest could hide anything. Vigil asks you first.',
     mode: 'alert',
     severity: 'low',
     fidelity: 'low',
-    condition: { all: [BASH, { field: 'commandBytes', op: 'gt', value: 4096 }] },
-    reasons: ['This command is longer than Vigil checks (4 KB).'],
+    // Set when the hook sent only the start of the command. Its size is in UTF-8
+    // bytes, so a byte count over 4,096 alone would also flag a shorter command
+    // in another script that Vigil read in full.
+    condition: { all: [BASH, { field: 'commandClipped', op: 'eq', value: true }] },
+    reasons: ['This command is longer than Vigil checks (4,096 characters).'],
   }),
 
   // ----------------------------------------------------------------- shadow
@@ -277,6 +313,21 @@ export const agentPreflightRules: DetectionRuleInput[] = [
     reasons: [
       'Vigil stopped 5 or more steps from one agent session within 10 minutes.',
       'The agent may be looking for a way around your rules.',
+    ],
+  }),
+  rule({
+    id: PREFLIGHT_SOCKET_RULE_ID,
+    name: "Another program took over Vigil's agent socket",
+    description:
+      "Raised by Vigil: a program other than Vigil removed or replaced the socket Claude Code's pre-flight hook asks, or was listening there before Vigil started. It could answer the hook in Vigil's place.",
+    mode: 'alert',
+    severity: 'high',
+    fidelity: 'high',
+    // A sentinel no tool name can match, like preflight-probing's. The agent
+    // service raises this rule itself, at most once an hour.
+    condition: { field: 'tool', op: 'eq', value: PREFLIGHT_SOCKET_TOOL },
+    reasons: [
+      "A program other than Vigil took the socket that Claude Code's hook asks before each step, so it could answer in Vigil's place.",
     ],
   }),
 ];

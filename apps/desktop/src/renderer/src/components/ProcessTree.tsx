@@ -2,7 +2,7 @@ import { Bot, CornerDownRight } from 'lucide-react';
 import type { CSSProperties } from 'react';
 import type { TreeNode } from '../../../shared/agents';
 import { timeOfDay } from '../format';
-import { treeOrder } from '../views/agents-format';
+import { treeRows } from '../views/agents-format';
 import { Chip } from './ui';
 
 /** Main sends at most this many processes of one session. */
@@ -14,12 +14,12 @@ const MAX_NODES = 200;
  * Programs one of whose events matched a rule are marked.
  */
 export function ProcessTree({ nodes }: { nodes: readonly TreeNode[] }) {
-  const ordered = treeOrder(nodes);
-  if (ordered.length === 0) return <span className="t-small">No programs recorded yet.</span>;
+  const rows = treeRows(nodes);
+  if (rows.length === 0) return <span className="t-small">No programs recorded yet.</span>;
   return (
     <div className="col" style={{ gap: 6 }}>
       <ol className="ptree" aria-label="Programs this session started">
-        {ordered.map((n, i) => (
+        {rows.map(({ node: n, parent }, i) => (
           <li
             key={`${n.pid}-${n.ts}-${i}`}
             className={`ptree-row ${n.matched ? 'matched' : ''}`}
@@ -27,6 +27,10 @@ export function ProcessTree({ nodes }: { nodes: readonly TreeNode[] }) {
           >
             <span className="ptree-glyph" aria-hidden>
               {n.depth === 0 ? <Bot size={14} /> : <CornerDownRight size={13} />}
+            </span>
+            {/* The indent shows who started what; this says it. */}
+            <span className="sr-only">
+              {parent ? `Started by ${parent.name}: ` : 'The agent: '}
             </span>
             <span className="ptree-name mono" title={n.path}>
               {n.name}

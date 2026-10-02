@@ -60,7 +60,8 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
   const [status] = useLive(() => vigil.getStatus());
   const [setup] = useLive(() => vigil.getSetup());
   const [updates] = useLive(() => vigil.getUpdates());
-  const [agents] = useLive(() => vigil.listAgents());
+  // Names and statuses only: the badge needs no stats, and this runs on every page.
+  const [agents] = useLive(() => vigil.listAgentNames());
   const suggestions = agents?.filter((a) => a.status === 'suggested').length ?? 0;
   const [section = 'home', param] = route.split('/');
 
@@ -85,8 +86,8 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
             >
               {n.icon}
               <span className="grow">{n.label}</span>
-              {n.id === 'alerts' && status && status.needsYou > 0 && (
-                <span className="count hot">{status.needsYou}</span>
+              {n.id === 'alerts' && status && status.badge > 0 && (
+                <span className="count hot">{status.badge}</span>
               )}
               {n.id === 'agents' && suggestions > 0 && (
                 <span className="count" title="Suggested agents waiting on you">

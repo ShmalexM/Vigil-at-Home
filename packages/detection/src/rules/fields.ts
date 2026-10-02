@@ -19,10 +19,24 @@ function read(e: DetectionEvent, key: string): unknown {
  */
 const COMPUTED: Record<string, FieldGetter> = {
   'process.name': (e) => ('process' in e ? basename(e.process?.path) : undefined),
-  /** The parent's name from the sensor, else the nearest ancestor Vigil's process tracker knows. */
+  /** The parent's name from its path, else the nearest ancestor Vigil knows (see process.ancestors). */
   'process.parentName': (e) =>
     'process' in e ? (basename(e.process?.parentPath) ?? e.process?.ancestors?.[0]) : undefined,
   'process.commandLine': (e) => ('process' in e ? e.process?.args?.join(' ') : undefined),
+  /**
+   * The download a process comes from: the nearest downloaded ancestor, or the
+   * process itself when it carries the quarantine flag. Chain rules key on it.
+   */
+  'process.downloadRoot': (e) => {
+    const p = 'process' in e ? e.process : undefined;
+    return p?.downloadedAncestor?.path ?? (p?.quarantine ? p.path : undefined);
+  },
+  /** The signature of that download (see process.downloadRoot). */
+  'process.downloadRootSigning': (e) => {
+    const p = 'process' in e ? e.process : undefined;
+    if (p?.downloadedAncestor) return p.downloadedAncestor.signing;
+    return p?.quarantine ? p.signing : undefined;
+  },
   /** Last component of the event's `path` (file, persistence item, Santa-protected file). */
   pathName: (e) => basename(read(e, 'path')),
   /** Last component of a persistence item's program. */
@@ -68,8 +82,13 @@ const PROCESS_FIELDS = [
   'quarantine',
   'quarantine.originUrl',
   'quarantine.agent',
-  // Filled by Vigil's process tracker, not by sensors.
+  'downloadedAncestor',
+  'downloadedAncestor.path',
+  'downloadedAncestor.originUrl',
+  'downloadedAncestor.signing',
+  // Filled by Vigil: the helper's sensor hub and the app's process tracker.
   'ancestors',
+  // Filled by the app's process tracker only, never in the helper.
   'agent',
   'agent.id',
   'agent.session',
@@ -123,6 +142,7 @@ export const KNOWN_FIELDS = new Set<string>([
   'tool',
   'command',
   'commandBytes',
+  'commandClipped',
   'filePath',
   'url',
   'mcpServer',

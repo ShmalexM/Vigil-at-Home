@@ -133,6 +133,8 @@ export function describeEvent(e: SensorEvent): string {
         gatekeeper_override: 'Gatekeeper was overridden',
       }[e.subtype];
     case 'agent.tool_request':
+      // `#socket` is Vigil's own stand-in, on the alert it raises when its agent socket is taken.
+      if (e.tool === '#socket') return 'Another program took Vigil’s agent socket';
       return `${{ 'claude-code': 'Claude Code' }[e.agent.host]} asked to use ${e.tool}`;
   }
 }

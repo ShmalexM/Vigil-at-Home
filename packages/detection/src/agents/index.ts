@@ -1,5 +1,12 @@
 export { AGENT_CATALOG, VIGIL_CONNECTOR, VIGIL_SELF, type CatalogEntry } from './catalog.js';
-export { AGENT_FIELD_PREFIXES, isAgentField, conditionUsesAgentFields } from './fields.js';
+export {
+  AGENT_FIELD_PREFIXES,
+  AI_EXCLUSION_DENY,
+  isAgentField,
+  conditionUsesAgentFields,
+  conditionUsesFields,
+  exclusionHidesAgent,
+} from './fields.js';
 export {
   compileAgentMatchers,
   argGlobMatch,

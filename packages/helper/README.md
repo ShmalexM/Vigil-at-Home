@@ -1,8 +1,8 @@
 # @vigil/helper
 
 The root daemon that takes action on the Mac. It accepts only the response actions in
-`@vigil/core` (plus four read-only queries), validated strictly, and it never runs a
-shell or a program it was handed.
+`@vigil/core` (plus four read-only queries and the blocking rules it runs itself),
+validated strictly, and it never runs a shell or a program it was handed.
 
 ```
 Vigil app (runs as you) ──NDJSON over /var/run/vigil-helper.sock (0600, yours)──► helper (root)
@@ -41,6 +41,39 @@ again every 5 minutes, and restarts osquery if the config has drifted. A config,
 or job that was there before Vigil is kept as `*.before-vigil`.
 `vigil-helper osquery-remove` (run by the uninstaller) stops Vigil's job and puts those
 back; `vigil-helper osquery-setup` does the setup by hand.
+
+## Blocking rules in the helper
+
+The app hands the helper its block-mode rules with `detection.sync`, and the helper runs
+them on every sensor event before passing the event on. A block no longer waits on two
+trips over the socket and the app's event loop, and it still happens while the app is
+closed, or at boot before anyone logs in (the rules are kept in `helper-rules.json`).
+
+```
+Santa / osquery ─► SensorHub ─► FastPath (same engine as the app) ─► Executor: kill, block…
+                                    │                                   │ journaled, undo works
+                                    └────────── event + what ran ───────┴─► app: alert, popup
+```
+
+- Only rules the helper can run alone are sent (`fastPathRules` in `@vigil/detection`):
+  block mode, no "first seen" baseline, no field only the app fills in
+  (`APP_ONLY_FIELD_PREFIXES`: an agent's tag, `process.agent`, and the fields of an
+  agent's tool request), and no rule on tool requests (`agent.tool_request`), which
+  only the app receives. Those stay in the app, which runs every rule either way.
+  `process.ancestors` is filled in by the SensorHub here, so rules on it can run.
+- The user's exceptions and Vigil's own paths come along, so "this is fine" and the
+  safety floor apply here too. A rule with an exception on an app-only field stays in
+  the app, since the helper couldn't honour it. The app re-sends whenever rules, modes or exceptions change.
+- Indicator lists the rules use are named by digest; the helper asks for the ones it
+  lacks, which arrive in parts (`detection.list.set`) and only apply once complete and
+  matching.
+- The app records what the helper ran as the alert's actions instead of running them a
+  second time. Only containment runs here; releases still need the password.
+- The same rules feed Santa's pre-launch (CEL) rules, so the ones Santa can express stop
+  the program before it runs at all.
+
+Anything running as the user can reach the socket and send fewer rules. That only moves
+those blocks back to the app's engine, as before, so this needs no password.
 
 ## Sensor health
 

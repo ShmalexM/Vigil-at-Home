@@ -44,6 +44,7 @@ processes.
 | Agent pre-flight hook (Claude Code)         | Per tool call it checks       | about 60–150 ms (Node.js start-up); Vigil answers in ≤ 5 ms   |
 |                                             | Between tool calls            | nothing: no process, timer or wakeup                          |
 | Vigil tools for agents (MCP, opt-in)        | Per call                      | one bounded read: 50 rows and 64 KB at most                   |
+|                                             | All calls together            | ≤ 50 ms of main-thread time a second (bursts of 150 ms)       |
 |                                             | Between calls                 | nothing in Vigil; the agent keeps its MCP server process      |
 | Agent process tracker                       | Memory                        | about 2 MB (8,192 processes at most)                          |
 |                                             | Time per event                | ≤ 5 µs on average                                             |
@@ -58,7 +59,7 @@ this page, and nothing here ever slows or pauses it.
 flowchart LR
   subgraph sensors["Sensors (separate processes)"]
     santa["Santa: every launch, block, file access"]
-    osq["osquery: connections every 10 s, startup items, extensions"]
+    osq["osquery: connections every 30 s (2 s for suspicious programs), startup items, extensions"]
   end
   santa -- santa.log --> tail["Log tailing"]
   osq -- results log --> tail
@@ -77,7 +78,11 @@ Everything after the EventLog can wait, batch, or skip a turn.
 
 Following AI agents adds two costs. Each launch updates an in-memory process
 tree (a map of at most 8,192 processes, about 2 MB) before the rules run, and
-events an agent caused keep a few basenames of their ancestry in storage.
+events an agent caused keep a few basenames of their ancestry in storage,
+plus the agent's id in an indexed column (about 30 bytes) so the Activity
+feed can show one agent's events without sorting them all. Other launches
+keep only their parent's name, when the sensor gave no parent path, so a
+rule on it replays as it ran.
 Claude Code's pre-flight hook, when the user sets it up, starts Node.js once
 per tool call it checks, about 60–150 ms that the agent waits and Vigil
 doesn't: the app only answers a line on a local socket. See
@@ -176,7 +181,13 @@ about 22 MB per 1,000 events for 0.5 MB stored and used twice the CPU.
 | Log tailing, `fs.watch` + 2 s poll | 0.05%, 1.5/s          | 0.03%, 1.2/s  |           |
 
 The network connection query is osquery's biggest cost (about 0.4 s of its
-own work every 10 s). Reading the two logs every 200 ms wakes the Mac more
+own work per run). It ran every 10 s at the time of these measurements and
+now runs every 30 s; a program worth a closer look (unsigned, ad hoc or
+downloaded) gets a one-off query of just its own sockets every 2 s for a
+minute after it starts, capped at 300 queries an hour
+(`packages/sensors/src/osquery/burst.ts`). While Santa is reporting launch
+items (macOS 13 and later), osquery's launchd query runs every 5 minutes
+instead of every minute. Reading the two logs every 200 ms wakes the Mac more
 than the rest of Vigil put together; the Sensors change that watches the
 log folder and polls every 2 s only as a fallback (PR #19) fits the budget.
 

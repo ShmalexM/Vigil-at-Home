@@ -24,7 +24,7 @@ describe('computeStatus', () => {
   const ok = [{ id: 'osquery', name: 'osquery', state: 'ok' as const }];
 
   it('is good when nothing needs the user', () => {
-    expect(computeStatus([], ok)).toEqual({ level: 'good', needsYou: 0, reasons: [] });
+    expect(computeStatus([], ok)).toEqual({ level: 'good', needsYou: 0, noticed: 0, reasons: [] });
   });
 
   it('is fair when a contained alert waits on the user', () => {
@@ -34,6 +34,21 @@ describe('computeStatus', () => {
   it('is poor when a serious alert is not contained or a sensor is down', () => {
     expect(computeStatus([alert({ containment: 'none' })], ok).level).toBe('poor');
     expect(computeStatus([], [{ id: 'santa', name: 'Santa', state: 'down' }]).level).toBe('poor');
+  });
+
+  it('stays good when Vigil only noticed something', () => {
+    const noticed = alert({
+      severity: 'medium',
+      fidelity: 'medium',
+      notify: 'badge',
+      containment: 'none',
+    });
+    expect(computeStatus([noticed, noticed], ok)).toEqual({
+      level: 'good',
+      needsYou: 0,
+      noticed: 2,
+      reasons: [],
+    });
   });
 
   it('is fair when a sensor is missing', () => {

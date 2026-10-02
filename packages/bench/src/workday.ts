@@ -13,8 +13,9 @@ import { rng, type Rng } from './rng.js';
  *
  * Most events are routine. A few are legitimate but look like an attack
  * (`lookalike`): a curl | sh installer, `xattr -cr` on an open-source app,
- * a test binary in /tmp. Their daily rates are estimates, stated below, so
- * the false-alert numbers are only as good as those rates.
+ * a test binary in /tmp, an agent deploying with `scp -i`. Their daily rates
+ * are estimates, stated below, so the false-alert numbers are only as good as
+ * those rates.
  */
 export type Profile = 'everyday' | 'developer';
 
@@ -169,31 +170,308 @@ const PROJECT = `${HOME}/code/api`;
 interface AgentCommand {
   command: string;
   programs: Array<[path: string, args: string[], signing: ProcessRef['signing']]>;
-  /** Files the first program opens. */
+  /** Files a program opens: the first one, or `programs[opener]`. */
   opens?: string[];
+  opener?: number;
   lookalike?: string;
+  /** How often it comes up, against the others in its list (1 when unset). */
+  weight?: number;
 }
 
+const GIT = '/usr/bin/git';
+const SSH = '/usr/bin/ssh';
+const NODE = '/opt/homebrew/bin/node';
+const SSH_KEY = `${HOME}/.ssh/id_ed25519`;
+
+/** What a coding agent runs most of the time, weighted by how often (an estimate). */
 const AGENT_COMMANDS: AgentCommand[] = [
-  { command: 'git status', programs: [['/usr/bin/git', ['git', 'status'], 'apple']] },
-  { command: 'git diff --stat', programs: [['/usr/bin/git', ['git', 'diff', '--stat'], 'apple']] },
+  { command: 'git status', programs: [[GIT, ['git', 'status'], 'apple']], weight: 5 },
+  { command: 'git diff --stat', programs: [[GIT, ['git', 'diff', '--stat'], 'apple']], weight: 3 },
+  { command: 'git diff src/', programs: [[GIT, ['git', 'diff', 'src/'], 'apple']], weight: 2 },
+  {
+    command: 'git log --oneline -10',
+    programs: [[GIT, ['git', 'log', '--oneline', '-10'], 'apple']],
+    weight: 2,
+  },
+  {
+    command: 'git add -A && git commit -m "Fix the users route"',
+    programs: [
+      [GIT, ['git', 'add', '-A'], 'apple'],
+      [GIT, ['git', 'commit', '-m', 'Fix the users route'], 'apple'],
+    ],
+    weight: 2,
+  },
   {
     command: 'rg -n "TODO" src',
     programs: [['/opt/homebrew/bin/rg', ['rg', '-n', 'TODO', 'src'], 'adhoc']],
+    weight: 4,
   },
-  { command: 'ls -la', programs: [['/bin/ls', ['ls', '-la'], 'apple']] },
+  { command: 'ls -la', programs: [['/bin/ls', ['ls', '-la'], 'apple']], weight: 2 },
   {
     command: 'npm test',
-    programs: [['/opt/homebrew/bin/node', ['node', '/opt/homebrew/bin/npm', 'test'], 'adhoc']],
+    programs: [[NODE, ['node', '/opt/homebrew/bin/npm', 'test'], 'adhoc']],
+    weight: 5,
+  },
+  {
+    command: 'npm run build',
+    programs: [[NODE, ['node', '/opt/homebrew/bin/npm', 'run', 'build'], 'adhoc']],
+    weight: 2,
+  },
+  {
+    command: 'npx tsc --noEmit',
+    programs: [[NODE, ['node', '/opt/homebrew/bin/npx', 'tsc', '--noEmit'], 'adhoc']],
+    weight: 2,
   },
   { command: 'cat README.md', programs: [['/bin/cat', ['cat', 'README.md'], 'apple']] },
+  {
+    command: 'cat package.json',
+    programs: [['/bin/cat', ['cat', 'package.json'], 'apple']],
+    weight: 2,
+  },
+  {
+    command: "sed -n '1,80p' src/server.ts",
+    programs: [['/usr/bin/sed', ['sed', '-n', '1,80p', 'src/server.ts'], 'apple']],
+    weight: 2,
+  },
+  {
+    command: 'find src -name "*.ts" | head -50',
+    programs: [
+      ['/usr/bin/find', ['find', 'src', '-name', '*.ts'], 'apple'],
+      ['/usr/bin/head', ['head', '-50'], 'apple'],
+    ],
+  },
+];
+
+/**
+ * The share of agent commands that are look-alikes, about one in fourteen (an
+ * estimate). Each shares words with credential theft or tampering but is
+ * ordinary work, so neither pre-flight nor agent watch should say anything.
+ */
+const AGENT_LOOKALIKE_SHARE = 0.07;
+const AGENT_LOOKALIKES: AgentCommand[] = [
   {
     command: 'aws sts get-caller-identity',
     programs: [['/usr/local/bin/aws', ['aws', 'sts', 'get-caller-identity'], 'developer_id']],
     opens: [`${HOME}/.aws/config`, `${HOME}/.aws/credentials`],
     lookalike: 'agent runs the aws CLI, which reads its keys',
+    weight: 2,
+  },
+  // An SSH key handed to the tool that uses it.
+  {
+    command: 'ssh -i ~/.ssh/id_ed25519 -T git@github.com',
+    programs: [[SSH, ['ssh', '-i', SSH_KEY, '-T', 'git@github.com'], 'apple']],
+    opens: [SSH_KEY],
+    lookalike: 'agent tests an SSH key (ssh -i)',
+    weight: 2,
+  },
+  {
+    command: 'scp -i ~/.ssh/id_ed25519 ./dist/app.tgz deploy@staging.example.com:/srv/releases/',
+    programs: [
+      [
+        '/usr/bin/scp',
+        ['scp', '-i', SSH_KEY, './dist/app.tgz', 'deploy@staging.example.com:/srv/releases/'],
+        'apple',
+      ],
+      [
+        SSH,
+        [
+          'ssh',
+          '-i',
+          SSH_KEY,
+          '-l',
+          'deploy',
+          'staging.example.com',
+          'scp',
+          '-t',
+          '/srv/releases/',
+        ],
+        'apple',
+      ],
+    ],
+    opens: [SSH_KEY],
+    opener: 1,
+    lookalike: 'agent deploys with scp -i',
+  },
+  {
+    command:
+      'rsync -av -e "ssh -i ~/.ssh/id_ed25519" ./build/ deploy@staging.example.com:/srv/app/',
+    programs: [
+      [
+        '/usr/bin/rsync',
+        [
+          'rsync',
+          '-av',
+          '-e',
+          'ssh -i ~/.ssh/id_ed25519',
+          './build/',
+          'deploy@staging.example.com:/srv/app/',
+        ],
+        'apple',
+      ],
+      [
+        SSH,
+        ['ssh', '-i', SSH_KEY, '-l', 'deploy', 'staging.example.com', 'rsync', '--server'],
+        'apple',
+      ],
+    ],
+    opens: [SSH_KEY],
+    opener: 1,
+    lookalike: 'agent deploys with rsync -e "ssh -i"',
+  },
+  {
+    // git runs GIT_SSH_COMMAND through sh.
+    command: 'GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519" git push origin main',
+    programs: [
+      [GIT, ['git', 'push', 'origin', 'main'], 'apple'],
+      [
+        '/bin/sh',
+        [
+          '/bin/sh',
+          '-c',
+          'ssh -i ~/.ssh/id_ed25519 "$@"',
+          'ssh -i ~/.ssh/id_ed25519',
+          'git@github.com',
+        ],
+        'apple',
+      ],
+      [SSH, ['ssh', '-i', SSH_KEY, 'git@github.com', "git-receive-pack 'sam/api.git'"], 'apple'],
+    ],
+    opens: [SSH_KEY],
+    opener: 2,
+    lookalike: 'agent pushes with GIT_SSH_COMMAND="ssh -i"',
+  },
+  {
+    command: 'ssh-add --apple-use-keychain ~/.ssh/id_ed25519',
+    programs: [['/usr/bin/ssh-add', ['ssh-add', '--apple-use-keychain', SSH_KEY], 'apple']],
+    opens: [SSH_KEY],
+    lookalike: 'agent adds an SSH key to the agent (ssh-add)',
+  },
+  {
+    command: 'ssh-keygen -y -f ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.pub',
+    programs: [['/usr/bin/ssh-keygen', ['ssh-keygen', '-y', '-f', SSH_KEY], 'apple']],
+    opens: [SSH_KEY],
+    lookalike: 'agent rebuilds a public key (ssh-keygen -y)',
+  },
+  {
+    command: 'chmod 600 ~/.ssh/id_ed25519',
+    programs: [['/bin/chmod', ['chmod', '600', SSH_KEY], 'apple']],
+    lookalike: 'agent fixes an SSH key mode (chmod 600)',
+  },
+  {
+    command: 'kubectl --kubeconfig ~/.kube/config get pods',
+    programs: [
+      [
+        '/opt/homebrew/bin/kubectl',
+        ['kubectl', '--kubeconfig', `${HOME}/.kube/config`, 'get', 'pods'],
+        'adhoc',
+      ],
+    ],
+    opens: [`${HOME}/.kube/config`],
+    lookalike: 'agent runs kubectl --kubeconfig',
+  },
+  // The environment filtered, and a network call that is a separate command.
+  {
+    command: 'env | grep -i proxy; curl -sI https://registry.npmjs.org',
+    programs: [
+      ['/usr/bin/env', ['env'], 'apple'],
+      ['/usr/bin/grep', ['grep', '-i', 'proxy'], 'apple'],
+      ['/usr/bin/curl', ['curl', '-sI', 'https://registry.npmjs.org'], 'apple'],
+    ],
+    lookalike: 'agent checks proxy variables, then the registry',
+  },
+  {
+    command: 'printenv | grep PORT && curl -s localhost:3000/health',
+    programs: [
+      ['/usr/bin/printenv', ['printenv'], 'apple'],
+      ['/usr/bin/grep', ['grep', 'PORT'], 'apple'],
+      ['/usr/bin/curl', ['curl', '-s', 'localhost:3000/health'], 'apple'],
+    ],
+    lookalike: 'agent checks the port, then the health endpoint',
+  },
+  {
+    command: 'tccutil reset Camera com.example.myapp',
+    programs: [['/usr/bin/tccutil', ['tccutil', 'reset', 'Camera', 'com.example.myapp'], 'apple']],
+    lookalike: "agent resets the camera permission of the app it's building",
+    weight: 0.5,
+  },
+  {
+    command: "jq '.mcpServers | keys' .mcp.json > servers.json",
+    programs: [['/opt/homebrew/bin/jq', ['jq', '.mcpServers | keys', '.mcp.json'], 'adhoc']],
+    opens: [`${PROJECT}/.mcp.json`],
+    lookalike: 'agent lists the MCP servers with jq',
+    weight: 0.5,
   },
 ];
+
+/**
+ * Steps that name a credential file for another reason, about once a week
+ * (`agentSecretPath`, an estimate). Pre-flight cannot tell them from a read
+ * and asks; where a program then opens the file (awk, curl), agent watch
+ * reports it too.
+ */
+const AGENT_SECRET_PATHS: AgentCommand[] = [
+  {
+    command: 'docker run -d -v ~/.kube/config:/root/.kube/config:ro bitnami/kubectl get pods',
+    programs: [
+      [
+        '/usr/local/bin/docker',
+        [
+          'docker',
+          'run',
+          '-d',
+          '-v',
+          `${HOME}/.kube/config:/root/.kube/config:ro`,
+          'bitnami/kubectl',
+          'get',
+          'pods',
+        ],
+        'developer_id',
+      ],
+    ],
+    lookalike: 'agent mounts the kubeconfig into a container',
+  },
+  {
+    // `test` is a shell builtin: nothing else starts.
+    command: 'test -d ~/.config/gcloud/ && echo yes',
+    programs: [],
+    lookalike: 'agent checks that gcloud is set up',
+  },
+  {
+    command: "awk -F= '/region/ {print $2}' ~/.aws/config",
+    programs: [
+      ['/usr/bin/awk', ['awk', '-F=', '/region/ {print $2}', `${HOME}/.aws/config`], 'apple'],
+    ],
+    opens: [`${HOME}/.aws/config`],
+    lookalike: 'agent reads the AWS region from its config',
+  },
+  {
+    command: 'curl --netrc-file ~/.netrc -s -d @body.json https://api.example.com/v1/items',
+    programs: [
+      [
+        '/usr/bin/curl',
+        [
+          'curl',
+          '--netrc-file',
+          `${HOME}/.netrc`,
+          '-s',
+          '-d',
+          '@body.json',
+          'https://api.example.com/v1/items',
+        ],
+        'apple',
+      ],
+    ],
+    opens: [`${HOME}/.netrc`],
+    lookalike: 'agent logs in to an API from .netrc (curl --netrc-file)',
+  },
+];
+
+/** One of `xs`, in proportion to its weight. */
+function pickWeighted(r: Rng, xs: readonly AgentCommand[]): AgentCommand {
+  let x = r.next() * xs.reduce((sum, c) => sum + (c.weight ?? 1), 0);
+  for (const c of xs) if ((x -= c.weight ?? 1) < 0) return c;
+  return xs[xs.length - 1]!;
+}
 
 /** The person asked the agent to install a tool the way its site says to. */
 const AGENT_INSTALL: AgentCommand = {
@@ -282,6 +560,7 @@ const RATES: Record<Profile, Record<string, number>> = {
     newExtension: 1 / 30,
     grepDocuments: 0,
     agentInstall: 0,
+    agentSecretPath: 0,
   },
   developer: {
     appleDaemon: 8000,
@@ -293,8 +572,8 @@ const RATES: Record<Profile, Record<string, number>> = {
     connection: 6000,
     browserFiles: 400,
     documents: 20,
-    // Claude Code sessions, each a dozen or so commands and edits.
-    agentSession: 3,
+    // Claude Code sessions of 10-30 commands and edits each: 100-200 tool calls a day.
+    agentSession: 8,
     installOneLiner: 1 / 7,
     xattrClear: 1 / 7,
     tmpBinary: 0.7,
@@ -306,6 +585,7 @@ const RATES: Record<Profile, Record<string, number>> = {
     newExtension: 1 / 30,
     grepDocuments: 1 / 14,
     agentInstall: 1 / 14,
+    agentSecretPath: 1 / 7,
   },
 };
 
@@ -606,12 +886,24 @@ export function workday(profile: Profile, dayStart: number, r: Rng): WorkEvent[]
   let session = 0;
   for (let i = ra.poisson(rate['agentSession'] ?? 0); i > 0; i--) {
     const steps: Array<AgentCommand | string> = [];
-    for (let j = ra.int(6, 18); j > 0; j--)
-      steps.push(ra.next() < 0.3 ? ra.pick(AGENT_EDITS) : ra.pick(AGENT_COMMANDS));
+    for (let j = ra.int(10, 30); j > 0; j--)
+      steps.push(
+        ra.next() < 0.3
+          ? ra.pick(AGENT_EDITS)
+          : pickWeighted(ra, ra.next() < AGENT_LOOKALIKE_SHARE ? AGENT_LOOKALIKES : AGENT_COMMANDS),
+      );
     agentSession(ra, workTime(ra, dayStart), pidBase + 200 * session++, steps, push);
   }
   for (let i = ra.poisson(rate['agentInstall'] ?? 0); i > 0; i--)
     agentSession(ra, workTime(ra, dayStart), pidBase + 200 * session++, [AGENT_INSTALL], push);
+  for (let i = ra.poisson(rate['agentSecretPath'] ?? 0); i > 0; i--)
+    agentSession(
+      ra,
+      workTime(ra, dayStart),
+      pidBase + 200 * session++,
+      [ra.pick(AGENT_SECRET_PATHS)],
+      push,
+    );
 
   out.sort((a, b) => a.event.ts - b.event.ts);
   return out;
@@ -720,7 +1012,7 @@ function agentSession(
           kind: 'file',
           op: 'open',
           path,
-          process: programs[0]!,
+          process: programs[step.opener ?? 0]!,
         },
         l,
       );

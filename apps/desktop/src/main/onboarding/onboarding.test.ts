@@ -124,6 +124,14 @@ describe('setup plan', () => {
       (s) => s.id === 'claude-preflight',
     )!;
     expect(on.result?.ok).toBe(true);
+    // Heard from, but pre-flight is off: not done, and it says why.
+    const off = stepsFor('local', { claudePreflight: { connected: false, off: true } }).find(
+      (s) => s.id === 'claude-preflight',
+    )!;
+    expect(off.result).toEqual({
+      ok: false,
+      detail: expect.stringMatching(/^Pre-flight checks are off/),
+    });
   });
 
   it('quotes the profile path for the shell', () => {

@@ -78,12 +78,26 @@ function ruleJson(d: Draft, taken: ReadonlySet<string>): string {
 
 const MCP_SERVER = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const DOMAIN = /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/;
+/** MAX_REGEX_LENGTH in @vigil/detection (not imported, to keep it out of the renderer). */
+const MAX_REGEX_LENGTH = 256;
+
+/**
+ * A URL whose host is `domain` or one of its subdomains, however the rest is
+ * written: a login (`u@`), a port, a trailing dot, or a query or fragment
+ * straight after the host. The host ends at the first `/`, `?`, `#` or `\`
+ * (which browsers read as `/`), so `example.com@evil.test` and
+ * `evil.test?.example.com` don't count. No nested quantifier, so it stays cheap.
+ */
+export function domainUrlRegex(domain: string): string {
+  const esc = domain.replace(/\./g, '\\.');
+  return String.raw`^https?://([^/?#@]*@)?([^/?#@:]*\.)?` + esc + String.raw`\.?(:\d*)?([/?#\\]|$)`;
+}
 
 export const TOOL_RULE_TEMPLATES: readonly ToolRuleTemplate[] = [
   {
     id: 'force-push',
     title: 'Ask before force-push',
-    description: 'A git push with -f or --force can overwrite work on the remote.',
+    description: 'A git push with -f, --force or a +refspec can overwrite work on the remote.',
     json: (taken) =>
       ruleJson(
         {
@@ -92,10 +106,13 @@ export const TOOL_RULE_TEMPLATES: readonly ToolRuleTemplate[] = [
           description: 'Before a Bash step runs: the command force-pushes to a git remote.',
           severity: 'medium',
           fidelity: 'high',
+          // `git`, any global options (`-C dir`, `-c k=v`, `--no-pager`), `push`, then
+          // in the same command a short-flag cluster with f (-f, -uf), --force… or a
+          // +refspec. Each option reads only one way, so it never backtracks badly.
           condition: {
             field: 'command',
             op: 'regex',
-            value: String.raw`git\s+push\b[^|;&]*(-f\b|--force)`,
+            value: String.raw`\bgit(?:\s+-[Cc]\s+\S+|\s+(?!-[Cc]\s)--?[a-z][\w-]*(?:=\S*)?)*\s+push\b[^|;&\n]*?(?:\s-[a-zA-Z]*f|\s--force|\s\+\S)`,
           },
           reasons: ['The command force-pushes, which can overwrite commits on the remote.'],
         },
@@ -172,7 +189,7 @@ export const TOOL_RULE_TEMPLATES: readonly ToolRuleTemplate[] = [
           .replace(/^[a-z]+:\/\//, '')
           .replace(/^\*\./, '')
           .replace(/[/?#].*$/, '');
-        return DOMAIN.test(v) && v.length <= 200 ? v : undefined;
+        return DOMAIN.test(v) && domainUrlRegex(v).length <= MAX_REGEX_LENGTH ? v : undefined;
       },
     },
     json: (taken, domain = 'example.com') =>
@@ -183,16 +200,7 @@ export const TOOL_RULE_TEMPLATES: readonly ToolRuleTemplate[] = [
           description: `Before a step fetches a page from ${domain} or one of its subdomains.`,
           severity: 'low',
           fidelity: 'high',
-          condition: {
-            field: 'url',
-            op: 'glob',
-            value: [
-              `http*://${domain}`,
-              `http*://${domain}/**`,
-              `http*://*.${domain}`,
-              `http*://*.${domain}/**`,
-            ],
-          },
+          condition: { field: 'url', op: 'regex', nocase: true, value: [domainUrlRegex(domain)] },
           reasons: ['{{tool}} would fetch {{url}}.'],
         },
         taken,

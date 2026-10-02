@@ -5,7 +5,7 @@ import { compileField } from '../rules/fields.js';
 import { sqliteStores, type SqlDatabase } from '../state/sqlite.js';
 import { memoryStores, type Stores } from '../state/stores.js';
 import type { DetectionEvent } from '../types.js';
-import { DAY, ev, exec, proc, T0, testRule } from './fixtures.js';
+import { connect, DAY, ev, exec, fileOpen, proc, T0, testRule } from './fixtures.js';
 
 const evil = proc({
   path: '/Users/alex/Downloads/evil',
@@ -196,6 +196,72 @@ describe('engine.check', () => {
     expect(d).toMatchObject({ ruleMode: 'alert', mode: 'block', execute: [], propose: [] });
     expect(d!.alert?.subject).toEqual({ kind: 'process', label: 'Bash request' });
     expect(d!.reasons).toEqual(['Bash would pipe a download into a shell']);
+  });
+});
+
+describe('engine.check and chain rules', () => {
+  /** Reads a cookie file, then (same program, within 10 minutes) connects out. */
+  const chain = testRule({
+    id: 'r-chain',
+    eventKinds: ['network.connection'],
+    condition: { field: 'process.name', op: 'eq', value: 'evil' },
+    sequence: {
+      steps: [
+        {
+          eventKinds: ['file'],
+          condition: { field: 'path', op: 'glob', value: '**/Cookies' },
+        },
+      ],
+      key: ['process.path'],
+      windowSec: 600,
+    },
+    dedupe: { key: ['process.path'], windowSec: 3600 },
+  });
+  const read = () => fileOpen(evil, '/Users/alex/Library/Chrome/Default/Cookies');
+  const send = () => connect(evil, '203.0.113.9');
+  const progress = (engine: DetectionEngine) =>
+    JSON.stringify([...(engine as unknown as { chains: Map<string, unknown> }).chains]);
+
+  it('never moves a chain on: checking its steps leaves no progress', () => {
+    const engine = new DetectionEngine([chain], memoryStores());
+    const before = progress(engine);
+    for (let i = 0; i < 100; i++) {
+      expect(engine.check(read())).toEqual([]);
+      expect(engine.check(send())).toEqual([]);
+    }
+    expect(progress(engine)).toBe(before);
+    // The checks counted for nothing: the connection alone still doesn't fire.
+    expect(engine.evaluate(send())).toEqual([]);
+  });
+
+  it('matches once the earlier steps are done, as evaluate would, without using them up', () => {
+    const engine = new DetectionEngine([chain], memoryStores());
+    engine.evaluate(read());
+    const done = progress(engine);
+    const e = send();
+    for (let i = 0; i < 100; i++) {
+      const [d] = engine.check(e);
+      expect(d).toMatchObject({ mode: 'alert', deduped: false });
+    }
+    expect(progress(engine)).toBe(done);
+    // Nothing was used up: the real evaluation still alerts, and only then counts.
+    const live = engine.evaluate(e);
+    expect(live.map((d) => [d.match.ruleId, d.deduped, d.alert !== undefined])).toEqual([
+      ['r-chain', false, true],
+    ]);
+    expect(engine.evaluate(send())[0]?.deduped).toBe(true);
+    // An event that is only a step never matches a check.
+    expect(engine.check(read())).toEqual([]);
+  });
+
+  it('sees a chain run out of time without clearing it', () => {
+    const engine = new DetectionEngine([chain], memoryStores());
+    engine.evaluate(read());
+    const done = progress(engine);
+    const late = { ...send(), ts: T0 + DAY };
+    expect(engine.check(late)).toEqual([]);
+    expect(progress(engine)).toBe(done);
+    expect(engine.evaluate(late)).toEqual([]);
   });
 });
 

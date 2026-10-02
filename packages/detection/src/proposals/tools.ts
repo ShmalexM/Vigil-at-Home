@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { DetectionEngine } from '../engine.js';
+import { AI_EXCLUSION_DENY } from '../agents/fields.js';
 import { COMPUTED_FIELDS, KNOWN_FIELDS } from '../rules/fields.js';
 import type { EventHistory } from '../state/stores.js';
 import { DetectionRule, MATCH_OPS } from '../types.js';
@@ -42,7 +43,9 @@ export function ruleLanguageGuide() {
     operators: MATCH_OPS,
     constraints: [
       'Your rule id gets an "ai-" prefix. Every proposed rule starts in shadow mode; only the user makes it louder. Any mode, origin, version or dates you set are ignored.',
-      'Responses that kill, block, quarantine, disable or add a Santa rule need a specific anchor: a hash, team ID, signing ID, host, address or extension ID, or a list.',
+      'Responses that kill, block, quarantine, disable or add a Santa rule need a specific anchor: a hash, team ID, signing ID, host, address or extension ID tested with eq, in or cidr, or looked up in a list on one of those fields. A list lookup on a command line, path or URL does not count.',
+      `Exclusions may not use agent, tool-request or parent fields (${AI_EXCLUSION_DENY.join(', ')}). Exclude a program by hash, or by team ID and signing ID.`,
+      'Rules about watched agents and their tool requests (tagged agent-watch or agent-preflight, checking agent.tool_request, or testing an agent field) are tuned and retired only by the user; do not propose tunings or retirements for them.',
       'A behaviour-only rule may respond with process.suspend only at high or critical severity; otherwise give no response and let it alert.',
       'Responses may only contain a threat: nothing that resumes, unblocks, restores or allows.',
       'Regexes: at most 256 characters, with no backreferences or nested quantifiers.',

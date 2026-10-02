@@ -37,10 +37,12 @@ import {
   type SqliteDetectionStores,
   type TrackerOptions,
 } from '@vigil/detection';
+import { fastPathRules, isAppOnlyField } from '@vigil/detection/fastpath';
 import { userOrigin } from '@vigil/detection/user';
 import type { EventOutcome } from '../shared/ipc.js';
 import type { AlertService } from './alerts.js';
 import type { Store } from './db/store.js';
+import type { HelperRuleSet } from './helper.js';
 
 const KEY_REVIEW = 'detection.review';
 
@@ -91,6 +93,9 @@ export class Detector {
   private reviewer: RuleReviewer | undefined;
   private checkedByKind = new Map<string, number>();
   private readonly now: () => number;
+  private readonly selfPaths: string[];
+  /** Called after rules, modes or exceptions change, so the helper's copy can follow. */
+  onRulesChanged: (() => void) | undefined;
 
   constructor(
     private readonly db: DatabaseSync,
@@ -100,6 +105,7 @@ export class Detector {
     opts: DetectorOptions,
   ) {
     this.now = opts.now ?? Date.now;
+    this.selfPaths = opts.selfPaths;
     // Detection keeps its state in det_* tables in the same database. Replay
     // history reads the app's own event table rather than keeping a second copy.
     this.stores = { ...sqliteStores(db), history: appHistory(store) };
@@ -268,9 +274,14 @@ export class Detector {
     }
   }
 
+  /** Take before reading `ps`, and pass to seedProcesses: launches seen meanwhile are newer. */
+  processMark(): number {
+    return this.tracker.mark();
+  }
+
   /** Processes `ps` listed (those running before Vigil, or missed): the tracker learns them. */
-  seedProcesses(rows: PsRow[]): void {
-    this.tracker.seed(rows);
+  seedProcesses(rows: PsRow[], since?: number): void {
+    this.tracker.seed(rows, since);
   }
 
   private outcome(kind: SensorEvent['kind'], detections: Detection[]): EventOutcome {
@@ -330,6 +341,32 @@ export class Detector {
     }));
   }
 
+  /**
+   * The blocking rules the helper can run on its own (fastPathRules), with
+   * the user's exceptions, Vigil's own paths and the lists the rules look up.
+   * The helper runs them on the sensor stream and hands Santa the ones it can
+   * stop before launch; this engine keeps running all of them either way.
+   */
+  helperRules(): HelperRuleSet {
+    const exceptions = this.stores.exceptions.all();
+    // The helper can't honour an exception on a field only the app fills in
+    // (an agent's tag), so it would block what the app lets through.
+    const needApp = new Set(
+      exceptions
+        .filter((x) => Object.keys(x.match).some((f) => isAppOnlyField(f)))
+        .map((x) => x.ruleId),
+    );
+    const { rules, lists } = fastPathRules(
+      this.engine.listRules().filter((r) => !needApp.has(r.id)),
+    );
+    return {
+      rules,
+      exceptions,
+      selfPaths: this.selfPaths,
+      lists: Object.fromEntries(lists.map((l) => [l, this.stores.lists.entries(l)])),
+    };
+  }
+
   hasRule(id: string): boolean {
     return this.engine.getRule(id) !== undefined;
   }
@@ -352,6 +389,7 @@ export class Detector {
       for (const k of r.eventKinds) counts.set(k, (counts.get(k) ?? 0) + 1);
     }
     this.checkedByKind = counts;
+    this.onRulesChanged?.();
   }
 }
 

@@ -78,6 +78,50 @@ function basename(p: string): string {
   return p.slice(p.lastIndexOf('/') + 1);
 }
 
+/** Sessions whose counts are kept between reads of the Agents page, at most. */
+const MAX_SESSION_COUNTS = 4096;
+
+/**
+ * The feed's query for one page. Every filter walks an index on ts: the agent
+ * filter goes through events_agent_ts, so a page stops at its limit instead
+ * of sorting every event the agent's sessions ever had.
+ */
+export function eventViewsQuery(
+  q: EventQuery,
+  now: number,
+): { sql: string; args: SQLInputValue[] } {
+  const where: string[] = [];
+  const args: SQLInputValue[] = [];
+  if (q.group) {
+    const kinds = EVENT_GROUPS[q.group];
+    where.push(`kind IN (${kinds.map(() => '?').join(',')})`);
+    args.push(...kinds);
+  }
+  if (q.matchedOnly) where.push('matched = 1');
+  if (q.agentSession) {
+    where.push('agent_session = ?');
+    args.push(q.agentSession);
+  }
+  if (q.agent) {
+    where.push('agent_id = ?');
+    args.push(q.agent);
+  }
+  if (q.before !== undefined) {
+    where.push('ts < ?');
+    args.push(q.before);
+  }
+  if (q.text) {
+    where.push('ts >= ?');
+    args.push((q.before ?? now) - TEXT_SEARCH_WINDOW_MS);
+    where.push(`body LIKE ? ESCAPE '\\'`);
+    args.push(`%${q.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+  }
+  const sql = `SELECT body, outcome, label FROM events ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+      ORDER BY ts DESC, id DESC LIMIT ?`;
+  args.push(q.limit ?? 200);
+  return { sql, args };
+}
+
 const Tokens = z.number().int().nonnegative();
 const UsageRunRow = z.object({
   id: z.string().min(1),
@@ -109,6 +153,12 @@ function eventView(r: EventRow): EventView {
  */
 export class Store {
   private readonly statements = new Map<string, StatementSync>();
+  /** Per-session counts (see sessionViews), dropped when the session's events change. */
+  private readonly sessionCounts = new Map<
+    string,
+    { events: number; matches: number; lastAt: number; asks: number; denies: number }
+  >();
+  private txDepth = 0;
 
   constructor(private readonly db: DatabaseSync) {
     db.exec(`
@@ -143,15 +193,34 @@ export class Store {
     }
   }
 
+  /**
+   * Runs `fn` in a transaction. A call inside another tx becomes a savepoint,
+   * so nesting is safe. A transaction left open by code outside tx (a bare
+   * BEGIN) is committed and logged first, so one leak can't make every later
+   * write fail with "cannot start a transaction within a transaction" and
+   * lose alerts. `fn` must be synchronous.
+   */
   tx<T>(fn: () => T): T {
-    this.db.exec('BEGIN');
+    if (this.txDepth === 0 && this.db.isTransaction) {
+      console.warn('[store] a transaction was left open outside Store.tx; committing it');
+      this.db.exec('COMMIT');
+    }
+    const name = `tx${this.txDepth}`;
+    this.db.exec(`SAVEPOINT ${name}`);
+    this.txDepth++;
     try {
       const out = fn();
-      this.db.exec('COMMIT');
+      if (out instanceof Promise) throw new Error('Store.tx needs a synchronous function');
+      this.db.exec(`RELEASE ${name}`);
       return out;
     } catch (err) {
-      this.db.exec('ROLLBACK');
+      if (this.db.isTransaction) {
+        this.db.exec(`ROLLBACK TO ${name}`);
+        this.db.exec(`RELEASE ${name}`);
+      }
       throw err;
+    } finally {
+      this.txDepth--;
     }
   }
 
@@ -197,21 +266,21 @@ export class Store {
    * the sensor's raw record); then only its outcome is filled in.
    */
   private writeEvent(e: SensorEvent, outcome?: EventOutcome): void {
-    // The agent session the event belongs to: the tracker's tag on a process,
-    // or the hook's agent on a tool request (whose process is only the would-be shell).
-    const session =
-      e.kind === 'agent.tool_request'
-        ? e.agent.session
-        : 'process' in e
-          ? e.process?.agent?.session
-          : undefined;
+    // The agent session and agent the event belongs to: the tracker's tag on a
+    // process, or the hook's agent on a tool request (whose process is only the
+    // would-be shell). The two are always set together.
+    const tag =
+      e.kind === 'agent.tool_request' ? e.agent : 'process' in e ? e.process?.agent : undefined;
+    const session = tag?.session;
+    if (session) this.sessionCounts.delete(session);
     this.stmt(
-      `INSERT INTO events (id, ts, kind, source, body, outcome, matched, agent_session)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO events (id, ts, kind, source, body, outcome, matched, agent_session, agent_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
          outcome = COALESCE(excluded.outcome, outcome),
          matched = CASE WHEN excluded.outcome IS NULL THEN matched ELSE excluded.matched END,
-         agent_session = COALESCE(agent_session, excluded.agent_session)`,
+         agent_session = COALESCE(agent_session, excluded.agent_session),
+         agent_id = COALESCE(agent_id, excluded.agent_id)`,
     ).run(
       e.id,
       e.ts,
@@ -221,45 +290,17 @@ export class Store {
       outcome ? JSON.stringify(outcome) : null,
       outcome && outcome.matches.length > 0 ? 1 : 0,
       session ?? null,
+      (session && tag?.id) || null,
     );
   }
 
-  /** Newest first, for the feed. */
   /**
    * The feed's page of events, newest first. Every filter walks an index on
    * ts, and text search only looks back a day from where the page starts, so
    * no query scans the whole table on the thread that also runs detection.
    */
   listEventViews(q: EventQuery = {}, now = Date.now()): EventView[] {
-    const where: string[] = [];
-    const args: SQLInputValue[] = [];
-    if (q.group) {
-      const kinds = EVENT_GROUPS[q.group];
-      where.push(`kind IN (${kinds.map(() => '?').join(',')})`);
-      args.push(...kinds);
-    }
-    if (q.matchedOnly) where.push('matched = 1');
-    if (q.agentSession) {
-      where.push('agent_session = ?');
-      args.push(q.agentSession);
-    }
-    if (q.agent) {
-      where.push('agent_session IN (SELECT id FROM agent_sessions WHERE agent_id = ?)');
-      args.push(q.agent);
-    }
-    if (q.before !== undefined) {
-      where.push('ts < ?');
-      args.push(q.before);
-    }
-    if (q.text) {
-      where.push('ts >= ?');
-      args.push((q.before ?? now) - TEXT_SEARCH_WINDOW_MS);
-      where.push(`body LIKE ? ESCAPE '\\'`);
-      args.push(`%${q.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
-    }
-    const sql = `SELECT body, outcome, label FROM events ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-      ORDER BY ts DESC, id DESC LIMIT ?`;
-    args.push(q.limit ?? 200);
+    const { sql, args } = eventViewsQuery(q, now);
     const rows = this.db.prepare(sql).all(...args) as {
       body: string;
       outcome: string | null;
@@ -360,6 +401,20 @@ export class Store {
     };
   }
 
+  /** Events stored since `since`. */
+  countEventsSince(since: number): number {
+    const row = this.stmt('SELECT COUNT(*) AS n FROM events WHERE ts >= ?').get(since) as {
+      n: number;
+    };
+    return row.n;
+  }
+
+  /** When the newest event of any source arrived, or null if none yet. */
+  newestEventAt(): number | null {
+    const row = this.stmt('SELECT MAX(ts) AS ts FROM events').get() as { ts: number | null };
+    return row.ts;
+  }
+
   /** When this sensor last reported anything, or null if never. */
   lastEventAt(source: string): number | null {
     const row = this.stmt('SELECT MAX(ts) AS ts FROM events WHERE source = ?').get(source) as {
@@ -435,6 +490,7 @@ export class Store {
 
   /** Delete events older than `before` that no alert references. Returns rows removed. */
   pruneEvents(before: number): number {
+    this.sessionCounts.clear();
     const res = this.stmt(
       `DELETE FROM events WHERE ts < ? AND id NOT IN (
          SELECT j.value FROM alerts, json_each(alerts.body, '$.eventIds') AS j)`,
@@ -564,6 +620,17 @@ export class Store {
         );
   }
 
+  /** Containment a rule carried out since `since`, counting ones the user later released. */
+  countRuleBlocksSince(since: number): number {
+    const row = this.stmt(
+      `SELECT COUNT(*) AS n FROM actions
+         WHERE requested_at >= ? AND status IN ('done', 'undone')
+           AND json_extract(body, '$.actor') = 'rule'
+           AND json_extract(body, '$.undoes') IS NULL`,
+    ).get(since) as { n: number };
+    return row.n;
+  }
+
   // ---------------------------------------------------------------- proposals
 
   saveProposal(proposal: ActionProposal): ActionProposal {
@@ -656,50 +723,76 @@ export class Store {
     return this.sessionViews('id = ?', id)[0];
   }
 
+  /** Whether any session of this agent is stored. */
+  hasAgentSessions(agentId: string): boolean {
+    return (
+      this.stmt('SELECT 1 FROM agent_sessions WHERE agent_id = ? LIMIT 1').get(agentId) !==
+      undefined
+    );
+  }
+
   /**
-   * Sessions with their counts. The counts walk each session's own events
-   * through the agent_session index, once for the whole page.
+   * Sessions with their counts. A session's counts walk its own events
+   * through the agent_session index, then are kept until one of its events
+   * is written or events are pruned: a page reloaded while an agent works
+   * counts again only the sessions that changed.
    */
   private sessionViews(where: string, ...args: SQLInputValue[]): AgentSessionView[] {
     const rows = this.stmt(
-      `WITH page AS (
-         SELECT id, agent_id, root_pid, started_at, body FROM agent_sessions WHERE ${where}
-       ), agg AS (
-         SELECT e.agent_session AS sid, COUNT(*) AS events, SUM(e.matched) AS matches,
-           MAX(e.ts) AS lastAt,
-           SUM(CASE WHEN e.kind = 'agent.tool_request' AND ${ASKED('e')} THEN 1 ELSE 0 END) AS asks,
-           SUM(CASE WHEN e.kind = 'agent.tool_request' AND ${DENIED('e')} THEN 1 ELSE 0 END) AS denies
-         FROM events e WHERE e.agent_session IN (SELECT id FROM page) GROUP BY e.agent_session
-       )
-       SELECT page.id, page.agent_id, page.root_pid, page.started_at, page.body,
-         agg.events, agg.matches, agg.lastAt, agg.asks, agg.denies
-       FROM page LEFT JOIN agg ON agg.sid = page.id
-       ORDER BY page.started_at DESC, page.id DESC`,
+      `SELECT id, agent_id, root_pid, started_at, body FROM agent_sessions WHERE ${where}`,
     ).all(...args) as {
       id: string;
       agent_id: string;
       root_pid: number;
       started_at: number;
       body: string;
-      events: number | null;
-      matches: number | null;
-      lastAt: number | null;
-      asks: number | null;
-      denies: number | null;
     }[];
+    const missing = rows.map((r) => r.id).filter((id) => !this.sessionCounts.has(id));
+    if (missing.length > 0) {
+      const counted = this.stmt(
+        `SELECT e.agent_session AS sid, COUNT(*) AS events, SUM(e.matched) AS matches,
+           MAX(e.ts) AS lastAt,
+           SUM(CASE WHEN e.kind = 'agent.tool_request' AND ${ASKED('e')} THEN 1 ELSE 0 END) AS asks,
+           SUM(CASE WHEN e.kind = 'agent.tool_request' AND ${DENIED('e')} THEN 1 ELSE 0 END) AS denies
+         FROM events e WHERE e.agent_session IN (SELECT value FROM json_each(?))
+         GROUP BY e.agent_session`,
+      ).all(JSON.stringify(missing)) as {
+        sid: string;
+        events: number;
+        matches: number | null;
+        lastAt: number | null;
+        asks: number | null;
+        denies: number | null;
+      }[];
+      const found = new Map(counted.map((c) => [c.sid, c]));
+      for (const id of missing) {
+        const c = found.get(id);
+        this.sessionCounts.set(id, {
+          events: Number(c?.events ?? 0),
+          matches: Number(c?.matches ?? 0),
+          lastAt: Number(c?.lastAt ?? 0),
+          asks: Number(c?.asks ?? 0),
+          denies: Number(c?.denies ?? 0),
+        });
+        if (this.sessionCounts.size > MAX_SESSION_COUNTS) {
+          this.sessionCounts.delete(this.sessionCounts.keys().next().value!);
+        }
+      }
+    }
     return rows.map((r) => {
       const body = AgentSessionBody.parse(JSON.parse(r.body));
+      const c = this.sessionCounts.get(r.id)!;
       const view: AgentSessionView = {
         id: r.id,
         agentId: r.agent_id,
         rootPid: Number(r.root_pid),
         rootPath: body.rootPath,
         startedAt: Number(r.started_at),
-        lastAt: Math.max(Number(r.started_at), Number(r.lastAt ?? 0)),
-        events: Number(r.events ?? 0),
-        matches: Number(r.matches ?? 0),
-        asks: Number(r.asks ?? 0),
-        denies: Number(r.denies ?? 0),
+        lastAt: Math.max(Number(r.started_at), c.lastAt),
+        events: c.events,
+        matches: c.matches,
+        asks: c.asks,
+        denies: c.denies,
         seeded: body.seeded,
       };
       if (body.parentSession) view.parentSession = body.parentSession;

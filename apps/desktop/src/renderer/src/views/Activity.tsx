@@ -20,9 +20,12 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { EventGroup, EventLabel, EventOutcome, EventView } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
 import { useToast } from '../components/Toasts';
+import { AgentField, toolRequestFields } from '../components/ToolRequestFields';
 import { Button, Card, Chip, Segmented, StatusMark } from '../components/ui';
+import { realProcess } from '../evidence';
 import { actorLabel, clock, describeAction, describeEvent, timeAgo, timeOfDay } from '../format';
-import { agentRoute, parseActivityParam, VIGIL_CONNECTOR, VIGIL_SELF } from './agents-format';
+import { matchText } from '../rule-modes';
+import { parseActivityParam, VIGIL_CONNECTOR, VIGIL_SELF } from './agents-format';
 import { PageHead } from './AppShell';
 
 const UNDOABLE = new Set([
@@ -42,9 +45,9 @@ export interface AgentLinks {
   go?: ((route: string) => void) | undefined;
 }
 
-/** Agent names for opened events and the filter chip. */
+/** Agent names for opened events and the filter chip. Names only, so no stats are read. */
 export function useAgentLinks(go?: (route: string) => void): AgentLinks {
-  const [agents] = useLive(() => vigil.listAgents());
+  const [agents] = useLive(() => vigil.listAgentNames());
   return {
     nameOf: (id) =>
       id === VIGIL_SELF
@@ -413,7 +416,7 @@ function OutcomeChip({
   const tone = top.mode === 'block' ? 'poor' : top.mode === 'alert' ? 'fair' : undefined;
   const extra = outcome.matches.length > 1 ? ` +${outcome.matches.length - 1}` : '';
   return (
-    <Chip tone={tone} title={outcome.matches.map((m) => `${m.ruleName} (${m.mode})`).join('\n')}>
+    <Chip tone={tone} title={matchText(outcome, toolRequest, '\n')}>
       {(toolRequest ? TOOL_OUTCOME_PREFIX : OUTCOME_PREFIX)[top.mode]}
       {top.ruleName}
       {extra}
@@ -446,38 +449,6 @@ function eventDetail(e: SensorEvent): string | undefined {
 
 const base = (p: string) => p.split('/').filter(Boolean).pop() ?? p;
 
-/** Which agent an event ran under, with a link to its session when there is a page for it. */
-function AgentField({
-  id,
-  session,
-  links,
-}: {
-  id: string;
-  session?: string | undefined;
-  links: AgentLinks;
-}) {
-  const own = id === VIGIL_SELF;
-  // Pack connectors have no page on Agents; the Pack page lists them.
-  const linked = !own && id !== VIGIL_CONNECTOR;
-  return (
-    <span className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-      <Chip tone={own ? 'ai' : 'accent'}>
-        <Bot size={12} />
-        {links.nameOf(id)}
-      </Chip>
-      {session && linked && links.go && (
-        <button
-          type="button"
-          className="more-link"
-          onClick={() => links.go?.(agentRoute(id, session))}
-        >
-          Open this session
-        </button>
-      )}
-    </span>
-  );
-}
-
 /** How the hook was answered, from the rules that matched. */
 function answerOf(outcome: EventOutcome | null): string {
   const modes = new Set(outcome?.matches.map((m) => m.mode));
@@ -506,7 +477,7 @@ function EventFields({
     ['Seen by', e.source === 'osquery' ? 'osquery' : e.source === 'santa' ? 'Santa' : 'Vigil'],
   ];
   // A tool request's process is the shell it would start, not a real one.
-  const p = 'process' in e && e.kind !== 'agent.tool_request' ? e.process : undefined;
+  const p = realProcess(e);
   if (p) {
     fields.push(['Program', <code key="p">{p.path}</code>]);
     fields.push(['Process id', p.pid]);
@@ -551,35 +522,16 @@ function EventFields({
       fields.push(['Runs', <code key="r">{e.programArgs.join(' ')}</code>]);
   }
   if (e.kind === 'santa.decision') fields.push(['Santa said', `${e.decision}: ${e.reason}`]);
-  if (e.kind === 'agent.tool_request') {
-    fields.push(['Tool', <code key="t">{e.tool}</code>]);
-    if (e.mcpServer) fields.push(['MCP server', <code key="m">{e.mcpServer}</code>]);
-    if (e.command) fields.push(['Command', <code key="c">{e.command}</code>]);
-    if (e.commandBytes !== undefined && e.commandBytes > 4096)
-      fields.push(['Command size', `${e.commandBytes} bytes; Vigil checked the first 4 KB`]);
-    if (e.filePath) fields.push(['File', <code key="f">{e.filePath}</code>]);
-    if (e.url) fields.push(['Address', <code key="u">{e.url}</code>]);
-    if (e.cwd) fields.push(['In folder', <code key="w">{e.cwd}</code>]);
-    if (e.contentBytes !== undefined)
-      fields.push([
-        'Content',
-        `${e.contentBytes} bytes${e.contentSha256 ? `, SHA-256 ${e.contentSha256.slice(0, 16)}…` : ''}. The text itself never reaches Vigil.`,
-      ]);
-    fields.push([
-      'Agent',
-      e.agent.id ? (
-        <AgentField key="ag" id={e.agent.id} session={e.agent.session} links={links} />
-      ) : (
-        'Claude Code (Vigil didn’t see which session started it)'
-      ),
-    ]);
+  const tool = e.kind === 'agent.tool_request';
+  if (tool) {
+    fields.push(...toolRequestFields(e, links));
     fields.push(['Answer', answerOf(outcome)]);
   }
   fields.push([
     'Rules',
     outcome
       ? outcome.matches.length
-        ? outcome.matches.map((m) => `${m.ruleName} (${m.mode})`).join(', ')
+        ? matchText(outcome, tool, ', ')
         : `Checked by ${outcome.checked}, none matched`
       : 'Not checked by any rule',
   ]);

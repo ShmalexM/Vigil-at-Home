@@ -7,10 +7,39 @@ import { TEXT_SEARCH_WINDOW_MS, type EventOutcome } from '../shared/ipc.js';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { migrations } from './db/schema.js';
-import { Store } from './db/store.js';
+import { Store, eventViewsQuery } from './db/store.js';
 import { makeExec, makeRule, memoryStore } from './testing.js';
 
 describe('Store', () => {
+  it('nests transactions as savepoints and rolls back only the inner one', () => {
+    const store = memoryStore();
+    const a = makeExec();
+    const b = makeExec();
+    store.tx(() => {
+      store.insertEvent(a);
+      expect(() =>
+        store.tx(() => {
+          store.insertEvent(b);
+          throw new Error('inner');
+        }),
+      ).toThrow('inner');
+      store.insertEvents([{ event: b }]);
+    });
+    expect(store.getEvents([a.id, b.id]).map((e) => e.id)).toEqual([a.id, b.id]);
+  });
+
+  it('recovers from a transaction left open outside tx', () => {
+    const db = new DatabaseSync(':memory:');
+    const store = new Store(db);
+    const a = makeExec();
+    db.exec('BEGIN');
+    store.insertEvent(a);
+    const b = makeExec();
+    expect(() => store.insertEvents([{ event: b }])).not.toThrow();
+    expect(db.isTransaction).toBe(false);
+    expect(store.getEvents([a.id, b.id])).toHaveLength(2);
+  });
+
   it('round-trips events, rules and settings', () => {
     const s = memoryStore();
     const e = makeExec();
@@ -213,18 +242,19 @@ describe('Store', () => {
 
 const S1 = 'aaaaaaaaaaaaaaaa';
 const S2 = 'bbbbbbbbbbbbbbbb';
-const tag = (session: string, depth = 1) => ({ id: 'claude-code', session, depth });
+const tag = (session: string, depth = 1, id = 'claude-code') => ({ id, session, depth });
 
 function tagged(
   session: string,
   ts: number,
   pid: number,
   path = '/usr/bin/git',
+  agent = 'claude-code',
 ): EventOfKind<'process.exec'> {
   return {
     ...makeExec(path, pid),
     ts,
-    process: { pid, ppid: 100, path, signing: 'apple', agent: tag(session) },
+    process: { pid, ppid: 100, path, signing: 'apple', agent: tag(session, 1, agent) },
   };
 }
 
@@ -287,12 +317,16 @@ describe('Store: agents', () => {
     const columns = (db.prepare('PRAGMA table_info(events)').all() as { name: string }[]).map(
       (c) => c.name,
     );
-    expect(columns).toContain('agent_session');
+    expect(columns).toEqual(expect.arrayContaining(['agent_session', 'agent_id']));
     const indexes = (
       db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index'`).all() as { name: string }[]
     ).map((r) => r.name);
     expect(indexes).toEqual(
-      expect.arrayContaining(['agent_sessions_agent_started', 'events_agent_session_ts']),
+      expect.arrayContaining([
+        'agent_sessions_agent_started',
+        'events_agent_session_ts',
+        'events_agent_ts',
+      ]),
     );
     expect(s.getEvent(old.id)).toEqual(old);
     expect(s.listEventViews({ agentSession: S1 })).toEqual([]);
@@ -349,7 +383,7 @@ describe('Store: agents', () => {
     const s = memoryStore();
     s.insertAgentSessions([sessionRow(S1, 1000), sessionRow(S2, 1000, 'codex')]);
     s.insertEvent(tagged(S1, 1100, 7));
-    s.insertEvent(tagged(S2, 1200, 8));
+    s.insertEvent(tagged(S2, 1200, 8, '/usr/bin/git', 'codex'));
     s.insertEvent(makeExec('/usr/bin/plain'));
     const req = toolRequest('t1', 1300, S1, 'block');
     s.insertEvent(req.event, req.outcome);
@@ -361,6 +395,70 @@ describe('Store: agents', () => {
     expect(s.listEventViews({ agentSession: S2 })).toHaveLength(1);
     expect(s.listEventViews({ group: 'agents' }).map((v) => v.event.id)).toEqual(['t1']);
     expect(s.eventStats(0).byGroup).toMatchObject({ agents: 1, programs: 3 });
+  });
+
+  it('pages the feed by agent through an index, without sorting all its events', () => {
+    const s = memoryStore();
+    const db = (s as unknown as { db: DatabaseSync }).db;
+    const plan = (q: Parameters<typeof eventViewsQuery>[0]) => {
+      const { sql, args } = eventViewsQuery(q, 10_000);
+      return (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args) as { detail: string }[]).map(
+        (r) => r.detail,
+      );
+    };
+    for (const q of [
+      { agent: 'claude-code' },
+      { agent: 'claude-code', group: 'programs' as const },
+      { agent: 'claude-code', before: 5000 },
+    ]) {
+      const steps = plan(q);
+      expect(steps.join('\n'), JSON.stringify(q)).toContain('events_agent_ts');
+      // Ordering rows of equal ts by id is fine; sorting every row is not.
+      expect(steps, JSON.stringify(q)).not.toContain('USE TEMP B-TREE FOR ORDER BY');
+    }
+    // The agent comes from the event's own tag, and a tool request's agent.
+    s.insertEvents([
+      { event: tagged(S1, 1100, 7), outcome: quiet },
+      toolRequest('t1', 1200, S1, 'block'),
+      toolRequest('t2', 1300, undefined, 'alert'),
+    ]);
+    expect(s.listEventViews({ agent: 'claude-code' }).map((v) => v.event.ts)).toEqual([1200, 1100]);
+  });
+
+  it('keeps session counts between reads and counts again only what changed', () => {
+    const s = memoryStore();
+    s.insertAgentSessions([sessionRow(S1, 1000), sessionRow(S2, 2000)]);
+    s.insertEvents([
+      { event: tagged(S1, 1100, 7), outcome: hit },
+      { event: tagged(S2, 2100, 8), outcome: quiet },
+    ]);
+    expect(s.hasAgentSessions('claude-code')).toBe(true);
+    expect(s.hasAgentSessions('codex')).toBe(false);
+    const counts = () =>
+      s.listAgentSessions('claude-code').map((v) => [v.id, v.events, v.matches, v.lastAt]);
+    expect(counts()).toEqual([
+      [S2, 1, 0, 2100],
+      [S1, 1, 1, 1100],
+    ]);
+    // A new event in S1, its outcome filled in later, then a request in S2.
+    const late = tagged(S1, 1200, 9);
+    s.insertEvent(late);
+    expect(counts()).toEqual([
+      [S2, 1, 0, 2100],
+      [S1, 2, 1, 1200],
+    ]);
+    s.insertEvents([{ event: late, outcome: hit }, toolRequest('t1', 2200, S2, 'block')]);
+    expect(counts()).toEqual([
+      [S2, 2, 1, 2200],
+      [S1, 2, 2, 1200],
+    ]);
+    expect(s.getAgentSession(S2)).toMatchObject({ denies: 1, events: 2 });
+    // Pruning forgets them all.
+    s.pruneEvents(1150);
+    expect(counts()).toEqual([
+      [S2, 2, 1, 2200],
+      [S1, 1, 1, 1200],
+    ]);
   });
 
   it('keeps the session an alert stored first when the batch writes the event again', () => {

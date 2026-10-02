@@ -6,20 +6,29 @@ import {
   agentPreflightRules,
   builtinRules,
   PREFLIGHT_PROBING_RULE_ID,
+  PREFLIGHT_SOCKET_RULE_ID,
+  PREFLIGHT_SOCKET_TOOL,
 } from '../packs/agent-preflight.js';
 import {
   AGENT_CONFIG_RE,
   agentWatchRules,
+  CONFIG_INPLACE_RE,
+  CONFIG_WRITE_RE,
+  COPY_OUT_RES,
   ENV_DUMP_RE,
   KEYCHAIN_SECRET_RE,
-  NET_SINK_RE,
+  MCP_ADD_RE,
   PASTE_HOST_RE,
-  PERSIST_RE,
-  SECRET_PATH_RE,
+  PERSIST_RES,
+  PIPE_SINK_RE,
+  PREFLIGHT_PIPE_RE,
+  PREFLIGHT_PROCSUB_RE,
+  SCRIPT_WRITE_RE,
+  SECRET_PATH_RES,
+  SECRET_READ_RE,
   TAMPER_RE_CASED,
   TAMPER_RES_NOCASE,
-  UPLOAD_RE,
-  WRITE_VERB_RE,
+  UPLOAD_RES,
 } from '../packs/agent-watch.js';
 import { macosCoreRules } from '../packs/macos-core.js';
 import { regexProblem } from '../rules/compile.js';
@@ -111,6 +120,8 @@ const bash = (command: string, commandBytes = Buffer.byteLength(command)) =>
   request('Bash', { command, commandBytes });
 const write = (filePath: string, tool = 'Write') => request(tool, { filePath });
 const read = (filePath: string) => request('Read', { filePath });
+/** Grep's `path`, which the hook sends as filePath: a file or a folder. */
+const grep = (filePath: string) => request('Grep', { filePath });
 
 /** What a malicious sample should produce: the effective mode and the actions it runs or offers. */
 type Want = { mode: 'block' | 'alert' | 'shadow'; actions?: string[] };
@@ -175,10 +186,19 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
       [sh('cat ~/.aws/credentials'), ALERT],
       // Started directly, not through a shell.
       [claude.exec('/usr/bin/base64', ['base64', '-i', `${home}/.ssh/id_rsa`]), ALERT],
+      [sh('base64 < ~/.aws/credentials > /tmp/a.txt'), ALERT],
+      [sh('echo "t=$(sudo cat ~/.netrc)"'), ALERT],
     ],
     good: [
       sh('cat ~/.ssh/id_ed25519.pub | pbcopy'),
       sh('cat README.md'),
+      // The path is named, but nothing on the command reads it out.
+      sh('docker run -d -v ~/.kube/config:/root/.kube/config:ro bitnami/kubectl get pods'),
+      sh('test -d ~/.config/gcloud/ && echo yes'),
+      sh('scp ops@k3s.example.com:/etc/rancher/k3s/k3s.yaml ~/.kube/config'),
+      sh(
+        'cat README.md; docker run -v ~/.aws/credentials:/root/.aws/credentials:ro amazon/aws-cli',
+      ),
       // The shell holding this command already alerted; its cat does not again.
       claude.exec(
         '/bin/cat',
@@ -361,6 +381,14 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
       [bash('killall Santa'), DENY],
       [write(`${home}/Library/Application Support/Vigil at Home/vigil.db`), DENY],
       [write('/var/db/santa/rules.db', 'Edit'), DENY],
+      // The same files by the firmlink, the /private links and in another case.
+      [write(`/System/Volumes/Data${home}/Library/Application Support/Vigil at Home/x`), DENY],
+      [write(`/system/volumes/data${home}/Library/Application Support/Vigil at Home/x`), DENY],
+      [write('/private/var/db/santa/rules.db'), DENY],
+      [write('/System/Volumes/Data/private/var/db/santa/x'), DENY],
+      [write('/System/Volumes/Data/Applications/Vigil at Home.app/Contents/x'), DENY],
+      [write('/private/var/run/vigil-helper.sock'), DENY],
+      [write('/var/db/../db/santa//rules.db'), DENY],
     ],
     good: [
       bash('santactl status'),
@@ -388,11 +416,17 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
     bad: [
       [read(`${home}/.aws/credentials`), ALERT],
       [read(`${home}/.ssh/id_ed25519`), ALERT],
+      [read(`/System/Volumes/Data${home}/.aws/credentials`), ALERT],
+      [grep(`${home}/.aws/credentials`), ALERT],
+      [grep(`${home}/.ssh`), ALERT],
+      [grep(`${home}/.aws`), ALERT],
       [bash('cat ~/.aws/credentials'), ALERT],
       [bash('security find-generic-password -s "Chrome Safe Storage" -w'), ALERT],
     ],
     good: [
       read(`${home}/.ssh/id_ed25519.pub`),
+      grep(`${home}/.ssh/id_ed25519.pub`),
+      grep(`${home}/code/app/src`),
       bash('cat ~/.ssh/id_ed25519.pub | pbcopy'),
       bash('security find-generic-password -s "my-app"'),
       read(`${home}/.npmrc`),
@@ -413,6 +447,8 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
   'preflight-persistence': {
     bad: [
       [write(`${home}/Library/LaunchAgents/com.sync.plist`), ALERT],
+      [write('/System/Volumes/Data/Library/LaunchDaemons/com.sync.plist'), ALERT],
+      [write(`/System/Volumes/Data${home}/Library/LaunchAgents/com.sync.plist`), ALERT],
       [bash('launchctl load -w ~/Library/LaunchAgents/com.sync.plist'), ALERT],
       [bash('(crontab -l; echo "@reboot ~/sync") | crontab -'), ALERT],
     ],
@@ -436,6 +472,12 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
   },
   // Raised by the agent service (S4), never matched by an event; see below.
   'preflight-probing': { bad: [], good: [] },
+  'preflight-socket-tampered': { bad: [], good: [] },
+};
+/** Rules Vigil raises itself, which no request can match. */
+const SENTINELS: Record<string, string> = {
+  [PREFLIGHT_PROBING_RULE_ID]: '#probe',
+  [PREFLIGHT_SOCKET_RULE_ID]: PREFLIGHT_SOCKET_TOOL,
 };
 
 const DECISION: Record<Want['mode'], PreflightDecision> = {
@@ -449,7 +491,7 @@ describe('agent rule packs', () => {
   it('has a test case for every rule', () => {
     expect(Object.keys(cases).sort()).toEqual([...agentIds].sort());
     for (const [id, c] of Object.entries(cases)) {
-      if (id === PREFLIGHT_PROBING_RULE_ID) continue;
+      if (id in SENTINELS) continue;
       expect(c.bad.length, id).toBeGreaterThan(0);
       expect(c.good.length, id).toBeGreaterThan(0);
     }
@@ -464,17 +506,24 @@ describe('agent rule packs', () => {
 
   it('keeps every shared regex safe and under 256 characters', () => {
     const res = [
-      SECRET_PATH_RE,
-      UPLOAD_RE,
-      NET_SINK_RE,
+      ...SECRET_PATH_RES,
+      SECRET_READ_RE,
+      ...UPLOAD_RES,
+      PIPE_SINK_RE,
+      ...COPY_OUT_RES,
       PASTE_HOST_RE,
       ENV_DUMP_RE,
-      PERSIST_RE,
+      ...PERSIST_RES,
       ...TAMPER_RES_NOCASE,
       TAMPER_RE_CASED,
       KEYCHAIN_SECRET_RE,
       AGENT_CONFIG_RE,
-      WRITE_VERB_RE,
+      CONFIG_WRITE_RE,
+      CONFIG_INPLACE_RE,
+      SCRIPT_WRITE_RE,
+      MCP_ADD_RE,
+      PREFLIGHT_PIPE_RE,
+      PREFLIGHT_PROCSUB_RE,
     ];
     for (const r of res) {
       expect(regexProblem(r), r).toBeUndefined();
@@ -574,20 +623,16 @@ describe('agent rule packs', () => {
     }
   }
 
-  it('cannot match preflight-probing from any request; Vigil raises it itself', () => {
-    const probing = agentPreflightRules.find((r) => r.id === PREFLIGHT_PROBING_RULE_ID)!;
-    expect(probing.condition).toEqual({ field: 'tool', op: 'eq', value: '#probe' });
-    expect(
-      PreflightRequest.safeParse({
-        v: 1,
-        method: 'preflight.check',
-        host: 'claude-code',
-        tool: '#probe',
-      }).success,
-    ).toBe(false);
+  it('cannot match preflight-probing or the socket rule from any request; Vigil raises them itself', () => {
     const all = Object.values(cases).flatMap((c) => [...c.bad.map(([e]) => e), ...c.good]);
-    for (const e of all) {
-      expect(run(engine(), e).map((d) => d.match.ruleId)).not.toContain(PREFLIGHT_PROBING_RULE_ID);
+    for (const [id, tool] of Object.entries(SENTINELS)) {
+      const r = agentPreflightRules.find((x) => x.id === id)!;
+      expect(r.condition).toEqual({ field: 'tool', op: 'eq', value: tool });
+      expect(
+        PreflightRequest.safeParse({ v: 1, method: 'preflight.check', host: 'claude-code', tool })
+          .success,
+      ).toBe(false);
+      for (const e of all) expect(run(engine(), e).map((d) => d.match.ruleId)).not.toContain(id);
     }
   });
 });
@@ -605,6 +650,24 @@ describe('agent look-alikes', () => {
     'cat ~/.claude/settings.json 2>/dev/null',
     'git push',
     'curl https://registry.npmjs.org/x',
+    // Keys handed to the tool that uses them, not read out (also in the bench).
+    'ssh -i ~/.ssh/id_ed25519 -T git@github.com',
+    'ssh -F ~/.ssh/config -i ~/.ssh/id_rsa devbox uptime',
+    'scp -i ~/.ssh/id_ed25519 ./dist/app.tgz deploy@staging.example.com:/srv/releases/',
+    'rsync -av -e "ssh -i ~/.ssh/id_ed25519" ./build/ deploy@staging.example.com:/srv/app/',
+    'GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519" git push origin main',
+    'ssh-add --apple-use-keychain ~/.ssh/id_ed25519',
+    'ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""',
+    'chmod 600 ~/.ssh/id_ed25519',
+    'kubectl --kubeconfig ~/.kube/config get pods',
+    'curl --netrc-file ~/.netrc -s -d @body.json https://api.example.com/v1/items',
+    // The env dump and the network call are separate commands.
+    'env | grep -i proxy; curl -sI https://registry.npmjs.org',
+    'printenv | grep PORT && curl -s localhost:3000/health',
+    // Another app's privacy permission, while testing it.
+    'tccutil reset Camera com.example.myapp',
+    // Reads the MCP settings; writes elsewhere.
+    "jq '.mcpServers | keys' .mcp.json > servers.json",
   ];
 
   for (const c of LOOKALIKES) {
@@ -616,6 +679,26 @@ describe('agent look-alikes', () => {
       const ds = eng.check(bash(c));
       expect(ds.map((d) => d.match.ruleId)).toEqual([]);
       expect(decide(ds, nameOf)).toEqual({ v: 1, decision: 'none' });
+    });
+  }
+
+  // Each names a credential path without reading it out: pre-flight asks (the
+  // path is named), but nothing is refused and agent watch raises no alert.
+  for (const c of [
+    'docker run -d -v ~/.kube/config:/root/.kube/config:ro bitnami/kubectl get pods',
+    'docker run --rm -v ~/.aws/credentials:/root/.aws/credentials:ro amazon/aws-cli s3 ls',
+    'test -d ~/.config/gcloud/ && echo yes',
+    'ls -d ~/.config/gcloud/*',
+    'scp ops@k3s.example.com:/etc/rancher/k3s/k3s.yaml ~/.kube/config',
+    "awk -F= '/region/ {print $2}' ~/.aws/config",
+  ]) {
+    it(`asks, but raises no agent alert, when an agent runs "${c}"`, () => {
+      const eng = engine();
+      expect(eng.evaluate(sh(c)).map((d) => d.match.ruleId)).toEqual([]);
+      expect(decide(eng.check(bash(c)), nameOf)).toMatchObject({
+        decision: 'ask',
+        ruleIds: ['preflight-secret-access'],
+      });
     });
   }
 

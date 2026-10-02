@@ -69,10 +69,11 @@ export interface PlanInputs {
   santaProfilePath?: string;
   /**
    * Set once Claude Code is installed or has been seen on this Mac, which
-   * offers its pre-flight hook; `connected` once the hook was heard from in
-   * the last 7 days.
+   * offers its pre-flight hook; `connected` while pre-flight is on and the
+   * hook was heard from in the last 7 days; `off` when it was heard from but
+   * pre-flight is off.
    */
-  claudePreflight?: { connected: boolean };
+  claudePreflight?: { connected: boolean; off?: true };
 }
 
 /**
@@ -248,7 +249,7 @@ export function setupPlan(inputs: PlanInputs = {}): StepDef[] {
  * not the AI Vigil uses. The hooks are pasted by the user; Vigil never reads
  * or writes Claude Code's own settings.
  */
-function claudePreflightStep(p: { connected: boolean }): StepDef {
+function claudePreflightStep(p: { connected: boolean; off?: true }): StepDef {
   return {
     id: 'claude-preflight',
     group: 'ai',
@@ -265,8 +266,15 @@ function claudePreflightStep(p: { connected: boolean }): StepDef {
     ],
     result: p.connected
       ? { ok: true, detail: 'The hook checked in within the last 7 days' }
-      : { ok: false },
-    checks: 'the hook said hello or asked about a tool call in the last 7 days',
+      : p.off
+        ? {
+            ok: false,
+            detail:
+              'Pre-flight checks are off. Turn them on below, or remove the hooks from Claude Code.',
+          }
+        : { ok: false },
+    checks:
+      'pre-flight checks are on and the hook said hello or asked about a tool call in the last 7 days',
   };
 }
 

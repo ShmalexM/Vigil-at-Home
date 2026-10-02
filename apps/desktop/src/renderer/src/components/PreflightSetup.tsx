@@ -31,7 +31,7 @@ function hookState(prefs: AgentPrefs, s: PreflightStatus, now: number): HookStat
 export function PreflightSetup({ compact }: { compact?: boolean }) {
   const toast = useToast();
   const [prefs, reloadPrefs] = useLive(() => vigil.getAgentPrefs());
-  const [status, reloadStatus] = useLive(() => vigil.getPreflightStatus());
+  const [status, reloadStatus] = useLive(() => vigil.getPreflightStatus(), null, 'agents');
   // Once the hook is connected the hooks fold away, one click from being copied again.
   const [showHooks, setShowHooks] = useState(false);
   if (!prefs || !status) return null;
@@ -86,9 +86,9 @@ export function PreflightSetup({ compact }: { compact?: boolean }) {
 
       {!compact && (
         <span className="t-small">
-          Claude Code’s hook asks Vigil before a Bash, Write, Edit, Read, WebFetch or MCP step runs.
-          Vigil’s rules answer: Deny stops the step, Ask hands it to you, and anything else is left
-          to Claude Code as usual. Rules decide, never an AI, and Vigil never answers “allow”.
+          Claude Code’s hook asks Vigil before a Bash, Write, Edit, Read, Grep, WebFetch or MCP step
+          runs. Vigil’s rules answer: Deny stops the step, Ask hands it to you, and anything else is
+          left to Claude Code as usual. Rules decide, never an AI, and Vigil never answers “allow”.
         </span>
       )}
 
@@ -105,9 +105,12 @@ export function PreflightSetup({ compact }: { compact?: boolean }) {
           <div className="col" style={{ gap: 8 }}>
             <ol className="preflight-steps">
               <li>
-                Copy these hooks into your Claude Code settings: <code>settings.json</code> in{' '}
-                <code>~/.claude</code>, or in a project’s <code>.claude</code> folder. Vigil never
-                opens that file.
+                Add these hooks to your Claude Code settings: <code>~/.claude/settings.json</code>{' '}
+                for every project, or a project’s <code>.claude/settings.local.json</code>, which
+                stays out of git, since the hooks hold paths on this Mac. If the file already has
+                settings, add the <code>hooks</code> section to them. If it already has hooks, add
+                the <code>PreToolUse</code> and <code>SessionStart</code> entries next to yours.
+                Vigil never opens that file.
               </li>
               <li>Restart your Claude Code sessions so they load the hooks.</li>
               <li>Vigil shows Connected once a session says hello.</li>
@@ -121,7 +124,7 @@ export function PreflightSetup({ compact }: { compact?: boolean }) {
                 aria-label="Copy the hooks"
                 onClick={async () => {
                   await navigator.clipboard.writeText(status.snippet);
-                  toast({ text: 'Copied. Paste it into your Claude Code settings.' });
+                  toast({ text: 'Copied. Add it to your Claude Code settings.' });
                 }}
               >
                 Copy

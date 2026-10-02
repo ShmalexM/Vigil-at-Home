@@ -81,6 +81,38 @@ describe('pre-flight rules', () => {
     );
   });
 
+  it('cannot chain requests, and no chain can step on one', () => {
+    const step = (eventKinds: string[], field: string) => ({
+      steps: [{ eventKinds, condition: { field, op: 'contains', value: '.ssh/id_' } }],
+      key: ['agent.session'],
+      windowSec: 600,
+    });
+    // A check never moves a chain on, so these could never fire.
+    expect(pre({ sequence: step(['agent.tool_request'], 'command') }).errors).toEqual([
+      'a sequence step cannot be an agent.tool_request; checking a request moves no chain',
+      'pre-flight rules decide each request on its own; they cannot use a sequence',
+    ]);
+    expect(pre({ sequence: step(['file'], 'path') }).errors).toContain(
+      'pre-flight rules decide each request on its own; they cannot use a sequence',
+    );
+    const onLaunch = lint({
+      id: 'exec-after-request',
+      condition: { field: 'process.name', op: 'eq', value: 'curl' },
+      sequence: { ...step(['agent.tool_request'], 'command'), key: ['process.agent.session'] },
+    });
+    expect(onLaunch.errors).toEqual([
+      'a sequence step cannot be an agent.tool_request; checking a request moves no chain',
+    ]);
+    // Chains of launches and file reads are fine.
+    expect(
+      lint({
+        id: 'exec-after-read',
+        condition: { field: 'process.name', op: 'eq', value: 'curl' },
+        sequence: { ...step(['file'], 'path'), key: ['process.agent.session'] },
+      }).errors,
+    ).toEqual([]);
+  });
+
   it('know the tool request fields', () => {
     const fields = [
       'tool',
@@ -97,11 +129,37 @@ describe('pre-flight rules', () => {
       'agent.id',
       'agent.session',
       'agent.hookSession',
-      'process.agent.id',
-      'process.agent.depth',
-      'process.ancestors',
+      'commandClipped',
+      // A Bash request carries the shell it would start.
+      'process.name',
+      'process.commandLine',
     ];
     for (const field of fields)
-      expect(pre({ condition: { field, op: 'exists' } }).errors).toEqual([]);
+      expect(pre({ condition: { field, op: 'exists' } })).toEqual({ errors: [], warnings: [] });
+  });
+
+  it('warn about process fields a tool request never carries', () => {
+    const r = pre({ condition: { field: 'process.agent.id', op: 'eq', value: 'codex' } });
+    expect(r.errors).toEqual([]);
+    expect(r.warnings).toEqual([
+      'process.agent.id is never set on a tool request; use agent.id or agent.session (agent.host for the app)',
+    ]);
+    for (const field of ['process.ancestors', 'process.parentName', 'process.agent.depth'])
+      expect(pre({ condition: { field, op: 'exists' } }).warnings.join(' ')).toMatch(
+        /never set on a tool request/,
+      );
+    expect(
+      pre({
+        exclusions: [{ inList: { list: 'my_list', field: 'process.parentName' } }],
+        reasons: ['{{process.agent.session}} asked'],
+      }).warnings,
+    ).toHaveLength(2);
+    // The same test on a launch is fine: the tracker tags those.
+    expect(
+      lint({
+        id: 'exec',
+        condition: { field: 'process.agent.id', op: 'eq', value: 'codex' },
+      }).warnings.join(' '),
+    ).not.toMatch(/never set on a tool request/);
   });
 });

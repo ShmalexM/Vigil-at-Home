@@ -5,6 +5,7 @@ export const CALL_NAMES = [
   'getAlertDetail',
   'decide',
   'reopen',
+  'clearNoticed',
   'undoAction',
   'approveProposal',
   'rejectProposal',
@@ -28,6 +29,7 @@ export const CALL_NAMES = [
   'eventStats',
   'getSettings',
   'setTheme',
+  'setAlertView',
   'setAppearance',
   'sendTestAlert',
   'openMain',
@@ -61,6 +63,7 @@ export const CALL_NAMES = [
   'dismissUpdate',
   'downloadUpdate',
   'listAgents',
+  'listAgentNames',
   'getAgent',
   'saveAgent',
   'setAgentWatch',
@@ -93,4 +96,12 @@ export const CALL_NAMES = [
   'refreshConnector',
 ] as const;
 
-export const PUSH_NAMES = ['changed', 'popup', 'navigate', 'theme', 'events', 'pack'] as const;
+export const PUSH_NAMES = [
+  'changed',
+  'popup',
+  'navigate',
+  'theme',
+  'events',
+  'agents',
+  'pack',
+] as const;

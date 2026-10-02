@@ -36,6 +36,7 @@ import type { Store } from './db/store.js';
 import type { VigilCore } from './service.js';
 import { labelKey } from './label-filter.js';
 import { TEST_RULE } from './test-alert.js';
+import { WORTH_A_LOOK_RULE, WorthALook } from './worth-a-look.js';
 import { monthStart, type UsageService } from './usage.js';
 
 const KEY_PREFS = 'ai.prefs';
@@ -134,6 +135,7 @@ export class AiBridge extends EventEmitter<{
   private queuedBackground = 0;
   /** Events waiting for a label, oldest first. */
   private labelQueue: SensorEvent[] = [];
+  private worthALook: WorthALook | undefined;
   private cachedPrefs: AiPrefs | undefined;
   /** When each program or destination was last queued, so repeats aren't sent again. */
   private readonly lastQueued = new Map<string, number>();
@@ -386,11 +388,13 @@ export class AiBridge extends EventEmitter<{
 
   /**
    * Explains each new alert once its response has run. Popups go first, in
-   * the scheduler's urgent lane; the test alert is never sent.
+   * the scheduler's urgent lane. The test alert is never sent, and neither
+   * are "worth a look" alerts: the labeller's reason already explains them,
+   * and the user can still press Explain.
    */
   explainAlertsFrom(core: Pick<VigilCore, 'alerts' | 'scheduler' | 'alertDetail'>): void {
     core.alerts.on('raised', (alert) => {
-      if (alert.ruleId === TEST_RULE.id) return;
+      if (alert.ruleId === TEST_RULE.id || alert.ruleId === WORTH_A_LOOK_RULE.id) return;
       const urgent = alert.notify === 'popup';
       if (!urgent) {
         if (this.queuedBackground >= MAX_QUEUED_BACKGROUND) return;
@@ -420,9 +424,14 @@ export class AiBridge extends EventEmitter<{
    * busy. A label never blocks, allows or raises anything.
    */
   labelEventsFrom(
-    core: Pick<VigilCore, 'scheduler' | 'store'> & { onIngest: VigilCore['onIngest'] },
+    core: Pick<VigilCore, 'scheduler' | 'store'> & {
+      onIngest: VigilCore['onIngest'];
+      alerts?: VigilCore['alerts'];
+    },
   ): void {
     core.onIngest = (event, outcome) => this.consider(event, outcome);
+    // The strongest catches become quiet "worth a look" alerts (worth-a-look.ts).
+    if (core.alerts) this.worthALook = new WorthALook(core.alerts, this.now);
     core.scheduler.every('label-events', LABEL_EVERY_MS, async () => {
       await this.labelBatch(core.store);
     });
@@ -500,18 +509,29 @@ export class AiBridge extends EventEmitter<{
     );
     if (!result.ok) return 0;
     const at = this.now();
-    store.setEventLabels(
-      result.labels.map((l) => ({
-        eventId: l.eventId,
-        label: {
-          label: l.label,
-          score: l.score,
-          reason: l.reason.slice(0, 300),
-          by: l.by,
-          at,
-        },
-      })),
-    );
+    const labelled = result.labels.map((l) => ({
+      eventId: l.eventId,
+      label: {
+        label: l.label,
+        score: l.score,
+        reason: l.reason.slice(0, 300),
+        by: l.by,
+        at,
+      },
+    }));
+    store.setEventLabels(labelled);
+    if (this.worthALook) {
+      const byId = new Map(batch.map((e) => [e.id, e]));
+      for (const l of labelled) {
+        const event = byId.get(l.eventId);
+        if (!event) continue;
+        try {
+          await this.worthALook.consider(event, l.label);
+        } catch (err) {
+          console.warn('[labels] could not raise a worth-a-look alert:', err);
+        }
+      }
+    }
     return result.labels.length;
   }
 

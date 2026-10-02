@@ -51,9 +51,21 @@ describe('hookSnippet', () => {
       `"${app}/node" "${app}/vigil-hook.mjs" hello --socket "${plain.socketPath}"`,
     );
     expect(HOOK_TIMEOUT_S).toBe(5);
-    for (const tool of ['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Read', 'WebFetch'])
-      expect(new RegExp(`^(${PREFLIGHT_MATCHER})$`).test(tool)).toBe(true);
-    expect(new RegExp(`^(${PREFLIGHT_MATCHER})$`).test('mcp__github__create_issue')).toBe(true);
+    const matcher = new RegExp(`^(${PREFLIGHT_MATCHER})$`);
+    for (const tool of [
+      'Bash',
+      'Write',
+      'Edit',
+      'MultiEdit',
+      'NotebookEdit',
+      'Read',
+      'Grep',
+      'WebFetch',
+    ])
+      expect(matcher.test(tool), tool).toBe(true);
+    expect(matcher.test('mcp__github__create_issue')).toBe(true);
+    // Names only: not worth Node's start-up on every call.
+    for (const tool of ['Glob', 'LS']) expect(matcher.test(tool), tool).toBe(false);
   });
 
   it('passes the defer setting through', () => {

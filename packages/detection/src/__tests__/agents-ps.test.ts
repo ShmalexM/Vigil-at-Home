@@ -3,14 +3,18 @@ import { mergePsArgs, parsePsComm, type PsRow } from '../agents/ps-table.js';
 import { AgentTracker } from '../agents/tracker.js';
 import { catalog } from './fixtures.js';
 
-/** `ps -axww -o pid=,ppid=,lstart=,comm=` under LC_ALL=C. */
+/**
+ * `ps -axww -o pid=,ppid=,lstart=,comm=` under LC_ALL=C. comm is argv[0]: a
+ * login shell's `-zsh`, a bare name for a program started from the shell's
+ * PATH, a full path only when the program was started by one.
+ */
 const COMM = [
   '    1     0 Mon Sep 28 08:01:12 2026 /sbin/launchd',
   '    0     0 Mon Sep 28 08:01:10 2026 kernel_task',
   '  512     1 Wed Oct  1 09:15:02 2026 /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal',
-  '  530   512 Wed Oct  1 09:15:03 2026 /bin/zsh',
-  ' 4242   530 Wed Oct  1 20:53:59 2026 /Users/alex/.local/share/claude/versions/2.0.14',
-  ' 4300  4242 Wed Oct  1 20:54:30 2026 /opt/homebrew/bin/node',
+  '  530   512 Wed Oct  1 09:15:03 2026 -zsh',
+  ' 4242   530 Wed Oct  1 20:53:59 2026 claude',
+  ' 4300  4242 Wed Oct  1 20:54:30 2026 node',
   ' 4301  4242 Wed Oct  1 20:54:31 2026 /bin/zsh',
   '  900     1 Tue Sep 29 10:00:00 2026 /Applications/Visual Studio Code.app/Contents/MacOS/Electron',
   '  901   900 Tue Sep 29 10:00:01 2026 /Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Renderer).app/Contents/MacOS/Code Helper (Renderer)',
@@ -70,7 +74,7 @@ describe('ps parsing', () => {
       id: claude.session,
       agentId: 'claude-code',
       rootPid: 4242,
-      rootPath: '/Users/alex/.local/share/claude/versions/2.0.14',
+      rootPath: 'claude',
       startedAt: new Date(2026, 9, 1, 20, 53, 59).getTime(),
       seeded: true,
     });
@@ -86,5 +90,16 @@ describe('ps parsing', () => {
       mergePsArgs(rows, ' 50 node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js'),
     );
     expect(t.lookup(51)?.tag).toMatchObject({ id: 'claude-code', depth: 1 });
+  });
+
+  it('finds an npm Claude Code started through its bin link', () => {
+    const rows: PsRow[] = [
+      { pid: 60, ppid: 530, startedAt: 0, path: 'node' },
+      { pid: 61, ppid: 60, startedAt: 0, path: '/bin/zsh' },
+    ];
+    const t = new AgentTracker({ matcher: catalog });
+    t.seed(mergePsArgs(rows, ' 60 node /opt/homebrew/bin/claude --resume'));
+    expect(t.lookup(60)?.tag).toMatchObject({ id: 'claude-code', depth: 0 });
+    expect(t.lookup(61)?.tag).toMatchObject({ id: 'claude-code', depth: 1 });
   });
 });

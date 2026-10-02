@@ -71,6 +71,15 @@ export const Route = z.string().regex(/^[a-z]+(\/[A-Za-z0-9_-]+)?$/);
 export const ThemePref = z.enum(['system', 'dark', 'light']);
 export type ThemePref = z.infer<typeof ThemePref>;
 
+/**
+ * How much of what Vigil notices the user sees. `less`: only what needs a
+ * decision badges the menu bar; noticed alerts fold into one line. `more`:
+ * noticed alerts are listed in full and count in the badge. Neither changes
+ * what Vigil blocks or the Good/Fair/Poor level.
+ */
+export const AlertView = z.enum(['less', 'more']);
+export type AlertView = z.infer<typeof AlertView>;
+
 const HexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 const FontFamily = z.string().regex(/^[\w\s,'"().-]{0,120}$/);
 const VariantTheme = z.object({
@@ -173,6 +182,7 @@ export const calls = {
   getAlertDetail: z.tuple([Id]),
   decide: z.tuple([Id, DecisionInput]),
   reopen: z.tuple([Id]),
+  clearNoticed: z.tuple([z.array(Id).min(1).max(500)]),
   undoAction: z.tuple([Id]),
   approveProposal: z.tuple([Id]),
   rejectProposal: z.tuple([Id]),
@@ -196,6 +206,7 @@ export const calls = {
   eventStats: z.tuple([]),
   getSettings: z.tuple([]),
   setTheme: z.tuple([ThemePref]),
+  setAlertView: z.tuple([AlertView]),
   setAppearance: z.tuple([Appearance]),
   sendTestAlert: z.tuple([]),
   openMain: z.tuple([Route.optional()]),
@@ -238,6 +249,7 @@ export const calls = {
   downloadUpdate: z.tuple([]),
   // Agents (main/agents).
   listAgents: z.tuple([]),
+  listAgentNames: z.tuple([]),
   getAgent: z.tuple([AgentId]),
   saveAgent: z.tuple([AgentIdentityInput]),
   setAgentWatch: z.tuple([AgentId, z.boolean()]),
@@ -284,10 +296,28 @@ export interface SensorView {
   note?: string;
 }
 
+/** Proof that Vigil is running, for the "it's working" line. Today is since local midnight. */
+export interface WatchSummary {
+  /** Events Vigil checked against its rules today. */
+  checkedToday: number;
+  /** When the newest event arrived, or null before the first. */
+  lastEventAt: number | null;
+  /** Things a rule blocked or paused today. */
+  blockedToday: number;
+}
+
 export interface StatusView {
   level: 'good' | 'fair' | 'poor';
+  /** Open alerts that need a decision (shared/attention.ts needsDecision). */
   needsYou: number;
+  /** Open alerts Vigil only noticed; they don't badge or lower the level. */
+  noticed: number;
   reasons: string[];
+  watch: WatchSummary;
+  /** The user's Show me less / Show me more choice. */
+  alertView: AlertView;
+  /** The number on the menu-bar icon and the Alerts nav item. */
+  badge: number;
   sensors: SensorView[];
   /** True while blocks are simulated because the privileged helper is missing. */
   dryRun: boolean;
@@ -488,6 +518,8 @@ export interface CallResults {
   getAlertDetail: AlertDetail | null;
   decide: Alert;
   reopen: Alert;
+  /** How many of the given alerts were cleared. */
+  clearNoticed: number;
   undoAction: ActionRecord;
   approveProposal: ActionRecord;
   rejectProposal: void;
@@ -511,6 +543,7 @@ export interface CallResults {
   eventStats: EventStats;
   getSettings: SettingsView;
   setTheme: void;
+  setAlertView: void;
   setAppearance: void;
   sendTestAlert: Alert;
   openMain: void;
@@ -544,6 +577,8 @@ export interface CallResults {
   dismissUpdate: void;
   downloadUpdate: void;
   listAgents: AgentView[];
+  /** The registry only, without listAgents' stats. */
+  listAgentNames: Pick<AgentView, 'id' | 'name' | 'status'>[];
   getAgent: AgentDetail | null;
   saveAgent: SaveAgentResult;
   setAgentWatch: void;
@@ -594,6 +629,12 @@ export interface Pushes {
   theme: [ThemePref];
   /** New events were stored. Sent at most once a second, with how many arrived. */
   events: [number];
+  /**
+   * Agent activity was recorded: a pre-flight request, a session, a hook
+   * check-in or a tools call. Sent at most every 2 seconds, for the views
+   * that show those; `changed` covers everything else.
+   */
+  agents: [];
   /** The pack changed: a dog's mood, the chat, an approval. Only the Pack page listens. */
   pack: [];
 }

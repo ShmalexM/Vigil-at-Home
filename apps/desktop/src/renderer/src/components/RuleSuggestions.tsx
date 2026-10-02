@@ -3,6 +3,7 @@ import { useState } from 'react';
 import type { RuleSuggestionView, RuleSuggestionsView } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
 import { timeAgo } from '../format';
+import { draftIsToolRule } from '../rule-modes';
 import { ImpactSummary, ReplaySummary } from './RuleEditor';
 import { useToast } from './Toasts';
 import { Button, Card, Chip, SectionHead, SeverityMark } from './ui';
@@ -132,7 +133,12 @@ function Suggestion({ s, onDone }: { s: RuleSuggestionView; onDone: () => void }
         </span>
       )}
       {s.impact && s.kind !== 'new_rule' && <ImpactSummary impact={s.impact} />}
-      {s.kind !== 'tuning' && s.replay && <ReplaySummary replay={s.replay} />}
+      {s.kind !== 'tuning' && s.replay && (
+        <ReplaySummary
+          replay={s.replay}
+          toolRule={s.ruleJson ? draftIsToolRule(s.ruleJson) : false}
+        />
+      )}
       {s.evidence.length > 0 && (
         <ul className="t-small evidence">
           {s.evidence.slice(0, 5).map((e) => (

@@ -9,6 +9,7 @@ import {
   type ListStore,
 } from '../state/stores.js';
 import type { DetectionEvent, DetectionRule } from '../types.js';
+import { toolRequestSubject } from './replay.js';
 
 /**
  * What approving a change would cost in coverage, shown before the user
@@ -76,6 +77,7 @@ function programOf(e: DetectionEvent): string | undefined {
 }
 
 function whatOf(e: DetectionEvent): string {
+  if (e.kind === 'agent.tool_request') return `${e.tool}: ${toolRequestSubject(e)}`;
   const prog = programOf(e);
   if (e.kind === 'network.connection')
     return `${prog ?? 'a program'} -> ${e.remoteHost ?? e.remoteAddress}`;

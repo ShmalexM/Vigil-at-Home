@@ -14,6 +14,15 @@ describe('osquery', () => {
     expect(cfg.options.logger_event_type).toBe(true);
   });
 
+  it('snapshots connections every 30 s and slows the launchd query only when Santa reports launch items', () => {
+    const plain = JSON.parse(osqueryConfig()).schedule;
+    expect(plain[QUERY_NAMES.networkConnections].interval).toBe(30);
+    expect(plain[QUERY_NAMES.launchd].interval).toBe(60);
+    const withSanta = JSON.parse(osqueryConfig({ santaReportsLaunchItems: true })).schedule;
+    expect(withSanta[QUERY_NAMES.launchd].interval).toBe(300);
+    expect(withSanta[QUERY_NAMES.listeningPorts].interval).toBe(60);
+  });
+
   it('reads the health rows, naming any query osquery switched off', () => {
     const line = (columns: Record<string, string>, action = 'added') =>
       JSON.stringify({ name: QUERY_NAMES.health, action, counter: 2, columns });

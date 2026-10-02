@@ -71,9 +71,68 @@ export function originLabel(a: Pick<AgentView, 'origin' | 'status' | 'presence'>
   return { label: a.presence === 'not-found' ? 'Built-in' : 'Detected' };
 }
 
+/**
+ * Whether Vigil tags what this agent starts, as the matcher decides it
+ * (`effective` in @vigil/detection): an active agent whose switch is on, and
+ * never a model runtime. The stored switch stays as it was while an agent is
+ * ignored, so it comes back when you watch the agent again.
+ */
+export function watching(a: Pick<AgentView, 'status' | 'watch' | 'kind'>): boolean {
+  return a.status === 'active' && a.watch && a.kind !== 'runtime';
+}
+
+/** An agent's Sessions list when it has none. */
+export function noSessionsText(a: Pick<AgentView, 'status' | 'watch' | 'kind'>): string {
+  if (watching(a)) return 'No sessions yet. One starts the next time it runs.';
+  if (a.status === 'ignored')
+    return 'No sessions: this agent is ignored, so Vigil tags nothing it runs.';
+  return 'No sessions: Vigil starts sessions only for agents it watches.';
+}
+
 /** "3 asks", "1 ask". */
 export function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
+}
+
+// ---------------------------------------------------------------- sessions
+
+/** The sessions listed: the live first page, then the older ones loaded, each once. */
+export function mergeSessions<S extends { id: string }>(
+  first: readonly S[],
+  older: readonly S[],
+): S[] {
+  const all = new Map<string, S>();
+  for (const s of [...first, ...older]) if (!all.has(s.id)) all.set(s.id, s);
+  return [...all.values()];
+}
+
+/**
+ * The page before the oldest session shown, added to a copy of everything
+ * shown. The copy matters: the first page reloads as new sessions start, and
+ * a session that drops off its end would otherwise vanish. `fetch(before)`
+ * returns up to `pageSize` sessions that started strictly before `before`,
+ * newest first, so it is asked from one past the oldest start: sessions that
+ * started in that same millisecond come back too, and the ones shown are
+ * dropped. Only when a whole page started in that millisecond does it step
+ * past them, so paging always moves on; a tie larger than a page can then
+ * lose some (only a cursor on start time and id, in main, would close that).
+ */
+export async function loadOlderSessions<S extends { id: string; startedAt: number }>(
+  shown: readonly S[],
+  fetch: (before: number) => Promise<S[]>,
+  pageSize: number,
+): Promise<{ rows: S[]; more: boolean } | undefined> {
+  const last = shown.at(-1);
+  if (!last) return undefined;
+  const seen = new Set(shown.map((s) => s.id));
+  let rows = await fetch(last.startedAt + 1);
+  if (rows.length === pageSize && rows.every((s) => seen.has(s.id))) {
+    rows = await fetch(last.startedAt);
+  }
+  return {
+    rows: [...shown, ...rows.filter((s) => !seen.has(s.id))],
+    more: rows.length === pageSize,
+  };
 }
 
 // ---------------------------------------------------------------- process tree
@@ -86,24 +145,35 @@ export function plural(n: number, one: string, many = `${one}s`): string {
  * The first node is the agent; the rest may come in any order.
  */
 export function treeOrder(nodes: readonly TreeNode[]): TreeNode[] {
+  return treeRows(nodes).map((r) => r.node);
+}
+
+/**
+ * The same order as treeOrder, each node with the one it hangs under (none
+ * for the agent), so a screen reader can say which program started which.
+ */
+export function treeRows(nodes: readonly TreeNode[]): { node: TreeNode; parent?: TreeNode }[] {
   const [root, ...rest] = nodes;
   if (!root) return [];
   const children = new Map<TreeNode, TreeNode[]>();
+  const parentOf = new Map<TreeNode, TreeNode>();
   // The newest process seen with each pid so far, since pids get reused.
   const byPid = new Map<number, TreeNode>([[root.pid, root]]);
   for (const n of [...rest].sort((a, b) => a.ts - b.ts)) {
     const parent = byPid.get(n.ppid) ?? root;
+    parentOf.set(n, parent);
     const list = children.get(parent);
     if (list) list.push(n);
     else children.set(parent, [n]);
     byPid.set(n.pid, n);
   }
   // Parents always come before their children above, so this walk can't loop.
-  const out: TreeNode[] = [];
+  const out: { node: TreeNode; parent?: TreeNode }[] = [];
   const stack: TreeNode[] = [root];
   while (stack.length) {
     const n = stack.pop()!;
-    out.push(n);
+    const parent = parentOf.get(n);
+    out.push(parent ? { node: n, parent } : { node: n });
     const kids = children.get(n);
     if (kids) for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]!);
   }

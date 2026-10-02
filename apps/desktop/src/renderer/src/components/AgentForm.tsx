@@ -216,7 +216,7 @@ export function AgentForm({
           <div key={i} className="matcher-row">
             <select
               className="field"
-              aria-label="What to match"
+              aria-label={`What to match, way ${i + 1}`}
               value={r.field}
               onChange={(e) => setRow(i, { field: e.target.value as MatcherField })}
             >
@@ -228,21 +228,21 @@ export function AgentForm({
             </select>
             <input
               className="field mono"
-              aria-label="Value"
+              aria-label={`Value, way ${i + 1}`}
               placeholder={MATCHER_FIELDS.find((f) => f.value === r.field)?.placeholder}
               value={r.value}
               onChange={(e) => setRow(i, { value: e.target.value })}
             />
             <input
               className="field mono"
-              aria-label="Command line pattern (optional)"
+              aria-label={`Command line pattern, way ${i + 1} (optional)`}
               placeholder="Command line like (optional)"
               value={r.args}
               onChange={(e) => setRow(i, { args: e.target.value })}
             />
             <IconButton
               size="sm"
-              label="Remove this row"
+              label={`Remove way ${i + 1}`}
               disabled={rows.length + kept.length <= 1}
               onClick={() => setRows(rows.filter((_, j) => j !== i))}
             >
@@ -282,11 +282,14 @@ export function AgentForm({
       </div>
 
       {errors.length > 0 && (
-        <ul className="issues errors">
-          {errors.map((e) => (
-            <li key={e}>{e}</li>
-          ))}
-        </ul>
+        // Errors appear after Check or Save while focus stays on the button, so announce them.
+        <div role="alert">
+          <ul className="issues errors">
+            {errors.map((e) => (
+              <li key={e}>{e}</li>
+            ))}
+          </ul>
+        </div>
       )}
       {current && <PreviewSummary preview={current} />}
 
