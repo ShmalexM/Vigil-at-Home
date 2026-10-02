@@ -8,7 +8,7 @@ import { onboardingHandlers } from './onboarding/ipc.js';
 import type { OnboardingService } from './onboarding/service.js';
 import type { VigilCore } from './service.js';
 import { sendTestAlert } from './test-alert.js';
-import { rendererOrigin, type Windows } from './windows.js';
+import { isAppFrame, type Windows } from './windows.js';
 import { RuleSuggestions } from './rule-suggestions.js';
 
 export type Handlers = {
@@ -81,6 +81,7 @@ export function registerIpc(
       appearance: core.appearance(),
       dataDir: app.getPath('userData'),
       version: app.getVersion(),
+      commit: typeof __VIGIL_COMMIT__ === 'string' ? __VIGIL_COMMIT__ : '',
       showAdvanced: core.showAdvanced(),
     }),
     setTheme: (theme) => {
@@ -134,7 +135,9 @@ export function registerIpc(
 
   for (const name of Object.keys(calls) as CallName[]) {
     ipcMain.handle(`vigil:${name}`, (event: IpcMainInvokeEvent, ...raw: unknown[]) => {
-      if (!event.senderFrame?.url.startsWith(rendererOrigin())) {
+      // Only Vigil's own page, in its top frame, may call in.
+      const frame = event.senderFrame;
+      if (!frame || frame.parent || !isAppFrame(frame.url)) {
         throw new Error('Rejected IPC from an unknown frame');
       }
       const args = calls[name].parse(raw);

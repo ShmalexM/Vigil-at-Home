@@ -51,4 +51,36 @@ describe('EventLog', () => {
     for (let i = 0; i < 5; i++) log.add(makeExec());
     expect(log.stats()).toMatchObject({ pending: 2, dropped: 3 });
   });
+
+  it('tries a failed batch once more before counting it as dropped', () => {
+    vi.useFakeTimers();
+    const store = memoryStore();
+    const errors: unknown[] = [];
+    const spy = vi.spyOn(store, 'insertEvents').mockImplementationOnce(() => {
+      throw new Error('disk busy');
+    });
+    const log = new EventLog(store, { flushMs: 1000, onError: (e) => errors.push(e) });
+    log.add(makeExec());
+    log.add(makeExec());
+    log.flush();
+    expect(errors).toHaveLength(1);
+    expect(log.stats()).toMatchObject({ pending: 2, dropped: 0 });
+    vi.advanceTimersByTime(1000);
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(store.recentEvents()).toHaveLength(2);
+    expect(log.stats()).toMatchObject({ pending: 0, dropped: 0 });
+  });
+
+  it('counts a batch that fails twice as dropped', () => {
+    const store = memoryStore();
+    vi.spyOn(store, 'insertEvents').mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    const log = new EventLog(store, { onError: () => {} });
+    log.add(makeExec());
+    log.add(makeExec());
+    log.flush();
+    log.flush();
+    expect(log.stats()).toMatchObject({ pending: 0, dropped: 2 });
+  });
 });
