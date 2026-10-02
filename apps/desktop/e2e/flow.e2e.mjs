@@ -224,6 +224,19 @@ async function detail(alertId) {
   return main((_e, id) => globalThis.vigil.core.alertDetail(id), alertId);
 }
 
+/**
+ * The alert's detail once its `kind` action has finished. A blocking rule
+ * saves the alert first and then awaits each action, so a poll can see the
+ * alert while the helper call is still pending.
+ */
+async function settled(alertId, kind) {
+  return waitUntil(async () => {
+    const d = await detail(alertId);
+    const a = d?.actions.find((x) => x.action.kind === kind);
+    return a && a.status !== 'pending' ? d : null;
+  }, 10000).then((d) => d ?? detail(alertId));
+}
+
 async function popupPage() {
   return waitUntil(async () => {
     for (const w of app.windows()) if ((await w.url()).includes('#popup')) return w;
@@ -333,7 +346,7 @@ try {
     });
     const alert = await waitUntil(() => alertFor('credential-theft-untrusted', t0), 5000);
     check('stealer: alert raised', !!alert);
-    const d = alert && (await detail(alert.id));
+    const d = alert && (await settled(alert.id, 'process.suspend'));
     const suspend = d?.actions.find((a) => a.action.kind === 'process.suspend');
     check('stealer: helper paused the process', suspend?.status === 'done', suspend?.result);
     check('stealer: process is really paused', procState(pid).startsWith('T'), procState(pid));
@@ -384,7 +397,7 @@ try {
     });
     const alert = await waitUntil(() => alertFor('fake-password-prompt', t0), 5000);
     check('fake prompt: alert raised', !!alert);
-    const d = alert && (await detail(alert.id));
+    const d = alert && (await settled(alert.id, 'process.kill'));
     const kill = d?.actions.find((a) => a.action.kind === 'process.kill');
     check('fake prompt: helper stopped the process', kill?.status === 'done', kill?.result);
     const gone = await waitUntil(
@@ -467,7 +480,7 @@ try {
     }
     check('beacon: seen by real osquery', s.sensor === 'real osquery');
     check('beacon: alert raised', !!alert);
-    const d = alert && (await detail(alert.id));
+    const d = alert && (await settled(alert.id, 'network.block'));
     const block = d?.actions.find((a) => a.action.kind === 'network.block');
     const ev = d?.events[0];
     s.connectToEventMs = ev ? ev.ts - t0 : null;
