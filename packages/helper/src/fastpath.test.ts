@@ -123,6 +123,19 @@ async function sendLists(names: string[], lists: Record<string, string[]>): Prom
   }
 }
 
+/**
+ * Hold a rule change, and come back once the helper has answered that it needs
+ * the password: a fixed wait for that answer fails on a busy machine.
+ */
+async function holdNow(command: DetectionSync): Promise<{ result: Promise<unknown> }> {
+  let result!: Promise<unknown>;
+  await new Promise<void>((held, failed) => {
+    result = client.hold(command, held);
+    result.catch(failed);
+  });
+  return { result };
+}
+
 describe('blocking rules in the helper', () => {
   it('takes rules from the app, asks only for lists it lacks, and blocks known malware', async () => {
     const hashes = Array.from({ length: 2500 }, (_, i) => i.toString(16).padStart(64, '0'));
@@ -266,10 +279,7 @@ describe('blocking rules in the helper', () => {
       match: { 'process.path': '/tmp/ok' },
       createdAt: 2,
     };
-    let held = false;
-    const syncing = client.hold({ ...sync, exceptions: [exception] }, () => (held = true));
-    await new Promise((r) => setTimeout(r, 20));
-    expect(held).toBe(true);
+    const { result: syncing } = await holdNow({ ...sync, exceptions: [exception] });
     // A release (here: removing a Santa rule) asks for the password, for both at once.
     await client.call({
       kind: 'santa.rule.set',
@@ -287,12 +297,11 @@ describe('blocking rules in the helper', () => {
 
     // Nothing else asks: approveHeld asks once for what is still waiting, and a no settles it as refused.
     approve = false;
-    const refused = client.hold({
+    const { result: refused } = await holdNow({
       ...sync,
       exceptions: [],
       selfPaths: [...sync.selfPaths, '/tmp'],
     });
-    await new Promise((r) => setTimeout(r, 20));
     await client.approveHeld();
     await expect(refused).rejects.toMatchObject({ code: 'refused' });
     expect(prompts).toHaveLength(2);
@@ -310,8 +319,7 @@ describe('blocking rules in the helper', () => {
     });
     prompts.length = 0;
     approve = false;
-    const syncing = client.hold({ ...sync, selfPaths: [...sync.selfPaths, '/tmp'] });
-    await new Promise((r) => setTimeout(r, 20));
+    const { result: syncing } = await holdNow({ ...sync, selfPaths: [...sync.selfPaths, '/tmp'] });
     await expect(
       client.call({ kind: 'santa.rule.remove', ruleType: 'binary', identifier: BAD }),
     ).rejects.toMatchObject({ code: 'refused' });
@@ -325,8 +333,7 @@ describe('blocking rules in the helper', () => {
     const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
     await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
     prompts.length = 0;
-    const syncing = client.hold({ ...sync, selfPaths: [...sync.selfPaths, '/tmp'] });
-    await new Promise((r) => setTimeout(r, 20));
+    const { result: syncing } = await holdNow({ ...sync, selfPaths: [...sync.selfPaths, '/tmp'] });
     client.dropHeld();
     await expect(syncing).rejects.toMatchObject({ code: 'refused' });
     await client.approveHeld();
