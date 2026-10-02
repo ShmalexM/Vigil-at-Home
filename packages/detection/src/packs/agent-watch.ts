@@ -53,15 +53,71 @@ const via = (names: string[]): Condition => ({
   ],
 });
 
-/** The command line matches any of these regexes. */
+/** The command line matches any of these regexes (case-sensitive). */
 const cmd = (...patterns: string[]): Condition => ({
   field: 'process.commandLine',
   op: 'regex',
   value: patterns,
 });
+/**
+ * The command line matches any of these regexes, ignoring case. macOS paths
+ * are case-insensitive (APFS), so `~/.AWS/Credentials` reads the same file as
+ * `~/.aws/credentials`; most checks fold case. Upload flags are the exception
+ * (see UPLOAD_RES) and stay on `cmd`.
+ */
+const cmdI = (...patterns: string[]): Condition => ({
+  field: 'process.commandLine',
+  op: 'regex',
+  value: patterns,
+  nocase: true,
+});
 
-/** Credential files named in a command: cloud keys, SSH private keys, token files. */
-export const SECRET_PATH_RE = String.raw`(\.aws/(credentials|config|sso/cache)|\.ssh/id_(rsa|ed25519|ecdsa|dsa)($|[\s"';|&)])|\.config/gcloud/|\.kube/config|\.netrc|\.npmrc|\.docker/config\.json|\.azure/)`;
+// ---------------------------------------------------------------- credentials
+/**
+ * The credential files, as a bare alternation, for reuse inside the scp/rsync
+ * checks below (no leading boundary or trailing terminator).
+ */
+const SECRET_BODY = String.raw`(\.aws/(credentials|config|sso/cache)|\.ssh/id_(rsa|ed25519|ecdsa|dsa)|\.kube/config|\.config/gcloud/|\.netrc|\.npmrc|\.docker/config\.json|\.azure/)`;
+
+/**
+ * Credential files named in a command: an SSH private key, a kube/netrc config,
+ * or a cloud-provider store. Matched case-insensitively (see cmdI). An SSH key
+ * does not count when the command is handing it to ssh/scp/sftp as the identity
+ * file (`-i`), or to `ssh-add`/`ssh-keygen`/`chmod`, or via `IdentityFile=`: the
+ * tool uses its own key, it is not being read out. A kube/netrc path does not
+ * count right after `--kubeconfig`/`KUBECONFIG=` or `--netrc-file`. `.npmrc`
+ * counts only under a home folder, so a project-local `.npmrc` is left alone.
+ */
+export const SECRET_PATH_SSH = String.raw`\.ssh/(?<!((^|[\s"'=/])(ssh|scp|sftp)(\s[^|;&]{0,64})?\s-i|(^|[\s"'=/])(ssh-add|ssh-keygen|chmod)\s[^|;&]{0,64}|IdentityFile=)\s?["']?[^\s"']{0,48}\.ssh/)id_(rsa|ed25519|ecdsa|dsa)($|[\s"';|&)])`;
+export const SECRET_PATH_KUBE = String.raw`(\.kube/(?<!(--kubeconfig[= ]|KUBECONFIG=)["']?[^\s"']{0,64}\.kube/)config|\.netrc(?<!--netrc-file[= ]["']?[^\s"']{0,64}\.netrc))`;
+export const SECRET_PATH_CLOUD = String.raw`(\.aws/(credentials|config|sso/cache)|\.config/gcloud/|\.docker/config\.json|\.azure/|(~|\$HOME|\$\{HOME\}|/Users/[^/\s"']+)/\.npmrc)`;
+/** The three credential-path checks, matched together (case-insensitive). */
+export const SECRET_PATH_RES = [SECRET_PATH_SSH, SECRET_PATH_KUBE, SECRET_PATH_CLOUD];
+/** Programs that print, copy or pack a file (agent-secret-command). */
+const SECRET_READERS = [
+  'cat',
+  'less',
+  'more',
+  'head',
+  'tail',
+  'cp',
+  'base64',
+  'xxd',
+  'strings',
+  'tar',
+  'zip',
+  'grep',
+];
+/**
+ * One of SECRET_READERS given a credential file in the same command, before the
+ * next `|`, `;` or `&`. Paired with SECRET_PATH_RES, which drops public keys and
+ * keys handed to ssh. A command that names the path for another reason
+ * (`docker run -v ~/.kube/config:...`, `test -d ~/.config/gcloud/`,
+ * `scp host:k3s.yaml ~/.kube/config`) is not reading it out.
+ */
+export const SECRET_READ_RE =
+  String.raw`(^|[\s;&|('"/\x60])(${SECRET_READERS.join('|')})\s[^|;&]*` + SECRET_BODY;
+
 /** The same files opened directly, plus the browser and keychain stores. */
 export const SECRET_FILE_GLOBS = [
   '~/.aws/credentials',
@@ -74,52 +130,100 @@ export const SECRET_FILE_GLOBS = [
   '~/.azure/**',
   ...CREDENTIAL_STORE_GLOBS,
 ];
-/** curl and friends sending data: a form, an upload, a request body. */
-export const UPLOAD_RE = String.raw`(\s-[FT]\s?|\s--form\s|\s--upload-file\s|\s--data(-binary|-raw|-urlencode)?\s|\s-d\s)`;
-/** Output piped into a network tool, or copied to another host. */
-export const NET_SINK_RE = String.raw`(\|\s*(curl|wget|nc|ncat|socat)\b|\b(scp|rsync)\s[^|;&]*:)`;
-/** Paste sites, file drops and request catchers. */
-export const PASTE_HOST_RE = String.raw`(pastebin\.com|paste\.ee|hastebin\.|0x0\.st|transfer\.sh|termbin\.com|ix\.io|dpaste\.|file\.io|webhook\.site|requestbin\.|pipedream\.net|ngrok(-free)?\.(io|app)|bashupload\.com|temp\.sh)`;
+
+// --------------------------------------------------------------- exfil sinks
 /**
- * Every environment variable piped somewhere. On an exec the command follows
- * `zsh -c ` or a quote, so whitespace and quotes count as a start too.
+ * curl/wget/nscurl sending data out: a form, an upload or a request body.
+ * Matched case-SENSITIVELY, because the flags are case-specific: `-d`/`-F`/`-T`
+ * and `--data`/`--form`/`--upload-file`/`--json` send a body, while `-f`
+ * (fail fast) does not. Folding case would read the `f` in `curl -fsSL` as a
+ * form upload.
  */
-export const ENV_DUMP_RE = String.raw`(^|[\s;&|('"/])(env|printenv)\s*\|`;
+export const UPLOAD_CURL = String.raw`\bcurl\b[^|;&\n]{0,256}\s(-[a-zA-Z]*[dFT]|--(data(-[a-z]+)?|form(-string)?|upload-file|json)\b)`;
+export const UPLOAD_WGET = String.raw`\b(wget|nscurl)\b[^|;&\n]{0,256}\s--(post|body)-(file|data)\b`;
+export const UPLOAD_RES = [UPLOAD_CURL, UPLOAD_WGET];
+/** Output piped straight into a network tool. */
+export const PIPE_SINK_RE = String.raw`\|\s*(curl|wget|nc|ncat|socat)\b`;
 /**
- * Loading a launch item, installing a crontab (`crontab -` reads it from a
- * pipe), or writing into a LaunchAgents folder. Verbs are whole words, so a
- * home folder like /Users/mvalle does not count as `mv`.
+ * A credential file copied to another host with scp/rsync (a `host:` target).
+ * The leading `(?=...:)` asserts a `host:` is coming before any separator, so a
+ * command with no remote target fails fast instead of backtracking. The key is
+ * left alone when it is the identity file passed with `-i`, or an rsync
+ * `--exclude`/`--filter` pattern or `-e "ssh -i ..."` option (`--include` is a
+ * transfer, so it still counts).
  */
-export const PERSIST_RE = String.raw`(launchctl\s+(load|bootstrap|submit|enable)\b|crontab\s+(-e|-r|-(\s|$)|[^-\s])|(\b(cp|mv|tee|ln)\b|>)\s*[^|;&]*Library/Launch(Agents|Daemons)/)`;
+export const SCP_FROM =
+  String.raw`\bscp\s(?=[^|;&]*:)[^|;&]*?(?<!\s-i\s{0,4}\S{0,40})` +
+  SECRET_BODY +
+  String.raw`[^|;&]*:`;
+export const RSYNC_FROM =
+  String.raw`\brsync\s(?=[^;&]*:)[^|;&]*?(?<!-e\s?["']ssh\s[^"']{0,140}|--(exclude|filter)[=\s]\s?\S{0,40})` +
+  SECRET_BODY +
+  String.raw`[^|;&]*:`;
+export const COPY_OUT_RES = [SCP_FROM, RSYNC_FROM];
 /**
- * Stopping or editing Vigil or Santa, or switching off macOS protections.
- * Case-insensitive. Paths may escape their spaces (`Vigil\ at\ Home`).
+ * Every environment variable piped to the network. The gap from `env |` to the
+ * tool cannot cross `;`, `&` or another `|`, so two separate commands like
+ * `env | grep proxy; curl host` do not count as one exfil.
+ */
+export const ENV_DUMP_RE = String.raw`(^|[\s;&|('"])(/usr/bin/|/bin/)?(env|printenv)\s*\|(?!\|)([^;&|\n]|\|(?!\|)){0,256}?(?<=[ \t|(/])(curl|wget|nc|ncat|socat)(?=[\s"')]|$)`;
+/**
+ * Paste sites, file drops and request catchers, matched only as the host part
+ * of a URL: after `//`, an optional `name.`/`user@` run, then the host, then a
+ * non-host-character. So `api.mix.io` is not read as `ix.io`. ngrok is left out
+ * (too many ordinary tunnels). Case-insensitive.
+ */
+export const PASTE_HOST_RE = String.raw`//([^/\s"']*[.@])?(pastebin\.com|paste\.ee|hastebin\.\w+|0x0\.st|transfer\.sh|termbin\.com|ix\.io|dpaste\.\w+|file\.io|webhook\.site|requestbin\.\w+|pipedream\.net|bashupload\.com|temp\.sh)(?![\w.-])`;
+
+// ---------------------------------------------------------------- persistence
+/** Loading a launch item that runs the payload at login. */
+export const PERSIST_LAUNCHCTL = String.raw`launchctl\s+(load|bootstrap|submit|enable)\b`;
+/**
+ * Installing a crontab (`crontab -e`/`-r`, or `crontab -` reading from a pipe,
+ * or `crontab file`). `crontab` must be at a command position (start, after a
+ * separator, or right after `eval`/`sudo`/`sh -c`), so the word in prose like
+ * `echo "crontab entry"` does not count. `crontab -l` (list) is left alone.
+ */
+export const PERSIST_CRONTAB = String.raw`(^|[\n;&|(\x60]|(eval|sudo|sh\s+-\w*c)\s+['"]?)\s*crontab\s+(-u\s+\S+\s+)?(-[er]\b|-(\s|$|['"])|[^-\s'"])`;
+/**
+ * Writing into a LaunchAgents/LaunchDaemons folder, whether by copy/move/link,
+ * `defaults write`, `plutil`, or a redirect. Verbs are whole words, so a home
+ * folder like `/Users/mvalle` is not read as `mv`. curl/wget count too, for a
+ * plist downloaded straight into the folder.
+ */
+export const PERSIST_WRITE = String.raw`((^|[\s;&|(/])(cp|mv|tee|ln|ditto|rsync|install|curl|wget)\b|\bdefaults\s+write\b|\bplutil\s+-(create|insert|replace|convert)\b|>\|?)(?:(?!Library/Launch|\b(cp|mv|ln|tee|ditto|rsync|install|curl|wget)\b)[^|;&>])*Library/Launch(Agents|Daemons)/`;
+export const PERSIST_RES = [PERSIST_LAUNCHCTL, PERSIST_CRONTAB, PERSIST_WRITE];
+
+// --------------------------------------------------------------------- tamper
+/**
+ * Stopping or editing Vigil or Santa, or switching off a macOS protection.
+ * Matched case-insensitively; paths may escape their spaces (`Vigil\ at\ Home`).
+ * The tempered gaps (`(?:(?!verb)[^|;&>])*`) stay linear: they stop at a
+ * command separator and at the next verb, so one pipeline matches at most once.
  */
 export const TAMPER_RES_NOCASE = [
-  String.raw`(^|[\s;&|(])(kill|killall|pkill)\s[^|;&]*(vigil|santa)`,
+  // kill/killall/pkill of Vigil or Santa, or a pipeline that xargs-kills it.
+  String.raw`((^|[\s;&|('"/])(kill|killall|pkill)\s(?:(?![\s('"/](kill|killall|pkill)\s)[^|;&])*(vigil|santa)|(vigil|santa)[^;&]{0,200}\|\s*xargs\b[^|;&]{0,40}\bkill)`,
+  // launchctl unloading/booting out Vigil or Santa.
   String.raw`launchctl\s+(bootout|unload|remove|disable|kill)\b[^|;&]*(vigil|santa)`,
+  // santactl adding an allow/remove rule.
   String.raw`santactl\s+rule\b[^|;&]*--(allow|remove|whitelist)`,
+  // spctl turning Gatekeeper off (or adding a blanket allowance).
   String.raw`spctl\s+--(master-disable|global-disable|disable|add)\b`,
-  String.raw`(tccutil\s+reset|csrutil\s+disable)\b`,
-  String.raw`(\b(rm|mv|cp|sqlite3|truncate|chmod|chown|tee)\b|>)\s*[^|;&]*(Vigil\\? at\\? Home|vigil-helper|com\.vigilathome|/var/db/santa)`,
+  // tccutil resetting privacy — but a per-app reset of some other app is fine;
+  // resetting All, or an app whose id names vigil/santa, is not.
+  String.raw`tccutil\s+reset\b(?!\s+["']?\w+["']?\s+["']?(?![\w.-]*(vigil|santa))[\w-]+\.[\w.-]+["']?(\s|$|[;&|)]))`,
+  // csrutil disabling System Integrity Protection.
+  String.raw`csrutil\s+disable\b`,
+  // editing or deleting Vigil's or Santa's own files.
+  String.raw`(\b(rm|mv|cp|sqlite3|truncate|chmod|chown|tee)\b|>)(?:(?!Vigil|vigil-helper|com\.vigilathome|/var/db/santa|Santa\.app|\b(rm|mv|cp|sqlite3|truncate|chmod|chown|tee)\b)[^|;&>])*(Vigil\\? at\\? Home|vigil-helper|com\.vigilathome|/var/db/santa|Santa\.app)`,
+  // turning the firewall off, or unloading Santa's system extension.
+  String.raw`(socketfilterfw\b[^|;&]{0,64}--setglobalstate\s+off\b|--unload-system-extension\b|systemextensionsctl\s+uninstall\b[^|;&]{0,128}(santa|vigil))`,
+  // telling Vigil or Santa to quit over AppleScript.
+  String.raw`osascript\b[^|;&]{0,160}(\bquit\s+(app|application)\b[^|;&]{0,64}(vigil|santa)|(vigil|santa)[^|;&]{0,32}\bto\s+quit\b)`,
 ];
-/** Case-sensitive: `pfctl -d` turns the firewall off and `-F` flushes it; `pfctl -f` loads rules and is fine. */
-export const TAMPER_RE_CASED = String.raw`pfctl\s+-(d\b|F)`;
-/** `security` printing a saved password (`-w`) or exporting keychain items. */
-export const KEYCHAIN_SECRET_RE = String.raw`security\s+(find-(generic|internet)-password\b[^|;&]*\s-w\b|export\b)`;
-/** Agent settings files, where hooks, permissions and MCP servers are configured. */
-export const AGENT_CONFIG_RE = String.raw`(\.claude/settings[A-Za-z.]*\.json|\.codex/config\.toml|\.mcp\.json|\.cursor/(hooks|mcp)\.json|claude_desktop_config\.json)`;
-/** Ways a command changes a file. */
-export const WRITE_VERB_RE = String.raw`(sed\s+-i|\btee\b|\bmv\b|\bcp\b|\brm\b|\bln\b|>\s*\S*\.(json|toml)|python3?\s+-c|node\s+-e|perl\s+-[a-z]*i)`;
-export const AGENT_CONFIG_GLOBS = [
-  '~/.claude/settings*.json',
-  '**/.claude/settings*.json',
-  '**/.mcp.json',
-  '~/.codex/config.toml',
-  '~/.cursor/**',
-  '**/.cursor/hooks.json',
-  '~/Library/Application Support/Claude/claude_desktop_config.json',
-];
+/** Case-sensitive: `pfctl -d` turns the firewall off and `-F a`/`-F r`/`-F T` flush rules; `-f` loads rules and `-F states` only clears connections, both fine. */
+export const TAMPER_RE_CASED = String.raw`pfctl\s+-(d\b|F\s*["']?[arT])`;
 
 /** `field` tampers with Vigil, Santa or a macOS protection. */
 export const tamper = (field: string): Condition => ({
@@ -128,6 +232,43 @@ export const tamper = (field: string): Condition => ({
     { field, op: 'regex', value: [TAMPER_RE_CASED] },
   ],
 });
+
+// ------------------------------------------------------------- agent settings
+/** `security` printing a saved password (`-g`/`-w`) or exporting the keychain. */
+export const KEYCHAIN_SECRET_RE = String.raw`security\s+(find-(generic|internet)-password\b[^|;&]*\s-[gw]|export\b|dump-keychain\b)`;
+/** Agent settings files, where hooks, permissions and MCP servers are configured. */
+export const AGENT_CONFIG_RE = String.raw`(\.claude/settings[A-Za-z.]*\.json|\.claude\.json|\.codex/config\.toml|\.mcp\.json|\.cursor/(hooks|mcp)\.json|claude_desktop_config\.json)`;
+/** A write verb (or redirect) landing on an agent settings file. Case-insensitive. */
+export const CONFIG_WRITE_RE =
+  String.raw`((^|[\s;&|(/])(tee|mv|cp|ln|rm|install|truncate|sponge)\s[^|;&]{0,200}?|>\|?\s*[^\s|;&<>]*)` +
+  AGENT_CONFIG_RE;
+/** An in-place edit (`sed -i`, `perl -i`) of an agent settings file. */
+export const CONFIG_INPLACE_RE =
+  String.raw`(sed\s+(-[a-zA-Z]*i|--in-place)|perl\s+-[a-zA-Z]*i)[^\n]{0,200}?` + AGENT_CONFIG_RE;
+/** A script opening a file for writing; paired with AGENT_CONFIG_RE so it only counts on a settings file. */
+export const SCRIPT_WRITE_RE = String.raw`(python3?|node|ruby|bun|deno)\s[^\n]{0,256}?(open\([^)]*['"][wax]|write_text|writeFile|fs\.write|File\.write)`;
+/** `claude|codex|gemini mcp add...`, which registers a new MCP server (a new tool) without touching a file. */
+export const MCP_ADD_RE = String.raw`\b(claude|codex|gemini)\s+mcp\s+add(-json|-from-claude-desktop)?\b`;
+export const AGENT_CONFIG_GLOBS = [
+  '~/.claude/settings*.json',
+  '**/.claude/settings*.json',
+  '~/.claude.json',
+  '**/.mcp.json',
+  '~/.codex/config.toml',
+  '~/.cursor/**',
+  '**/.cursor/hooks.json',
+  '**/.cursor/mcp.json',
+  '~/Library/Application Support/Claude/claude_desktop_config.json',
+];
+
+// ------------------------------------------------------------ run downloaded
+/**
+ * Downloading code and running it straight away: curl/wget piped into a shell
+ * or interpreter (an optional `sudo` and an absolute path allowed), or fed in
+ * through process substitution. Case-insensitive. Used by the pre-flight pack.
+ */
+export const PREFLIGHT_PIPE_RE = String.raw`(curl|wget)\s[^|]*\|\s*(sudo(\s+-\S+)?(\s+-\S+)?\s+)?(\S*/)?((ba|z|da|k)?sh\b|(python[23]?|perl|ruby|node)\s*(-(\s|$)|$|[;&|)]))`;
+export const PREFLIGHT_PROCSUB_RE = String.raw`(\b((ba|z|da|k)?sh|source|python[23]?|perl|ruby|node)|(^|[;&|(]\s*)\.)\s+(-\S+\s+)?<\(\s*(curl|wget)\b`;
 
 /** One alert per agent session and command. */
 const perCommand = (windowSec: number) => ({
@@ -197,21 +338,10 @@ export const agentWatchRules: DetectionRuleInput[] = [
       all: [
         AGENT,
         CHILD,
-        via([
-          'cat',
-          'less',
-          'more',
-          'head',
-          'tail',
-          'cp',
-          'base64',
-          'xxd',
-          'strings',
-          'tar',
-          'zip',
-          'grep',
-        ]),
-        cmd(SECRET_PATH_RE),
+        via(SECRET_READERS),
+        // A shell passes via() whatever it runs, so the reader must be in the command too.
+        cmdI(SECRET_READ_RE),
+        cmdI(...SECRET_PATH_RES),
       ],
     },
     reasons: [
@@ -234,11 +364,12 @@ export const agentWatchRules: DetectionRuleInput[] = [
       all: [
         AGENT,
         CHILD,
-        via(['curl', 'wget', 'nc', 'ncat', 'scp', 'rsync', 'nscurl']),
+        via(['curl', 'wget', 'nc', 'ncat', 'socat', 'scp', 'rsync', 'nscurl']),
         {
           any: [
-            { all: [cmd(SECRET_PATH_RE), cmd(UPLOAD_RE, NET_SINK_RE)] },
-            { all: [cmd(ENV_DUMP_RE), cmd(String.raw`\b(curl|wget|nc)\b`)] },
+            { all: [cmdI(...SECRET_PATH_RES), { any: [cmd(...UPLOAD_RES), cmdI(PIPE_SINK_RE)] }] },
+            cmdI(...COPY_OUT_RES),
+            cmdI(ENV_DUMP_RE),
           ],
         },
       ],
@@ -264,9 +395,9 @@ export const agentWatchRules: DetectionRuleInput[] = [
       all: [
         AGENT,
         CHILD,
-        via(['curl', 'wget', 'nc']),
-        cmd(UPLOAD_RE),
-        { field: 'process.commandLine', op: 'regex', value: [PASTE_HOST_RE], nocase: true },
+        via(['curl', 'wget', 'nc', 'nscurl']),
+        cmd(...UPLOAD_RES),
+        cmdI(PASTE_HOST_RE),
       ],
     },
     response: [SUSPEND],
@@ -287,7 +418,26 @@ export const agentWatchRules: DetectionRuleInput[] = [
     fidelity: 'medium',
     eventKinds: ['process.exec'],
     condition: {
-      all: [AGENT, CHILD, via(['launchctl', 'crontab', 'cp', 'mv', 'tee', 'ln']), cmd(PERSIST_RE)],
+      all: [
+        AGENT,
+        CHILD,
+        via([
+          'launchctl',
+          'crontab',
+          'cp',
+          'mv',
+          'tee',
+          'ln',
+          'ditto',
+          'rsync',
+          'install',
+          'curl',
+          'wget',
+          'defaults',
+          'plutil',
+        ]),
+        cmdI(...PERSIST_RES),
+      ],
     },
     reasons: [
       '{{process.agent.id}} ran: {{process.commandLine}}',
@@ -318,12 +468,23 @@ export const agentWatchRules: DetectionRuleInput[] = [
     id: 'agent-hook-config-edit',
     name: "AI agent changing an agent's settings",
     description:
-      'A command an AI agent ran edits Claude Code, Codex, Cursor or MCP settings, where hooks, permissions and MCP servers are configured.',
+      'A command an AI agent ran edits Claude Code, Codex, Cursor or MCP settings, or registers a new MCP server (claude mcp add), where hooks, permissions and MCP servers are configured.',
     mode: 'alert',
     severity: 'medium',
     fidelity: 'medium',
     eventKinds: ['process.exec'],
-    condition: { all: [AGENT, CHILD, cmd(AGENT_CONFIG_RE), cmd(WRITE_VERB_RE)] },
+    condition: {
+      all: [
+        AGENT,
+        CHILD,
+        {
+          any: [
+            cmdI(CONFIG_WRITE_RE, CONFIG_INPLACE_RE, MCP_ADD_RE),
+            { all: [cmd(SCRIPT_WRITE_RE), cmd(AGENT_CONFIG_RE)] },
+          ],
+        },
+      ],
+    },
     reasons: [
       '{{process.agent.id}} ran: {{process.commandLine}}',
       "These settings can switch off Vigil's pre-flight check or give the agent new tools.",

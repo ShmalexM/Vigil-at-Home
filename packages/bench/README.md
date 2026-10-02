@@ -35,8 +35,10 @@ events the rules let through ─► local model or Jev ─► flagged? (vs. grou
 - `src/workday.ts`: a seeded normal-use workload, including legitimate
   activity that looks like an attack (install one-liners, `xattr -cr`, test
   binaries in /tmp). The developer also runs Claude Code sessions (commands,
-  edits and the pre-flight requests its hook sends). The daily rates are
-  estimates and are listed in the file. `storedBytesPerEvent` is what the
+  edits and the pre-flight requests its hook sends), about 160 tool calls a
+  day; one command in fourteen is a look-alike (`ssh -i`, an `scp -i` deploy,
+  `env | grep proxy; curl ...`), so the agent rules' false-alert guard can
+  fail. The daily rates are estimates and are listed in the file. `storedBytesPerEvent` is what the
   event log keeps per event, with and without agent ancestry.
 - `src/preflight.ts`: tool calls as Claude Code's hook sends them, answered
   the way the app answers (`engine.check`): attacks must be denied or asked

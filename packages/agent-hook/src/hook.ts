@@ -6,13 +6,16 @@
 //   hello      tells Vigil the hook is set up; prints nothing, ever
 //
 // It never prints allow (in Claude Code, allow skips the user's own
-// permission prompt) and reads no files: everything it knows comes from its
-// stdin and the socket. Of what a tool would write it sends only the size
+// permission prompt) and reads no file contents: everything it knows comes
+// from its stdin and the socket. It follows the links in the paths it sends
+// (realpath reads folder entries and link targets only), so rules see the
+// file a tool would touch. Of what a tool would write it sends only the size
 // and SHA-256, never the text.
 
 import { createHash } from 'node:crypto';
+import { realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { PreflightReply, PreflightRequest, type HookHello } from '@vigil/core';
 import { z } from 'zod';
@@ -31,6 +34,10 @@ export const LIMITS = {
   commandChars: 4096,
   urlChars: 2048,
   hookSessionChars: 128,
+  /** Following links in the paths; past this the paths go as written. */
+  linksMs: 250,
+  /** The longest path Vigil takes. */
+  pathChars: 1024,
 } as const;
 
 /** What the hook needs from the outside world, so tests can stand in for it. */
@@ -38,6 +45,8 @@ export interface HookIO {
   stdin: AsyncIterable<Buffer>;
   write(s: string): void;
   connect(path: string): Promise<Duplex>;
+  /** Follows the links in a path that exists. Defaults to fs.promises.realpath. */
+  realpath?(path: string): Promise<string>;
 }
 
 export type OnUnavailable = 'ask' | 'defer';
@@ -56,6 +65,8 @@ const HookInput = z.object({
       command: text,
       file_path: text,
       notebook_path: text,
+      /** Grep's file or folder. Other tools' `path` fields are their own business. */
+      path: text,
       url: text,
       content: text,
       new_string: text,
@@ -108,7 +119,7 @@ export function toRequest(input: unknown, ppid: number): PreflightRequest | unde
     req.command = ti.command.slice(0, LIMITS.commandChars);
     req.commandBytes = Buffer.byteLength(ti.command);
   }
-  const file = ti?.file_path || ti?.notebook_path;
+  const file = ti?.file_path || ti?.notebook_path || (tool_name === 'Grep' ? ti?.path : undefined);
   if (file) req.filePath = dir ? resolve(dir, expandHome(file)) : resolve(expandHome(file));
   if (ti?.url !== undefined) req.url = ti.url.slice(0, LIMITS.urlChars);
   const content =
@@ -124,7 +135,62 @@ export function toRequest(input: unknown, ppid: number): PreflightRequest | unde
   return ok.success ? ok.data : undefined;
 }
 
+/**
+ * `path` with its links followed: a link the agent made to a secret, or to
+ * Vigil's own files, is checked as what it points to. Only the part that
+ * exists is followed; a missing tail (a file about to be written) is kept as
+ * written. On any error, or a result too long to send, `path` as it was.
+ */
+export async function followLinks(
+  path: string,
+  real: (p: string) => Promise<string> = realpath,
+): Promise<string> {
+  const tail: string[] = [];
+  for (let head = path; ;) {
+    try {
+      const out = join(await real(head), ...tail);
+      return out.length <= LIMITS.pathChars ? out : path;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      const up = dirname(head);
+      if ((code !== 'ENOENT' && code !== 'ENOTDIR') || up === head) return path;
+      tail.unshift(basename(head));
+      head = up;
+    }
+  }
+}
+
+/**
+ * The request with the links in its file and folder followed the same way,
+ * so `toolOutsideCwd` still compares like with like. Never slower than
+ * `ms`: past that, the paths go as the agent wrote them.
+ */
+async function withLinksFollowed(
+  req: PreflightRequest,
+  io: HookIO,
+  ms: number,
+): Promise<PreflightRequest> {
+  const real = io.realpath ?? realpath;
+  try {
+    const [filePath, cwd] = await within(
+      Promise.all([
+        req.filePath === undefined ? undefined : followLinks(req.filePath, real),
+        req.cwd === undefined ? undefined : followLinks(req.cwd, real),
+      ]),
+      ms,
+    );
+    return {
+      ...req,
+      ...(filePath !== undefined ? { filePath } : {}),
+      ...(cwd !== undefined ? { cwd } : {}),
+    };
+  } catch {
+    return req;
+  }
+}
+
 const UNAVAILABLE = "Vigil couldn't check this step";
+const UNCHECKED = "Vigil couldn't read this step, so it asks first";
 const BUSY = "Vigil is busy and couldn't check this step";
 
 function answer(decision: 'deny' | 'ask', reason: string): string {
@@ -140,9 +206,16 @@ function answer(decision: 'deny' | 'ask', reason: string): string {
 /**
  * What the hook prints: Claude Code's deny or ask answer, or '' to leave the
  * step to Claude Code's own permissions. There is no way to print allow.
+ * `unavailable` is Vigil missing or slow, which the user's setting decides;
+ * `unchecked` is input the hook couldn't read or pass on (too big, garbled,
+ * a path too long). The agent chooses its input, so that always asks.
  */
-export function render(r: PreflightReply | 'unavailable', onUnavailable: OnUnavailable): string {
+export function render(
+  r: PreflightReply | 'unavailable' | 'unchecked',
+  onUnavailable: OnUnavailable,
+): string {
   if (r === 'unavailable') return onUnavailable === 'defer' ? '' : answer('ask', UNAVAILABLE);
+  if (r === 'unchecked') return answer('ask', UNCHECKED);
   switch (r.decision) {
     case 'deny':
       return answer('deny', r.reason ?? 'Stopped by a Vigil rule');
@@ -182,7 +255,7 @@ export function within<T>(p: Promise<T>, ms: number, late?: (v: T) => void): Pro
   });
 }
 
-/** All of stdin, or undefined when it is over the limit. */
+/** All of stdin, or undefined when it is over the limit (the hook then asks). */
 async function readInput(stdin: AsyncIterable<Buffer>): Promise<string | undefined> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -237,19 +310,23 @@ async function exchange(
 /**
  * PreToolUse: ask Vigil about the tool call on stdin and print the answer.
  * When Vigil is missing, slow or answers anything but a valid reply, the
- * answer is ask, or nothing with `onUnavailable: 'defer'`. Never throws.
+ * answer is ask, or nothing with `onUnavailable: 'defer'`. Input the hook
+ * can't read or pass on always asks. Never throws.
  */
 export async function runPreflight(
   io: HookIO,
   o: { socket: string; onUnavailable: OnUnavailable; ppid: number },
 ): Promise<0> {
   const until = Date.now() + LIMITS.totalMs;
-  let reply: PreflightReply | 'unavailable' = 'unavailable';
+  let reply: PreflightReply | 'unavailable' | 'unchecked' = 'unavailable';
   try {
     const input = await within(readInput(io.stdin), LIMITS.totalMs);
     const req = input === undefined ? undefined : toRequest(parseJson(input), o.ppid);
-    if (req) {
-      const parsed = PreflightReply.safeParse(await exchange(io, o.socket, req, until));
+    if (!req) {
+      reply = 'unchecked';
+    } else {
+      const linked = await withLinksFollowed(req, io, Math.min(LIMITS.linksMs, until - Date.now()));
+      const parsed = PreflightReply.safeParse(await exchange(io, o.socket, linked, until));
       if (parsed.success) reply = parsed.data;
     }
   } catch {

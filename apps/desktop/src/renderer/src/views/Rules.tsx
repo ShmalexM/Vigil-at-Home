@@ -8,15 +8,9 @@ import { NewRulePanel, RuleEditorPanel } from '../components/RuleEditor';
 import { RuleSuggestions } from '../components/RuleSuggestions';
 import { useToast } from '../components/Toasts';
 import { Button, Card, Chip, Segmented, SeverityMark } from '../components/ui';
+import { confirmsFirst, isToolRule, modeLabel, modesFor } from '../rule-modes';
 import '../styles/rules.css';
 import { PageHead } from './AppShell';
-
-const MODES: { value: RuleMode; label: string }[] = [
-  { value: 'disabled', label: 'Off' },
-  { value: 'shadow', label: 'Shadow' },
-  { value: 'alert', label: 'Alert' },
-  { value: 'block', label: 'Block' },
-];
 
 export function RulesView({
   selected,
@@ -94,15 +88,20 @@ function RuleRow({
   const { rule, matches } = view;
   const toast = useToast();
   const [confirmBlock, setConfirmBlock] = useState(false);
+  // A tool rule answers Claude Code's hook: its modes are Record, Ask and Deny.
+  const tool = isToolRule(rule);
 
   const set = async (mode: RuleMode) => {
-    if (mode === 'block' && rule.mode !== 'block') {
-      setConfirmBlock(true);
-      return;
-    }
+    // Picking anything else dismisses a Block confirmation still showing.
+    const confirm = confirmsFirst(rule.mode, mode);
+    setConfirmBlock(confirm);
+    if (confirm) return;
     const before = rule.mode;
     await vigil.setRuleMode(rule.id, mode);
-    toast({ text: `${rule.name}: ${mode}`, undo: () => void vigil.setRuleMode(rule.id, before) });
+    toast({
+      text: `${rule.name}: ${modeLabel(rule, mode)}`,
+      undo: () => void vigil.setRuleMode(rule.id, before),
+    });
   };
 
   return (
@@ -130,7 +129,7 @@ function RuleRow({
         <Segmented
           label={`Mode for ${rule.name}`}
           value={rule.mode}
-          options={MODES}
+          options={modesFor(rule)}
           onChange={(m) => void set(m)}
         />
         <Button
@@ -147,19 +146,26 @@ function RuleRow({
       {rule.provenance && (
         <span className="t-small">Why the AI drafted it: {rule.provenance.rationale}</span>
       )}
-      {confirmBlock && (
+      {confirmBlock && rule.mode !== 'block' && (
         <div className="attn poor">
-          <span className="grow">
-            In Block mode this rule acts on its own: {rule.response.length || 'no'} response action
-            {rule.response.length === 1 ? '' : 's'} run the moment it matches.
-          </span>
+          {tool ? (
+            <span className="grow">
+              In Deny mode Claude Code stops every step this rule matches, without asking you.
+            </span>
+          ) : (
+            <span className="grow">
+              In Block mode this rule acts on its own: {rule.response.length || 'no'} response
+              action
+              {rule.response.length === 1 ? '' : 's'} run the moment it matches.
+            </span>
+          )}
           <button type="button" className="btn sm ghost" onClick={() => setConfirmBlock(false)}>
             Cancel
           </button>
           <HoldButton
             size="sm"
-            label="Hold to turn on blocking"
-            doneLabel="Blocking"
+            label={tool ? 'Hold to turn on Deny' : 'Hold to turn on blocking'}
+            doneLabel={tool ? 'Denying' : 'Blocking'}
             onConfirm={async () => {
               await vigil.setRuleMode(rule.id, 'block');
               setConfirmBlock(false);

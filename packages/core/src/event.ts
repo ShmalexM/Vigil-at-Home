@@ -136,8 +136,15 @@ export const AgentToolRequestEvent = z.object({
   command: z.string().max(4096).optional(),
   /** Size of the full command; it may be longer than the part in `command`. */
   commandBytes: z.number().int().nonnegative().optional(),
-  /** Absolute; the hook has already resolved `..` against `cwd`. */
+  /** Set by Vigil when `command` is only the start of the command (the hook keeps 4,096 characters). */
+  commandClipped: z.literal(true).optional(),
+  /**
+   * Absolute; the hook has already resolved `..` against `cwd` and followed
+   * links, and Vigil writes it the way rules do (`/var`, not `/private/var`).
+   */
   filePath: z.string().max(1024).optional(),
+  /** The path as the hook sent it, when that differs from `filePath`. For display only. */
+  filePathGiven: z.string().max(1024).optional(),
   url: z.string().max(2048).optional(),
   /** For mcp__<server>__<tool> tools. */
   mcpServer: z.string().max(128).optional(),

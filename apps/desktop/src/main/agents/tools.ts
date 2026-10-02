@@ -42,8 +42,11 @@ export const MAX_RESULT_BYTES = 64 * 1024;
 const DEFAULT_ROWS = 20;
 /** search_events looks back this far at most. */
 export const EVENT_DAYS = 7;
-/** Text is looked for in at most this many of the newest events. */
-const SCAN_ROWS = 50_000;
+/**
+ * Text is looked for in at most this many of the newest events: about 10 ms
+ * of the main thread per search, which the socket's tools budget then limits.
+ */
+export const SCAN_ROWS = 10_000;
 /** Longest string in a result (command lines, summaries). */
 const TEXT_CHARS = 1000;
 /** Latest sessions shown per agent by list_agents. */

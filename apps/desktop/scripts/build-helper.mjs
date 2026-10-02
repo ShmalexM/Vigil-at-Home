@@ -24,6 +24,7 @@ import {
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { BUNDLE_OPTIONS } from './bundle-options.mjs';
 
 /** The Node.js release the helper runs on. Bump with the repo's Node version. */
 export const HELPER_NODE_VERSION = 'v22.22.2';
@@ -42,18 +43,7 @@ async function bundle() {
   const common = join(out, 'common');
   rmSync(common, { recursive: true, force: true });
   mkdirSync(common, { recursive: true });
-  const options = {
-    bundle: true,
-    platform: 'node',
-    format: 'esm',
-    target: 'node22',
-    // Bundled CommonJS dependencies still call require().
-    banner: {
-      js: "import { createRequire as __vigilRequire } from 'node:module'; const require = __vigilRequire(import.meta.url);",
-    },
-    legalComments: 'inline',
-    logLevel: 'warning',
-  };
+  const options = BUNDLE_OPTIONS;
   await build({
     ...options,
     entryPoints: [join(repo, 'packages/helper/src/cli.ts')],

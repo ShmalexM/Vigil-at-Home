@@ -225,6 +225,7 @@ export const calls = {
   downloadUpdate: z.tuple([]),
   // Agents (main/agents).
   listAgents: z.tuple([]),
+  listAgentNames: z.tuple([]),
   getAgent: z.tuple([AgentId]),
   saveAgent: z.tuple([AgentIdentityInput]),
   setAgentWatch: z.tuple([AgentId, z.boolean()]),
@@ -516,6 +517,8 @@ export interface CallResults {
   dismissUpdate: void;
   downloadUpdate: void;
   listAgents: AgentView[];
+  /** The registry only, without listAgents' stats. */
+  listAgentNames: Pick<AgentView, 'id' | 'name' | 'status'>[];
   getAgent: AgentDetail | null;
   saveAgent: SaveAgentResult;
   setAgentWatch: void;
@@ -551,6 +554,12 @@ export interface Pushes {
   theme: [ThemePref];
   /** New events were stored. Sent at most once a second, with how many arrived. */
   events: [number];
+  /**
+   * Agent activity was recorded: a pre-flight request, a session, a hook
+   * check-in or a tools call. Sent at most every 2 seconds, for the views
+   * that show those; `changed` covers everything else.
+   */
+  agents: [];
 }
 
 export type VigilApi = {

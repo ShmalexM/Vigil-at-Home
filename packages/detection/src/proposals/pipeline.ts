@@ -1,6 +1,6 @@
 import { newId, type RuleMode } from '@vigil/core';
 import { z } from 'zod';
-import { conditionUsesAgentFields } from '../agents/fields.js';
+import { conditionUsesAgentFields, exclusionHidesAgent } from '../agents/fields.js';
 import { compileRule, type DetectionEngine } from '../engine.js';
 import { USER_BLOCKED_HASHES } from '../feedback.js';
 import { assertUserOrigin, type UserOrigin } from '../origin.js';
@@ -8,7 +8,12 @@ import { lintRule, type LintResult } from '../rules/lint.js';
 import type { EventHistory } from '../state/stores.js';
 import { Condition, DetectionRule } from '../types.js';
 import { proveChange, type ImpactReport } from './prover.js';
-import { replayRule, type ReplayReport } from './replay.js';
+import {
+  PARENT_REPLAY_NOTE,
+  replayMissesParents,
+  replayRule,
+  type ReplayReport,
+} from './replay.js';
 
 export type ProposalStatus =
   'rejected_by_checks' | 'awaiting_review' | 'approved' | 'rejected' | 'withdrawn';
@@ -127,14 +132,21 @@ export interface PipelineOptions {
 
 /** Rules about watched agents and their tool requests. Only the user tunes or retires them. */
 const USER_TUNED_TAGS = ['agent-watch', 'agent-preflight'];
-const USER_TUNED_ONLY = 'Agent rules are tuned only by you.';
-const AGENT_EXCLUSION =
-  'An exclusion may not use agent or tool-request fields (process.agent, process.ancestors, agent, tool, command, filePath, url and the like): that would hide what an agent does. Exclude a specific program by hash, or by team ID and signing ID.';
+export const USER_TUNED_ONLY = 'Agent rules are tuned only by you.';
+export const AGENT_EXCLUSION =
+  'An exclusion may not use agent or tool-request fields (process.agent, process.ancestors, process.parentName, process.parentPath, agent, tool, command, filePath, url and the like): that would hide what an agent does. Exclude a specific program by hash, or by team ID and signing ID.';
 
+/**
+ * Tagged agent-watch or agent-preflight, on agent.tool_request, or whose
+ * condition reads an agent field (a rule the user wrote about agents). An
+ * exclusion on an agent field only carves agents out of an ordinary rule, so
+ * it does not count.
+ */
 function userTunedOnly(rule: DetectionRule): boolean {
   return (
     rule.tags.some((t) => USER_TUNED_TAGS.includes(t)) ||
-    rule.eventKinds.includes('agent.tool_request')
+    rule.eventKinds.includes('agent.tool_request') ||
+    conditionUsesAgentFields(rule.condition)
   );
 }
 
@@ -250,7 +262,7 @@ export class RulePipeline {
     const parsed = DetectionRule.safeParse(draft);
     if (!parsed.success) return { ok: false, errors: formatZod(parsed.error), warnings: [] };
     const rule = parsed.data;
-    if (rule.exclusions.some(conditionUsesAgentFields))
+    if (rule.exclusions.some(exclusionHidesAgent))
       return { ok: false, errors: [AGENT_EXCLUSION], warnings: [] };
     if (this.engine.getRule(rule.id)) {
       return {
@@ -287,7 +299,7 @@ export class RulePipeline {
     if (!base) return { ok: false, errors: [`No rule called ${input.ruleId}.`], warnings: [] };
     if (userTunedOnly(base))
       return { ok: false, errors: [USER_TUNED_ONLY], warnings: [], final: true };
-    if (conditionUsesAgentFields(input.addExclusion))
+    if (exclusionHidesAgent(input.addExclusion))
       return { ok: false, errors: [AGENT_EXCLUSION], warnings: [] };
     const tuned: DetectionRule = {
       ...base,
@@ -407,6 +419,9 @@ export class RulePipeline {
       proposal.baseRuleVersion = p.base.version;
     }
 
+    // The noise gate below cannot see these rules' noise; say so rather than pass them silently.
+    if (p.kind === 'new_rule' && replayMissesParents(p.rule))
+      lint.warnings.push(PARENT_REPLAY_NOTE);
     if (lint.errors.length === 0) {
       const after = this.replay(p.rule);
       proposal.replay = after.report;

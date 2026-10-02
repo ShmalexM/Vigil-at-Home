@@ -31,22 +31,31 @@ export {
 export { macosCoreRules, CREDENTIAL_STORE_GLOBS } from './packs/macos-core.js';
 export {
   agentWatchRules,
-  SECRET_PATH_RE,
+  SECRET_PATH_RES,
   SECRET_FILE_GLOBS,
-  UPLOAD_RE,
-  NET_SINK_RE,
+  UPLOAD_RES,
+  PIPE_SINK_RE,
+  COPY_OUT_RES,
   PASTE_HOST_RE,
   ENV_DUMP_RE,
-  PERSIST_RE,
+  PERSIST_RES,
   TAMPER_RES_NOCASE,
   TAMPER_RE_CASED,
+  KEYCHAIN_SECRET_RE,
   AGENT_CONFIG_RE,
-  WRITE_VERB_RE,
+  CONFIG_WRITE_RE,
+  CONFIG_INPLACE_RE,
+  SCRIPT_WRITE_RE,
+  MCP_ADD_RE,
+  PREFLIGHT_PIPE_RE,
+  PREFLIGHT_PROCSUB_RE,
   AGENT_CONFIG_GLOBS,
 } from './packs/agent-watch.js';
 export {
   agentPreflightRules,
   PREFLIGHT_PROBING_RULE_ID,
+  PREFLIGHT_SOCKET_RULE_ID,
+  PREFLIGHT_SOCKET_TOOL,
   builtinRules,
 } from './packs/agent-preflight.js';
 export {

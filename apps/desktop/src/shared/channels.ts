@@ -61,6 +61,7 @@ export const CALL_NAMES = [
   'dismissUpdate',
   'downloadUpdate',
   'listAgents',
+  'listAgentNames',
   'getAgent',
   'saveAgent',
   'setAgentWatch',
@@ -78,4 +79,4 @@ export const CALL_NAMES = [
   'listVigilHelpers',
 ] as const;
 
-export const PUSH_NAMES = ['changed', 'popup', 'navigate', 'theme', 'events'] as const;
+export const PUSH_NAMES = ['changed', 'popup', 'navigate', 'theme', 'events', 'agents'] as const;

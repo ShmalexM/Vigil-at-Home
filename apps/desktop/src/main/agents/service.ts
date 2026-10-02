@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import {
   AgentIdentityInput,
+  newId,
   type AgentIdentity,
   type AgentMatcher,
   type AgentToolRequestEvent,
@@ -33,6 +34,8 @@ import {
 } from '@vigil/core';
 import {
   PREFLIGHT_PROBING_RULE_ID,
+  PREFLIGHT_SOCKET_RULE_ID,
+  PREFLIGHT_SOCKET_TOOL,
   compileAgentMatchers,
   type AgentRecord,
   type Detection,
@@ -74,6 +77,7 @@ import {
   TOOLS_OFF,
   socketPathFor,
   type EndpointRequest,
+  type SocketTamper,
   type ToolsRequest,
 } from './endpoint.js';
 import { hookFiles, hookSnippet, mcpSnippet } from './hook-snippet.js';
@@ -91,8 +95,14 @@ const DAY = 24 * HOUR;
 
 /** New sessions are written in one batch this long after the first arrives. */
 const SESSION_FLUSH_MS = 1000;
-/** `ps` runs again on a miss at most this often. */
+/**
+ * `ps` runs again on a miss at most this often. While reading it again finds
+ * none of the processes that missed, the wait doubles, up to MAX_RESEED_MS.
+ */
 const RESEED_MS = 30_000;
+const MAX_RESEED_MS = 30 * MINUTE;
+/** Processes that missed since `ps` last ran, remembered at most. */
+const MAX_MISSED = 256;
 /** Pages hear about background changes (requests, sessions) at most this often. */
 const CHANGED_MS = 2000;
 /** The hook's last request is saved at most this often; a hello is saved at once. */
@@ -100,12 +110,29 @@ const HOOK_SAVE_MS = MINUTE;
 /** Tool requests stored per agent session (or hook session) and in all, per hour. */
 export const RECORD_PER_KEY_PER_HOUR = 600;
 export const RECORD_PER_HOUR = 3000;
+/**
+ * Stopped steps stored per hour, apart from the limits above, so a flood of
+ * other requests can't push them out. Denies are rare by design.
+ */
+export const DENY_RECORD_PER_HOUR = 300;
 /** One alert per rule and agent session for stopped steps in this long. */
 export const DENY_ALERT_MS = 10 * MINUTE;
 /** This many stopped steps in one session within PROBE_WINDOW_MS looks like probing. */
 export const PROBE_DENIES = 5;
+/** Twice that over all sessions together, spread so no one session reaches it. */
+export const PROBE_DENIES_ALL = 2 * PROBE_DENIES;
 const PROBE_WINDOW_MS = 10 * MINUTE;
 const PROBE_ALERT_MS = HOUR;
+/**
+ * Alerts and probing count by the session Vigil attributed a request to.
+ * The client sends its hook session and parent pid itself, so requests Vigil
+ * can't attribute count together, and changing those can't spread denies thin.
+ */
+const UNATTRIBUTED = 'unattributed';
+/** Every session at once, for probing spread over several. */
+const EVERY_SESSION = '*';
+/** Another program taking the agent socket raises an alert at most this often. */
+const TAMPER_ALERT_MS = HOUR;
 /** Sessions, denies and alert times are remembered for this many keys at most. */
 const MAX_KEYS = 1024;
 /** An agent active this recently counts as running. */
@@ -210,7 +237,12 @@ function matcherView(m: AgentMatcher): AgentMatcherView {
   return v;
 }
 
-export class AgentService extends EventEmitter<{ changed: [] }> {
+/**
+ * `changed`: something setup, the menu bar or the Agents page's state depends
+ * on (an agent, a setting, the hook connecting). `activity`: a request,
+ * session or tools call was recorded, for the views that show those.
+ */
+export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
   private readonly now: () => number;
   private readonly endpoint: AgentEndpoint;
   private readonly readPs: () => Promise<PsRow[]>;
@@ -229,18 +261,27 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
 
   private pendingSessions: AgentSessionRow[] = [];
   private sessionTimer: ReturnType<typeof setTimeout> | undefined;
-  private changedTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly timers: Partial<Record<'changed' | 'activity', ReturnType<typeof setTimeout>>> =
+    {};
 
   private seeding: Promise<void> | undefined;
   private lastSeedAt = Number.NEGATIVE_INFINITY;
-  /** Agents the last `ps` found running. */
+  /** The wait between `ps` runs on a miss; it grows while they find nothing. */
+  private reseedMs = RESEED_MS;
+  /** Pids the last `ps` listed: a miss on one of them is not fixed by reading it again. */
+  private psPids = new Set<number>();
+  /** Pids that missed since `ps` last ran. */
+  private missed = new Set<number>();
+  /** Agents the last `ps` found running, and when that `ps` ran. */
   private running = new Set<string>();
+  private runningAt = Number.NEGATIVE_INFINITY;
   /** Agents the last discovery found installed. */
   private installed = new Set<string>();
 
-  /** Tool requests admitted for storage this hour, in all and per key. */
-  private caps = { hour: -1, total: 0, perKey: new Map<string, number>() };
+  /** Tool requests admitted for storage this hour: in all, per key, and denies. */
+  private caps = { hour: -1, total: 0, perKey: new Map<string, number>(), denies: 0 };
   private notRecorded = 0;
+  private tamperAlertAt = Number.NEGATIVE_INFINITY;
   private readonly denyAlertAt = new Map<string, number>();
   private readonly denyTimes = new Map<string, number[]>();
   private readonly probeAlertAt = new Map<string, number>();
@@ -259,6 +300,8 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
       socketPath: o.socketPath ?? socketPathFor(o.userData, tmpdir(), process.getuid?.() ?? 0),
       handle: (req) => this.fromSocket(req),
       tools: (req) => this.handleTools(req),
+      // Later: it can arrive from inside status().
+      onTamper: (why) => setImmediate(() => this.socketTampered(why)),
       log: this.log,
     });
     this.tools = new VigilTools({
@@ -291,8 +334,9 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
   async stop(): Promise<void> {
     this.started = false;
     this.flushSessions();
-    clearTimeout(this.changedTimer);
-    this.changedTimer = undefined;
+    for (const t of Object.values(this.timers)) clearTimeout(t);
+    delete this.timers.changed;
+    delete this.timers.activity;
     this.saveHook();
     this.saveToolUse();
     await this.endpoint.stop();
@@ -301,14 +345,28 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
   // ---------------------------------------------------------------- views
 
   listAgents(): AgentView[] {
-    const stats = this.o.store.agentStats(this.startOfDay());
-    return this.o.detector.registry.list().map((r) => this.view(r, stats.get(r.id)));
+    const since = this.startOfDay();
+    const stats = this.o.store.agentStats(since);
+    const host = this.hostCounts(since);
+    return this.o.detector.registry.list().map((r) => this.view(r, stats.get(r.id), host));
+  }
+
+  /**
+   * Each agent's id, name and status, from the registry alone: for the
+   * sidebar's suggestion count and agent names on other pages, which would
+   * otherwise run listAgents' stats queries on every change.
+   */
+  listAgentNames(): Pick<AgentView, 'id' | 'name' | 'status'>[] {
+    return this.o.detector.registry
+      .list()
+      .map((r) => ({ id: r.id, name: r.name, status: r.status }));
   }
 
   getAgent(id: string): AgentDetail | null {
     const r = this.agentRecord(id);
     if (!r) return null;
-    const view = this.view(r, this.o.store.agentStats(this.startOfDay()).get(id));
+    const since = this.startOfDay();
+    const view = this.view(r, this.o.store.agentStats(since).get(id), this.hostCounts(since));
     const rules = this.o.detector
       .rules()
       .filter(
@@ -343,9 +401,10 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
     }
     this.emit('changed');
     const r = this.agentRecord(parsed.data.id)!;
+    const since = this.startOfDay();
     return {
       ok: true,
-      agent: this.view(r, this.o.store.agentStats(this.startOfDay()).get(r.id)),
+      agent: this.view(r, this.o.store.agentStats(since).get(r.id), this.hostCounts(since)),
     };
   }
 
@@ -515,18 +574,22 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
 
   /**
    * For setup's Claude Code pre-flight step: shown once Claude Code is
-   * installed or has been seen, done while the hook is connected.
+   * installed or has been seen, done while pre-flight is on and the hook is
+   * connected. `off`: the hook was heard from, but pre-flight is off, so
+   * Vigil answers nothing and Claude Code asks about every step.
    */
-  claudePreflightStep(): { connected: boolean } | undefined {
-    const connected = hookConnected(this.hook, this.now());
+  claudePreflightStep(): { connected: boolean; off?: true } | undefined {
+    const heard = hookConnected(this.hook, this.now());
+    const on = this.prefs().preflightEnabled;
     const claude = 'claude-code';
     const known =
       this.hook.lastHelloAt !== undefined ||
       this.hook.lastRequestAt !== undefined ||
       this.installed.has(claude) ||
       this.running.has(claude) ||
-      this.o.store.listAgentSessions(claude, undefined, 1).length > 0;
-    return known ? { connected } : undefined;
+      this.o.store.hasAgentSessions(claude);
+    if (!known) return undefined;
+    return heard && !on ? { connected: false, off: true } : { connected: heard && on };
   }
 
   // ---------------------------------------------------------------- the bridge
@@ -567,7 +630,7 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
   handleTools(req: ToolsRequest): ToolsReply {
     if (!this.prefs().toolsEnabled) {
       this.toolsRefused++;
-      this.soon();
+      this.soon('activity');
       return TOOLS_OFF;
     }
     if (req.method === 'tools.list')
@@ -581,7 +644,7 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
   private calledTool(tool: string, at: number): void {
     this.toolUse = { calls: this.toolUse.calls + 1, lastCallAt: at, lastTool: tool };
     if (this.now() - this.toolUseSavedAt >= HOOK_SAVE_MS) this.saveToolUse();
-    this.soon();
+    this.soon('activity');
   }
 
   private saveToolUse(): void {
@@ -617,30 +680,47 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
     };
   }
 
-  /** After the answer: store the request (within caps), alert on a deny, watch for probing. */
+  /**
+   * After the answer: alert on a deny, watch for probing, and store the
+   * request within the hourly limits. Alerting comes first and has bounds of
+   * its own, so a busy session or a flood of other requests never silences it.
+   */
   private record(r: PreflightResult): void {
     // When it was asked, not when this runs: a burst is recorded together.
     const at = r.event.ts;
     this.heard({ lastRequestAt: at });
-    const key = r.event.agent.session ?? r.event.agent.hookSession ?? 'unknown';
-    if (!this.admit(key, at)) {
-      this.notRecorded++;
-      this.soon();
-      return;
-    }
+    const deny = r.reply.decision === 'deny';
+    const who = r.event.agent.session ?? UNATTRIBUTED;
     const alerted = new Set<string>();
-    for (const d of r.detections) {
-      if (d.mode === 'block' && this.alertDeny(d, r.event, key, at)) alerted.add(d.match.ruleId);
+    if (deny) {
+      for (const d of r.detections) {
+        if (d.mode === 'block' && this.alertDeny(d, r.event, who, at)) alerted.add(d.match.ruleId);
+      }
+      this.countDeny(r.event, who, at);
     }
-    this.o.detector.recordToolRequest(r.event, r.detections, alerted);
-    if (r.reply.decision === 'deny') this.countDeny(r.event, key, at);
-    this.soon();
+    // Storage is shared out per session, or per hook session when Vigil can't
+    // tell which agent asked. A request an alert points to is kept regardless.
+    const key = r.event.agent.session ?? r.event.agent.hookSession ?? 'unknown';
+    if (this.admit(key, at, deny) || alerted.size > 0) {
+      this.o.detector.recordToolRequest(r.event, r.detections, alerted);
+    } else {
+      this.notRecorded++;
+    }
+    this.soon('activity');
   }
 
-  /** Room to store one more request from `key` this hour. */
-  private admit(key: string, at: number): boolean {
+  /**
+   * Room to store one more request from `key` this hour. Denies have their
+   * own room, so they never wait behind other requests.
+   */
+  private admit(key: string, at: number, deny: boolean): boolean {
     const hour = Math.floor(at / HOUR);
-    if (hour !== this.caps.hour) this.caps = { hour, total: 0, perKey: new Map() };
+    if (hour !== this.caps.hour) this.caps = { hour, total: 0, perKey: new Map(), denies: 0 };
+    if (deny) {
+      if (this.caps.denies >= DENY_RECORD_PER_HOUR) return false;
+      this.caps.denies++;
+      return true;
+    }
     const n = this.caps.perKey.get(key) ?? 0;
     if (this.caps.total >= RECORD_PER_HOUR || n >= RECORD_PER_KEY_PER_HOUR) return false;
     this.caps.total++;
@@ -674,12 +754,16 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
     return true;
   }
 
-  /** Five stopped steps in one session within 10 minutes raise preflight-probing, once an hour. */
-  private countDeny(event: AgentToolRequestEvent, key: string, at: number): void {
-    const times = (this.denyTimes.get(key) ?? []).filter((t) => at - t < PROBE_WINDOW_MS);
-    times.push(at);
-    remember(this.denyTimes, key, times);
-    if (times.length < PROBE_DENIES) return;
+  /**
+   * Five stopped steps in one session within 10 minutes raise
+   * preflight-probing, once an hour per session; so do ten over all
+   * sessions together, when no one session got to five.
+   */
+  private countDeny(event: AgentToolRequestEvent, who: string, at: number): void {
+    const mine = this.denied(who, at);
+    const all = this.denied(EVERY_SESSION, at);
+    const key = mine >= PROBE_DENIES ? who : all >= PROBE_DENIES_ALL ? EVERY_SESSION : undefined;
+    if (key === undefined) return;
     const last = this.probeAlertAt.get(key);
     if (last !== undefined && at - last < PROBE_ALERT_MS) return;
     const engine = this.o.detector.engine;
@@ -699,13 +783,65 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
       .catch((err: unknown) => this.log(`probing alert failed: ${(err as Error).message}`));
   }
 
+  /** Count a stopped step under `key`: how many it has had in the last 10 minutes. */
+  private denied(key: string, at: number): number {
+    const times = (this.denyTimes.get(key) ?? []).filter((t) => at - t < PROBE_WINDOW_MS);
+    times.push(at);
+    remember(this.denyTimes, key, times);
+    return times.length;
+  }
+
+  /**
+   * Another program took the agent socket: it was listening there before
+   * Vigil, or replaced or removed Vigil's socket (which the endpoint then
+   * takes back). Raises preflight-socket-tampered, once an hour, in the mode
+   * the user set on the Rules page.
+   */
+  private socketTampered(why: SocketTamper): void {
+    const at = this.now();
+    if (at - this.tamperAlertAt < TAMPER_ALERT_MS) return;
+    const engine = this.o.detector.engine;
+    const rule = engine.getRule(PREFLIGHT_SOCKET_RULE_ID);
+    if (!rule) return;
+    const mode = engine.modeOf(rule);
+    if (mode !== 'alert' && mode !== 'block') return;
+    this.tamperAlertAt = at;
+    // An event for the alert to point to: the socket, as a request no hook can send.
+    const event: AgentToolRequestEvent = {
+      id: newId(at),
+      ts: at,
+      source: 'vigil',
+      kind: 'agent.tool_request',
+      tool: PREFLIGHT_SOCKET_TOOL,
+      filePath: this.endpoint.socketPath,
+      agent: { host: 'claude-code' },
+    };
+    const what =
+      why === 'taken'
+        ? "was already listening on Vigil's socket when Vigil started, so Vigil could not open it. Until it stops, it answers Claude Code's hook in Vigil's place."
+        : `${why} Vigil's socket. Vigil took it back, but the program may try again.`;
+    void this.o.alerts
+      .raise({
+        rule: { ...coreRule(rule), mode },
+        events: [event],
+        actions: [],
+        summary: `A program other than Vigil ${what}`,
+        subject: { kind: 'file', label: this.endpoint.socketPath },
+      })
+      .catch((err: unknown) => this.log(`socket alert failed: ${(err as Error).message}`));
+    this.emit('changed');
+  }
+
   private heard(patch: Partial<HookState>): void {
     const wasConnected = hookConnected(this.hook, this.now());
     this.hook = { ...this.hook, ...patch };
     if (patch.lastHelloAt !== undefined || this.now() - this.hookSavedAt >= HOOK_SAVE_MS) {
       this.saveHook();
     }
-    if (patch.lastHelloAt !== undefined || !wasConnected) this.soon();
+    // Connecting changes the setup step and the Tool policy tab; a later
+    // hello only moves "last checked in".
+    if (!wasConnected && hookConnected(this.hook, this.now())) this.soon('changed');
+    else if (patch.lastHelloAt !== undefined) this.soon('activity');
   }
 
   private saveHook(): void {
@@ -757,9 +893,19 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
     this.sessionTimer ??= setTimeout(() => this.flushSessions(), SESSION_FLUSH_MS);
   }
 
-  /** The tracker met a process it doesn't know: read `ps` again, at most every 30 s. */
-  onMiss(_ppid: number): void {
-    if (this.seeding || this.now() - this.lastSeedAt < RESEED_MS) return;
+  /**
+   * The tracker met a process it doesn't know: read `ps` again, at most every
+   * 30 s, less often while that finds none of the processes that missed (a
+   * process that exited, or one `ps` names differently), on battery 4 times
+   * less often still, and not while routine work is paused.
+   */
+  onMiss(pid: number): void {
+    // ps listed it last time, so reading it again tells Vigil nothing new.
+    if (this.psPids.has(pid)) return;
+    if (this.missed.size < MAX_MISSED) this.missed.add(pid);
+    const scheduler = this.o.scheduler;
+    if (this.seeding || scheduler.isPaused) return;
+    if (this.now() - this.lastSeedAt < this.reseedMs * scheduler.slowdownFactor) return;
     void this.seed();
   }
 
@@ -795,34 +941,45 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
     } catch (err) {
       this.log(`saving sessions failed: ${(err as Error).message}`);
     }
-    this.soon();
+    this.soon('activity');
   }
 
   /** Tell the pages once things settle, rather than on every request. Armed only by activity. */
-  private soon(): void {
-    if (this.changedTimer) return;
-    this.changedTimer = setTimeout(() => {
-      this.changedTimer = undefined;
-      this.emit('changed');
+  private soon(what: 'changed' | 'activity'): void {
+    if (this.timers[what]) return;
+    const t = setTimeout(() => {
+      delete this.timers[what];
+      this.emit(what);
     }, CHANGED_MS);
-    this.changedTimer.unref?.();
+    t.unref?.();
+    this.timers[what] = t;
   }
 
   private seed(): Promise<void> {
     this.seeding ??= (async () => {
       this.lastSeedAt = this.now();
+      const missed = this.missed;
+      this.missed = new Set();
       try {
+        // Launches seen while ps runs are newer than its rows.
+        const since = this.o.detector.processMark();
         const rows = await this.readPs();
-        this.o.detector.seedProcesses(rows);
+        this.o.detector.seedProcesses(rows, since);
+        this.psPids = new Set(rows.map((r) => r.pid));
+        if (missed.size > 0) {
+          const found = [...missed].some((pid) => this.psPids.has(pid));
+          this.reseedMs = found ? RESEED_MS : Math.min(MAX_RESEED_MS, this.reseedMs * 2);
+        }
         const m = this.o.detector.registry.matcher();
         const running = new Set<string>();
         for (const r of rows) {
           const id = m.match(r)?.id;
           if (id) running.add(id);
         }
+        this.runningAt = this.now();
         if (!sameSet(running, this.running)) {
           this.running = running;
-          this.soon();
+          this.soon('changed');
         }
       } catch (err) {
         this.log(`reading the process table failed: ${(err as Error).message}`);
@@ -851,7 +1008,21 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
     return this.o.detector.registry.list().find((a) => a.id === id);
   }
 
-  private view(r: AgentRecord, s: AgentStats | undefined): AgentView {
+  /**
+   * Today's pre-flight answers for the host (Claude Code), whether or not
+   * Vigil could tie each request to a session: with watch off, or on a
+   * tracker miss, a request has the host but no agent.
+   */
+  private hostCounts(since: number): { ask: number; deny: number } {
+    return this.o.store.toolRequestCounts(since);
+  }
+
+  private view(
+    r: AgentRecord,
+    s: AgentStats | undefined,
+    host: { ask: number; deny: number },
+  ): AgentView {
+    const preflight = r.preflightHost === 'claude-code';
     const v: AgentView = {
       id: r.id,
       name: r.name,
@@ -862,8 +1033,8 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
       presence: this.presence(r.id, s?.lastSeenAt),
       sessionsToday: s?.sessions ?? 0,
       matchesToday: s?.matches ?? 0,
-      asksToday: s?.asks ?? 0,
-      deniesToday: s?.denies ?? 0,
+      asksToday: preflight ? host.ask : (s?.asks ?? 0),
+      deniesToday: preflight ? host.deny : (s?.denies ?? 0),
       builtin: r.builtin,
       edited: r.edited,
     };
@@ -873,9 +1044,11 @@ export class AgentService extends EventEmitter<{ changed: [] }> {
   }
 
   private presence(id: string, lastSeenAt: number | undefined): AgentPresence {
-    if (this.running.has(id)) return 'running';
-    if (lastSeenAt !== undefined && this.now() - lastSeenAt < RUNNING_MS) return 'running';
-    if (lastSeenAt !== undefined) return 'seen';
+    // A `ps` that listed it counts as a sighting when it ran, and goes stale like one.
+    const psAt = this.running.has(id) ? this.runningAt : Number.NEGATIVE_INFINITY;
+    const seen = Math.max(lastSeenAt ?? Number.NEGATIVE_INFINITY, psAt);
+    if (this.now() - seen < RUNNING_MS) return 'running';
+    if (Number.isFinite(seen)) return 'seen';
     return this.installed.has(id) ? 'installed' : 'not-found';
   }
 

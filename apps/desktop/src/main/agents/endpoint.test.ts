@@ -7,20 +7,26 @@ import {
   readFileSync,
   renameSync,
   statSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
-import { connect, createServer, type Server } from 'node:net';
+import { connect, createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { HelloReply, PreflightReply, ToolsReply, type PreflightRequest } from '@vigil/core';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   AgentEndpoint,
+  MAX_BUSY_IN_A_ROW,
+  MAX_UNREAD,
+  TOOLS_BUSY,
   socketPathFor,
   type AgentEndpointOptions,
   type EndpointRequest,
+  type SocketTamper,
   type ToolsRequest,
 } from './endpoint.js';
+import { MAX_RESULT_BYTES } from './tools.js';
 
 const request = (r: Partial<PreflightRequest> = {}): PreflightRequest => ({
   v: 1,
@@ -97,6 +103,56 @@ async function client(path: string) {
       return line === undefined ? undefined : JSON.parse(line);
     },
   };
+}
+
+/** Polls `cond` every 10 ms for up to `ms`. */
+async function until(cond: () => boolean, ms = 2000): Promise<boolean> {
+  for (const end = Date.now() + ms; Date.now() < end;) {
+    if (cond()) return true;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return cond();
+}
+
+/** A server on `path` that answers every line with `reply`, like a program posing as Vigil. */
+async function impostor(path: string, reply: unknown): Promise<Server> {
+  const s = createServer((c) => {
+    c.on('error', () => {});
+    c.on('data', () => c.write(JSON.stringify(reply) + '\n'));
+  });
+  servers.push(s);
+  await new Promise<void>((r) => s.listen(path, r));
+  return s;
+}
+
+/**
+ * A client that writes `line` as fast as the socket takes it and never reads
+ * a reply. Resolves when the server closes the connection, or after `ms`.
+ */
+async function flood(path: string, line: string, ms = 3000): Promise<'closed' | 'open'> {
+  const sock = connect(path);
+  sock.on('error', () => {}); // EPIPE or ECONNRESET once Vigil closes it.
+  await once(sock, 'connect');
+  sock.pause();
+  const chunk = line.repeat(32 * 1024);
+  let closed = false;
+  sock.on('close', () => (closed = true));
+  const end = Date.now() + ms;
+  while (!closed && Date.now() < end) {
+    if (!sock.write(chunk)) {
+      await new Promise<void>((r) => {
+        const done = () => {
+          clearTimeout(timer);
+          sock.off('drain', done).off('close', done);
+          r();
+        };
+        const timer = setTimeout(done, 50);
+        sock.once('drain', done).once('close', done);
+      });
+    }
+  }
+  sock.destroy();
+  return closed ? 'closed' : 'open';
 }
 
 /** A socket file nothing listens on, as a crashed run leaves behind. */
@@ -260,6 +316,87 @@ describe('AgentEndpoint', () => {
     expect(await c.ask(call)).toMatchObject({ ok: true });
   });
 
+  it('closes a connection that sends without reading its replies, holding at most 256 KB for it', async () => {
+    // No rate limit, so every line is answered (unreadable) rather than busy.
+    const { ep, path } = await endpoint({ burst: 1e9, idleMs: 60_000 });
+    const conns = (ep as unknown as { connections: Set<Socket> }).connections;
+    let most = 0;
+    const sample = setInterval(() => {
+      for (const s of conns) if (!s.destroyed) most = Math.max(most, s.writableLength);
+    }, 1);
+    try {
+      expect(await flood(path, 'a\n', 1000)).toBe('closed');
+    } finally {
+      clearInterval(sample);
+    }
+    expect(most).toBeLessThanOrEqual(MAX_UNREAD + JSON.stringify(UNREADABLE).length + 1);
+    // Vigil still answers everyone else.
+    expect(await (await client(path)).ask(request())).toEqual({ v: 1, decision: 'none' });
+  });
+
+  it('closes a connection that keeps sending into a full bucket', async () => {
+    const t = 1_000_000;
+    const { path } = await endpoint({ now: () => t, burst: 2, idleMs: 60_000 });
+    const c = await client(path);
+    for (let i = 0; i < 2; i++) expect(await c.ask(request())).toEqual({ v: 1, decision: 'none' });
+    for (let i = 1; i < MAX_BUSY_IN_A_ROW; i++) {
+      expect(await c.ask(request())).toEqual({ v: 1, decision: 'ask', reason: 'busy' });
+    }
+    // The 8th busy reply in a row closes it.
+    expect(await c.ask(request())).toBeUndefined();
+    expect(c.isClosed()).toBe(true);
+    // A flood that reads nothing is closed long before its backlog matters.
+    expect(await flood(path, 'a\n', 1000)).toBe('closed');
+  });
+
+  it('still answers a tools call whose result is near the 64 KB limit', async () => {
+    const result = { text: 'x'.repeat(MAX_RESULT_BYTES - 64) };
+    const { path } = await endpoint({ tools: () => ({ v: 1, ok: true, result }) });
+    const c = await client(path);
+    const call = { v: 1, method: 'tools.call', tool: 'search_events', args: {} };
+    for (let i = 0; i < 3; i++) expect(await c.ask(call)).toEqual({ v: 1, ok: true, result });
+  });
+
+  it('shares a budget of main-thread time among all tools calls, whatever the connection', async () => {
+    const wall = { t: 1_000_000 };
+    const cpu = { t: 0 };
+    let calls = 0;
+    const { path, seen } = await endpoint({
+      burst: 1e9,
+      now: () => wall.t,
+      clock: () => cpu.t,
+      // Each call takes 50 ms of the main thread.
+      tools: () => {
+        calls++;
+        cpu.t += 50;
+        return { v: 1, ok: true, result: {} };
+      },
+    });
+    const call = JSON.stringify({ v: 1, method: 'tools.call', tool: 'search_events', args: {} });
+    const conns = await Promise.all([client(path), client(path), client(path)]);
+    // 60 calls in one write per connection's share: only the budget's 150 ms reach the tools.
+    for (const c of conns) c.sock.write((call + '\n').repeat(20));
+    const replies: unknown[] = [];
+    for (const c of conns) for (let i = 0; i < 20; i++) replies.push(JSON.parse((await c.next())!));
+    expect(calls).toBe(3);
+    expect(replies.filter((r) => (r as { ok: boolean }).ok)).toHaveLength(3);
+    expect(replies.filter((r) => JSON.stringify(r) === JSON.stringify(TOOLS_BUSY))).toHaveLength(
+      57,
+    );
+    // A new connection doesn't reset it.
+    const fresh = await client(path);
+    expect(await fresh.ask(JSON.parse(call))).toEqual(TOOLS_BUSY);
+    expect(calls).toBe(3);
+    // Pre-flight requests don't wait on it.
+    expect(await fresh.ask(request())).toEqual({ v: 1, decision: 'none' });
+    expect(seen).toHaveLength(1);
+    // It comes back at 50 ms a second.
+    wall.t += 1000;
+    expect(await fresh.ask(JSON.parse(call))).toMatchObject({ ok: true });
+    expect(await fresh.ask(JSON.parse(call))).toEqual(TOOLS_BUSY);
+    expect(calls).toBe(4);
+  });
+
   it('asks, then closes, on a line over 64 KB', async () => {
     const { path, seen } = await endpoint();
     const c = await client(path);
@@ -341,7 +478,12 @@ describe('AgentEndpoint', () => {
     const other = createServer((s) => s.on('error', () => {}).end('other\n'));
     servers.push(other);
     await new Promise<void>((r) => other.listen(live, r));
-    const ep = new AgentEndpoint({ socketPath: live, handle: () => ({ v: 1, decision: 'none' }) });
+    const tampered: SocketTamper[] = [];
+    const ep = new AgentEndpoint({
+      socketPath: live,
+      handle: () => ({ v: 1, decision: 'none' }),
+      onTamper: (why) => tampered.push(why),
+    });
     running.push(ep);
     await ep.start();
     expect(ep.status()).toEqual({
@@ -349,6 +491,8 @@ describe('AgentEndpoint', () => {
       error: expect.stringContaining('already answering'),
       socketPath: live,
     });
+    // Something else answering on Vigil's own path is reported.
+    expect(tampered).toEqual(['taken']);
     expect(await (await client(live)).next()).toBe('other');
 
     const file = socketIn();
@@ -363,6 +507,49 @@ describe('AgentEndpoint', () => {
       socketPath: file,
     });
     expect(readFileSync(file, 'utf8')).toBe('keep me');
+  });
+
+  it('takes its socket back from a program that replaced it, and reports it', async () => {
+    const deny: PreflightReply = { v: 1, decision: 'deny', reason: 'stopped', ruleIds: ['r'] };
+    const tampered: SocketTamper[] = [];
+    const { ep, path } = await endpoint({
+      handle: (req) => (req.method === 'hello' ? { v: 1, ok: true } : deny),
+      onTamper: (why) => tampered.push(why),
+    });
+    // Another program deletes Vigil's socket and answers in its place.
+    rmSync(path);
+    await impostor(path, { v: 1, decision: 'none' });
+    expect(await until(() => tampered.length > 0)).toBe(true);
+    expect(tampered).toEqual(['replaced']);
+    expect(await until(() => ep.status().state === 'listening')).toBe(true);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    // The hook reaches Vigil's rules again.
+    expect(await (await client(path)).ask(request())).toEqual(deny);
+
+    // Removing it is caught the same way.
+    rmSync(path);
+    expect(await until(() => tampered.length > 1)).toBe(true);
+    expect(tampered).toEqual(['replaced', 'removed']);
+    expect(await until(() => ep.status().state === 'listening' && existsSync(path))).toBe(true);
+    expect(await (await client(path)).ask(request())).toEqual(deny);
+  });
+
+  it('checks its socket when asked for its status', async () => {
+    const tampered: SocketTamper[] = [];
+    const { ep, path } = await endpoint({ onTamper: (why) => tampered.push(why) });
+    // Without the folder watch, as when the system drops a change.
+    const own = ep as unknown as { watcher?: { close(): void } | undefined };
+    own.watcher?.close();
+    own.watcher = undefined;
+    rmSync(path);
+    expect(tampered).toEqual([]);
+    expect(ep.status()).toMatchObject({
+      state: 'error',
+      error: "Another program removed or replaced Vigil's agent socket",
+    });
+    expect(tampered).toEqual(['removed']);
+    expect(await until(() => ep.status().state === 'listening' && existsSync(path))).toBe(true);
+    expect(await (await client(path)).ask(request())).toEqual({ v: 1, decision: 'none' });
   });
 
   it('removes its socket when stopped', async () => {

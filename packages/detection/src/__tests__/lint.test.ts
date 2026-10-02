@@ -97,11 +97,37 @@ describe('pre-flight rules', () => {
       'agent.id',
       'agent.session',
       'agent.hookSession',
-      'process.agent.id',
-      'process.agent.depth',
-      'process.ancestors',
+      'commandClipped',
+      // A Bash request carries the shell it would start.
+      'process.name',
+      'process.commandLine',
     ];
     for (const field of fields)
-      expect(pre({ condition: { field, op: 'exists' } }).errors).toEqual([]);
+      expect(pre({ condition: { field, op: 'exists' } })).toEqual({ errors: [], warnings: [] });
+  });
+
+  it('warn about process fields a tool request never carries', () => {
+    const r = pre({ condition: { field: 'process.agent.id', op: 'eq', value: 'codex' } });
+    expect(r.errors).toEqual([]);
+    expect(r.warnings).toEqual([
+      'process.agent.id is never set on a tool request; use agent.id or agent.session (agent.host for the app)',
+    ]);
+    for (const field of ['process.ancestors', 'process.parentName', 'process.agent.depth'])
+      expect(pre({ condition: { field, op: 'exists' } }).warnings.join(' ')).toMatch(
+        /never set on a tool request/,
+      );
+    expect(
+      pre({
+        exclusions: [{ inList: { list: 'my_list', field: 'process.parentName' } }],
+        reasons: ['{{process.agent.session}} asked'],
+      }).warnings,
+    ).toHaveLength(2);
+    // The same test on a launch is fine: the tracker tags those.
+    expect(
+      lint({
+        id: 'exec',
+        condition: { field: 'process.agent.id', op: 'eq', value: 'codex' },
+      }).warnings.join(' '),
+    ).not.toMatch(/never set on a tool request/);
   });
 });

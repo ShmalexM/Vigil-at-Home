@@ -7,8 +7,12 @@
 import { join } from 'node:path';
 import type { McpSnippets } from '../../shared/agents.js';
 
-/** The tools Claude Code asks the pre-flight hook about. */
-export const PREFLIGHT_MATCHER = 'Bash|Write|Edit|MultiEdit|NotebookEdit|Read|WebFetch|mcp__.*';
+/**
+ * The tools Claude Code asks the pre-flight hook about. Grep prints what it
+ * finds, so it is checked like Read; Glob and LS only list names.
+ */
+export const PREFLIGHT_MATCHER =
+  'Bash|Write|Edit|MultiEdit|NotebookEdit|Read|Grep|WebFetch|mcp__.*';
 
 /** Seconds Claude Code waits for the hook. The hook gives up on Vigil after 1.5 s. */
 export const HOOK_TIMEOUT_S = 5;

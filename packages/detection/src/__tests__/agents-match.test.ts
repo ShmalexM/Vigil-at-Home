@@ -39,6 +39,56 @@ describe('agent matching', () => {
     expect(idOf('/Users/alex/@anthropic-ai/claude-code/node', ['node'])).toBeUndefined();
   });
 
+  it('knows an npm-installed CLI by the bin link node runs', () => {
+    const node = '/opt/homebrew/Cellar/node/22.9.0/bin/node';
+    expect(idOf(node, ['node', '/opt/homebrew/bin/claude', '-p', 'x'])).toBe('claude-code');
+    expect(idOf(node, ['node', '/Users/alex/.nvm/versions/node/v22.9.0/bin/claude'])).toBe(
+      'claude-code',
+    );
+    expect(idOf(node, ['node', '--max-old-space-size=8192', '/opt/homebrew/bin/gemini'])).toBe(
+      'gemini-cli',
+    );
+    expect(idOf(node, ['node', '/opt/homebrew/bin/copilot'])).toBe('copilot-cli');
+    expect(idOf(node, ['node', '/Users/alex/code/app/node_modules/.bin/claude', 'mcp'])).toBe(
+      'claude-code',
+    );
+    // A retag sees the arguments as one joined string.
+    expect(idOf(node, ['node /opt/homebrew/bin/claude --resume'])).toBe('claude-code');
+    // env runs node on the same process right after; env itself is not the agent.
+    expect(idOf('/usr/bin/env', ['/usr/bin/env', 'node', '/opt/homebrew/bin/claude'])).toBe(
+      undefined,
+    );
+    expect(idOf(node, ['node', '/x/bin/claude-helper'])).toBeUndefined();
+    expect(idOf(node, ['node', '-e', 'require("/opt/homebrew/bin/claude")'])).toBeUndefined();
+    expect(idOf(node, ['node', 'build.js', '--out', '/usr/local/bin/claude'])).toBeUndefined();
+    // A team ID, signing ID or path in a matcher is about the host binary, not the script.
+    const m = compileAgentMatchers([
+      identity('pathy', [{ names: ['tool'], paths: ['/opt/tool/**'] }]),
+    ]);
+    expect(m.match({ path: node, args: ['node', '/opt/tool/bin/tool'] })).toBeUndefined();
+    expect(
+      catalog().wantsArgs({ path: '/opt/homebrew/bin/bun', args: ['bun', 'x/bin/claude'] }),
+    ).toBe(true);
+  });
+
+  it('finds the desktop apps in ~/Applications and when translocated', () => {
+    expect(idOf('/Users/x/Applications/Claude.app/Contents/MacOS/Claude')).toBe('claude-desktop');
+    expect(
+      idOf(
+        '/private/var/folders/0x/ab/T/AppTranslocation/1F2E3D4C-0000-4000-8000-000000000000/d/Claude.app/Contents/MacOS/Claude',
+      ),
+    ).toBe('claude-desktop');
+    expect(idOf('/Users/x/Applications/Codex.app/Contents/MacOS/Codex')).toBe('codex-app');
+    expect(idOf('/Users/x/Applications/Cursor.app/Contents/MacOS/Cursor')).toBe('cursor');
+    expect(idOf('/private/var/folders/0x/ab/T/Claude.app/Contents/MacOS/Claude')).toBeUndefined();
+    expect(idOf('/Users/x/Applications/Claude.app.evil/Contents/MacOS/Claude')).toBeUndefined();
+    const claudeApp = AGENT_CATALOG.find((c) => c.id === 'claude-desktop')!;
+    expect(claudeApp.installPaths).toEqual([
+      '/Applications/Claude.app',
+      '~/Applications/Claude.app',
+    ]);
+  });
+
   it('matches path globs, with ~/ standing for any home folder', () => {
     expect(idOf('/Applications/Claude.app/Contents/MacOS/Claude')).toBe('claude-desktop');
     expect(idOf('/Applications/Claude.app/Contents/Helpers/disclaimer')).toBe('claude-desktop');

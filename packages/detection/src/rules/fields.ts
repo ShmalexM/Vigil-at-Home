@@ -123,6 +123,7 @@ export const KNOWN_FIELDS = new Set<string>([
   'tool',
   'command',
   'commandBytes',
+  'commandClipped',
   'filePath',
   'url',
   'mcpServer',

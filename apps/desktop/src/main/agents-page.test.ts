@@ -22,12 +22,17 @@ import {
   agentIdFor,
   agentRoute,
   describeMatcher,
+  loadOlderSessions,
   matchersFromRows,
+  mergeSessions,
+  noSessionsText,
   originLabel,
   parseActivityParam,
   parseAgentParam,
   rowsFromMatchers,
   treeOrder,
+  treeRows,
+  watching,
 } from '../renderer/src/views/agents-format.js';
 
 const T = Date.UTC(2026, 9, 1);
@@ -70,11 +75,22 @@ describe('tool-rule templates', () => {
       req({ tool: 'Bash', command: 'git push --force origin main' }),
       req({ tool: 'Bash', command: 'git push -f' }),
       req({ tool: 'Bash', command: 'git push origin +main --force-with-lease' }),
+      req({ tool: 'Bash', command: 'git -C /repo push --force' }),
+      req({ tool: 'Bash', command: 'git -c core.x=y push -f' }),
+      req({ tool: 'Bash', command: 'git --no-pager push --force' }),
+      req({ tool: 'Bash', command: 'git push -uf origin main' }),
+      req({ tool: 'Bash', command: 'git push origin +main' }),
+      req({ tool: 'Bash', command: 'cd /repo && git push -fu origin main' }),
     ],
     good: [
       req({ tool: 'Bash', command: 'git push origin main' }),
       req({ tool: 'Bash', command: 'git push origin feature-fix' }),
       req({ tool: 'Bash', command: 'git fetch --force' }),
+      req({ tool: 'Bash', command: 'git push origin my-f' }),
+      req({ tool: 'Bash', command: 'git -C /repo push origin main' }),
+      req({ tool: 'Bash', command: 'git push --follow-tags' }),
+      req({ tool: 'Bash', command: 'git push origin main && rm -f out.log' }),
+      req({ tool: 'Bash', command: 'git push origin main\nrm -f out.log' }),
     ],
   };
   samples['outside-project'] = {
@@ -101,10 +117,26 @@ describe('tool-rule templates', () => {
       req({ tool: 'WebFetch', url: 'https://example.com/docs' }),
       req({ tool: 'WebFetch', url: 'https://api.example.com/v1?q=1' }),
       req({ tool: 'WebFetch', url: 'https://example.com' }),
+      // A port, a login, a trailing dot, or a query or fragment right after the host.
+      req({ tool: 'WebFetch', url: 'https://example.com:8443/x' }),
+      req({ tool: 'WebFetch', url: 'https://example.com:443' }),
+      req({ tool: 'WebFetch', url: 'https://u@example.com/x' }),
+      req({ tool: 'WebFetch', url: 'https://u:p@api.example.com/x' }),
+      req({ tool: 'WebFetch', url: 'https://example.com?x=1' }),
+      req({ tool: 'WebFetch', url: 'http://example.com#a' }),
+      req({ tool: 'WebFetch', url: 'https://example.com./x' }),
+      req({ tool: 'WebFetch', url: 'https://API.Example.com:8443/x' }),
+      req({ tool: 'WebFetch', url: 'HTTPS://EXAMPLE.COM/X' }),
     ],
     good: [
       req({ tool: 'WebFetch', url: 'https://notexample.com/x' }),
       req({ tool: 'WebFetch', url: 'https://example.com.evil.test/x' }),
+      req({ tool: 'WebFetch', url: 'https://example.community/x' }),
+      // The host is evil.test in each of these.
+      req({ tool: 'WebFetch', url: 'https://example.com@evil.test/x' }),
+      req({ tool: 'WebFetch', url: 'https://evil.test?.example.com/' }),
+      req({ tool: 'WebFetch', url: 'https://evil.test#.example.com/' }),
+      req({ tool: 'WebFetch', url: 'https://evil.test?u=@example.com/' }),
     ],
   };
 
@@ -139,6 +171,39 @@ describe('tool-rule templates', () => {
     expect(saved(template('domain').json(new Set(), 'api.example.co.uk')).id).toBe(
       'ask-fetch-api-example-co-uk',
     );
+  });
+
+  it('makes a rule that saves for the longest domains it accepts', () => {
+    const t = template('domain');
+    const clean = t.input!.clean;
+    // Each dot is escaped in the regex, so a domain of one-letter labels runs out of room first.
+    let dotted = 'a';
+    while (clean(`${dotted}.a`)) dotted += '.a';
+    // 196 characters: the regex is then exactly 256, the most the rule language takes.
+    const wide = `${'a'.repeat(63)}.${'b'.repeat(63)}.${'c'.repeat(63)}.dddd`;
+    for (const d of [dotted, wide]) {
+      expect(clean(d), d).toBe(d);
+      const rule = saved(t.json(new Set(), d));
+      expect(lintRule(rule), d).toEqual({ errors: [], warnings: [] });
+      expect(answer(rule, req({ tool: 'WebFetch', url: `https://x.${d}:8443/` }))).toBe('ask');
+    }
+    expect(dotted.length).toBeGreaterThan(100);
+    expect(clean(`${wide}d`)).toBeUndefined();
+  });
+
+  it('force-push stays fast on commands built to make it backtrack', () => {
+    const rule = saved(template('force-push').json(new Set()));
+    for (const command of [
+      `git ${'--a=b '.repeat(800)}`,
+      `git ${'-C a '.repeat(800)}`,
+      `git ${'-C '.repeat(1300)}`,
+      'git push '.repeat(450),
+    ]) {
+      const t0 = performance.now();
+      expect(answer(rule, req({ tool: 'Bash', command }))).toBe('none');
+      // Linear work takes well under a millisecond; exponential takes seconds.
+      expect(performance.now() - t0, command.slice(0, 20)).toBeLessThan(50);
+    }
   });
 
   it('cleans what was typed, and refuses what it cannot use', () => {
@@ -223,6 +288,29 @@ describe('treeOrder', () => {
       '101@3',
       '103@4',
     ]);
+  });
+
+  it('names the program each one hangs under, for screen readers', () => {
+    const rows = treeRows([
+      node(100, 1, 0, 0),
+      node(101, 100, 1, 1),
+      node(102, 101, 2, 2),
+      node(101, 100, 3, 1), // pid 101 again
+      node(103, 101, 4, 2), // under the newer 101
+      node(200, 999, 5, 2), // parent never seen: under the agent
+    ]);
+    expect(rows.map((r) => r.node)).toEqual(
+      treeOrder(rows.map((r) => r.node).sort((a, b) => a.ts - b.ts)),
+    );
+    expect(rows.map((r) => `${r.node.pid}@${r.node.ts}<${r.parent ? r.parent.ts : '-'}`)).toEqual([
+      '100@0<-',
+      '101@1<0',
+      '102@2<1',
+      '101@3<0',
+      '103@4<3',
+      '200@5<0',
+    ]);
+    expect(treeRows([])).toEqual([]);
   });
 
   it('keeps every node, and an empty tree stays empty', () => {
@@ -311,6 +399,99 @@ describe('agentIdFor', () => {
     for (const id of ['goose', long, agentIdFor('Café Bot', new Set())]) {
       expect(AgentId.safeParse(id).success, id).toBe(true);
     }
+  });
+});
+
+describe('sessions list', () => {
+  type S = { id: string; startedAt: number };
+  const s = (id: string, startedAt: number): S => ({ id, startedAt });
+  // The store: strictly before `before`, newest first, ties by id.
+  const store = (all: S[], page: number) => async (before: number) =>
+    all
+      .filter((x) => x.startedAt < before)
+      .sort((a, b) => b.startedAt - a.startedAt || b.id.localeCompare(a.id))
+      .slice(0, page);
+
+  it('keeps a session that drops off the first page when a new one starts', async () => {
+    const all = [s('a', 1), s('b', 2), s('c', 3), s('d', 4), s('e', 5)];
+    const page = 3;
+    const fetch = store(all, page);
+    let first = await fetch(Infinity); // e, d, c
+    const older = await loadOlderSessions(mergeSessions(first, []), fetch, page);
+    expect(older!.rows.map((x) => x.id)).toEqual(['e', 'd', 'c', 'b', 'a']);
+
+    // f starts: the first page is now f, e, d, and c dropped off it.
+    all.push(s('f', 6));
+    first = await fetch(Infinity);
+    expect(first.map((x) => x.id)).toEqual(['f', 'e', 'd']);
+    const list = mergeSessions(first, older!.rows);
+    expect(list.map((x) => x.id)).toEqual(['f', 'e', 'd', 'c', 'b', 'a']);
+    const next = await loadOlderSessions(list, fetch, page);
+    expect(next!.rows).toEqual(list);
+    expect(next!.more).toBe(false);
+  });
+
+  it('keeps the live copy of a session on the first page', () => {
+    const fresh = { id: 'a', startedAt: 1, events: 9 };
+    const stale = { id: 'a', startedAt: 1, events: 3 };
+    expect(mergeSessions([fresh], [stale, { id: 'b', startedAt: 0, events: 1 }])).toEqual([
+      fresh,
+      { id: 'b', startedAt: 0, events: 1 },
+    ]);
+  });
+
+  it('skips no session that started in the same millisecond as the page’s last', async () => {
+    const all = [s('a', 1), s('b', 5), s('c', 5), s('d', 9), s('e', 9)];
+    const fetch = store(all, 3);
+    const first = await fetch(Infinity); // e, d, c
+    // Strictly before c's start would skip b, which started with it.
+    expect((await fetch(5)).map((x) => x.id)).toEqual(['a']);
+    const older = await loadOlderSessions(first, fetch, 3);
+    expect(older!.rows.map((x) => x.id)).toEqual(['e', 'd', 'c', 'b', 'a']);
+    expect(older!.more).toBe(true);
+  });
+
+  it('moves on when a whole page started in one millisecond', async () => {
+    const all = [s('a', 1), s('c', 5), s('d', 5)];
+    const fetch = store(all, 2);
+    const first = await fetch(Infinity); // d, c
+    // Asked from 6 again it would get d, c back for ever; it steps to before 5 instead.
+    const older = await loadOlderSessions(first, fetch, 2);
+    expect(older!.rows.map((x) => x.id)).toEqual(['d', 'c', 'a']);
+    expect(older!.more).toBe(false);
+    expect(await loadOlderSessions([], fetch, 2)).toBeUndefined();
+  });
+});
+
+describe('watching', () => {
+  const agent = (status: 'active' | 'ignored' | 'suggested', watch: boolean, kind = 'cli') => ({
+    status,
+    watch,
+    kind: kind as 'cli',
+  });
+
+  it('is what the matcher does: never an ignored agent or a runtime', () => {
+    expect(watching(agent('active', true))).toBe(true);
+    expect(watching(agent('active', false))).toBe(false);
+    // An ignored built-in keeps its stored switch, but nothing it runs is tagged.
+    expect(watching(agent('ignored', true))).toBe(false);
+    expect(watching(agent('suggested', true))).toBe(false);
+    expect(watching(agent('active', true, 'runtime'))).toBe(false);
+  });
+
+  it('says why an agent has no sessions', () => {
+    expect(noSessionsText(agent('active', true))).toBe(
+      'No sessions yet. One starts the next time it runs.',
+    );
+    expect(noSessionsText(agent('ignored', true))).toBe(
+      'No sessions: this agent is ignored, so Vigil tags nothing it runs.',
+    );
+    expect(noSessionsText(agent('active', true, 'runtime'))).toBe(
+      'No sessions: Vigil starts sessions only for agents it watches.',
+    );
+    expect(noSessionsText(agent('active', false))).toBe(
+      'No sessions: Vigil starts sessions only for agents it watches.',
+    );
   });
 });
 

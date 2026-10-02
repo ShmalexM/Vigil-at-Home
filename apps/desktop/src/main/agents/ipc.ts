@@ -3,6 +3,7 @@ import type { AgentService } from './service.js';
 
 type AgentCall =
   | 'listAgents'
+  | 'listAgentNames'
   | 'getAgent'
   | 'saveAgent'
   | 'setAgentWatch'
@@ -27,6 +28,7 @@ type AgentCall =
 export function agentsHandlers(agents: AgentService): Pick<Handlers, AgentCall> {
   return {
     listAgents: () => agents.listAgents(),
+    listAgentNames: () => agents.listAgentNames(),
     getAgent: (id) => agents.getAgent(id),
     saveAgent: (input) => agents.saveAgent(input),
     setAgentWatch: (id, on) => agents.setAgentWatch(id, on),

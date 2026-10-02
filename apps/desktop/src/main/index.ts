@@ -208,6 +208,7 @@ function start(): void {
   core.sensors.on('changed', refresh);
   setup.on('changed', () => windows.broadcast('changed'));
   agents.on('changed', () => windows.broadcast('changed'));
+  agents.on('activity', () => windows.broadcast('agents'));
   core.alerts.on('popup', (alert) => windows.showPopup(alert.id));
   core.feed.on('events', (n) => windows.broadcast('events', n));
   refresh();

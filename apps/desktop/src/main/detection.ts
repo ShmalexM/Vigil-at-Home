@@ -268,9 +268,14 @@ export class Detector {
     }
   }
 
+  /** Take before reading `ps`, and pass to seedProcesses: launches seen meanwhile are newer. */
+  processMark(): number {
+    return this.tracker.mark();
+  }
+
   /** Processes `ps` listed (those running before Vigil, or missed): the tracker learns them. */
-  seedProcesses(rows: PsRow[]): void {
-    this.tracker.seed(rows);
+  seedProcesses(rows: PsRow[], since?: number): void {
+    this.tracker.seed(rows, since);
   }
 
   private outcome(kind: SensorEvent['kind'], detections: Detection[]): EventOutcome {

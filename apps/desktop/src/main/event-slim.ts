@@ -7,16 +7,24 @@ import type { SensorEvent } from '@vigil/core';
  * - The sensor's raw record roughly doubles an event's size and no rule
  *   reads it, so it goes. It is kept only on events an alert refers to,
  *   which AlertService stores itself.
- * - `process.ancestors` (the parent chain's program names) is kept only
- *   where someone will look at it: on events under a watched agent, whose
- *   session view shows the tree, and on events a rule matched.
+ * - `process.ancestors` (the parent chain's program names) is kept where
+ *   someone will look at it: on events under a watched agent, whose session
+ *   view shows the tree, and on events a rule matched.
+ * - Elsewhere a launch keeps its parent's name when the sensor gave no
+ *   parent path (Santa's log never does): `process.parentName` falls back to
+ *   it, so replay and a new rule's preview see the parent the live rules saw.
  */
 export function slimForStorage(e: SensorEvent, matched: boolean): SensorEvent {
   const { raw: _raw, ...slim } = e;
   const p = 'process' in slim ? slim.process : undefined;
   if (p?.ancestors && !p.agent && !matched) {
-    const { ancestors: _ancestors, ...process } = p;
-    return { ...slim, process } as SensorEvent;
+    const { ancestors, ...process } = p;
+    const launch = slim.kind === 'process.exec' || slim.kind === 'santa.decision';
+    const keepParent = launch && !p.parentPath && ancestors.length > 0;
+    return {
+      ...slim,
+      process: keepParent ? { ...process, ancestors: ancestors.slice(0, 1) } : process,
+    } as SensorEvent;
   }
   return slim as SensorEvent;
 }

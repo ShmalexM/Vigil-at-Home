@@ -67,7 +67,7 @@ function state(s: AgentToolsStatus): [MarkState, string, string] {
  */
 export function AgentToolsSetup() {
   const toast = useToast();
-  const [status, reload] = useLive(() => vigil.getAgentToolsStatus());
+  const [status, reload] = useLive(() => vigil.getAgentToolsStatus(), null, 'agents');
   const [where, setWhere] = useState<Where>('claudeCommand');
   if (!status) return null;
 

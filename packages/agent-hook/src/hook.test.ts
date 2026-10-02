@@ -1,5 +1,14 @@
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { connect, createServer, type Server, type Socket } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -7,6 +16,7 @@ import { HookHello, PreflightRequest } from '@vigil/core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   LIMITS,
+  followLinks,
   parseArgs,
   render,
   runHello,
@@ -16,7 +26,8 @@ import {
   type OnUnavailable,
 } from './hook.js';
 
-// Every node:fs call made while the hook runs is recorded, to show it reads no files.
+// Every node:fs call made while the hook runs is recorded, to show it reads no file
+// contents: following links (realpath) is all it does.
 const { fsCalls, recording } = vi.hoisted(() => {
   const fsCalls: string[] = [];
   const recording = (mod: Record<string, unknown>, name: string) => {
@@ -123,6 +134,7 @@ const answer = (decision: 'deny' | 'ask', reason: string) =>
     },
   });
 const UNAVAILABLE = answer('ask', "Vigil couldn't check this step");
+const UNCHECKED = answer('ask', "Vigil couldn't read this step, so it asks first");
 
 /** What the hook may print: nothing, or Claude Code's deny or ask answer. */
 function expectHookOutput(out: string[]): void {
@@ -230,6 +242,28 @@ describe('toRequest', () => {
     ).toBe('/a/c');
   });
 
+  it("sends Grep's path as the file it reads, and no other tool's", () => {
+    const grep = toRequest(
+      {
+        tool_name: 'Grep',
+        tool_input: { pattern: '.', path: '~/.aws/credentials', output_mode: 'content' },
+        cwd: '/Users/alex/code/app',
+      },
+      1,
+    );
+    expect(grep?.filePath).toBe(join(homedir(), '.aws/credentials'));
+    expect(
+      toRequest({ tool_name: 'Grep', tool_input: { pattern: 'x', path: 'src' }, cwd: '/a' }, 1)
+        ?.filePath,
+    ).toBe('/a/src');
+    expect(
+      toRequest({ tool_name: 'mcp__fs__read', tool_input: { path: '/Users/alex/.ssh/id' } }, 1),
+    ).not.toHaveProperty('filePath');
+    expect(toRequest({ tool_name: 'Glob', tool_input: { path: '/x' } }, 1)).not.toHaveProperty(
+      'filePath',
+    );
+  });
+
   it('maps URLs, MCP tools and fields of other shapes', () => {
     expect(
       toRequest({ tool_name: 'WebFetch', tool_input: { url: 'https://x.test/a', prompt: 'p' } }, 1),
@@ -285,6 +319,9 @@ describe('render', () => {
     }
     expect(render('unavailable', 'ask')).toBe(UNAVAILABLE);
     expect(render('unavailable', 'defer')).toBe('');
+    // Input the hook couldn't read asks whatever the setting: the agent chose it.
+    expect(render('unchecked', 'ask')).toBe(UNCHECKED);
+    expect(render('unchecked', 'defer')).toBe(UNCHECKED);
     expect(render({ v: 1, decision: 'ask', reason: 'busy' }, 'defer')).toBe(
       answer('ask', "Vigil is busy and couldn't check this step"),
     );
@@ -346,16 +383,89 @@ describe('runPreflight', () => {
     expect(took).toBeLessThan(2000); // it did not wait for the late deny
   });
 
-  it('asks without contacting Vigil when the input is too big or unreadable', async () => {
+  it('asks without contacting Vigil when the input is too big or unreadable, whatever the setting', async () => {
     const s = await stub(() => reply({ decision: 'none' }));
     const huge = bashInput('x'.repeat(LIMITS.stdinBytes));
-    expect(await preflight(s.path, 'ask', huge)).toBe(UNAVAILABLE);
-    expect(await preflight(s.path, 'ask', 'not json')).toBe(UNAVAILABLE);
-    expect(await preflight(s.path, 'defer', 'not json')).toBe('');
+    // Padding a step past 256 KB doesn't make the hook step aside.
+    const write = {
+      ...bashInput(),
+      tool_name: 'Write',
+      tool_input: { file_path: '/Users/alex/x', content: '\u0001'.repeat(50_000) },
+    };
+    for (const onUnavailable of ['ask', 'defer'] as const) {
+      expect(await preflight(s.path, onUnavailable, huge)).toBe(UNCHECKED);
+      expect(await preflight(s.path, onUnavailable, write)).toBe(UNCHECKED);
+      expect(await preflight(s.path, onUnavailable, 'not json')).toBe(UNCHECKED);
+      expect(await preflight(s.path, onUnavailable, '')).toBe(UNCHECKED);
+      // Input the hook can't pass on: a tool name off the pattern, a path too long.
+      expect(
+        await preflight(s.path, onUnavailable, { ...bashInput(), tool_name: 'rm -rf /' }),
+      ).toBe(UNCHECKED);
+      expect(
+        await preflight(s.path, onUnavailable, {
+          tool_name: 'Read',
+          tool_input: { file_path: '/' + 'a'.repeat(1100) },
+        }),
+      ).toBe(UNCHECKED);
+    }
     expect(s.lines).toEqual([]);
   });
 
-  it('reads no files, not even the ones the input names', async () => {
+  it('follows links in the file and folder it sends', async () => {
+    const dir = realpathSync(SOCKET_DIR());
+    const secrets = join(dir, 'secrets');
+    mkdirSync(join(secrets, 'aws'), { recursive: true });
+    writeFileSync(join(secrets, 'aws', 'credentials'), 'key\n');
+    mkdirSync(join(dir, 'project'));
+    // What an agent can set up with one `ln -s`, which no rule looks at.
+    symlinkSync(join(secrets, 'aws'), join(dir, 'a'));
+    symlinkSync(join(dir, 'project'), join(dir, 'p'));
+    const s = await stub(() => reply({ decision: 'none' }));
+    const send = async (file_path: string, cwd: string, h = io({})) => {
+      const input = { tool_name: 'Read', tool_input: { file_path }, cwd };
+      const run = { ...io(input), ...(h.realpath ? { realpath: h.realpath } : {}) };
+      expect(await runPreflight(run, { socket: s.path, onUnavailable: 'ask', ppid: 1 })).toBe(0);
+      return PreflightRequest.parse(JSON.parse(s.lines.at(-1)!));
+    };
+    expect(await send(join(dir, 'a', 'credentials'), join(dir, 'p'))).toMatchObject({
+      filePath: join(secrets, 'aws', 'credentials'),
+      cwd: join(dir, 'project'),
+    });
+    // Relative to a linked folder.
+    expect(await send('../a/credentials', join(dir, 'p'))).toMatchObject({
+      filePath: join(secrets, 'aws', 'credentials'),
+    });
+    // A file about to be written keeps its missing tail.
+    expect(await send(join(dir, 'a', 'new', 'x.txt'), join(dir, 'p'))).toMatchObject({
+      filePath: join(secrets, 'aws', 'new', 'x.txt'),
+    });
+    // When following links fails, the path goes as written; the check still happens.
+    const failing = {
+      ...io({}),
+      realpath: () => Promise.reject(Object.assign(new Error('EIO'), { code: 'EIO' })),
+    };
+    expect(await send(join(dir, 'a', 'credentials'), join(dir, 'p'), failing)).toMatchObject({
+      filePath: join(dir, 'a', 'credentials'),
+      cwd: join(dir, 'p'),
+    });
+    // ...and when it hangs (a stalled network mount), it gives up in time.
+    const hanging = { ...io({}), realpath: () => new Promise<string>(() => {}) };
+    const t0 = Date.now();
+    expect(await send(join(dir, 'a', 'credentials'), join(dir, 'p'), hanging)).toMatchObject({
+      filePath: join(dir, 'a', 'credentials'),
+    });
+    expect(Date.now() - t0).toBeLessThan(LIMITS.totalMs);
+  });
+
+  it('keeps a path as written when following its links fails or runs too long', async () => {
+    const long = '/' + 'd/'.repeat(400) + 'f';
+    const real = async (p: string) => (p === '/' ? '/' : Promise.reject({ code: 'ENOENT' }));
+    expect(await followLinks('/no/such/file', real)).toBe('/no/such/file');
+    expect(await followLinks(long, async () => '/' + 'x'.repeat(1100))).toBe(long);
+    expect(await followLinks('/x', () => Promise.reject({ code: 'EACCES' }))).toBe('/x');
+  });
+
+  it('reads no file contents, not even of the files the input names', async () => {
     const dir = SOCKET_DIR();
     const conversation = join(dir, 'conversation.jsonl');
     const secret = join(dir, 'id_ed25519');
@@ -368,14 +478,16 @@ describe('runPreflight', () => {
       tool_name: 'Read',
       tool_input: { file_path: secret },
     };
+    const real = realpathSync(secret);
     expect(fsCalls).toContain('fs.writeFileSync'); // the recorder is live
     fsCalls.length = 0;
     expect(await preflight(s.path, 'ask', input)).toBe('');
     await runHello(io({ session_id: 'abc', transcript_path: conversation }), { socket: s.path });
-    expect(fsCalls).toEqual([]);
+    // Following links reads folder entries and link targets, never what a file holds.
+    expect(new Set(fsCalls)).toEqual(new Set(['fs/promises.realpath']));
     expect(s.lines.join('\n')).not.toContain(conversation);
     expect(s.lines.join('\n')).not.toContain('PRIVATE KEY');
-    expect(JSON.parse(s.lines[0]!)).toMatchObject({ filePath: secret });
+    expect(JSON.parse(s.lines[0]!)).toMatchObject({ filePath: real });
   });
 });
 
@@ -449,7 +561,15 @@ describe('the hook package source', () => {
     }
   });
 
-  it('imports no file-system module', () => {
-    for (const { text } of sources) expect(text).not.toMatch(/from '(node:)?fs(\/promises)?'/);
+  it('imports nothing from the file system but realpath', () => {
+    for (const { f, text } of sources) {
+      const fs = [...text.matchAll(/^import .* from '(node:)?fs(\/promises)?';$/gm)].map(
+        (m) => m[0],
+      );
+      expect(fs, f).toEqual(
+        f === 'hook.ts' ? ["import { realpath } from 'node:fs/promises';"] : [],
+      );
+      expect(text, f).not.toMatch(/require\(['"](node:)?fs/);
+    }
   });
 });
