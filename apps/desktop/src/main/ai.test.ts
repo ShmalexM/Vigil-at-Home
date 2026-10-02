@@ -7,7 +7,7 @@ import type {
   VigilAiOptions,
 } from '@vigil/ai';
 import { AiBridge, type KeySource } from './ai.js';
-import { DryRunExecutor } from './executor.js';
+import { DryRunExecutor, type ActionExecutor } from './executor.js';
 import { VigilCore } from './service.js';
 import { sendTestAlert } from './test-alert.js';
 import { isNoticed } from '../shared/attention.js';
@@ -56,6 +56,7 @@ function fakeAi(opts: VigilAiOptions, calls: RunRequest<unknown>[]): VigilAi {
         systemPrompt: '',
         userPrompt: '',
         outcome: 'ok',
+        billed: true,
         usage: {
           inputTokens: 10,
           cachedInputTokens: 0,
@@ -76,9 +77,15 @@ function fakeAi(opts: VigilAiOptions, calls: RunRequest<unknown>[]): VigilAi {
   };
 }
 
-function setup(o: { saved?: Partial<Record<ApiKeyProvider, string>>; mode?: SetupMode } = {}) {
+function setup(
+  o: {
+    saved?: Partial<Record<ApiKeyProvider, string>>;
+    mode?: SetupMode;
+    executor?: ActionExecutor;
+  } = {},
+) {
   const store = memoryStore();
-  const core = new VigilCore(store, new DryRunExecutor(), true, () => NOW);
+  const core = new VigilCore(store, o.executor ?? new DryRunExecutor(), true, () => NOW);
   const calls: RunRequest<unknown>[] = [];
   const made: VigilAiOptions[] = [];
   const opened: string[] = [];
@@ -177,7 +184,7 @@ describe('AiBridge explanations', () => {
       summary: 'An unsigned program ran from /tmp.',
     });
     expect(core.usage.report(1).totals.runs).toBe(1);
-    expect(ai.spentThisMonthUsd('claude')).toBeCloseTo(0.01);
+    expect(ai.spentThisMonthUsd()).toBeCloseTo(0.01);
   });
 
   it('uses the Claude plan only for an explanation the user asks for', async () => {
@@ -192,6 +199,26 @@ describe('AiBridge explanations', () => {
     expect(await ai.explainOnRequest(core, alert.id)).toEqual({ ok: true });
     expect(calls[1]).toMatchObject({ purpose: 'explain', urgency: 'now', requestedByUser: true });
     expect(await ai.explainOnRequest(core, 'gone')).toMatchObject({ ok: false });
+  });
+
+  it('tells the AI what really happened, a failed block included', async () => {
+    const failing: ActionExecutor = {
+      execute: async () => {
+        throw new Error('helper not installed');
+      },
+    };
+    const { core, ai, calls } = setup({ executor: failing });
+    ai.explainAlertsFrom(core);
+    await core.alerts.raise({
+      rule: makeRule(),
+      events: [makeExec()],
+      actions: [{ kind: 'process.suspend', pid: 4242 }],
+    });
+    await settle();
+    expect(calls[0]?.data).toMatchObject({
+      actions: [{ kind: 'process.suspend', status: 'failed', error: 'helper not installed' }],
+    });
+    expect(calls[0]?.instructions).toContain('a failed or pending action did not happen');
   });
 
   it('never sends the test alert', async () => {
@@ -256,15 +283,37 @@ describe('AiBridge view', () => {
     expect(await ai.limits()).toEqual({
       plans: [],
       backgroundSharePercent: 10,
-      // Claude's own work always runs on an Anthropic key now, so the cap covers it.
-      caps: { api: 20, jev: 20, claude: 20 },
+      // One cap over every key; the runner decides which runs it counts.
+      capUsd: 20,
     });
   });
 
-  it('caps Codex runs on an OpenAI key too', async () => {
-    const { ai } = setup();
-    ai.setPrefs({ monthlyCapUsd: 20, codexUses: 'apiKey' });
-    expect((await ai.limits()).caps).toEqual({ api: 20, jev: 20, claude: 20, codex: 20 });
+  it('counts every key-billed run, Codex on an OpenAI key included, toward one cap', () => {
+    const { ai, store } = setup();
+    const run = (
+      id: string,
+      provider: 'codex' | 'jev' | 'claude',
+      costUsd: number | null,
+      billed?: boolean,
+    ) =>
+      store.addAiRun({
+        id,
+        at: NOW,
+        provider,
+        purpose: 'explain',
+        ok: true,
+        inputTokens: 1,
+        cachedInputTokens: 0,
+        outputTokens: 1,
+        costUsd,
+        ...(billed !== undefined ? { billed } : {}),
+      });
+    run('a', 'codex', 0.5, true);
+    run('b', 'jev', 0.25, true);
+    // A plan run's estimate and a ChatGPT plan run never count.
+    run('c', 'claude', 3, false);
+    run('d', 'codex', null);
+    expect(ai.spentThisMonthUsd()).toBeCloseTo(0.75);
   });
 });
 

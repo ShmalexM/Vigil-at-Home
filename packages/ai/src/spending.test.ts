@@ -179,6 +179,46 @@ describe('spending', () => {
     expect(ran).toBe(0);
   });
 
+  it('holds Codex on an OpenAI key to the same one cap, but not a ChatGPT plan or a requested plan explanation', async () => {
+    const ran: string[] = [];
+    const adapter = (id: 'claude' | 'codex'): ProviderAdapter => ({
+      id,
+      probe: async () => ({ provider: id, state: 'ready' }),
+      run: async () => {
+        ran.push(id);
+        return { kind: 'ok', json: {}, audit: { called: [], denied: [] } };
+      },
+    });
+    const base = defaultAiSettings('/tmp/vigil-test');
+    const runnerWith = (patch: Partial<typeof base>) =>
+      createAiRunner({
+        settings: { ...base, quota: { ...base.quota, apiKeyMonthlyCapUsd: 5 }, ...patch },
+        adapters: [adapter('claude'), adapter('codex')],
+        log: { record: () => {} },
+        // The total over every key; no provider argument.
+        spentThisMonthUsd: async () => 5,
+      });
+    const req = {
+      purpose: 'explain' as const,
+      urgency: 'now' as const,
+      instructions: 'x',
+      data: {},
+      output: z.object({}),
+      deadlineMs: 1_000,
+    };
+    const keyed = runnerWith({ order: ['codex'], codex: { ...base.codex, mode: 'apiKey' } });
+    expect(await keyed.run(req)).toMatchObject({ ok: false, reason: 'quota' });
+    const plan = runnerWith({ order: ['codex'], codex: { ...base.codex, mode: 'subscription' } });
+    expect(await plan.run(req)).toMatchObject({ ok: true, provider: 'codex' });
+    const claudePlan = runnerWith({
+      order: ['claude'],
+      claude: { ...base.claude, allowPlan: true },
+    });
+    expect(await claudePlan.run(req)).toMatchObject({ ok: false, reason: 'quota' });
+    expect(await claudePlan.run({ ...req, requestedByUser: true })).toMatchObject({ ok: true });
+    expect(ran).toEqual(['codex', 'claude']);
+  });
+
   it("reads Claude Code's own token counts, cost estimate and plan windows", () => {
     const usage = runUsageFromResult({
       modelUsage: {

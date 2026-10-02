@@ -41,8 +41,8 @@ export interface Proposal {
     removed: number;
     removedConfirmedThreats: number;
   };
-  /** For retire: the quieter mode the rule would move to. */
-  retireTo?: 'shadow' | 'disabled';
+  /** For retire: the quieter mode the rule would move to (alert only for Vigil's own suggestions). */
+  retireTo?: 'alert' | 'shadow' | 'disabled';
   /** What approving it would stop catching, including look-alikes that would slip through. */
   impact?: ImpactReport;
   decidedAt?: number;
@@ -152,6 +152,8 @@ function userTunedOnly(rule: DetectionRule): boolean {
 
 /** More alerts a day than this from a new AI rule means it matches ordinary use. */
 const MAX_NEW_RULE_ALERTS_PER_DAY = 3;
+/** Provider name on suggestions Vigil makes from the user's own answers, not an AI. */
+export const VIGIL_PROVIDER = 'vigil';
 const DAY = 86_400_000;
 
 /**
@@ -343,6 +345,42 @@ export class RulePipeline {
         warnings: [],
       };
     }
+    return this.queueRetirement(base, input.toMode, input.rationale, input.evidence, provider);
+  }
+
+  /**
+   * Vigil's own suggestion to move a rule the user keeps marking safe down a
+   * mode. Not on the AI tool surface and not counted against the AI budget.
+   * Skipped while one is waiting, or for 30 days after the user said no.
+   */
+  suggestDemotion(
+    s: { ruleId: string; to: 'alert' | 'shadow' | 'disabled'; message: string },
+    evidence: string[] = [],
+  ): SubmitResult | undefined {
+    const base = this.engine.getRule(s.ruleId);
+    if (!base) return undefined;
+    const now = this.opts.now();
+    const blocked = this.store
+      .list()
+      .some(
+        (p) =>
+          p.rule.id === s.ruleId &&
+          (p.status === 'awaiting_review' ||
+            (p.kind === 'retire' &&
+              p.status === 'rejected' &&
+              now - (p.decidedAt ?? 0) < 30 * DAY)),
+      );
+    if (blocked) return undefined;
+    return this.queueRetirement(base, s.to, s.message, evidence, VIGIL_PROVIDER);
+  }
+
+  private queueRetirement(
+    base: DetectionRule,
+    toMode: 'alert' | 'shadow' | 'disabled',
+    rationale: string,
+    evidence: string[],
+    provider: string,
+  ): SubmitResult {
     const now = this.opts.now();
     const before = this.replay(base);
     const threats = this.countConfirmedThreats(
@@ -360,19 +398,19 @@ export class RulePipeline {
       kind: 'retire',
       createdAt: now,
       provider,
-      rationale: input.rationale,
-      evidence: input.evidence,
+      rationale: rationale,
+      evidence: evidence,
       rule: base,
       baseRuleId: base.id,
       baseRuleVersion: base.version,
-      retireTo: input.toMode,
+      retireTo: toMode,
       status: errors.length ? 'rejected_by_checks' : 'awaiting_review',
       lint: { errors, warnings: [] },
       replay: before.report,
       impact: this.prove(
         base,
-        input.toMode === 'disabled' ? undefined : base,
-        input.toMode === 'disabled' ? undefined : input.toMode,
+        toMode === 'disabled' ? undefined : base,
+        toMode === 'disabled' ? undefined : toMode,
       ),
     };
     this.store.put(proposal);
@@ -524,6 +562,9 @@ export class RulePipeline {
       // Only the mode changes; the rule itself stays as it is.
       mode = p.retireTo ?? 'shadow';
       live = this.engine.getRule(p.rule.id) ?? p.rule;
+      // A turn-down never turns a rule up, even if the user moved it lower since.
+      if (MODE_RANK[mode] >= MODE_RANK[this.engine.modeOf(live)])
+        throw new Error(`${live.name} is already in ${this.engine.modeOf(live)} mode.`);
       this.engine._setMode(live.id, mode);
     } else {
       mode = opts.mode ?? (p.kind === 'tuning' ? this.engine.modeOf(p.rule) : 'alert');
