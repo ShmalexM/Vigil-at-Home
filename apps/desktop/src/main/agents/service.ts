@@ -101,6 +101,11 @@ const SESSION_FLUSH_MS = 1000;
  */
 const RESEED_MS = 30_000;
 const MAX_RESEED_MS = 30 * MINUTE;
+/**
+ * A request from a process Vigil doesn't know yet reads `ps` again, at most
+ * this often, so it can be filed under its agent's session.
+ */
+const LATE_ATTRIBUTION_MS = 5_000;
 /** Processes that missed since `ps` last ran, remembered at most. */
 const MAX_MISSED = 256;
 /** Pages hear about background changes (requests, sessions) at most this often. */
@@ -616,8 +621,34 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
       return { v: 1, ok: true };
     }
     const result = this.o.detector.preflight(req);
-    setImmediate(() => this.record(result));
+    // The hook can ask before the sensors report the agent running it (a
+    // `claude -p` that calls a tool at once). Then `ps` says which agent it
+    // is, and the request is recorded once that is known. The answer never waits.
+    const late = req.ppid !== undefined && !result.event.agent.session ? req.ppid : undefined;
+    const lookup = late !== undefined ? this.lateLookup(late) : undefined;
+    if (lookup) void lookup.then(() => this.recordLate(result, late!));
+    else setImmediate(() => this.record(result));
     return result.reply;
+  }
+
+  /** A `ps` read under way, or a new one when the last was long enough ago. */
+  private lateLookup(pid: number): Promise<void> | undefined {
+    if (!this.started || this.psPids.has(pid)) return undefined;
+    if (this.seeding) return this.seeding;
+    if (this.o.scheduler.isPaused || this.now() - this.lastSeedAt < LATE_ATTRIBUTION_MS) {
+      return undefined;
+    }
+    return this.seed();
+  }
+
+  private recordLate(r: PreflightResult, pid: number): void {
+    if (!this.started) return;
+    const tag = this.o.detector.agentOf(pid);
+    if (tag) {
+      r.event.agent.id = tag.id;
+      r.event.agent.session = tag.session;
+    }
+    this.record(r);
   }
 
   /**
