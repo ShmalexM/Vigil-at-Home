@@ -422,6 +422,8 @@ export interface SettingsView {
   appearance: AppearanceSettings;
   dataDir: string;
   version: string;
+  /** Short commit hash of the build, '' when unknown. */
+  commit: string;
   /** Advanced pages (Alerts, Rules, Activity, Usage) are listed in the sidebar. */
   showAdvanced: boolean;
 }
