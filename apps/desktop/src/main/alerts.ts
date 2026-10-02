@@ -28,6 +28,8 @@ export interface Detection {
   title?: string;
   summary?: string;
   subject?: Alert['subject'];
+  /** Never fold into an earlier alert (a test alert must pop up every time). */
+  standalone?: boolean;
 }
 
 export interface AlertEvents {
@@ -368,11 +370,11 @@ export const REPEAT_WINDOW_MS = 15 * 60_000;
  * version, what the alert says, and every event with its process (executable
  * identity and signature, pid and start time, command line, working
  * directory, user, parent) and resource, with only the event's id, time and
- * raw sensor record left out. Detections that run or suggest an action, and
- * critical ones, never share a row.
+ * raw sensor record left out. Detections that run or suggest an action,
+ * critical ones, and ones marked standalone never share a row.
  */
 export function repeatKey(d: Detection): string | undefined {
-  if (d.actions.length > 0 || d.rule.severity === 'critical') return undefined;
+  if (d.standalone || d.actions.length > 0 || d.rule.severity === 'critical') return undefined;
   return JSON.stringify([
     d.rule.id,
     d.rule.version,

@@ -2,6 +2,7 @@ import type { Action, Alert } from '@vigil/core';
 import { describe, expect, it } from 'vitest';
 import { AlertService, REPEAT_WINDOW_MS } from './alerts.js';
 import { DryRunExecutor } from './executor.js';
+import { sendTestAlert } from './test-alert.js';
 import { makeExec, makeRule, memoryStore } from './testing.js';
 
 const rule = makeRule({ mode: 'alert', severity: 'high', fidelity: 'high' });
@@ -77,5 +78,12 @@ describe('folding identical repeats', () => {
     await svc.raise({ rule: plain, events: [makeExec('/tmp/p', 4)], actions: [] });
 
     expect(store.listAlerts()).toHaveLength(8);
+  });
+
+  it('pops up a test alert every time, even back to back', async () => {
+    const { svc, popups } = setup();
+    await sendTestAlert(svc, 1);
+    await sendTestAlert(svc, 1);
+    expect(popups).toHaveLength(2);
   });
 });
