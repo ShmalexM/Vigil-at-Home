@@ -28,7 +28,21 @@ import type {
   TreeNode,
   VigilHelperView,
 } from './agents.js';
+import {
+  ChatContext,
+  ConnectorInput,
+  DogInput,
+  DogPatch,
+  PermissionMode,
+  ToolChoice,
+  ToolDecision,
+  ToolKey,
+  type PackView,
+} from './pack.js';
 import type { AppearanceSettings } from './themes.js';
+
+const DogRef = z.string().regex(/^[a-z0-9-]{1,64}$/);
+const ConnectorRef = z.string().regex(/^[a-z0-9-]{1,40}$/);
 import type { UpdateView } from './updates.js';
 import type { UsageLimitsView, UsageReport } from './usage.js';
 import {
@@ -258,6 +272,21 @@ export const calls = {
   /** Vigil's read-only tools for your own agents (MCP). */
   getAgentToolsStatus: z.tuple([]),
   listVigilHelpers: z.tuple([]),
+  getPack: z.tuple([]),
+  setPackMode: z.tuple([PermissionMode]),
+  sayToLead: z.tuple([z.string().min(1).max(4000), ChatContext.optional()]),
+  clearLeadChat: z.tuple([]),
+  decideLeadAction: z.tuple([Id, Id, z.boolean()]),
+  decidePackTool: z.tuple([Id, ToolDecision]),
+  adoptDog: z.tuple([DogInput]),
+  updateDog: z.tuple([DogRef, DogPatch]),
+  retireDog: z.tuple([DogRef]),
+  runDog: z.tuple([DogRef]),
+  setPackToolChoice: z.tuple([ToolKey, ToolChoice]),
+  addConnector: z.tuple([ConnectorInput]),
+  setConnectorEnabled: z.tuple([ConnectorRef, z.boolean()]),
+  removeConnector: z.tuple([ConnectorRef]),
+  refreshConnector: z.tuple([ConnectorRef]),
 } as const;
 export type CallName = keyof typeof calls;
 
@@ -585,6 +614,21 @@ export interface CallResults {
   getPreflightStatus: PreflightStatus;
   getAgentToolsStatus: AgentToolsStatus;
   listVigilHelpers: VigilHelperView[];
+  getPack: PackView;
+  setPackMode: void;
+  sayToLead: AiActionResult;
+  clearLeadChat: void;
+  decideLeadAction: void;
+  decidePackTool: void;
+  adoptDog: AiActionResult;
+  updateDog: void;
+  retireDog: void;
+  runDog: AiActionResult;
+  setPackToolChoice: void;
+  addConnector: AiActionResult;
+  setConnectorEnabled: void;
+  removeConnector: void;
+  refreshConnector: AiActionResult;
 }
 
 /** One agent session: its process tree (at most 200 nodes) and events (at most 500). */
@@ -611,6 +655,8 @@ export interface Pushes {
    * that show those; `changed` covers everything else.
    */
   agents: [];
+  /** The pack changed: a dog's mood, the chat, an approval. Only the Pack page listens. */
+  pack: [];
 }
 
 export type VigilApi = {

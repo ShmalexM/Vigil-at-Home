@@ -2,6 +2,8 @@ import type { ProcessRef, SensorEvent } from '@vigil/core';
 
 /** Same id as VIGIL_SELF in @vigil/detection, restated so this file stays import-light. */
 const VIGIL_SELF = 'vigil-self';
+/** Same as VIGIL_CONNECTOR: an MCP server Vigil started for the pack. */
+const VIGIL_CONNECTOR = 'vigil-connector';
 
 /**
  * Which events no rule matched are worth the labeller's look, and what makes
@@ -107,9 +109,10 @@ function folder(path: string): string {
 export function labelKey(e: SensorEvent): { key: string; tool: boolean } | undefined {
   // A watched agent's activity is reviewed per session, not event by event: an
   // agent runs hundreds of commands an hour, which would swamp the labeller's
-  // CPU budget. Vigil's own helpers (vigil-self) are still labelled.
+  // CPU budget. Vigil's own helpers (vigil-self) and the pack's connectors,
+  // which nothing reviews per session, are still labelled.
   const agent = 'process' in e ? e.process?.agent : undefined;
-  if (agent && agent.id !== VIGIL_SELF) return undefined;
+  if (agent && agent.id !== VIGIL_SELF && agent.id !== VIGIL_CONNECTOR) return undefined;
   const apple = 'process' in e && e.process?.signing === 'apple';
   const k = (key: string) => ({ key, tool: apple });
   switch (e.kind) {

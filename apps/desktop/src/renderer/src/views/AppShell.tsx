@@ -3,6 +3,7 @@ import {
   Bell,
   Bot,
   ChartSpline,
+  Dog as DogIcon,
   Download,
   History as HistoryIcon,
   House,
@@ -13,6 +14,7 @@ import {
 import { useEffect, useState, type ReactNode } from 'react';
 import { LEVEL_RULES } from '../../../shared/levels';
 import { useLive, vigil } from '../api';
+import { AskScout } from '../components/AskScout';
 import { Shield } from '../components/Shield';
 import { Button, LevelPill } from '../components/ui';
 import { ActivityView } from './Activity';
@@ -20,6 +22,7 @@ import { AgentsView } from './Agents';
 import { AlertsView } from './Alerts';
 import { HistoryView } from './History';
 import { HomeView } from './Home';
+import { PackPage } from './Pack';
 import { SetupWizard } from './onboarding/SetupWizard';
 import { RulesView } from './Rules';
 import { SettingsView } from './Settings';
@@ -42,6 +45,7 @@ export const ADVANCED_NAV: NavItem[] = [
   { id: 'alerts', label: 'Alerts', icon: <Bell size={16} /> },
   { id: 'rules', label: 'Rules', icon: <ListChecks size={16} /> },
   { id: 'agents', label: 'Agents', icon: <Bot size={16} /> },
+  { id: 'pack', label: 'Pack', icon: <DogIcon size={16} /> },
   { id: 'activity', label: 'Activity', icon: <Activity size={16} /> },
   { id: 'usage', label: 'Usage', icon: <ChartSpline size={16} /> },
 ];
@@ -177,9 +181,11 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
         {section === 'alerts' && <AlertsView selected={param} go={go} />}
         {section === 'rules' && <RulesView selected={param} go={go} />}
         {section === 'agents' && <AgentsView selected={param} go={go} />}
+        {section === 'pack' && <PackPage />}
         {section === 'activity' && <ActivityView selected={param} go={go} />}
         {section === 'usage' && <UsageView />}
         {section === 'settings' && <SettingsView go={go} />}
+        <AskScout page={section} selected={param} go={go} />
       </main>
     </div>
   );

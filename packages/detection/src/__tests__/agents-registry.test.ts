@@ -54,6 +54,7 @@ describe('agent registry', () => {
     });
     expect(reg.list().at(-1)).toMatchObject({ id: 'aider', builtin: false, edited: false });
     expect(() => reg.save({ ...aider, id: 'vigil-self' }, me)).toThrow(/reserved/);
+    expect(() => reg.save({ ...aider, id: 'vigil-connector' }, me)).toThrow(/reserved/);
     expect(() => reg.save({ ...aider, id: 'Not An Id' }, me)).toThrow();
     expect(() => reg.save({ ...aider, match: [{ argGlobs: ['*x*'] }] }, me)).toThrow();
   });

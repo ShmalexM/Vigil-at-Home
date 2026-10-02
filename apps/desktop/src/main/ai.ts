@@ -29,6 +29,8 @@ import {
   type AiView,
 } from '../shared/ai.js';
 import type { AlertDetail, EventOutcome } from '../shared/ipc.js';
+import type { HelperId } from '../shared/pack.js';
+import type { PackAi } from './pack/service.js';
 import type { ApiKeyProvider, SetupMode } from '../shared/setup.js';
 import type { Store } from './db/store.js';
 import type { VigilCore } from './service.js';
@@ -123,7 +125,11 @@ const Pin = z.object({
  * The AI explains alerts. It never blocks, releases or allows anything, and a
  * block never waits for it.
  */
-export class AiBridge extends EventEmitter<{ changed: [] }> {
+export class AiBridge extends EventEmitter<{
+  changed: [];
+  /** A built-in helper started or finished a run (the Pack page's dogs move). */
+  busy: [helper: HelperId, busy: boolean];
+}> {
   private instance: { ai: VigilAi; key: string } | undefined;
   private readonly now: () => number;
   private readonly explaining = new Set<string>();
@@ -442,7 +448,9 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
     if (this.o.mode() === 'local' || !(prefs.claude || prefs.codex || prefs.api)) return undefined;
     return {
       run: async (req) => {
-        const r = await this.ai().run({ ...req, providers: REVIEW_PROVIDERS });
+        const r = await this.busyWhile('rule-reviewer', () =>
+          this.ai().run({ ...req, providers: REVIEW_PROVIDERS }),
+        );
         if (r.ok) return { ok: true, value: r.value, provider: r.provider };
         return { ok: false, reason: r.reason, ...(r.detail ? { detail: r.detail } : {}) };
       },
@@ -481,7 +489,7 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
     }
     const batch = this.labelQueue;
     this.labelQueue = [];
-    const result = await classifier.classify(batch);
+    const result = await this.busyWhile('labeller', () => classifier.classify(batch));
     // Whatever wasn't labelled goes back ahead of newer events, within the cap.
     const deferred = new Set(result.deferred);
     this.labelQueue = [...batch.filter((e) => deferred.has(e.id)), ...this.labelQueue].slice(
@@ -515,6 +523,51 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
     return result.labels.length;
   }
 
+  private async busyWhile<T>(helper: HelperId, work: () => Promise<T>): Promise<T> {
+    this.emit('busy', helper, true);
+    try {
+      return await work();
+    } finally {
+      this.emit('busy', helper, false);
+    }
+  }
+
+  /**
+   * The runner for the pack (Pack page). The Lead dog's chat is the user's
+   * own request and may use their Claude plan when they opted in; pack jobs
+   * and risk checks for them never do (mayUsePlan in @vigil/ai).
+   */
+  packAi(): PackAi {
+    return {
+      run: (req) => this.ai().run(req),
+      status: async () => {
+        const v = await this.view();
+        const ready = (p: AiProvider) =>
+          v.providers.some((x) => x.provider === p && x.state === 'ready');
+        const claudeOnKey = ready('claude') && v.anthropicKey;
+        const judges = [
+          claudeOnKey && 'Claude (API key)',
+          ready('codex') && 'Codex',
+          ready('api') && (v.api?.name ?? 'the cloud API'),
+          ready('ollama') && 'the local model',
+        ].filter((x): x is string => typeof x === 'string');
+        const planOnly = ready('claude') && !v.anthropicKey && v.prefs.claudePlan;
+        return {
+          anyReady: judges.length > 0 || planOnly,
+          judge: judges.length
+            ? { ready: true, detail: `${judges[0]} checks risky calls` }
+            : {
+                ready: false,
+                detail: planOnly
+                  ? 'Only your Claude plan is set up, so risky calls in pack jobs are asked instead'
+                  : 'No AI can check risky calls, so they are asked instead',
+              },
+          leadMayUsePlan: v.prefs.claudePlan && ready('claude'),
+        };
+      },
+    };
+  }
+
   /**
    * The user asked Vigil to explain this alert (the Explain button). The only
    * path that may use their Claude plan, when they've turned it on.
@@ -545,16 +598,18 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
     this.explaining.add(alert.id);
     try {
       const urgent = asked || alert.notify === 'popup';
-      const result = await this.ai().run({
-        purpose: 'explain',
-        urgency: urgent ? 'now' : 'background',
-        // Only an explanation the user asked for may use their Claude plan.
-        ...(asked ? { requestedByUser: true } : {}),
-        instructions: EXPLAIN_INSTRUCTIONS,
-        data: explainData(detail),
-        output: Explanation,
-        deadlineMs: urgent ? EXPLAIN_NOW_DEADLINE_MS : EXPLAIN_BACKGROUND_DEADLINE_MS,
-      });
+      const result = await this.busyWhile('explainer', () =>
+        this.ai().run({
+          purpose: 'explain',
+          urgency: urgent ? 'now' : 'background',
+          // Only an explanation the user asked for may use their Claude plan.
+          ...(asked ? { requestedByUser: true } : {}),
+          instructions: EXPLAIN_INSTRUCTIONS,
+          data: explainData(detail),
+          output: Explanation,
+          deadlineMs: urgent ? EXPLAIN_NOW_DEADLINE_MS : EXPLAIN_BACKGROUND_DEADLINE_MS,
+        }),
+      );
       if (!result.ok) return undefined;
       const v = result.value;
       return {

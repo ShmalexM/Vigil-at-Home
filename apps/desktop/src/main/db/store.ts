@@ -127,7 +127,7 @@ const UsageRunRow = z.object({
   id: z.string().min(1),
   at: z.number().int(),
   provider: z.enum(['claude', 'codex', 'jev', 'api', 'ollama']),
-  purpose: z.enum(['explain', 'analyze', 'classify']),
+  purpose: z.enum(['explain', 'analyze', 'classify', 'chat']),
   ok: z.boolean(),
   model: z.string().max(200).optional(),
   inputTokens: Tokens,

@@ -80,6 +80,29 @@ export const CALL_NAMES = [
   'getPreflightStatus',
   'getAgentToolsStatus',
   'listVigilHelpers',
+  'getPack',
+  'setPackMode',
+  'sayToLead',
+  'clearLeadChat',
+  'decideLeadAction',
+  'decidePackTool',
+  'adoptDog',
+  'updateDog',
+  'retireDog',
+  'runDog',
+  'setPackToolChoice',
+  'addConnector',
+  'setConnectorEnabled',
+  'removeConnector',
+  'refreshConnector',
 ] as const;
 
-export const PUSH_NAMES = ['changed', 'popup', 'navigate', 'theme', 'events', 'agents'] as const;
+export const PUSH_NAMES = [
+  'changed',
+  'popup',
+  'navigate',
+  'theme',
+  'events',
+  'agents',
+  'pack',
+] as const;

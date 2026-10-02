@@ -2,7 +2,7 @@ import type { AgentToolRequestEvent } from '@vigil/core';
 import { Bot } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { toolRequestRows } from '../evidence';
-import { agentRoute, VIGIL_SELF } from '../views/agents-format';
+import { agentRoute, VIGIL_CONNECTOR, VIGIL_SELF } from '../views/agents-format';
 import type { AgentLinks } from '../views/Activity';
 import { Chip } from './ui';
 
@@ -17,13 +17,15 @@ export function AgentField({
   links: AgentLinks;
 }) {
   const own = id === VIGIL_SELF;
+  // Pack connectors have no page on Agents; the Pack page lists them.
+  const linked = !own && id !== VIGIL_CONNECTOR;
   return (
     <span className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
       <Chip tone={own ? 'ai' : 'accent'}>
         <Bot size={12} />
         {links.nameOf(id)}
       </Chip>
-      {session && !own && links.go && (
+      {session && linked && links.go && (
         <button
           type="button"
           className="more-link"

@@ -9,7 +9,7 @@
 /** Same ids as `ProviderId` in @vigil/ai. */
 export type UsageProvider = 'claude' | 'codex' | 'jev' | 'api' | 'ollama';
 /** Same ids as `Purpose` in @vigil/ai. */
-export type UsagePurpose = 'explain' | 'analyze' | 'classify';
+export type UsagePurpose = 'explain' | 'analyze' | 'classify' | 'chat';
 export type UsageDays = 1 | 7 | 30 | 90;
 
 /** Reading order for every chart, row and table. */
@@ -31,8 +31,9 @@ export const PROVIDER_LABEL: Record<UsageProvider, string> = {
 
 export const PURPOSE_LABEL: Record<UsagePurpose, string> = {
   explain: 'Explaining alerts',
-  analyze: 'Proposing rules',
+  analyze: 'Rule reviews and pack jobs',
   classify: 'Labelling events',
+  chat: 'Talking with the Lead dog',
 };
 
 /**

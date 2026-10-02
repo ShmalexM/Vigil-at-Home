@@ -1,0 +1,113 @@
+/*
+ * Ask the Lead dog from any page (components/AskScout.tsx): a slim bar pinned
+ * to the bottom of the content, and the drawer it opens.
+ */
+.ask-dock {
+  position: sticky;
+  bottom: 0;
+  z-index: 6;
+  display: flex;
+  justify-content: center;
+  padding: 10px 28px 14px;
+  background: linear-gradient(to top, var(--bg0) 55%, transparent);
+  pointer-events: none;
+}
+.ask-bar {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(640px, 100%);
+  height: 40px;
+  padding: 0 8px 0 4px;
+  border: 1px solid var(--ln1);
+  border-radius: 14px;
+  background: var(--bg2);
+  color: var(--tx1);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: text;
+  box-shadow: 0 4px 16px var(--shadow);
+}
+.ask-bar:hover,
+.ask-bar:focus-visible {
+  border-color: var(--ac-ln);
+}
+.ask-bar-dog {
+  flex-shrink: 0;
+  margin: -6px -2px -4px 0;
+}
+.ask-drawer {
+  position: fixed;
+  right: 20px;
+  bottom: 16px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(440px, calc(100vw - 40px));
+  max-height: min(78vh, 680px);
+  padding: 12px;
+  border: 1px solid var(--ln1);
+  border-radius: 16px;
+  background: var(--bg1);
+  box-shadow: 0 12px 40px var(--shadow);
+  animation: ask-rise 160ms ease-out;
+}
+.ask-drawer .lead-log {
+  min-height: 160px;
+  max-height: none;
+  flex: 1;
+}
+.ask-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--ln0);
+}
+.ask-head-dog {
+  flex-shrink: 0;
+  margin: -8px -4px -4px -6px;
+}
+@keyframes ask-rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ask-drawer {
+    animation: none;
+  }
+}
+
+/* Home: the Lead dog acts out the status line. */
+.home-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.home-scout {
+  flex-shrink: 0;
+  margin: -18px -8px -12px auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+/* The drawer is narrow: approval buttons go under the request. */
+.ask-drawer .approval-card {
+  flex-wrap: wrap;
+}
+.ask-drawer .approval-card > .col:last-child {
+  flex-direction: row;
+  margin-left: auto;
+}
+
+/* Leave room for the bar under the pinned list on split pages. */
+.content:has(.ask-dock) .split-list {
+  max-height: calc(100vh - 300px);
+}

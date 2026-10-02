@@ -1,12 +1,16 @@
 import { CircleCheck, Eye, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import { useLive, vigil } from '../api';
+import { homeMood } from '../components/AskScout';
 import { NeedsYouLine, NoticedList, WatchLine } from '../components/Attention';
+import { Dog } from '../components/Dog';
 import { Card, Chip, LevelPill, SectionHead, SeverityMark, StatusMark } from '../components/ui';
 import { timeAgo } from '../format';
 import { isNoticed, needsDecision } from '../../../shared/attention';
 import { LEVEL_RULES } from '../../../shared/levels';
+import { leadChat } from '../lead-chat';
 import { PageHead } from './AppShell';
+import { usePack } from './Pack';
 
 const levelSentence = {
   good: 'Protection is on.',
@@ -20,6 +24,11 @@ export function HomeView({ go }: { go: (r: string) => void }) {
   const needs = (alerts ?? []).filter(needsDecision);
   const noticed = (alerts ?? []).filter(isNoticed);
   const allRunning = !!status && status.sensors.every((s) => s.state === 'ok');
+  const [pack] = usePack({ settings: false });
+  const lead = pack?.dogs.find((d) => d.role === 'lead');
+  // Ears up for a decision, or for protection that has stopped; a layer that
+  // was never installed is the status line's to explain, not a reason to fret.
+  const scout = homeMood(pack, !!status && (status.needsYou > 0 || status.level === 'poor'));
 
   return (
     <div className="page">
@@ -30,12 +39,23 @@ export function HomeView({ go }: { go: (r: string) => void }) {
 
       {status && (
         <Card>
-          <div className="row" style={{ gap: 12 }}>
+          <div className="home-status">
             <LevelPill level={status.level} />
             <span className="t-h2">
               {levelSentence[status.level]}
               {status.needsYou === 0 && ' Nothing needs you.'}
             </span>
+            {lead && (
+              <button
+                type="button"
+                className="home-scout"
+                title={`${lead.name}: ${scout.says}. Ask ${lead.name}`}
+                aria-label={`Ask ${lead.name}`}
+                onClick={leadChat.open}
+              >
+                <Dog breed={lead.breed} mood={scout.mood} size={96} />
+              </button>
+            )}
           </div>
           {status.needsYou > 0 && <NeedsYouLine count={status.needsYou} />}
           <div className="row spread" style={{ flexWrap: 'wrap' }}>
