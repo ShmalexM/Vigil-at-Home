@@ -612,7 +612,8 @@ const Explanation = z.object({
 const EXPLAIN_INSTRUCTIONS =
   "A security rule on this person's Mac raised the alert in the data. Explain it to someone who " +
   'is not a security expert: what the program is, what it did, and why the rule cares, in two or ' +
-  'three short sentences for `summary`. Put anything longer in `details`. Give your read as ' +
+  'three short sentences for `summary`. Say what Vigil actually did from `actions` (a failed or ' +
+  'pending action did not happen). Put anything longer in `details`. Give your read as ' +
   '`verdict` and how sure you are as `confidence`. Say `unsure` rather than guess. Never tell the ' +
   'person to allow, release or trust anything; they decide that themselves.';
 
@@ -629,7 +630,12 @@ function explainData(d: AlertDetail) {
     ...(d.rule
       ? { rule: { name: d.rule.name, description: d.rule.description, mode: d.rule.mode } }
       : {}),
-    actions: d.actions.map((a) => ({ kind: a.action.kind, status: a.status })),
+    // What really happened, so the explanation never claims a block or release that failed.
+    actions: d.actions.map((a) => ({
+      kind: a.action.kind,
+      status: a.status,
+      ...(a.result?.error ? { error: a.result.error.slice(0, 200) } : {}),
+    })),
     events: d.events.slice(0, MAX_EVENTS),
   };
 }
