@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { z } from 'zod';
 import { canChangeMode, type Rule, type RuleMode, type SensorEvent } from '@vigil/core';
 import {
+  AlertView,
   Appearance,
   ThemePref,
   type AlertDetail,
@@ -10,6 +11,7 @@ import {
   type RuleView,
   type StatusView,
 } from '../shared/ipc.js';
+import { isNoticed } from '../shared/attention.js';
 import { DEFAULT_APPEARANCE, type AppearanceSettings } from '../shared/themes.js';
 import { AlertService, type DecisionInput } from './alerts.js';
 import { EventLog } from './events.js';
@@ -22,6 +24,7 @@ import { Scheduler } from './scheduler.js';
 import { SensorRegistry } from './sensors.js';
 import { computeStatus } from './status.js';
 import { TEST_RULE } from './test-alert.js';
+import { WORTH_A_LOOK_RULE } from './worth-a-look.js';
 import { UsageService } from './usage.js';
 
 const HOUR = 60 * 60 * 1000;
@@ -78,6 +81,7 @@ export class VigilCore {
       onError: (name, err) => console.error(`[scheduler] ${name} failed:`, err),
     });
     store.upsertRule(TEST_RULE);
+    store.upsertRule(WORTH_A_LOOK_RULE);
   }
 
   start(): void {
@@ -161,9 +165,31 @@ export class VigilCore {
           reason: 'You confirmed it as malicious',
         });
       }
-      if (learned.demoted) console.info(`[detection] ${learned.demoted.message}`);
+      if (learned.suggested && learned.suggestDemotion)
+        console.info(`[detection] suggested: ${learned.suggestDemotion.message}`);
     }
     return this.store.getAlert(alertId) ?? alert;
+  }
+
+  /**
+   * "Those were me" on the Noticed list. Only alerts that are still Noticed
+   * (shared/attention.ts) are cleared, so this can never release a block or
+   * dismiss something that asked for a decision. It doesn't teach the rules
+   * either: one tap on a pile shouldn't quietly turn a rule off.
+   */
+  async clearNoticed(ids: readonly string[]): Promise<number> {
+    let cleared = 0;
+    for (const id of new Set(ids)) {
+      const alert = this.store.getAlert(id);
+      if (!alert || !isNoticed(alert)) continue;
+      await this.alerts.decide(id, {
+        verdict: 'expected',
+        release: false,
+        note: 'Cleared from Noticed',
+      });
+      cleared++;
+    }
+    return cleared;
   }
 
   eventStats(): EventStats {
@@ -175,8 +201,17 @@ export class VigilCore {
 
   status(): StatusView {
     const s = computeStatus(this.store.listAlerts({ status: 'open' }), this.sensors.list());
+    const today = startOfDay(this.now());
+    const alertView = this.alertView();
     return {
       ...s,
+      alertView,
+      badge: s.needsYou + (alertView === 'more' ? s.noticed : 0),
+      watch: {
+        checkedToday: this.store.countEventsSince(today),
+        lastEventAt: this.store.newestEventAt(),
+        blockedToday: this.store.countRuleBlocksSince(today),
+      },
       sensors: this.sensors.list(),
       dryRun: this.executor.simulated ?? this.dryRun,
       helperInstallable: this.helperInstallable,
@@ -204,7 +239,10 @@ export class VigilCore {
     }));
     const own = this.store
       .listRules()
-      .filter((r) => r.id !== TEST_RULE.id && !this.detector?.hasRule(r.id))
+      .filter(
+        (r) =>
+          r.id !== TEST_RULE.id && r.id !== WORTH_A_LOOK_RULE.id && !this.detector?.hasRule(r.id),
+      )
       .map((rule) => ({ rule, matches: counts.get(rule.id) ?? 0 }));
     return [...engine, ...own];
   }
@@ -249,6 +287,23 @@ export class VigilCore {
     this.store.setSetting('theme', ThemePref.parse(theme));
   }
 
+  alertView(): AlertView {
+    return this.store.getSetting('alertView', AlertView, 'less');
+  }
+
+  setAlertView(view: AlertView): void {
+    this.store.setSetting('alertView', AlertView.parse(view));
+  }
+
+  /** Off by default: the sidebar shows only Home, History and Settings. */
+  showAdvanced(): boolean {
+    return this.store.getSetting('showAdvanced', z.boolean(), false);
+  }
+
+  setShowAdvanced(show: boolean): void {
+    this.store.setSetting('showAdvanced', show);
+  }
+
   appearance(): AppearanceSettings {
     return this.store.getSetting('appearance', Appearance, DEFAULT_APPEARANCE);
   }
@@ -256,4 +311,11 @@ export class VigilCore {
   setAppearance(appearance: AppearanceSettings): void {
     this.store.setSetting('appearance', Appearance.parse(appearance));
   }
+}
+
+/** Local midnight before `ms`, so "today" matches the user's clock. */
+function startOfDay(ms: number): number {
+  const d = new Date(ms);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
 }

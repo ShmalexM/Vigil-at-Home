@@ -51,6 +51,7 @@ export function registerIpc(
     getAlertDetail: (id) => core.alertDetail(id),
     decide: (id, input) => core.decide(id, stripUndefined(input)),
     reopen: (id) => core.alerts.reopen(id),
+    clearNoticed: (ids) => core.clearNoticed(ids),
     undoAction: (id) => core.alerts.undo(id),
     approveProposal: (id) => core.alerts.approveProposal(id),
     rejectProposal: (id) => core.alerts.rejectProposal(id),
@@ -80,10 +81,20 @@ export function registerIpc(
       appearance: core.appearance(),
       dataDir: app.getPath('userData'),
       version: app.getVersion(),
+      showAdvanced: core.showAdvanced(),
     }),
     setTheme: (theme) => {
       core.setTheme(theme);
       windows.applyTheme(theme, core.appearance());
+    },
+    setAlertView: (view) => {
+      core.setAlertView(view);
+      windows.setNeedsYou(core.status().badge);
+      windows.broadcast('changed');
+    },
+    setShowAdvanced: (show) => {
+      core.setShowAdvanced(show);
+      windows.broadcast('changed');
     },
     setAppearance: (appearance) => {
       core.setAppearance(appearance);

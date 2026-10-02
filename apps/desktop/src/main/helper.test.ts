@@ -2,20 +2,23 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SensorEvent } from '@vigil/core';
+import type { HelperRan } from '@vigil/helper';
 import type { HelperClient } from '@vigil/helper/client';
 import { describe, expect, it } from 'vitest';
 import { HelperLink } from './helper.js';
 
 function fakeClient(answer: (cmd: { kind: string }) => unknown) {
-  const listeners: ((e: SensorEvent) => void)[] = [];
+  const listeners: ((e: SensorEvent, ran: HelperRan[]) => void)[] = [];
   const calls: string[] = [];
+  const sent: { kind: string }[] = [];
   const client = {
-    onEvent: (fn: (e: SensorEvent) => void) => (listeners.push(fn), () => {}),
+    onEvent: (fn: (e: SensorEvent, ran: HelperRan[]) => void) => (listeners.push(fn), () => {}),
     subscribe: async () => {
       calls.push('events.subscribe');
     },
     call: async (cmd: { kind: string }) => {
       calls.push(cmd.kind);
+      sent.push(cmd);
       return answer(cmd);
     },
     close: () => calls.push('close'),
@@ -23,7 +26,8 @@ function fakeClient(answer: (cmd: { kind: string }) => unknown) {
   return {
     client: client as unknown as HelperClient,
     calls,
-    emit: (e: SensorEvent) => listeners.forEach((f) => f(e)),
+    sent,
+    emit: (e: SensorEvent, ran: HelperRan[] = []) => listeners.forEach((f) => f(e, ran)),
   };
 }
 
@@ -87,6 +91,73 @@ describe('HelperLink', () => {
     };
     await link.reconnect();
     expect(subscribed).toEqual(['e1']);
+    link.stop();
+  });
+
+  it('does not run again what the helper’s own rules already ran', async () => {
+    const fake = fakeClient(() => ({ actionId: 'j', summary: 'ok', undoable: false }));
+    const link = new HelperLink(socket(), async () => fake.client);
+    await link.tryConnect();
+    const kill = { kind: 'process.kill' as const, pid: 4242, path: '/tmp/payload' };
+    fake.emit(
+      {
+        id: 'e9',
+        ts: 1,
+        source: 'santa',
+        kind: 'process.exec',
+        process: { pid: 4242, path: '/tmp/payload' },
+      },
+      [
+        {
+          ruleId: 'known-bad-hash',
+          at: 1,
+          action: kill,
+          outcome: { actionId: 'h1', summary: 'stopped', undoable: false },
+        },
+        {
+          ruleId: 'known-bad-hash',
+          at: 2,
+          action: { kind: 'network.block', address: '203.0.113.9' },
+          error: 'pf is off',
+        },
+      ],
+    );
+    // The helper's own finish time, so time-to-block stays honest.
+    expect(await link.execute(kill)).toEqual({ at: 1 });
+    expect(await link.execute({ kind: 'network.block', address: '203.0.113.9' })).toMatchObject({
+      error: 'pf is off',
+    });
+    expect(fake.calls).toEqual(['events.subscribe']);
+    // Only once: a later identical action goes to the helper.
+    await link.execute(kill);
+    expect(fake.calls).toEqual(['events.subscribe', 'process.kill']);
+    link.stop();
+  });
+
+  it('sends the helper its rules, then only the lists it asks for, in parts', async () => {
+    const fake = fakeClient((cmd) =>
+      cmd.kind === 'detection.sync' ? { needLists: ['big'], preexec: null } : { complete: true },
+    );
+    const link = new HelperLink(socket(), async () => fake.client);
+    await link.tryConnect();
+    const big = Array.from({ length: 2500 }, (_, i) => `h${i}`);
+    const out = await link.syncRules({
+      rules: [],
+      exceptions: [],
+      selfPaths: ['/x'],
+      lists: { big, small: ['a'] },
+    });
+    expect(out?.needLists).toEqual(['big']);
+    const parts = fake.sent.filter((c) => c.kind === 'detection.list.set') as unknown as {
+      part: number;
+      parts: number;
+      entries: string[];
+    }[];
+    expect(parts.map((p) => [p.part, p.parts, p.entries.length])).toEqual([
+      [0, 3, 1000],
+      [1, 3, 1000],
+      [2, 3, 500],
+    ]);
     link.stop();
   });
 

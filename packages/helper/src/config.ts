@@ -8,6 +8,8 @@ export interface HelperPaths {
   approvalsDir: string;
   tlsDir: string;
   fileAccessPolicy: string;
+  /** The blocking rules the app last handed the helper (fastpath.ts). */
+  helperRules: string;
   santaLog: string | false;
   osqueryResults: string | false;
   socket: string;
@@ -24,6 +26,7 @@ export function defaultPaths(supportDir = '/Library/Application Support/Vigil'):
     approvalsDir: '/var/run/vigil-approvals',
     tlsDir: join(supportDir, 'santa-sync'),
     fileAccessPolicy: join(supportDir, 'santa-file-access.plist'),
+    helperRules: join(supportDir, 'helper-rules.json'),
     santaLog: '/var/db/santa/santa.log',
     osqueryResults: '/var/log/osquery/osqueryd.results.log',
     socket: '/var/run/vigil-helper.sock',

@@ -21,7 +21,10 @@
 //   4. Launch agent named like Apple's: a real plist, seen by osquery. The
 //      popup suggests disabling it; the user presses Block it; then undoes it.
 //   5. Timing: the same pause-and-popup path repeated to get a spread.
-//   6. Learning: answering "fine" three times demotes the rule from block to alert.
+//   6. Learning: answering "fine" three times suggests turning the rule down to alert;
+//      it keeps blocking until the suggestion is accepted.
+//   7. App closed: the helper runs the blocking rules the app handed it and
+//      blocks the same beacon with no app running.
 //
 // The admin password dialog can't be answered on a runner, so the helper's
 // approval step (which the dialog would run as root) runs through sudo
@@ -424,7 +427,7 @@ try {
     // A fresh osquery on a runner can take a while before its first scheduled
     // results (the first run of every query lands at once). Start the beacon
     // only once connection snapshots are flowing, so the wait below measures
-    // the 10 s snapshot interval rather than osquery's start-up.
+    // the 30 s snapshot interval rather than osquery's start-up.
     const g0 = Date.now();
     const flowing = await waitUntil(() => osqueryHasRun('vigil_network_connections'), 150000, 1000);
     s.osqueryReadyWaitedMs = Date.now() - g0;
@@ -595,7 +598,7 @@ try {
       const paused = procState(pid).startsWith('T');
       const t1 = Date.now();
       // Undo the pause rather than answering "fine": three "fine" answers in a
-      // row teach Vigil to demote the rule, which scenario 6 checks on its own.
+      // row make Vigil suggest turning the rule down, which scenario 6 checks on its own.
       if (act) await main((_e, id) => globalThis.vigil.core.alerts.undo(id), act.id);
       const resumed = await waitUntil(() => !procState(pid).startsWith('T'), 20000);
       results.timings.push({
@@ -618,7 +621,8 @@ try {
   // ---------------------------------------------------------------- 6
   {
     // The user keeps saying "fine" to one rule: after three answers Vigil
-    // should stop blocking with it (block -> alert), and never raise it itself.
+    // suggests turning it down (block -> alert) but leaves it blocking until
+    // the user accepts the suggestion.
     const modeOf = () =>
       main(
         () =>
@@ -628,7 +632,19 @@ try {
     const before = await modeOf();
     // Scenario 1 already answered "fine" once for this rule.
     let answers = 1;
-    for (let i = 0; i < 4 && (await modeOf()) === 'block'; i++, answers++) {
+    const suggestion = () =>
+      main(() =>
+        globalThis.vigil.core.detector.pipeline
+          .list()
+          .find(
+            (p) =>
+              p.kind === 'retire' &&
+              p.provider === 'vigil' &&
+              p.status === 'awaiting_review' &&
+              p.rule.id === 'credential-theft-untrusted',
+          ),
+      );
+    for (let i = 0; i < 4 && !(await suggestion()); i++, answers++) {
       const child = sleeper(`Helper-${i}`);
       await sleep(200);
       const t0 = await inject({
@@ -653,24 +669,62 @@ try {
         );
       child.kill('SIGKILL');
     }
+    const suggested = await suggestion();
+    const stillBefore = await modeOf();
+    if (suggested)
+      await main((_e, id) => globalThis.vigil.core.detector.approveProposal(id), suggested.id);
     const after = await modeOf();
     results.scenarios.learning = {
-      name: '"Fine" answers demote the rule',
+      name: '"Fine" answers suggest turning the rule down',
       before,
+      afterAnswers: stillBefore,
       after,
       answers,
     };
     check('learning: rule was blocking before', before === 'block', before);
     check(
-      'learning: three "fine" answers demoted it to alert',
-      after === 'alert' && answers === 3,
+      'learning: three "fine" answers suggested Alert and left it blocking',
+      !!suggested && suggested.retireTo === 'alert' && stillBefore === 'block' && answers === 3,
+      { suggested: suggested?.retireTo ?? null, mode: stillBefore, answers },
+    );
+    check('learning: accepting the suggestion moved it to alert', after === 'alert', after);
+  }
+  results.approvals = await main(() => globalThis.__approvals);
+
+  // ---------------------------------------------------------------- 7
+  {
+    const s = { name: 'App closed: the helper blocks on its own', sensor: 'real osquery' };
+    results.scenarios.appClosed = s;
+    // Scenario 3 undid its block; the address is still on the list.
+    const synced = await main(async () => {
+      await globalThis.vigil.syncHelperRules();
+      return (await globalThis.vigil.core.executor.query('helper.status'))?.helperRules ?? null;
+    });
+    s.helperRules = synced;
+    check('app closed: helper has the blocking rules', (synced?.rules ?? 0) > 0, synced);
+    check('app closed: helper has the threat list', (synced?.lists?.known_bad_ips ?? 0) > 0);
+    check('app closed: address unblocked before the test', !pfBlocked(C2));
+    await app.close();
+    const t0 = Date.now();
+    const beacon = nodeStandIn(
+      'beacon-2',
+      `const https=require('node:https');const agent=new https.Agent({keepAlive:true,maxSockets:1});` +
+        `const go=()=>https.get({host:'${C2}',path:'/',agent,timeout:5000},(r)=>r.resume()).on('error',()=>{});` +
+        `go();setInterval(go,2000)`,
+    );
+    const blocked = await waitUntil(() => pfBlocked(C2), 90000, 250);
+    s.connectToBlockMs = blocked ? Date.now() - t0 : null;
+    check('app closed: helper blocked the address with the app closed', blocked);
+    check('app closed: address is really unreachable', blocked && !reachable(C2));
+    beacon.kill('SIGKILL');
+    execFileSync(
+      'sudo',
+      ['-n', 'pfctl', '-a', 'com.apple/vigil', '-t', 'vigil_blocked', '-T', 'flush'],
       {
-        after,
-        answers,
+        stdio: 'ignore',
       },
     );
   }
-  results.approvals = await main(() => globalThis.__approvals);
 } catch (err) {
   check('run completed', false, { error: String(err?.stack ?? err) });
 } finally {

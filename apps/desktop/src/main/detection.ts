@@ -12,6 +12,7 @@ import {
   macosCoreRules,
   mergeRules,
   sqliteStores,
+  type DecisionResult,
   type Detection,
   type DetectionRule,
   type EventHistory,
@@ -22,10 +23,12 @@ import {
   type ReviewState,
   type SqliteDetectionStores,
 } from '@vigil/detection';
+import { fastPathRules } from '@vigil/detection/fastpath';
 import { userOrigin } from '@vigil/detection/user';
 import type { EventOutcome } from '../shared/ipc.js';
 import type { AlertService } from './alerts.js';
 import type { Store } from './db/store.js';
+import type { HelperRuleSet } from './helper.js';
 
 const KEY_REVIEW = 'detection.review';
 
@@ -61,6 +64,9 @@ export class Detector {
   private reviewer: RuleReviewer | undefined;
   private checkedByKind = new Map<string, number>();
   private readonly now: () => number;
+  private readonly selfPaths: string[];
+  /** Called after rules, modes or exceptions change, so the helper's copy can follow. */
+  onRulesChanged: (() => void) | undefined;
 
   constructor(
     private readonly db: DatabaseSync,
@@ -70,6 +76,7 @@ export class Detector {
     opts: DetectorOptions,
   ) {
     this.now = opts.now ?? Date.now;
+    this.selfPaths = opts.selfPaths;
     // Detection keeps its state in det_* tables in the same database. Replay
     // history reads the app's own event table rather than keeping a second copy.
     this.stores = { ...sqliteStores(db), history: appHistory(store) };
@@ -227,12 +234,17 @@ export class Detector {
    * user-blocked list, and demotion of rules that keep being wrong. Returns
    * the Santa rule to add when the user confirmed it as malicious.
    */
-  learn(alertId: string, decision: UserDecision) {
+  learn(alertId: string, decision: UserDecision): DecisionResult & { suggested?: boolean } {
     const d = this.store.getAlertDetection(alertId) as Detection | undefined;
     if (!d) return {};
     const result = this.feedback.recordDecision(d, decision, userOrigin('alert'));
+    // A rule that keeps being wrong is only suggested for a quieter mode; the
+    // user approves it in Rules like any other suggested change.
+    const suggested = result.suggestDemotion
+      ? this.pipeline.suggestDemotion(result.suggestDemotion, [alertId])
+      : undefined;
     this.recount();
-    return result;
+    return { ...result, suggested: suggested?.ok === true };
   }
 
   /** Every rule the engine runs, with the mode it actually applies. */
@@ -241,6 +253,22 @@ export class Detector {
       rule: coreRule(r as DetectionRule),
       mode: effectiveMode,
     }));
+  }
+
+  /**
+   * The blocking rules the helper can run on its own (fastPathRules), with
+   * the user's exceptions, Vigil's own paths and the lists the rules look up.
+   * The helper runs them on the sensor stream and hands Santa the ones it can
+   * stop before launch; this engine keeps running all of them either way.
+   */
+  helperRules(): HelperRuleSet {
+    const { rules, lists } = fastPathRules(this.engine.listRules());
+    return {
+      rules,
+      exceptions: this.stores.exceptions.all(),
+      selfPaths: this.selfPaths,
+      lists: Object.fromEntries(lists.map((l) => [l, this.stores.lists.entries(l)])),
+    };
   }
 
   hasRule(id: string): boolean {
@@ -265,6 +293,7 @@ export class Detector {
       for (const k of r.eventKinds) counts.set(k, (counts.get(k) ?? 0) + 1);
     }
     this.checkedByKind = counts;
+    this.onRulesChanged?.();
   }
 }
 

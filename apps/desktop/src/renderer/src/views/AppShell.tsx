@@ -3,6 +3,7 @@ import {
   Bell,
   ChartSpline,
   Download,
+  History as HistoryIcon,
   House,
   ListChecks,
   Settings as SettingsIcon,
@@ -15,19 +16,31 @@ import { Shield } from '../components/Shield';
 import { Button, LevelPill } from '../components/ui';
 import { ActivityView } from './Activity';
 import { AlertsView } from './Alerts';
+import { HistoryView } from './History';
 import { HomeView } from './Home';
 import { SetupWizard } from './onboarding/SetupWizard';
 import { RulesView } from './Rules';
 import { SettingsView } from './Settings';
 import { UsageView } from './Usage';
 
-const NAV: { id: string; label: string; icon: ReactNode }[] = [
+type NavItem = { id: string; label: string; icon: ReactNode };
+
+/** What everyone needs day to day. */
+const NAV: NavItem[] = [
   { id: 'home', label: 'Home', icon: <House size={16} /> },
+  { id: 'history', label: 'History', icon: <HistoryIcon size={16} /> },
+  { id: 'settings', label: 'Settings', icon: <SettingsIcon size={16} /> },
+];
+
+/**
+ * The detail behind what Vigil does. Listed in the sidebar only when turned on
+ * in Settings › Advanced, but always reachable by route (popups link to alerts).
+ */
+export const ADVANCED_NAV: NavItem[] = [
   { id: 'alerts', label: 'Alerts', icon: <Bell size={16} /> },
   { id: 'rules', label: 'Rules', icon: <ListChecks size={16} /> },
   { id: 'activity', label: 'Activity', icon: <Activity size={16} /> },
   { id: 'usage', label: 'Usage', icon: <ChartSpline size={16} /> },
-  { id: 'settings', label: 'Settings', icon: <SettingsIcon size={16} /> },
 ];
 
 export function AppShell({ initialRoute }: { initialRoute: string }) {
@@ -54,7 +67,10 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
   const [status] = useLive(() => vigil.getStatus());
   const [setup] = useLive(() => vigil.getSetup());
   const [updates] = useLive(() => vigil.getUpdates());
+  const [settings] = useLive(() => vigil.getSettings());
   const [section = 'home', param] = route.split('/');
+  const onAdvanced = ADVANCED_NAV.some((n) => n.id === section);
+  const showAdvanced = !!settings?.showAdvanced || onAdvanced;
 
   if (section === 'setup') return <SetupWizard onDone={() => go('home')} />;
 
@@ -68,20 +84,27 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
         </div>
         <nav className="col" style={{ gap: 2 }}>
           {NAV.map((n) => (
-            <button
+            <NavButton
               key={n.id}
-              type="button"
-              className="nav-item"
-              aria-current={section === n.id ? 'page' : undefined}
+              item={n}
+              current={section === n.id}
+              badge={n.id === 'home' ? status?.badge : undefined}
               onClick={() => go(n.id)}
-            >
-              {n.icon}
-              <span className="grow">{n.label}</span>
-              {n.id === 'alerts' && status && status.needsYou > 0 && (
-                <span className="count hot">{status.needsYou}</span>
-              )}
-            </button>
+            />
           ))}
+          {showAdvanced && (
+            <>
+              <span className="nav-group t-small">Advanced</span>
+              {ADVANCED_NAV.map((n) => (
+                <NavButton
+                  key={n.id}
+                  item={n}
+                  current={section === n.id}
+                  onClick={() => go(n.id)}
+                />
+              ))}
+            </>
+          )}
         </nav>
         <div className="grow" />
         {status && (
@@ -130,13 +153,39 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
           </div>
         )}
         {section === 'home' && <HomeView go={go} />}
+        {section === 'history' && <HistoryView go={go} />}
         {section === 'alerts' && <AlertsView selected={param} go={go} />}
         {section === 'rules' && <RulesView selected={param} go={go} />}
         {section === 'activity' && <ActivityView />}
         {section === 'usage' && <UsageView />}
-        {section === 'settings' && <SettingsView />}
+        {section === 'settings' && <SettingsView go={go} />}
       </main>
     </div>
+  );
+}
+
+function NavButton({
+  item,
+  current,
+  badge,
+  onClick,
+}: {
+  item: NavItem;
+  current: boolean;
+  badge?: number | undefined;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="nav-item"
+      aria-current={current ? 'page' : undefined}
+      onClick={onClick}
+    >
+      {item.icon}
+      <span className="grow">{item.label}</span>
+      {!!badge && <span className="count hot">{badge}</span>}
+    </button>
   );
 }
 

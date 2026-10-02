@@ -3,7 +3,15 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { osqueryConfig, osqueryFlags } from '@vigil/sensors';
-import { OSQUERY_LABEL, ensureOsquery, removeOsquery, type OsqueryPaths } from './osquery.js';
+import {
+  OSQUERY_LABEL,
+  ensureOsquery,
+  osqueryShellRunner,
+  removeOsquery,
+  santaReportsLaunchItems,
+  type OsqueryPaths,
+} from './osquery.js';
+import type { System } from './system.js';
 import { FakeSystem } from './testing/fakeSystem.js';
 
 const TARGET = `system/${OSQUERY_LABEL}`;
@@ -102,5 +110,35 @@ describe('osquery setup', () => {
     writeFileSync(p.plist, '<plist>theirs</plist>');
     await removeOsquery(sys, p);
     expect(existsSync(p.plist)).toBe(true);
+  });
+});
+
+describe('santaReportsLaunchItems', () => {
+  it('is true from macOS 13 (Darwin 22) on', () => {
+    expect(santaReportsLaunchItems('21.6.0')).toBe(false);
+    expect(santaReportsLaunchItems('22.1.0')).toBe(true);
+    expect(santaReportsLaunchItems('25.0.0')).toBe(true);
+  });
+});
+
+describe('osqueryShellRunner', () => {
+  it('runs one query in shell mode and parses its JSON', async () => {
+    const calls: string[][] = [];
+    const sys = {
+      run: async (_bin: string, args: string[]) => {
+        calls.push(args);
+        return { code: 0, stdout: '[{"pid":"7"}]', stderr: '' };
+      },
+    } as unknown as System;
+    expect(await osqueryShellRunner(sys)('SELECT 1;')).toEqual([{ pid: '7' }]);
+    expect(calls[0]?.[0]).toBe('-S');
+    expect(calls[0]?.at(-1)).toBe('SELECT 1;');
+  });
+
+  it('returns undefined when osquery fails', async () => {
+    const sys = {
+      run: async () => ({ code: 1, stdout: '', stderr: 'nope' }),
+    } as unknown as System;
+    expect(await osqueryShellRunner(sys)('SELECT 1;')).toBeUndefined();
   });
 });

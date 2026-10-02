@@ -405,9 +405,115 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
         ),
         { mode: 'alert' },
       ],
+      [
+        exec(
+          proc({
+            path: '/usr/bin/xattr',
+            args: ['xattr', '-d', '-r', 'com.apple.quarantine', '/Applications/Google Chrome.app'],
+            signing: 'apple',
+          }),
+        ),
+        { mode: 'alert' },
+      ],
+      [
+        exec(
+          proc({
+            path: '/usr/bin/xattr',
+            args: ['xattr', '-r', '-d', 'com.apple.quarantine', '/Applications/X.app'],
+            signing: 'apple',
+          }),
+        ),
+        { mode: 'alert' },
+      ],
+      [
+        exec(
+          proc({
+            path: '/usr/bin/xattr',
+            args: ['xattr', '-dr', 'com.apple.quarantine', '/Applications/X.app'],
+            signing: 'apple',
+          }),
+        ),
+        { mode: 'alert' },
+      ],
+      [
+        exec(
+          proc({
+            path: '/usr/bin/xattr',
+            args: ['xattr', '-rd', 'com.apple.quarantine', '/Applications/X.app'],
+            signing: 'apple',
+          }),
+        ),
+        { mode: 'alert' },
+      ],
+      [
+        exec(
+          proc({
+            path: '/usr/bin/xattr',
+            args: ['xattr', '-c', '/Applications/X.app'],
+            signing: 'apple',
+          }),
+        ),
+        { mode: 'alert' },
+      ],
+      [
+        exec(
+          proc({
+            path: '/usr/bin/xattr',
+            args: ['xattr', '-rc', '/Applications/X.app'],
+            signing: 'apple',
+          }),
+        ),
+        { mode: 'alert' },
+      ],
     ],
     good: [
       exec(proc({ path: '/usr/bin/xattr', args: ['xattr', '-l', 'file.txt'], signing: 'apple' })),
+      // Real cases from Alex's Mac: Claude and Slack write the flag on downloads.
+      exec(
+        proc({
+          path: '/usr/bin/xattr',
+          args: [
+            'xattr',
+            '-w',
+            'com.apple.quarantine',
+            '0081;66f0a1b2;Claude;',
+            '/Users/alex/Downloads/report.pdf',
+          ],
+          signing: 'apple',
+        }),
+      ),
+      exec(
+        proc({
+          path: '/usr/bin/xattr',
+          args: [
+            'xattr',
+            '-w',
+            'com.apple.quarantine',
+            '0081;66f0a1b2;Slack;',
+            '/Users/alex/Downloads/notes.docx',
+          ],
+          signing: 'apple',
+        }),
+      ),
+      exec(
+        proc({
+          path: '/usr/bin/xattr',
+          args: ['xattr', '-p', 'com.apple.quarantine', '/Users/alex/Downloads/report.pdf'],
+          signing: 'apple',
+        }),
+      ),
+      exec(
+        proc({
+          path: '/usr/bin/xattr',
+          args: [
+            'xattr',
+            '-d',
+            'com.apple.metadata:kMDItemWhereFroms',
+            '/Users/alex/Downloads/a.zip',
+          ],
+          signing: 'apple',
+        }),
+      ),
     ],
   },
   'gatekeeper-disabled': {
@@ -560,6 +666,45 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
     ],
   },
   'mass-document-reads': { bad: [], good: [] },
+  'untrusted-download-collect-then-connect': { bad: [], good: [] },
+  'untrusted-download-persistence': {
+    bad: [
+      [
+        ev({
+          kind: 'persistence',
+          change: 'added',
+          mechanism: 'launch_agent',
+          path: `${home}/Library/LaunchAgents/com.updater.plist`,
+          program: '/bin/sh',
+          process: proc({
+            path: '/bin/sh',
+            signing: 'apple',
+            downloadedAncestor: {
+              path: '/Volumes/Setup/Setup.app/Contents/MacOS/Setup',
+              originUrl: 'https://files.example/setup.dmg',
+              signing: 'adhoc',
+            },
+          }),
+        }),
+        { mode: 'alert', actions: ['persistence.disable'] },
+      ],
+    ],
+    good: [
+      // An identified app that was downloaded adds its own login item.
+      ev({
+        kind: 'persistence',
+        change: 'added',
+        mechanism: 'login_item',
+        path: '/Applications/Rectangle.app',
+        program: '/Applications/Rectangle.app/Contents/MacOS/Rectangle',
+        process: proc({
+          path: '/Applications/Rectangle.app/Contents/MacOS/Rectangle',
+          signing: 'developer_id',
+          quarantine: { originUrl: 'https://rectangleapp.com/Rectangle.dmg' },
+        }),
+      }),
+    ],
+  },
   'unsigned-first-network': {
     bad: [[connect(devTool, '140.82.112.3'), { mode: 'shadow' }]],
     good: [connect(chrome, '142.250.1.1')],
@@ -617,6 +762,76 @@ describe('macOS core pack', () => {
       });
     }
   }
+
+  it('untrusted-download-collect-then-connect needs the read, then a connection, from the same download', () => {
+    const download = {
+      path: '/Volumes/Game/Game.app/Contents/MacOS/Game',
+      originUrl: 'https://cracks.example/game.dmg',
+      signing: 'unsigned' as const,
+    };
+    const child = (path: string, pid: number) =>
+      proc({ path, pid, signing: 'apple', downloadedAncestor: download });
+    const cookies = `${home}/Library/Application Support/Google/Chrome/Default/Cookies`;
+    const fired = (events: DetectionEvent[]) => {
+      const eng = engine();
+      return events
+        .flatMap((e) => eng.evaluate(e))
+        .filter((d) => d.match.ruleId === 'untrusted-download-collect-then-connect');
+    };
+    // Read by one child, sent by another: same download, so it fires.
+    const hits = fired([
+      fileOpen(child('/bin/cp', 601), cookies),
+      connect(child('/usr/bin/curl', 602), '198.51.100.7'),
+    ]);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.mode).toBe('alert');
+    expect(hits[0]!.propose.map((a) => a.kind)).toEqual(['network.block', 'process.kill']);
+    expect(hits[0]!.reasons.join(' ')).not.toMatch(/\{\{|unknown/);
+    // A connection alone, or one before the read, is not enough.
+    expect(fired([connect(child('/usr/bin/curl', 602), '198.51.100.7')])).toEqual([]);
+    expect(
+      fired([
+        connect(child('/usr/bin/curl', 602), '198.51.100.7'),
+        fileOpen(child('/bin/cp', 601), cookies),
+      ]),
+    ).toEqual([]);
+    // A different download connecting does not count.
+    expect(
+      fired([
+        fileOpen(child('/bin/cp', 601), cookies),
+        connect(
+          proc({
+            path: '/usr/bin/curl',
+            signing: 'apple',
+            downloadedAncestor: { ...download, path: '/Volumes/Other/Other' },
+          }),
+          '198.51.100.7',
+        ),
+      ]),
+    ).toEqual([]);
+    // An identified downloaded app (Chrome) reading its own cookies then connecting is normal.
+    const chromeDownloaded = proc({
+      ...chrome,
+      quarantine: { originUrl: 'https://dl.google.com/chrome.dmg' },
+    });
+    expect(
+      fired([fileOpen(chromeDownloaded, cookies), connect(chromeDownloaded, '142.250.1.1')]),
+    ).toEqual([]);
+  });
+
+  it('chain rules forget steps older than their window', () => {
+    const download = { path: '/Volumes/X/X', signing: 'unsigned' as const };
+    const p = proc({ path: '/bin/cp', signing: 'apple', downloadedAncestor: download });
+    const eng = engine();
+    const read = fileOpen(p, `${home}/Library/Keychains/login.keychain-db`);
+    eng.evaluate(read);
+    const late = { ...connect(p, '198.51.100.7'), ts: read.ts + 11 * 60_000 } as DetectionEvent;
+    expect(
+      eng
+        .evaluate(late)
+        .filter((d) => d.match.ruleId === 'untrusted-download-collect-then-connect'),
+    ).toEqual([]);
+  });
 
   it('mass-document-reads needs 50 reads in a minute from one unsigned process', () => {
     const count = (p: ReturnType<typeof proc>) => {

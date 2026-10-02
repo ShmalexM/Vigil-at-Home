@@ -34,7 +34,9 @@ import type { Store } from './db/store.js';
 import type { VigilCore } from './service.js';
 import { labelKey } from './label-filter.js';
 import { TEST_RULE } from './test-alert.js';
-import { monthStart, type UsageService } from './usage.js';
+import { WORTH_A_LOOK_RULE, WorthALook } from './worth-a-look.js';
+import { monthStart, sumCost, type UsageService } from './usage.js';
+import { isKeyBilled } from '../shared/usage.js';
 
 const KEY_PREFS = 'ai.prefs';
 const KEY_PINS = 'ai.pins';
@@ -128,6 +130,7 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
   private queuedBackground = 0;
   /** Events waiting for a label, oldest first. */
   private labelQueue: SensorEvent[] = [];
+  private worthALook: WorthALook | undefined;
   private cachedPrefs: AiPrefs | undefined;
   /** When each program or destination was last queued, so repeats aren't sent again. */
   private readonly lastQueued = new Map<string, number>();
@@ -227,7 +230,7 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
       getOpenAiApiKey: keyOf('openai'),
       ...(api ? { getApiKey: keyOf(api.provider) } : {}),
       ...(this.o.keys.list().typesafe ? { getJevApiKey: keyOf('typesafe') } : {}),
-      spentThisMonthUsd: async (p) => this.spentThisMonthUsd(p),
+      spentThisMonthUsd: async () => this.spentThisMonthUsd(),
       ...(this.o.isBusy ? { isBusy: this.o.isBusy } : {}),
     });
     this.instance = { ai, key };
@@ -247,12 +250,9 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
     }
   }
 
-  /** What Vigil's runs on one provider cost since the 1st, for the monthly cap. */
-  spentThisMonthUsd(provider: ProviderId): number {
-    return this.o.store
-      .listAiRuns(monthStart(this.now()))
-      .filter((r) => r.provider === provider)
-      .reduce((sum, r) => sum + (r.costUsd ?? 0), 0);
+  /** What Vigil charged to the user's keys since the 1st, all providers together, for the cap. */
+  spentThisMonthUsd(): number {
+    return sumCost(this.o.store.listAiRuns(monthStart(this.now())).filter(isKeyBilled));
   }
 
   /** Binaries recorded at setup, kept in the app's database. */
@@ -266,24 +266,14 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
     };
   }
 
-  /** Plan limits and key caps for the Usage page. */
+  /** Plan limits and the key cap for the Usage page. */
   async limits() {
     const snapshot = await this.ai().spending([]);
     const cap = this.prefs().monthlyCapUsd;
-    const settings = this.settings();
     return {
       plans: snapshot.plans,
       backgroundSharePercent: snapshot.limits.backgroundSharePercent,
-      ...(cap !== undefined
-        ? {
-            caps: {
-              api: cap,
-              jev: cap,
-              ...(settings.claude.mode === 'apiKey' ? { claude: cap } : {}),
-              ...(settings.codex.mode === 'apiKey' ? { codex: cap } : {}),
-            },
-          }
-        : {}),
+      ...(cap !== undefined ? { capUsd: cap } : {}),
     };
   }
 
@@ -380,11 +370,13 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
 
   /**
    * Explains each new alert once its response has run. Popups go first, in
-   * the scheduler's urgent lane; the test alert is never sent.
+   * the scheduler's urgent lane. The test alert is never sent, and neither
+   * are "worth a look" alerts: the labeller's reason already explains them,
+   * and the user can still press Explain.
    */
   explainAlertsFrom(core: Pick<VigilCore, 'alerts' | 'scheduler' | 'alertDetail'>): void {
     core.alerts.on('raised', (alert) => {
-      if (alert.ruleId === TEST_RULE.id) return;
+      if (alert.ruleId === TEST_RULE.id || alert.ruleId === WORTH_A_LOOK_RULE.id) return;
       const urgent = alert.notify === 'popup';
       if (!urgent) {
         if (this.queuedBackground >= MAX_QUEUED_BACKGROUND) return;
@@ -414,9 +406,14 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
    * busy. A label never blocks, allows or raises anything.
    */
   labelEventsFrom(
-    core: Pick<VigilCore, 'scheduler' | 'store'> & { onIngest: VigilCore['onIngest'] },
+    core: Pick<VigilCore, 'scheduler' | 'store'> & {
+      onIngest: VigilCore['onIngest'];
+      alerts?: VigilCore['alerts'];
+    },
   ): void {
     core.onIngest = (event, outcome) => this.consider(event, outcome);
+    // The strongest catches become quiet "worth a look" alerts (worth-a-look.ts).
+    if (core.alerts) this.worthALook = new WorthALook(core.alerts, this.now);
     core.scheduler.every('label-events', LABEL_EVERY_MS, async () => {
       await this.labelBatch(core.store);
     });
@@ -492,18 +489,29 @@ export class AiBridge extends EventEmitter<{ changed: [] }> {
     );
     if (!result.ok) return 0;
     const at = this.now();
-    store.setEventLabels(
-      result.labels.map((l) => ({
-        eventId: l.eventId,
-        label: {
-          label: l.label,
-          score: l.score,
-          reason: l.reason.slice(0, 300),
-          by: l.by,
-          at,
-        },
-      })),
-    );
+    const labelled = result.labels.map((l) => ({
+      eventId: l.eventId,
+      label: {
+        label: l.label,
+        score: l.score,
+        reason: l.reason.slice(0, 300),
+        by: l.by,
+        at,
+      },
+    }));
+    store.setEventLabels(labelled);
+    if (this.worthALook) {
+      const byId = new Map(batch.map((e) => [e.id, e]));
+      for (const l of labelled) {
+        const event = byId.get(l.eventId);
+        if (!event) continue;
+        try {
+          await this.worthALook.consider(event, l.label);
+        } catch (err) {
+          console.warn('[labels] could not raise a worth-a-look alert:', err);
+        }
+      }
+    }
     return result.labels.length;
   }
 
@@ -604,7 +612,8 @@ const Explanation = z.object({
 const EXPLAIN_INSTRUCTIONS =
   "A security rule on this person's Mac raised the alert in the data. Explain it to someone who " +
   'is not a security expert: what the program is, what it did, and why the rule cares, in two or ' +
-  'three short sentences for `summary`. Put anything longer in `details`. Give your read as ' +
+  'three short sentences for `summary`. Say what Vigil actually did from `actions` (a failed or ' +
+  'pending action did not happen). Put anything longer in `details`. Give your read as ' +
   '`verdict` and how sure you are as `confidence`. Say `unsure` rather than guess. Never tell the ' +
   'person to allow, release or trust anything; they decide that themselves.';
 
@@ -621,7 +630,12 @@ function explainData(d: AlertDetail) {
     ...(d.rule
       ? { rule: { name: d.rule.name, description: d.rule.description, mode: d.rule.mode } }
       : {}),
-    actions: d.actions.map((a) => ({ kind: a.action.kind, status: a.status })),
+    // What really happened, so the explanation never claims a block or release that failed.
+    actions: d.actions.map((a) => ({
+      kind: a.action.kind,
+      status: a.status,
+      ...(a.result?.error ? { error: a.result.error.slice(0, 200) } : {}),
+    })),
     events: d.events.slice(0, MAX_EVENTS),
   };
 }

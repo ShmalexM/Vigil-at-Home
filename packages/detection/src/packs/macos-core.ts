@@ -429,7 +429,7 @@ export const macosCoreRules: DetectionRuleInput[] = [
     },
     response: [SUSPEND],
     reasons: [
-      'A command downloaded code from the internet and ran it right away.',
+      'A command downloaded code from the internet and ran it right away: {{process.commandLine}}',
       'If you just pasted this from a site you trust (for example an installer), you can allow it.',
     ],
     tags: ['attack.execution', 'attack.t1059.004'],
@@ -477,7 +477,8 @@ export const macosCoreRules: DetectionRuleInput[] = [
   rule({
     id: 'quarantine-removed',
     name: 'Download safety check removed',
-    description: 'xattr removed the quarantine flag that makes macOS check downloaded apps.',
+    description:
+      "xattr deleted the quarantine flag that makes macOS check downloaded apps, or cleared all of a file's attributes.",
     mode: 'alert',
     severity: 'medium',
     fidelity: 'medium',
@@ -487,8 +488,16 @@ export const macosCoreRules: DetectionRuleInput[] = [
         { field: 'process.name', op: 'eq', value: 'xattr' },
         {
           any: [
-            { field: 'process.args', op: 'eq', value: 'com.apple.quarantine' },
-            { field: 'process.args', op: 'in', value: ['-c', '-cr', '-rc'] },
+            // -d com.apple.quarantine, with -r/-s/-v in the same flag or apart.
+            // -w (write) and -p (read) set or show the flag and never fire.
+            {
+              all: [
+                { field: 'process.args', op: 'regex', value: '^-[rsv]*d[rsv]*$' },
+                { field: 'process.args', op: 'eq', value: 'com.apple.quarantine' },
+              ],
+            },
+            // -c clears every attribute, the quarantine flag included.
+            { field: 'process.args', op: 'regex', value: '^-[rsv]*c[rsv]*$' },
           ],
         },
       ],
@@ -586,6 +595,62 @@ export const macosCoreRules: DetectionRuleInput[] = [
     response: [{ kind: 'persistence.disable', path: '{{path}}' }],
     reasons: ["{{path}} will run {{programCommandLine|'a program'}} every time you log in."],
     tags: ['attack.persistence', 'attack.t1543.001'],
+  }),
+  rule({
+    id: 'untrusted-download-persistence',
+    name: 'Unsigned download set itself to run at login',
+    description:
+      'A program that came from an unsigned or ad hoc signed download, or something it started, added a login item or launch agent.',
+    mode: 'alert',
+    severity: 'high',
+    fidelity: 'high',
+    eventKinds: ['persistence'],
+    condition: {
+      all: [
+        { field: 'change', op: 'in', value: ['added', 'modified'] },
+        { field: 'process.downloadRootSigning', op: 'in', value: UNTRUSTED_SIGNING },
+      ],
+    },
+    response: [{ kind: 'persistence.disable', path: '{{path}}' }],
+    reasons: [
+      '{{path}} was added by something that came from {{process.downloadRoot}}, which is not signed by an identified developer.',
+      "Downloaded from {{process.downloadedAncestor.originUrl|process.quarantine.originUrl|'the internet'}}.",
+    ],
+    dedupe: { key: ['path'], windowSec: 86_400 },
+    tags: ['attack.persistence', 'attack.t1543.001'],
+  }),
+  rule({
+    id: 'untrusted-download-collect-then-connect',
+    name: 'Unsigned download read your secrets, then went online',
+    description:
+      'Something from an unsigned download opened browser cookies, saved passwords, keys or a wallet, and within ten minutes the same download connected to the internet. That is how infostealers collect and send.',
+    mode: 'alert',
+    severity: 'critical',
+    fidelity: 'high',
+    eventKinds: ['network.connection'],
+    sequence: {
+      steps: [
+        {
+          eventKinds: ['file'],
+          condition: {
+            all: [
+              { field: 'op', op: 'in', value: ['open', 'write', 'rename'] },
+              { field: 'path', op: 'glob', value: CREDENTIAL_STORE_GLOBS },
+              { field: 'process.downloadRootSigning', op: 'in', value: UNTRUSTED_SIGNING },
+            ],
+          },
+        },
+      ],
+      key: ['process.downloadRoot'],
+      windowSec: 600,
+    },
+    condition: { field: 'process.downloadRootSigning', op: 'in', value: UNTRUSTED_SIGNING },
+    response: [{ kind: 'network.block', address: '{{remoteAddress}}' }, KILL],
+    reasons: [
+      '{{process.name}}, started from the unsigned download {{process.downloadRoot}}, connected to {{remoteHost|remoteAddress}} after it read saved passwords, cookies or keys.',
+    ],
+    dedupe: { key: ['process.downloadRoot'], windowSec: 3600 },
+    tags: ['attack.collection', 'attack.exfiltration', 'attack.t1041'],
   }),
   rule({
     id: 'persistence-apple-lookalike',

