@@ -85,12 +85,30 @@ describe('Detector', () => {
     expect(executor.log.filter((a) => a.kind === 'santa.rule.set').length).toBeGreaterThan(0);
   });
 
-  it('lists the engine rules and lets the user change their mode', () => {
+  it('lists the engine rules and lets the user change their mode', async () => {
     const { core } = setup();
     const rules = core.rules();
     expect(rules.find((r) => r.rule.id === 'known-bad-hash')?.rule.mode).toBe('block');
-    core.setRuleMode('known-bad-hash', 'alert');
+    core.detector!.syncHelper = async () => 'applied';
+    expect(await core.setRuleMode('known-bad-hash', 'alert')).toMatchObject({
+      rule: { id: 'known-bad-hash', mode: 'alert' },
+      helper: 'applied',
+    });
     expect(core.rules().find((r) => r.rule.id === 'known-bad-hash')?.rule.mode).toBe('alert');
+  });
+
+  it('the Rules screen hears that a cancelled password left the rule blocking', async () => {
+    const { core } = setup();
+    core.detector!.syncHelper = async () => 'declined';
+    expect(await core.setRuleMode('known-bad-hash', 'alert')).toMatchObject({
+      rule: { mode: 'block' },
+      helper: 'declined',
+    });
+    core.detector!.syncHelper = async () => 'unavailable';
+    expect(await core.setRuleMode('known-bad-hash', 'alert')).toMatchObject({
+      rule: { mode: 'alert' },
+      helper: 'unavailable',
+    });
   });
 
   it('hands the helper the rules it can block with, and what they need', async () => {
@@ -110,7 +128,7 @@ describe('Detector', () => {
     expect(set.selfPaths).toEqual(['/Applications/Vigil at Home.app']);
     // The user's "this is fine" reaches the helper, so it stops blocking it too.
     expect(set.exceptions.length).toBeGreaterThan(0);
-    core.setRuleMode('known-bad-hash', 'alert');
+    await core.setRuleMode('known-bad-hash', 'alert');
     expect(core.detector!.helperRules().rules.map((r) => r.id)).not.toContain('known-bad-hash');
   });
 

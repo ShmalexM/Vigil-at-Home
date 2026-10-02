@@ -1,7 +1,7 @@
 import type { RuleMode } from '@vigil/core';
 import type { Proposal } from '@vigil/detection';
 import type { RuleSuggestionView, RuleSuggestionsView } from '../shared/ipc.js';
-import type { Detector } from './detection.js';
+import type { Detector, HelperSyncOutcome } from './detection.js';
 import { describeCondition } from './rule-editing.js';
 
 const BOOKKEEPING = ['version', 'createdAt', 'updatedAt', 'origin', 'provenance', 'mode'];
@@ -41,8 +41,9 @@ export class RuleSuggestions {
     return { pending, recent, review };
   }
 
-  accept(id: string, mode?: RuleMode): void {
-    void this.detector.approveProposal(id, mode);
+  /** Resolves once the helper has the change, or the user cancelled its password. */
+  accept(id: string, mode?: RuleMode): Promise<HelperSyncOutcome> {
+    return this.detector.approveProposal(id, mode);
   }
 
   dismiss(id: string, note?: string): void {
