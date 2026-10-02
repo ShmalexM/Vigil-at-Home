@@ -60,6 +60,8 @@ describe('detection benchmark', () => {
     });
     // Regression guard: every canonical attack is caught when the telemetry is there.
     expect(summary.canonical.caughtIdeal).toBe(summary.canonical.total);
+    expect(heldoutSummary.caughtIdeal).toBeGreaterThanOrEqual(HELDOUT_FLOOR.caughtIdeal);
+    expect(heldoutSummary.caughtSensors).toBeGreaterThanOrEqual(HELDOUT_FLOOR.caughtSensors);
     expect(summary.agents.caughtIdeal).toBe(summary.agents.total);
     for (const w of workload) {
       // Agent rules stay out of a developer's way (alerts, and steps the agent
@@ -67,7 +69,5 @@ describe('detection benchmark', () => {
       expect(w.agentRules.alerts + w.agentRules.asks, w.profile).toBeLessThanOrEqual(0.5);
       expect(w.storedBytesPerEvent.delta, w.profile).toBeLessThanOrEqual(40);
     }
-    expect(heldoutSummary.caughtIdeal).toBeGreaterThanOrEqual(HELDOUT_FLOOR.caughtIdeal);
-    expect(heldoutSummary.caughtSensors).toBeGreaterThanOrEqual(HELDOUT_FLOOR.caughtSensors);
   });
 });

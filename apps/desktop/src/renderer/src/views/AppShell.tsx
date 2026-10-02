@@ -73,10 +73,10 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
   const [status] = useLive(() => vigil.getStatus());
   const [setup] = useLive(() => vigil.getSetup());
   const [updates] = useLive(() => vigil.getUpdates());
+  const [settings] = useLive(() => vigil.getSettings());
   // Names and statuses only: the badge needs no stats, and this runs on every page.
   const [agents] = useLive(() => vigil.listAgentNames());
   const suggestions = agents?.filter((a) => a.status === 'suggested').length ?? 0;
-  const [settings] = useLive(() => vigil.getSettings());
   const [section = 'home', param] = route.split('/');
   const onAdvanced = ADVANCED_NAV.some((n) => n.id === section);
   const showAdvanced = !!settings?.showAdvanced || onAdvanced;
@@ -109,8 +109,12 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
                   key={n.id}
                   item={n}
                   current={section === n.id}
-                  {...(n.id === 'agents' && suggestions > 0
-                    ? { badge: suggestions, badgeHint: 'Suggested agents waiting on you' }
+                  {...(n.id === 'agents'
+                    ? {
+                        badge: suggestions,
+                        calm: true,
+                        badgeTitle: 'Suggested agents waiting on you',
+                      }
                     : {})}
                   onClick={() => go(n.id)}
                 />
@@ -182,14 +186,16 @@ function NavButton({
   item,
   current,
   badge,
-  badgeHint,
+  calm,
+  badgeTitle,
   onClick,
 }: {
   item: NavItem;
   current: boolean;
   badge?: number | undefined;
-  /** A quiet count with this explanation, instead of the red one. */
-  badgeHint?: string;
+  /** A count that waits on the user but isn't urgent. */
+  calm?: boolean;
+  badgeTitle?: string;
   onClick: () => void;
 }) {
   return (
@@ -201,14 +207,11 @@ function NavButton({
     >
       {item.icon}
       <span className="grow">{item.label}</span>
-      {!!badge &&
-        (badgeHint ? (
-          <span className="count" title={badgeHint}>
-            {badge}
-          </span>
-        ) : (
-          <span className="count hot">{badge}</span>
-        ))}
+      {!!badge && (
+        <span className={calm ? 'count' : 'count hot'} title={badgeTitle}>
+          {badge}
+        </span>
+      )}
     </button>
   );
 }

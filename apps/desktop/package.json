@@ -14,6 +14,7 @@
   "main": "out/main/index.js",
   "scripts": {
     "e2e": "node e2e/popup.e2e.mjs",
+    "e2e:agents": "node e2e/agents.e2e.mjs",
     "predev": "node scripts/build-helper.mjs --dev",
     "dev": "electron-vite dev",
     "build": "electron-vite build",

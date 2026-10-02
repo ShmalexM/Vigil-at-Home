@@ -20,6 +20,7 @@ import {
   MAX_BUSY_IN_A_ROW,
   MAX_UNREAD,
   TOOLS_BUSY,
+  WATCH_SETTLE_MS,
   socketPathFor,
   type AgentEndpointOptions,
   type EndpointRequest,
@@ -106,6 +107,13 @@ async function client(path: string) {
 }
 
 /** Polls `cond` every 10 ms for up to `ms`. */
+/**
+ * How long Vigil may take to notice a change to its socket by itself: the
+ * folder watch usually tells it at once, and its last start-up check is the
+ * backstop. Generous, because a busy machine runs timers late.
+ */
+const NOTICED_MS = WATCH_SETTLE_MS[WATCH_SETTLE_MS.length - 1]! + 2000;
+
 async function until(cond: () => boolean, ms = 2000): Promise<boolean> {
   for (const end = Date.now() + ms; Date.now() < end;) {
     if (cond()) return true;
@@ -509,30 +517,53 @@ describe('AgentEndpoint', () => {
     expect(readFileSync(file, 'utf8')).toBe('keep me');
   });
 
-  it('takes its socket back from a program that replaced it, and reports it', async () => {
-    const deny: PreflightReply = { v: 1, decision: 'deny', reason: 'stopped', ruleIds: ['r'] };
-    const tampered: SocketTamper[] = [];
-    const { ep, path } = await endpoint({
-      handle: (req) => (req.method === 'hello' ? { v: 1, ok: true } : deny),
-      onTamper: (why) => tampered.push(why),
-    });
-    // Another program deletes Vigil's socket and answers in its place.
-    rmSync(path);
-    await impostor(path, { v: 1, decision: 'none' });
-    expect(await until(() => tampered.length > 0)).toBe(true);
-    expect(tampered).toEqual(['replaced']);
-    expect(await until(() => ep.status().state === 'listening')).toBe(true);
-    expect(statSync(path).mode & 0o777).toBe(0o600);
-    // The hook reaches Vigil's rules again.
-    expect(await (await client(path)).ask(request())).toEqual(deny);
+  it(
+    'takes its socket back from a program that replaced it, and reports it',
+    async () => {
+      const deny: PreflightReply = { v: 1, decision: 'deny', reason: 'stopped', ruleIds: ['r'] };
+      const tampered: SocketTamper[] = [];
+      const { ep, path } = await endpoint({
+        handle: (req) => (req.method === 'hello' ? { v: 1, ok: true } : deny),
+        onTamper: (why) => tampered.push(why),
+      });
+      // Another program deletes Vigil's socket and answers in its place.
+      rmSync(path);
+      await impostor(path, { v: 1, decision: 'none' });
+      expect(await until(() => tampered.length > 0, NOTICED_MS)).toBe(true);
+      expect(tampered).toEqual(['replaced']);
+      expect(await until(() => ep.status().state === 'listening')).toBe(true);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      // The hook reaches Vigil's rules again.
+      expect(await (await client(path)).ask(request())).toEqual(deny);
 
-    // Removing it is caught the same way.
-    rmSync(path);
-    expect(await until(() => tampered.length > 1)).toBe(true);
-    expect(tampered).toEqual(['replaced', 'removed']);
-    expect(await until(() => ep.status().state === 'listening' && existsSync(path))).toBe(true);
-    expect(await (await client(path)).ask(request())).toEqual(deny);
-  });
+      // Removing it is caught the same way.
+      rmSync(path);
+      expect(await until(() => tampered.length > 1, NOTICED_MS)).toBe(true);
+      expect(tampered).toEqual(['replaced', 'removed']);
+      expect(await until(() => ep.status().state === 'listening' && existsSync(path))).toBe(true);
+      expect(await (await client(path)).ask(request())).toEqual(deny);
+    },
+    4 * NOTICED_MS,
+  );
+
+  it(
+    'catches a change made before the system starts watching its folder',
+    async () => {
+      const tampered: SocketTamper[] = [];
+      const { ep, path } = await endpoint({ onTamper: (why) => tampered.push(why) });
+      // As on macOS, where the folder watch starts a moment after listening.
+      const own = ep as unknown as { watcher?: { close(): void } | undefined };
+      own.watcher?.close();
+      own.watcher = undefined;
+      rmSync(path);
+      await impostor(path, { v: 1, decision: 'none' });
+      // Nothing asks for the status: Vigil looks again by itself.
+      expect(await until(() => tampered.length > 0, NOTICED_MS)).toBe(true);
+      expect(tampered).toEqual(['replaced']);
+      expect(await until(() => ep.status().state === 'listening')).toBe(true);
+    },
+    4 * NOTICED_MS,
+  );
 
   it('checks its socket when asked for its status', async () => {
     const tampered: SocketTamper[] = [];
