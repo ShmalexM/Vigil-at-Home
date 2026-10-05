@@ -1,5 +1,14 @@
 import { join } from 'node:path';
-import { app, BrowserWindow, nativeTheme, screen, shell, Tray, type Rectangle } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  nativeTheme,
+  screen,
+  shell,
+  Tray,
+  type Rectangle,
+} from 'electron';
 import trayIcon from '../../resources/trayTemplate.png?asset';
 import trayAlertIcon from '../../resources/trayAlertTemplate.png?asset';
 import type { Pushes, ThemePref } from '../shared/ipc.js';
@@ -71,6 +80,16 @@ export class Windows {
     this.tray.setToolTip('Vigil at Home');
     this.tray.on('click', () => this.togglePopover());
     this.tray.on('right-click', () => this.togglePopover());
+    // Linux tray hosts (GNOME's AppIndicator extension, KDE) often open a
+    // menu instead of passing on the click, so give them one.
+    if (process.platform === 'linux') {
+      this.tray.setContextMenu(
+        Menu.buildFromTemplate([
+          { label: 'What needs you', click: () => this.togglePopover() },
+          { label: 'Open Vigil at Home', click: () => this.openMain() },
+        ]),
+      );
+    }
   }
 
   /** Menu-bar icon: count of alerts waiting on the user, alert glyph when any. */
@@ -140,8 +159,9 @@ export class Windows {
         minHeight: 600,
         show: false,
         title: 'Vigil at Home',
-        titleBarStyle: 'hiddenInset',
-        trafficLightPosition: { x: 16, y: 18 },
+        ...(process.platform === 'darwin'
+          ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 16, y: 18 } }
+          : {}),
         backgroundColor: this.background(),
         webPreferences: webPreferences(),
       }),
