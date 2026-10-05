@@ -17,6 +17,7 @@ export class FakeLinuxSystem implements System {
   /** Units that are running, as "<scope> <unit>" with scope "system" or "user:<name>". */
   readonly active = new Set<string>();
   tableExists = false;
+  fagenrulesFails = false;
   private nextHandle = 2;
   console: number | undefined = 1000;
 
@@ -32,6 +33,8 @@ export class FakeLinuxSystem implements System {
       }
       case 'nft':
         return this.nft(args);
+      case 'fagenrules':
+        return this.fagenrulesFails ? fail('rule error') : ok();
       case 'systemctl': {
         const user = args[0] === '--user' ? `user:${args[2]!.replace(/@$/, '')}` : 'system';
         const rest = args[0] === '--user' ? args.slice(3) : args;

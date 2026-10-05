@@ -2,7 +2,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { appendFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import type { ProcessRef } from '@vigil/core';
+import type { HelperRan } from './fastpath.js';
 import { HelperClient } from './client.js';
 import { linuxPaths, type HelperPaths } from './config.js';
 import { runDaemon, type SensorHealth } from './daemon.js';
@@ -32,6 +34,7 @@ beforeAll(async () => {
     approvalOwnerUid: process.getuid!(),
     sensorBinaries: { santa: false, osquery: join(root, 'no-osqueryd') },
     osquery: false,
+    fapolicydRulesDir: join(root, 'no-fapolicyd', 'rules.d'),
     trust: (path) =>
       path === '/usr/bin/curl'
         ? { signing: 'package', signingId: 'pkg:curl' }
@@ -93,5 +96,40 @@ describe('daemon on Linux', () => {
     expect(status.sensors.santa.installed).toBe(false);
     expect(status.firewall).toEqual(['203.0.113.9']);
     expect(sys.runs.some((r) => r.bin === 'pfctl' || r.bin === 'santactl')).toBe(false);
+  });
+});
+
+describe('blocked programs on Linux', () => {
+  it('stops a blocked program as soon as its launch is seen', async () => {
+    const exe = join(root, 'miner');
+    writeFileSync(exe, 'not really a miner');
+    const sha = createHash('sha256').update('not really a miner').digest('hex');
+    await client!.call({
+      kind: 'santa.rule.set',
+      ruleType: 'binary',
+      identifier: sha,
+      policy: 'block',
+    });
+    sys.processes.set(4321, { path: exe, started: 'Mon Oct  5 16:20:13 2026' });
+    const ran: HelperRan[][] = [];
+    client!.onEvent((e, r) => {
+      if (e.kind === 'process.exec' && e.process.pid === 4321) ran.push(r);
+    });
+    await client!.subscribe();
+    appendFileSync(
+      paths.osqueryResults as string,
+      JSON.stringify({
+        name: 'vigil_process_events',
+        action: 'added',
+        counter: 1,
+        unixTime: 1790000000,
+        columns: { pid: '4321', parent: '1', path: exe, time: '1790000000' },
+      }) + '\n',
+    );
+    for (let i = 0; i < 50 && ran.length === 0; i++) await new Promise((r) => setTimeout(r, 100));
+    expect(ran[0]).toMatchObject([
+      { ruleId: 'blocked-program', action: { kind: 'process.kill', pid: 4321, path: exe } },
+    ]);
+    expect(sys.signals).toContainEqual({ pid: 4321, signal: 'SIGKILL' });
   });
 });

@@ -15,3 +15,4 @@ export * from './osquery/burst.js';
 export * from './hub.js';
 export * from './osquery/linuxConfig.js';
 export * from './linux/packages.js';
+export * from './linux/hash.js';

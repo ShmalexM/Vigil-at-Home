@@ -13,10 +13,12 @@
 
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import { chmodSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
+  FileHasher,
   OSQUERYD_PATH,
   RuleStore,
+  type SensorEvent,
   SantaSyncServer,
   type SignatureInfo,
   SensorHub,
@@ -41,6 +43,8 @@ import { PreexecSync } from './preexec.js';
 import { signatureLookup } from './signature.js';
 import { linuxPackageIndex } from './packageTrust.js';
 import { ensureLinuxOsquery, type LinuxOsqueryPaths } from './linuxOsquery.js';
+import { FapolicydBlocks } from './commands/fapolicyd.js';
+import type { HelperRan } from './fastpath.js';
 import { BINARIES, LINUX_BINARIES, realSystem, type System } from './system.js';
 
 export interface DaemonOptions {
@@ -57,6 +61,8 @@ export interface DaemonOptions {
   osquery?: OsqueryPaths | false;
   /** Linux: where osquery lives; false leaves it alone. Only acted on as root. */
   linuxOsquery?: LinuxOsqueryPaths;
+  /** Linux: fapolicyd's rules folder; tests point it elsewhere. */
+  fapolicydRulesDir?: string;
   /** Linux: the trust answer for a program path. Defaults to the dpkg/rpm index. */
   trust?: (path: string) => SignatureInfo | undefined;
 }
@@ -132,6 +138,14 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   });
   fastPath.load();
 
+  // Linux: programs blocked by hash (fapolicyd, plus the check on each launch below).
+  const fapolicyd = linux
+    ? new FapolicydBlocks(sys, {
+        store: join(paths.supportDir, 'blocked-programs.json'),
+        ...(opts.fapolicydRulesDir ? { rulesDir: opts.fapolicydRulesDir } : {}),
+      })
+    : undefined;
+
   const executor: Executor = new Executor({
     sys,
     journal,
@@ -147,8 +161,13 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
           },
           preexec: new PreexecSync(sys, rules, existsSync),
         }),
-    statusExtra: () => ({ sensors: sensors(), helperRules: fastPath.status() }),
+    statusExtra: () => ({
+      sensors: sensors(),
+      helperRules: fastPath.status(),
+      ...(fapolicyd ? { fapolicyd: fapolicyd.status() } : {}),
+    }),
     fastPath,
+    ...(fapolicyd ? { fapolicyd } : {}),
   });
 
   const server = new HelperServer({
@@ -159,6 +178,27 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   });
   await server.listen();
 
+  // Linux: a blocked program that got past fapolicyd (not installed, or not
+  // reloaded yet) is stopped as soon as its launch is seen.
+  const stopBlockedLaunch = async (e: SensorEvent): Promise<HelperRan[]> => {
+    if (!fapolicyd || e.kind !== 'process.exec' || !e.process.sha256) return [];
+    if (!fapolicyd.has(e.process.sha256)) return [];
+    const action = { kind: 'process.kill' as const, pid: e.process.pid, path: e.process.path };
+    try {
+      const out = await executor.execute(action);
+      return [
+        {
+          ruleId: 'blocked-program',
+          action,
+          at: Date.now(),
+          ...(out.kind === 'done' ? { outcome: out.result as ActionOutcome } : {}),
+        },
+      ];
+    } catch (err) {
+      return [{ ruleId: 'blocked-program', action, at: Date.now(), error: (err as Error).message }];
+    }
+  };
+
   let delivered = Promise.resolve();
   const hub = new SensorHub({
     santaLogPath: paths.santaLog,
@@ -166,12 +206,16 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     // One event at a time, in order: a block finishes before the next event
     // is looked at, and the app hears about each event with what was done.
     sink: (e) => {
-      delivered = delivered.then(async () => server.publish(e, await fastPath.check(e)));
+      delivered = delivered.then(async () => {
+        const ran = [...(await stopBlockedLaunch(e)), ...(await fastPath.check(e))];
+        server.publish(e, ran);
+      });
     },
     // Signatures of programs that started before Vigil (codesign is macOS-only).
     ...(process.platform === 'darwin' && !linux ? { signatureLookup: signatureLookup(sys) } : {}),
-    // Linux: whether the package manager installed each program, answered at once.
-    ...(linux ? { trust: opts.trust ?? trustFromPackages() } : {}),
+    // Linux: whether the package manager installed each program, answered at
+    // once, and the hash of each untrusted one (blocks are by hash).
+    ...(linux ? { trust: opts.trust ?? trustFromPackages(), hash: hasher() } : {}),
     // The closer look at suspicious programs' connections needs osquery and root.
     ...(existsSync(bins.osquery) && process.getuid?.() === 0 && opts.osquery !== false
       ? { osqueryRunner: osqueryShellRunner(sys) }
@@ -204,6 +248,14 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       server.listen(syncPort, '127.0.0.1', () => resolve());
     });
     https = server;
+  }
+
+  if (fapolicyd) {
+    try {
+      await fapolicyd.apply();
+    } catch (err) {
+      log(`could not apply fapolicyd rules: ${(err as Error).message}`);
+    }
   }
 
   try {
@@ -297,4 +349,9 @@ function writeFileAccessPolicy(path: string): void {
 function trustFromPackages(): (path: string) => SignatureInfo | undefined {
   const index = linuxPackageIndex();
   return (path) => index.trust(path);
+}
+
+function hasher(): (path: string) => string | undefined {
+  const h = new FileHasher();
+  return (path) => h.sha256(path);
 }

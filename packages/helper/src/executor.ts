@@ -30,6 +30,7 @@ import {
 } from './commands/process.js';
 import { Firewall, normalizeTarget, type NetworkFirewall } from './commands/firewall.js';
 import { NftFirewall } from './commands/nftables.js';
+import type { FapolicydBlocks } from './commands/fapolicyd.js';
 import {
   quarantine,
   realParentPath,
@@ -64,6 +65,8 @@ export interface ExecutorDeps {
   preexec?: PreexecSync;
   /** Blocking rules the helper runs on the sensor stream itself. */
   fastPath?: FastPath;
+  /** Linux: programs blocked by hash, enforced by fapolicyd and the helper. */
+  fapolicyd?: FapolicydBlocks;
 }
 
 export type ExecOutcome =
@@ -106,6 +109,8 @@ export class Executor {
   }
 
   async execute(cmd: HelperCommand, approval?: string): Promise<ExecOutcome> {
+    // Refuse what Linux can't do before asking for a password for it.
+    if (this.d.sys.platform === 'linux') checkLinuxBlock(cmd);
     if (cmd.kind === 'detection.sync') {
       // Whether a sync weakens anything depends on the policy in force.
       const weakens = this.d.fastPath?.loosening(cmd) ?? [];
@@ -129,7 +134,9 @@ export class Executor {
       case 'santa.rule.set':
         return `Vigil wants to always allow programs matching ${cmd.ruleType} ${cmd.identifier}.`;
       case 'santa.rule.remove':
-        return `Vigil wants to remove its Santa rule for ${cmd.ruleType} ${cmd.identifier}.`;
+        return this.d.sys.platform === 'linux'
+          ? `Vigil wants to unblock the program with hash ${cmd.identifier}.`
+          : `Vigil wants to remove its Santa rule for ${cmd.ruleType} ${cmd.identifier}.`;
       default: {
         const e = this.findContainment(cmd);
         return e ? `Vigil wants to undo: ${e.summary}.` : 'Vigil needs your permission.';
@@ -213,9 +220,7 @@ export class Executor {
 
   private async run(cmd: HelperCommand): Promise<unknown> {
     const { sys, journal } = this.d;
-    if (sys.platform === 'linux' && cmd.kind.startsWith('santa.')) {
-      throw new ActionError('invalid', 'Santa runs only on macOS');
-    }
+    if (sys.platform === 'linux' && cmd.kind.startsWith('santa.')) return this.runLinuxBlock(cmd);
     switch (cmd.kind) {
       case 'process.suspend': {
         const id = await suspendProcess(sys, cmd.pid, target(cmd));
@@ -384,6 +389,41 @@ export class Executor {
     }
   }
 
+  /**
+   * Linux has no Santa. A binary block becomes a fapolicyd rule by hash
+   * (commands/fapolicyd.ts); every other Santa rule type is macOS-only.
+   */
+  private async runLinuxBlock(cmd: HelperCommand): Promise<unknown> {
+    const blocks = this.d.fapolicyd;
+    checkLinuxBlock(cmd);
+    if (cmd.kind !== 'santa.rule.set' && cmd.kind !== 'santa.rule.remove') return undefined;
+    if (!blocks) throw new ActionError('failed', 'program blocking is not set up');
+    const sha = cmd.identifier.toLowerCase();
+    if (cmd.kind === 'santa.rule.set') {
+      await blocks.block(sha);
+      const existing = this.d.journal
+        .active()
+        .find(
+          (e) =>
+            e.kind === 'santa.rule.set' &&
+            (e.command as HelperAction & { identifier: string }).identifier.toLowerCase() === sha,
+        );
+      if (existing) return this.outcome(existing);
+      return this.record(cmd, `blocked programs with hash ${sha}`, {
+        ruleType: 'BINARY',
+        previous: null,
+      });
+    }
+    if (!(await blocks.unblock(sha)))
+      throw new ActionError('not_found', 'that program is not blocked');
+    for (const e of this.d.journal.active()) {
+      const c = e.command as HelperAction;
+      if (c.kind === 'santa.rule.set' && c.identifier.toLowerCase() === sha)
+        this.d.journal.markUndone(e.id);
+    }
+    return this.record(cmd as HelperAction, `unblocked programs with hash ${sha}`);
+  }
+
   private async syncSanta(): Promise<void> {
     try {
       await this.d.triggerSantaSync?.();
@@ -407,6 +447,17 @@ export function syncPrompt(weakens: string[]): string {
   const shown = weakens.slice(0, 3).join('; ');
   const more = weakens.length > 3 ? ` and ${weakens.length - 3} more` : '';
   return `Vigil wants to loosen its blocking rules: ${shown}${more}.`;
+}
+
+/** The Santa commands Linux can carry out: blocking or unblocking a program by hash. */
+function checkLinuxBlock(cmd: HelperCommand): void {
+  if (!cmd.kind.startsWith('santa.')) return;
+  if (cmd.kind !== 'santa.rule.set' && cmd.kind !== 'santa.rule.remove')
+    throw new ActionError('invalid', 'Santa runs only on macOS');
+  if (cmd.ruleType !== 'binary')
+    throw new ActionError('invalid', 'on Linux a program can only be blocked by its sha256');
+  if (cmd.kind === 'santa.rule.set' && cmd.policy === 'allow')
+    throw new ActionError('invalid', 'Linux needs no allow rules; Vigil only blocks there');
 }
 
 function policyError(err: unknown): ActionError {

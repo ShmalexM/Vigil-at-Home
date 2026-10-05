@@ -29,6 +29,7 @@ export const LINUX_BINARIES = {
   pkexec: '/usr/bin/pkexec',
   dpkgQuery: '/usr/bin/dpkg-query',
   rpm: '/usr/bin/rpm',
+  fagenrules: '/usr/sbin/fagenrules',
   osqueryd: '/opt/osquery/bin/osqueryd',
 } as const;
 

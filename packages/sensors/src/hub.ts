@@ -32,6 +32,11 @@ export interface SensorHubOptions {
    */
   trust?: (path: string) => SignatureInfo | undefined;
   /**
+   * Linux: the sha256 of an untrusted program at launch, which osquery
+   * doesn't report and a block by hash needs.
+   */
+  hash?: (path: string) => string | undefined;
+  /**
    * Runs one-off osquery queries. When set, programs worth a closer look get
    * their connections checked every 2 s for a minute (see osquery/burst.ts).
    */
@@ -130,7 +135,7 @@ export class SensorHub {
     this.opts.sink(event);
   }
 
-  /** Adds the trust answer to a process that has no signature yet. */
+  /** Adds the trust answer to a process that has no signature yet, and an untrusted launch's hash. */
   private withTrust(e: SensorEvent): SensorEvent {
     const trust = this.opts.trust;
     const p = trust && 'process' in e ? e.process : undefined;
@@ -139,6 +144,10 @@ export class SensorHub {
     if (!info) return e;
     const process = { ...p, signing: info.signing };
     if (info.signingId) process.signingId = info.signingId;
+    if (e.kind === 'process.exec' && info.signing !== 'package' && !p.sha256 && this.opts.hash) {
+      const sha256 = this.opts.hash(p.path);
+      if (sha256) process.sha256 = sha256;
+    }
     return { ...e, process } as SensorEvent;
   }
 

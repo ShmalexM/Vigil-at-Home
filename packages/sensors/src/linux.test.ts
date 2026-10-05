@@ -242,3 +242,25 @@ describe('hub trust on Linux', () => {
     }
   });
 });
+
+describe('launch hashes', () => {
+  it('hashes a file once per change and skips big or missing files', async () => {
+    const { FileHasher } = await import('./linux/hash.js');
+    const { createHash } = await import('node:crypto');
+    const dir = mkdtempSync(join(tmpdir(), 'vigil-hash-'));
+    try {
+      const f = join(dir, 'prog');
+      writeFileSync(f, 'one');
+      const h = new FileHasher({ maxBytes: 10 });
+      expect(h.sha256(f)).toBe(createHash('sha256').update('one').digest('hex'));
+      writeFileSync(f, 'two!');
+      expect(h.sha256(f)).toBe(createHash('sha256').update('two!').digest('hex'));
+      writeFileSync(f, 'x'.repeat(11));
+      expect(h.sha256(f)).toBeUndefined();
+      expect(h.sha256(join(dir, 'gone'))).toBeUndefined();
+      expect(h.sha256(dir)).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
