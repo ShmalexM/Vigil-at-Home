@@ -153,6 +153,19 @@ export function PackPage() {
         >
           Tools and connectors
         </button>
+        <label
+          className="pack-voice t-small"
+          title="Turns off the dog talk in the pack’s status lines and the Lead dog’s replies. The dogs stay."
+        >
+          <input
+            type="checkbox"
+            checked={pack.voice === 'plain'}
+            onChange={(e) =>
+              void vigil.setPackVoice(e.target.checked ? 'plain' : 'pack').then(reload)
+            }
+          />
+          Plain wording
+        </label>
       </div>
       {tab === 'pack' ? (
         <div className="pack-layout">

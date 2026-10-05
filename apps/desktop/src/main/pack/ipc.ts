@@ -5,6 +5,7 @@ import type { PackService } from './service.js';
 type PackCall =
   | 'getPack'
   | 'setPackMode'
+  | 'setPackVoice'
   | 'sayToLead'
   | 'clearLeadChat'
   | 'decideLeadAction'
@@ -38,6 +39,7 @@ export function packHandlers(pack: PackService, connectors: Connectors): Pick<Ha
   return {
     getPack: () => pack.view(),
     setPackMode: (mode) => pack.setMode(mode),
+    setPackVoice: (voice) => pack.setVoice(voice),
     // The answer arrives as a push; the call returns once the Lead dog has replied.
     sayToLead: (text, context) => result(() => pack.say(text, context)),
     clearLeadChat: () => pack.clearChat(),

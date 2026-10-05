@@ -33,6 +33,7 @@ import {
   ConnectorInput,
   DogInput,
   DogPatch,
+  PackVoice,
   PermissionMode,
   ToolChoice,
   ToolDecision,
@@ -276,6 +277,7 @@ export const calls = {
   listVigilHelpers: z.tuple([]),
   getPack: z.tuple([]),
   setPackMode: z.tuple([PermissionMode]),
+  setPackVoice: z.tuple([PackVoice]),
   sayToLead: z.tuple([z.string().min(1).max(4000), ChatContext.optional()]),
   clearLeadChat: z.tuple([]),
   decideLeadAction: z.tuple([Id, Id, z.boolean()]),
@@ -621,6 +623,7 @@ export interface CallResults {
   listVigilHelpers: VigilHelperView[];
   getPack: PackView;
   setPackMode: void;
+  setPackVoice: void;
   sayToLead: AiActionResult;
   clearLeadChat: void;
   decideLeadAction: void;

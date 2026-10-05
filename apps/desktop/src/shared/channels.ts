@@ -82,6 +82,7 @@ export const CALL_NAMES = [
   'listVigilHelpers',
   'getPack',
   'setPackMode',
+  'setPackVoice',
   'sayToLead',
   'clearLeadChat',
   'decideLeadAction',

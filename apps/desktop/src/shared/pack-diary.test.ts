@@ -33,4 +33,10 @@ describe('the pack diary', () => {
       { dog: 'pip', text: 'Pip tried twice but couldn’t finish', failed: 0 },
     ]);
   });
+
+  it('drops the dog talk with Plain wording', () => {
+    expect(
+      diaryLines(DOGS, [{ dog: 'helper-labeller', kind: 'label', n: 2, failed: 0 }], 'plain'),
+    ).toEqual([{ dog: 'helper-labeller', text: 'Biscuit labelled new events twice', failed: 0 }]);
+  });
 });

@@ -545,3 +545,12 @@
   margin: 0;
   padding-left: 16px;
 }
+
+.pack-voice {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--tx2);
+  cursor: pointer;
+}

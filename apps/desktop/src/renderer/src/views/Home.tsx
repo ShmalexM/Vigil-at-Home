@@ -231,7 +231,7 @@ function InstallHelper({ reinstall }: { reinstall: boolean }) {
  */
 function PackDiary({ pack }: { pack: PackView }) {
   const [open, setOpen] = useState<string | undefined>();
-  const lines = diaryLines(pack.dogs, pack.today);
+  const lines = diaryLines(pack.dogs, pack.today, pack.voice);
   if (lines.length === 0) return null;
   const dog = (id: string) => pack.dogs.find((d) => d.id === id);
   const shown = open ? dog(open) : undefined;

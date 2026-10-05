@@ -38,6 +38,10 @@ export type DogMood =
 export const PermissionMode = z.enum(['ask', 'auto', 'full']);
 export type PermissionMode = z.infer<typeof PermissionMode>;
 
+/** How the pack talks: with a little dog in it, or plain. Wording only; nothing else changes. */
+export const PackVoice = z.enum(['pack', 'plain']);
+export type PackVoice = z.infer<typeof PackVoice>;
+
 /**
  * The user's choice for one tool. "auto" follows the permission mode; "ask"
  * always asks; "allow" never asks (rules still apply); "off" hides it from
@@ -208,6 +212,7 @@ export interface ConnectorView {
 
 export interface PackView {
   mode: PermissionMode;
+  voice: PackVoice;
   dogs: (Dog & { mood: DogMood; activity?: string })[];
   chat: ChatMessage[];
   approvals: ToolApproval[];
@@ -238,6 +243,14 @@ const DID: Record<DogNoteKind, (n: number) => string> = {
   job: (n) => `went on ${count(n, 'job')}`,
   judge: (n) => `checked ${count(n, 'tool call')}`,
 };
+const PLAIN: Record<DogNoteKind, (n: number) => string> = {
+  explain: (n) => `explained ${count(n, 'alert')}`,
+  label: (n) => `labelled new events ${times(n)}`,
+  review: (n) => `reviewed the rules${n > 1 ? ` ${times(n)}` : ''}`,
+  chat: (n) => `answered ${count(n, 'question')}`,
+  job: (n) => `ran ${count(n, 'job')}`,
+  judge: (n) => `checked ${count(n, 'tool call')}`,
+};
 const ORDER: DogNoteKind[] = ['chat', 'job', 'explain', 'label', 'review', 'judge'];
 
 /**
@@ -248,7 +261,9 @@ const ORDER: DogNoteKind[] = ['chat', 'job', 'explain', 'label', 'review', 'judg
 export function diaryLines(
   dogs: readonly Pick<Dog, 'id' | 'name'>[],
   today: readonly DiaryTally[],
+  voice: PackVoice = 'pack',
 ): { dog: string; text: string; failed: number }[] {
+  const words = voice === 'plain' ? PLAIN : DID;
   return dogs.flatMap((d) => {
     const mine = today.filter((t) => t.dog === d.id && t.n > 0);
     if (mine.length === 0) return [];
@@ -256,7 +271,7 @@ export function diaryLines(
     // Only finished runs count as done; the rest are the "didn't finish" count.
     const did = ORDER.flatMap((k) => {
       const t = mine.find((x) => x.kind === k);
-      return t && t.n > t.failed ? [DID[k](t.n - t.failed)] : [];
+      return t && t.n > t.failed ? [words[k](t.n - t.failed)] : [];
     });
     const text =
       did.length === 0

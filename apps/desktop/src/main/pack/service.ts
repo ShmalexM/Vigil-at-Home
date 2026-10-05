@@ -23,6 +23,7 @@ import {
   ChatContext,
   DogInput,
   DogPatch,
+  PackVoice,
   PermissionMode,
   Schedule,
   ToolChoice,
@@ -47,6 +48,7 @@ import { afterJudge, gateAction, gateTool } from './gate.js';
 import { shapeFromJsonSchema } from './schema.js';
 
 const KEY_MODE = 'pack.mode';
+const KEY_VOICE = 'pack.voice';
 const KEY_DOGS = 'pack.dogs';
 const KEY_CHAT = 'pack.chat';
 const KEY_CHOICES = 'pack.toolChoices';
@@ -220,9 +222,14 @@ const LEAD_INSTRUCTIONS = [
   'What you cannot do, and must not offer: block, allow, release or quarantine anything; approve, edit or turn off a rule; change Vigil’s settings; touch a built-in helper’s job. If asked, say the person does that themselves in Vigil.',
   'Breeds: shepherd, doberman, husky, golden, beagle, corgi, dachshund, chihuahua. Match the breed to the job when you can (a beagle follows trails through logs, a doberman guards, a husky runs long overnight jobs).',
   'data.lookingAt, when present, is the Vigil page the person had open and the id of what was selected there (an alert on alerts, a rule on rules, an agent on agents, an event on activity). When they say "this" or "what\'s this?", that is what they mean: look it up with your tools before answering.',
-  'Keep `reply` short and friendly, plain words, no markdown headings. A little dog humour is fine; never at the expense of clarity.',
+  'Keep `reply` short and friendly, plain words, no markdown headings.',
   'In `why`, give up to five short points on what your answer rests on (what a tool showed, what the person said). The person can read them in your notebook.',
 ].join('\n');
+
+const VOICE_LINE: Record<PackVoice, string> = {
+  pack: 'You are a dog, and a little dog humour is fine; never at the expense of clarity.',
+  plain: 'The person asked for plain wording: no dog talk or jokes, just clear sentences.',
+};
 
 function jobInstructions(dog: Dog): string {
   return [
@@ -289,6 +296,16 @@ export class PackService {
 
   setMode(mode: PermissionMode): void {
     this.o.save(KEY_MODE, PermissionMode.parse(mode));
+    this.changed();
+  }
+
+  voice(): PackVoice {
+    return this.o.load(KEY_VOICE, PackVoice, 'pack');
+  }
+
+  /** Plain wording turns off the dog talk in moods and the Lead dog's replies. */
+  setVoice(voice: PackVoice): void {
+    this.o.save(KEY_VOICE, PackVoice.parse(voice));
     this.changed();
   }
 
@@ -362,6 +379,7 @@ export class PackService {
     const chat = this.chat();
     return {
       mode: this.mode(),
+      voice: this.voice(),
       dogs: this.dogs().map((d) => {
         const r = this.mood(d);
         return { ...d, mood: r.mood, ...(r.activity ? { activity: r.activity } : {}) };
@@ -435,9 +453,10 @@ export class PackService {
   helperBusy(helper: HelperId, busy: boolean): void {
     const id = this.dogs().find((d) => d.helper === helper)?.id;
     if (!id) return;
+    const plain = this.voice() === 'plain';
     const doing: Record<HelperId, [DogMood, string]> = {
-      explainer: ['fetching', 'Fetching an explanation'],
-      labeller: ['sniffing', 'Sniffing through new events'],
+      explainer: ['fetching', plain ? 'Explaining an alert' : 'Fetching an explanation'],
+      labeller: ['sniffing', plain ? 'Labelling new events' : 'Sniffing through new events'],
       'rule-reviewer': ['sniffing', 'Reviewing the rules'],
     };
     if (busy) this.setMood(id, doing[helper][0], doing[helper][1]);
@@ -540,7 +559,7 @@ export class PackService {
         purpose: 'chat',
         urgency: 'now',
         requestedByUser: true,
-        instructions: `${LEAD_INSTRUCTIONS}\n\nThe person's message:\n"""\n${words}\n"""`,
+        instructions: `${LEAD_INSTRUCTIONS}\n${VOICE_LINE[this.voice()]}\n\nThe person's message:\n"""\n${words}\n"""`,
         data: {
           now: new Date(this.now()).toISOString(),
           mode: this.mode(),
@@ -769,7 +788,13 @@ export class PackService {
       const dogs = this.dogs();
       if (dogs.some((d) => d.id === id))
         this.saveDogs(dogs.map((d) => (d.id === id ? { ...d, lastReport: report } : d)));
-      if (report.ok) this.setMood(id, 'done', 'Back with a report', DONE_MS);
+      if (report.ok)
+        this.setMood(
+          id,
+          'done',
+          this.voice() === 'plain' ? 'Finished' : 'Back with a report',
+          DONE_MS,
+        );
       else this.setMood(id, 'error', 'Couldn’t finish', DONE_MS * 2);
       return report;
     } finally {
