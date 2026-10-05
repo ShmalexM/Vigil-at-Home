@@ -26,6 +26,7 @@ import { KeyStore } from './onboarding/keys.js';
 import { OnboardingService } from './onboarding/service.js';
 import { Connectors, ConnectorRecord } from './pack/connectors.js';
 import { Notebook } from './pack/notebook.js';
+import { PackMemory } from './pack/memory.js';
 import { PackService } from './pack/service.js';
 import { seedPackDemo } from './pack/demo.js';
 import { PowerPolicy } from './power.js';
@@ -250,6 +251,7 @@ function start(): void {
     scheduler: core.scheduler,
     isBusy: () => power.isBusy(),
     notebook: new Notebook(db, { onChange: pushPack }),
+    memory: new PackMemory(db, { onChange: pushPack }),
     onChange: pushPack,
   });
   ai.on('busy', (helper, busy) => pack.helperBusy(helper, busy));

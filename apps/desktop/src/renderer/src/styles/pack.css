@@ -546,6 +546,38 @@
   padding-left: 16px;
 }
 
+/* ---------------------------------------------------------------- memory */
+.memory-add {
+  gap: 6px;
+}
+.memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.memory-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px 6px 12px;
+  border: 1px solid var(--ln0);
+  border-radius: 10px;
+  background: var(--bg2);
+}
+.memory-card {
+  padding-left: 12px;
+}
+.memory-card .memory-icon {
+  flex: none;
+  color: var(--ac);
+}
+.memory-card .struck {
+  text-decoration: line-through;
+}
+
 .pack-voice {
   display: inline-flex;
   align-items: center;

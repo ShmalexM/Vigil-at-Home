@@ -39,8 +39,10 @@ import {
   ToolDecision,
   ToolKey,
   type DogNote,
+  type MemoryEntry,
   type PackView,
   NotesFilter,
+  MemoryInput,
 } from './pack.js';
 import type { AppearanceSettings } from './themes.js';
 
@@ -294,6 +296,14 @@ export const calls = {
   /** A dog's notebook, or every note about one alert, rule, event or tool. */
   listPackNotes: z.tuple([NotesFilter]),
   clearPackNotes: z.tuple([DogRef.optional()]),
+  /** What the pack remembers, from the person's own words. */
+  listPackMemory: z.tuple([]),
+  addPackMemory: z.tuple([MemoryInput]),
+  /** One entry, or every entry when no id is given. */
+  forgetPackMemory: z.tuple([Id.optional()]),
+  packMemoryMarkdown: z.tuple([]),
+  /** Keep or decline a memory change the Lead dog asked for, or undo one it made. */
+  decideLeadMemory: z.tuple([Id, Id, z.boolean()]),
 } as const;
 export type CallName = keyof typeof calls;
 
@@ -639,6 +649,11 @@ export interface CallResults {
   refreshConnector: AiActionResult;
   listPackNotes: DogNote[];
   clearPackNotes: void;
+  listPackMemory: MemoryEntry[];
+  addPackMemory: { ok: boolean; error?: string };
+  forgetPackMemory: void;
+  packMemoryMarkdown: string;
+  decideLeadMemory: void;
 }
 
 /** One agent session: its process tree (at most 200 nodes) and events (at most 500). */

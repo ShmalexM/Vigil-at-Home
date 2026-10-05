@@ -115,6 +115,55 @@ flowchart LR
   itself (no migration), for 30 days and at most 2,000 notes per dog.
 - Nothing reads notes back to decide anything. They are for the person.
 
+## Memory
+
+The pack remembers lasting facts from your own words, so you don't have to
+repeat them: the apps and coding agents you use, your network, how you want
+answers worded. It follows the shape of Cognition's
+[agent memory repo](https://cognition.com/agent-memory-repo): one short list,
+one line per fact, each with where it came from and when, grouped by topic
+(About you, This Mac, Apps and tools, Network, Coding agents, How the pack
+works). **Memory** on the Lead dog's panel lists it; you can add a line,
+forget one, or copy the whole thing as a `MEMORY.md`.
+
+```mermaid
+flowchart LR
+  you[Your message] --> lead[Lead dog answers]
+  lead -->|no tool used| keep[Saved, with Undo]
+  lead -->|a tool was used| card["Remember this? card"]
+  card -->|Keep| keep
+  keep --> mem[(pack_memory)]
+  mem -->|background only| chat[Next chats and pack jobs]
+  mem -. never .-> gate[Tool gate, risk judge, rules, detection]
+```
+
+What it changes for a security app, compared with a coding agent's memory:
+
+- **Only your words go in.** The Lead dog may note a fact (`remember`) or
+  cross one out (`forget`, `replaces`). Vigil applies that straight away only
+  when the answer used no tool, so it rested on your message alone. If the
+  answer read an alert, an event or a connector, text in there could have
+  been written by whoever made the file or the web page, so the change waits
+  on a "Remember this?" card. Pack jobs and the built-in helpers read memory
+  and never write it, and no AI tidies it in the background (the post's
+  "dreaming" step): duplicates are caught when a fact is saved, and a
+  replacement crosses out the line it updates.
+- **Background, never permission.** Each run is told memory cannot make a
+  file, app, address or tool call safe or allowed, and never outranks a rule,
+  an alert or what you say now. Structurally, only `PackService` reads it:
+  the tool gate, the "Let AI decide" risk judge, Vigil's rules and detection
+  never see it.
+- **No secrets.** A line the redactor would hide (keys, tokens, passwords,
+  email addresses) is refused, not stored.
+- **Small.** Up to 100 lines, each up to 200 characters. The newest that fit
+  ride along with each chat and pack job; when some don't fit, the dog gets a
+  `recall_memory` tool to search the rest. Using it doesn't count as using a
+  tool for the rule above, since it only reads your own words back.
+
+Memory lives in its own `pack_memory` table on this Mac, created by
+`main/pack/memory.ts` like the notebooks' table, outside the numbered
+migrations.
+
 ## Connectors
 
 Connectors are your own MCP servers, added on the Pack page under Tools and connectors: a command on this Mac (stdio) or a URL (streamable HTTP). Vigil is the MCP client; the model sees only the tools and their results, never a token. Environment values and bearer tokens are encrypted with the Keychain-backed key the API keys use, in `pack-secrets.json` (mode 0600). Vigil never reads another app's MCP settings.

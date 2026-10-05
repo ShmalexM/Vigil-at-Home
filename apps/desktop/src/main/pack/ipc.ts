@@ -20,7 +20,12 @@ type PackCall =
   | 'removeConnector'
   | 'refreshConnector'
   | 'listPackNotes'
-  | 'clearPackNotes';
+  | 'clearPackNotes'
+  | 'listPackMemory'
+  | 'addPackMemory'
+  | 'forgetPackMemory'
+  | 'packMemoryMarkdown'
+  | 'decideLeadMemory';
 
 /**
  * The Pack page. Every call here is the user's own click or message; what
@@ -61,5 +66,11 @@ export function packHandlers(pack: PackService, connectors: Connectors): Pick<Ha
     refreshConnector: (id) => result(() => pack.refreshConnector(id)),
     listPackNotes: (filter) => pack.notes(filter),
     clearPackNotes: (dog) => pack.clearNotes(dog),
+    listPackMemory: () => pack.memories(),
+    addPackMemory: (input) => result(() => pack.remember(input)),
+    forgetPackMemory: (id) => pack.forget(id),
+    packMemoryMarkdown: () => pack.memoryMarkdown(),
+    decideLeadMemory: (messageId, changeId, approve) =>
+      pack.decideMemory(messageId, changeId, approve),
   };
 }
