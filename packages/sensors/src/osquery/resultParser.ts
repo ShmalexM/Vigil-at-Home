@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import type { EventOfKind, SensorEvent } from '@vigil/core';
 import { defined, pidOf } from '../types.js';
 import { QUERY_NAMES } from './config.js';
+import { LINUX_QUERY_NAMES } from './linuxConfig.js';
 import { osquerySigning } from '../signing.js';
 
 interface OsqueryResultLine {
@@ -53,7 +54,9 @@ export function osqueryLineToEvents(line: string, opts: OsqueryParseOptions = {}
   }
   const c = parsed.columns;
   if (!c || typeof c !== 'object') return [];
-  if (Number(parsed.counter) === 0 && !opts.includeBaseline) return [];
+  // Event tables only ever hold new activity, so their first run is real too.
+  const evented = parsed.name === LINUX_QUERY_NAMES.processEvents;
+  if (Number(parsed.counter) === 0 && !opts.includeBaseline && !evented) return [];
   const unix = Number(parsed.unixTime);
   const base = {
     id: id(line),
@@ -141,6 +144,54 @@ export function osqueryLineToEvents(line: string, opts: OsqueryParseOptions = {}
         },
       ];
     }
+    case LINUX_QUERY_NAMES.processEvents: {
+      const path = c.path ?? '';
+      const pid = pidOf(c.pid);
+      if (!added || !path.startsWith('/') || pid === undefined) return [];
+      const t = Number(c.time);
+      return [
+        {
+          ...base,
+          ...(Number.isFinite(t) && t > 0 ? { ts: t * 1000 } : {}),
+          kind: 'process.exec',
+          process: defined({
+            pid,
+            ppid: pidOf(c.parent),
+            path,
+            args: commandLine(c.json_cmdline, c.cmdline),
+            cwd: c.cwd || undefined,
+            uid: pidOf(c.uid),
+          }),
+        },
+      ];
+    }
+    case LINUX_QUERY_NAMES.startup: {
+      const path = c.path ?? '';
+      if (!path.startsWith('/')) return [];
+      return [
+        {
+          ...base,
+          kind: 'persistence',
+          change: added ? 'added' : 'removed',
+          mechanism: path.includes('/autostart/') ? 'autostart' : 'systemd_unit',
+          path,
+          ...defined({ label: path.slice(path.lastIndexOf('/') + 1) || undefined }),
+        },
+      ];
+    }
+    case LINUX_QUERY_NAMES.shellProfiles: {
+      const path = c.path ?? '';
+      if (!path.startsWith('/')) return [];
+      return [
+        {
+          ...base,
+          kind: 'persistence',
+          change: added ? 'modified' : 'removed',
+          mechanism: 'shell_profile',
+          path,
+        },
+      ];
+    }
     case QUERY_NAMES.crontab:
       return [
         {
@@ -154,6 +205,25 @@ export function osqueryLineToEvents(line: string, opts: OsqueryParseOptions = {}
     default:
       return [];
   }
+}
+
+/**
+ * A launch's arguments. osquery gives them as a JSON array in json_cmdline;
+ * the plain cmdline joins them with spaces and can't be split exactly, so
+ * it is only the fallback.
+ */
+function commandLine(json: string | undefined, plain: string | undefined): string[] | undefined {
+  if (json) {
+    try {
+      const parsed: unknown = JSON.parse(json);
+      if (Array.isArray(parsed) && parsed.every((a) => typeof a === 'string'))
+        return parsed.slice(0, 256);
+    } catch {
+      // fall back to cmdline
+    }
+  }
+  const parts = plain?.split(' ').filter(Boolean);
+  return parts?.length ? parts.slice(0, 256) : undefined;
 }
 
 /**

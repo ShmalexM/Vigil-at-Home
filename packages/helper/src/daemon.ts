@@ -18,6 +18,7 @@ import {
   OSQUERYD_PATH,
   RuleStore,
   SantaSyncServer,
+  type SignatureInfo,
   SensorHub,
   ensureSyncTls,
   fileAccessPolicy,
@@ -38,6 +39,8 @@ import {
 import { HelperServer } from './server.js';
 import { PreexecSync } from './preexec.js';
 import { signatureLookup } from './signature.js';
+import { linuxPackageIndex } from './packageTrust.js';
+import { ensureLinuxOsquery, type LinuxOsqueryPaths } from './linuxOsquery.js';
 import { BINARIES, LINUX_BINARIES, realSystem, type System } from './system.js';
 
 export interface DaemonOptions {
@@ -52,6 +55,10 @@ export interface DaemonOptions {
   sensorBinaries?: { santa: string | false; osquery: string };
   /** Where osquery lives; false leaves osquery alone (tests). Only acted on as root. */
   osquery?: OsqueryPaths | false;
+  /** Linux: where osquery lives; false leaves it alone. Only acted on as root. */
+  linuxOsquery?: LinuxOsqueryPaths;
+  /** Linux: the trust answer for a program path. Defaults to the dpkg/rpm index. */
+  trust?: (path: string) => SignatureInfo | undefined;
 }
 
 /** What helper.status reports about each sensor. The app decides what counts as stale. */
@@ -162,7 +169,9 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       delivered = delivered.then(async () => server.publish(e, await fastPath.check(e)));
     },
     // Signatures of programs that started before Vigil (codesign is macOS-only).
-    ...(process.platform === 'darwin' ? { signatureLookup: signatureLookup(sys) } : {}),
+    ...(process.platform === 'darwin' && !linux ? { signatureLookup: signatureLookup(sys) } : {}),
+    // Linux: whether the package manager installed each program, answered at once.
+    ...(linux ? { trust: opts.trust ?? trustFromPackages() } : {}),
     // The closer look at suspicious programs' connections needs osquery and root.
     ...(existsSync(bins.osquery) && process.getuid?.() === 0 && opts.osquery !== false
       ? { osqueryRunner: osqueryShellRunner(sys) }
@@ -207,9 +216,16 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   // Start osquery with Vigil's queries once it is installed, and keep it loaded.
   const osqueryPaths = opts.osquery ?? defaultOsqueryPaths();
   const keepOsquery = () => {
-    // On Linux osquery is set up by the sensors step that follows; until then
-    // the helper reads its results if the user runs it.
-    if (linux || !osqueryPaths || process.getuid?.() !== 0) return;
+    if (opts.osquery === false || process.getuid?.() !== 0) return;
+    if (linux) {
+      ensureLinuxOsquery(sys, opts.linuxOsquery)
+        .then((state) => {
+          if (state === 'started' || state === 'restarted') log(`osquery ${state}`);
+        })
+        .catch((err: Error) => log(`could not start osquery: ${err.message}`));
+      return;
+    }
+    if (!osqueryPaths) return;
     // osquery's startup-item query slows to a 5 minute safety net only while
     // Santa is actually reporting (it can be installed but not yet approved).
     const santaAt = hub.lastEventAt().santa;
@@ -275,4 +291,10 @@ function writeFileAccessPolicy(path: string): void {
   if (next === current) return;
   writeFileSync(path, next, { mode: 0o644 });
   chmodSync(path, 0o644);
+}
+
+/** The package index, built once at start and reloaded when packages change. */
+function trustFromPackages(): (path: string) => SignatureInfo | undefined {
+  const index = linuxPackageIndex();
+  return (path) => index.trust(path);
 }

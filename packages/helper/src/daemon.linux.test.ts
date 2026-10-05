@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { ProcessRef } from '@vigil/core';
 import { HelperClient } from './client.js';
 import { linuxPaths, type HelperPaths } from './config.js';
 import { runDaemon, type SensorHealth } from './daemon.js';
@@ -31,6 +32,10 @@ beforeAll(async () => {
     approvalOwnerUid: process.getuid!(),
     sensorBinaries: { santa: false, osquery: join(root, 'no-osqueryd') },
     osquery: false,
+    trust: (path) =>
+      path === '/usr/bin/curl'
+        ? { signing: 'package', signingId: 'pkg:curl' }
+        : { signing: 'unsigned' },
   });
   client = await HelperClient.connect(paths.socket, async () => false);
 });
@@ -42,6 +47,35 @@ afterAll(async () => {
 });
 
 describe('daemon on Linux', () => {
+  it('marks launches from osquery with whether a package installed them', async () => {
+    const got: ProcessRef[] = [];
+    client!.onEvent((e) => {
+      if (e.kind === 'process.exec') got.push(e.process);
+    });
+    await client!.subscribe();
+    const line = (pid: number, path: string) =>
+      JSON.stringify({
+        name: 'vigil_process_events',
+        action: 'added',
+        counter: 0,
+        unixTime: 1790000000,
+        columns: {
+          pid: String(pid),
+          parent: '1',
+          uid: '1000',
+          path,
+          cmdline: path,
+          time: '1790000000',
+        },
+      }) + '\n';
+    appendFileSync(paths.osqueryResults as string, line(10, '/usr/bin/curl') + line(11, '/tmp/x'));
+    for (let i = 0; i < 50 && got.length < 2; i++) await new Promise((r) => setTimeout(r, 100));
+    expect(got).toMatchObject([
+      { path: '/usr/bin/curl', signing: 'package', signingId: 'pkg:curl' },
+      { path: '/tmp/x', signing: 'unsigned' },
+    ]);
+  });
+
   it('starts without Santa: no sync certificate or file-access policy', () => {
     expect(existsSync(join(paths.tlsDir, 'ca.pem'))).toBe(false);
     expect(existsSync(paths.fileAccessPolicy)).toBe(false);
