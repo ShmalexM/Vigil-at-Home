@@ -21,3 +21,7 @@ export {
 } from './commands/firewall.js';
 export { vetPath, resolveTarget } from './commands/quarantine.js';
 export { launchdDomain } from './commands/persistence.js';
+export * from './platform.js';
+export { NftFirewall, NFT_TABLE, parseNftRules } from './commands/nftables.js';
+export type { NetworkFirewall } from './commands/firewall.js';
+export { LINUX_STARTUP_DIR_RE, unitScope } from './commands/linuxPersistence.js';

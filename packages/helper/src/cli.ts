@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // vigil-helper daemon            run the root daemon (launchd does this)
 // vigil-helper approve <nonce>…  record the user's approval; only works as root,
-//                                i.e. after macOS's admin password dialog
+//                                i.e. after the admin password dialog (osascript
+//                                on macOS, pkexec on Linux)
 // vigil-helper santa-profile     print the Santa configuration profile
 // vigil-helper osquery-config    print the osquery configuration
 // vigil-helper osquery-flags     print osquery's startup flags (osquery.flags)
@@ -29,7 +30,7 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'approve': {
       if (process.getuid?.() !== 0) {
-        console.error('approve must run as root (through the macOS password dialog)');
+        console.error('approve must run as root (through the admin password dialog)');
         return 1;
       }
       // One password can approve several commands, each by its own nonce.

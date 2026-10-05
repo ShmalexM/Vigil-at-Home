@@ -11,8 +11,9 @@ import { randomBytes } from 'node:crypto';
 import type { SensorEvent } from '@vigil/sensors';
 import type { HelperCommand, HelperResponse } from './protocol.js';
 import type { HelperRan } from './fastpath.js';
-import { approvalAppleScript } from './approval.js';
+import { approvalAppleScript, pkexecArgs } from './approval.js';
 import { defaultPaths } from './config.js';
+import { hostPlatform, type Platform } from './platform.js';
 
 export class HelperCallError extends Error {
   constructor(
@@ -38,6 +39,27 @@ export function osascriptApprover(helperExecutable = defaultPaths().helperExecut
         (err) => resolve(!err),
       );
     });
+}
+
+/**
+ * Linux: polkit's own password dialog through pkexec, which runs
+ * `vigil-helper approve` as root only after the admin password. polkit shows
+ * its standard text, so `prompt` isn't used; the app says what is being
+ * approved before the dialog appears.
+ */
+export function pkexecApprover(
+  helperExecutable = defaultPaths(undefined, 'linux').helperExecutable,
+  pkexec = '/usr/bin/pkexec',
+): Approver {
+  return (nonce, _prompt, also = []) =>
+    new Promise((resolve) => {
+      execFile(pkexec, pkexecArgs(helperExecutable, [nonce, ...also]), (err) => resolve(!err));
+    });
+}
+
+/** The password dialog for this OS. */
+export function defaultApprover(platform: Platform = hostPlatform()): Approver {
+  return platform === 'linux' ? pkexecApprover() : osascriptApprover();
 }
 
 /** A command waiting on approval that the next password dialog also asks for. */
@@ -79,7 +101,7 @@ export class HelperClient {
 
   static connect(
     socketPath = defaultPaths().socket,
-    approver: Approver = osascriptApprover(),
+    approver: Approver = defaultApprover(),
   ): Promise<HelperClient> {
     return new Promise((resolve, reject) => {
       const sock = connect(socketPath);

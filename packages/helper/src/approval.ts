@@ -1,5 +1,5 @@
 // Releasing a block or allowing a program needs proof that the person at the
-// keyboard typed their macOS admin password, not just a request from the app
+// keyboard typed their admin password (macOS's dialog, or polkit's on Linux), not just a request from the app
 // (malware running as the user can send the app's requests too).
 //
 //   app ──undo──► helper: needs approval, nonce N (bound to this exact command)
@@ -108,4 +108,17 @@ export function approvalAppleScript(
   const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   const shell = `'${helperPath}' approve ${nonces.join(' ')}`;
   return `do shell script "${esc(shell)}" with prompt "${esc(prompt.slice(0, 200))}" with administrator privileges`;
+}
+
+/**
+ * Linux: the arguments for pkexec, which asks for the admin password through
+ * the desktop's polkit agent and then runs the helper's approve command as
+ * root. No shell is involved, so only the nonces and path are checked.
+ */
+export function pkexecArgs(helperPath: string, nonce: string | string[]): string[] {
+  const nonces = typeof nonce === 'string' ? [nonce] : nonce;
+  if (nonces.length === 0 || !nonces.every((n) => /^[a-f0-9]{32}$/.test(n)))
+    throw new Error('bad nonce');
+  if (!/^\/[A-Za-z0-9 ._/-]+$/.test(helperPath)) throw new Error('bad helper path');
+  return ['--disable-internal-agent', helperPath, 'approve', ...nonces];
 }
