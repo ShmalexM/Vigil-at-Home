@@ -169,7 +169,11 @@ export function PackPage() {
       </div>
       {tab === 'pack' ? (
         <div className="pack-layout">
-          <LeadPanel pack={pack} reload={reload} />
+          <LeadPanel
+            pack={pack}
+            reload={reload}
+            onEdit={() => setEditing(pack.dogs.find((d) => d.role === 'lead'))}
+          />
           <PackGrid pack={pack} onEdit={setEditing} reload={reload} />
         </div>
       ) : (
@@ -196,7 +200,16 @@ const STARTERS = [
   'What is the pack up to?',
 ];
 
-export function LeadPanel({ pack, reload }: { pack: PackView; reload: () => void }) {
+export function LeadPanel({
+  pack,
+  reload,
+  onEdit,
+}: {
+  pack: PackView;
+  reload: () => void;
+  /** Opens the editor for the Lead dog: a different breed and name. */
+  onEdit?: () => void;
+}) {
   const lead = pack.dogs.find((d) => d.role === 'lead')!;
   return (
     <Card className="lead-panel">
@@ -211,7 +224,12 @@ export function LeadPanel({ pack, reload }: { pack: PackView; reload: () => void
           </span>
           <span className="t-small">{breedName(lead.breed)}</span>
           <MoodLine dog={lead} fallback="Ready when you are" />
-          <span>
+          <span className="row" style={{ gap: 4 }}>
+            {onEdit && (
+              <Button size="sm" kind="ghost" icon={<Dice5 size={13} />} onClick={onEdit}>
+                Change Lead dog
+              </Button>
+            )}
             <NotebookButton dog={lead} />
           </span>
         </div>
@@ -825,7 +843,9 @@ function DogEditor({
         tabIndex={-1}
       >
         <div className="row spread">
-          <h2 className="t-h2">{dog ? `Edit ${dog.name}` : 'Adopt a dog'}</h2>
+          <h2 className="t-h2">
+            {!dog ? 'Adopt a dog' : role === 'lead' ? 'Change your Lead dog' : `Edit ${dog.name}`}
+          </h2>
           <button type="button" className="btn ghost icon-btn" aria-label="Close" onClick={onClose}>
             <X size={16} />
           </button>
