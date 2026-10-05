@@ -8,6 +8,12 @@ and apps/desktop/src/renderer/src/views/usage-format.ts) are adapted from
 T3 Code (https://github.com/pingdotgg/t3code), Copyright (c) 2026 T3 Tools Inc.,
 used under the MIT License.
 
+The chat's thinking trace, word-by-word answers and one-at-a-time tool
+approvals (apps/desktop/src/renderer/src/components/Thinking.tsx,
+StreamingText.tsx, ApprovalStack.tsx, agent-ui.ts and styles/agent-ui.css)
+are adapted from Beautiful UI (https://github.com/slev12397/beautiful-ui),
+Copyright (c) 2026 Shane Levine, used under the MIT License.
+
 Test fixtures in packages/sensors/src/logParser.test.ts contain sample log
 lines from Santa (https://github.com/northpolesec/santa), used under the
 Apache License, Version 2.0.

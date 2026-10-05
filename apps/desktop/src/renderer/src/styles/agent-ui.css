@@ -1,0 +1,296 @@
+/*
+ * Thinking, StreamingText and ApprovalStack. Motion and layout adapted from
+ * Beautiful UI (https://github.com/slev12397/beautiful-ui), Copyright (c) 2026
+ * Shane Levine, MIT License; restyled on Vigil's tokens. See THIRD_PARTY_NOTICES.md.
+ */
+
+/* ------------------------------------------------------------ thinking */
+
+.thinking {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.thinking-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  margin-left: -6px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--tx2);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 100ms;
+}
+.thinking-head:hover:not(:disabled) {
+  background: var(--bg3);
+}
+.thinking-head:disabled {
+  cursor: default;
+}
+.thinking-icon {
+  color: var(--tx3);
+  flex-shrink: 0;
+}
+.thinking.working .thinking-icon {
+  color: var(--ai);
+}
+.thinking-shimmer {
+  white-space: nowrap;
+  color: transparent;
+  background-image: linear-gradient(90deg, var(--tx3) 35%, var(--tx0) 50%, var(--tx3) 65%);
+  background-size: 200% 100%;
+  background-clip: text;
+  animation: agent-shimmer 1.4s linear infinite;
+}
+.thinking-done {
+  white-space: nowrap;
+  animation: agent-fade-in 350ms ease-out both;
+}
+.thinking-chevron {
+  color: var(--tx3);
+  transition: transform 300ms var(--agent-ease);
+}
+.thinking-head[aria-expanded='true'] .thinking-chevron {
+  transform: rotate(180deg);
+}
+.thinking-trace {
+  position: relative;
+  margin: 2px 0 0 5px;
+  padding: 2px 0 2px 14px;
+  border-left: 1px solid var(--ln1);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.thinking-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 24px;
+  font-size: 12px;
+  color: var(--tx1);
+  animation: agent-fade-up 320ms var(--agent-ease) both;
+}
+.thinking-row.prose {
+  align-items: flex-start;
+  min-height: 0;
+  padding: 2px 0;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  color: var(--tx2);
+}
+.thinking-check {
+  color: var(--tx3);
+  flex-shrink: 0;
+}
+.thinking-spin {
+  width: 11px;
+  height: 11px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--ln2);
+  border-top-color: var(--tx1);
+  animation: agent-spin 700ms linear infinite;
+}
+.thinking-primary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.thinking-row.prose .thinking-primary {
+  overflow: visible;
+}
+.thinking-secondary {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--tx3);
+}
+
+/* ------------------------------------------------------ streaming text */
+
+.stream-word {
+  animation: agent-resolve 260ms ease-out both;
+}
+.stream-caret {
+  display: inline-block;
+  width: 2px;
+  height: 0.95em;
+  margin-left: 2px;
+  vertical-align: -0.1em;
+  border-radius: 1px;
+  background: currentColor;
+  animation: agent-fade-in 150ms ease-out both;
+}
+
+/* ------------------------------------------------------ approval stack */
+
+.approval-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.approval-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  align-self: flex-end;
+}
+.approval-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--tx3);
+  cursor: pointer;
+}
+.approval-step:hover:not(:disabled) {
+  color: var(--tx0);
+  background: var(--bg3);
+}
+.approval-step:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+.approval-card.slide-next {
+  animation: agent-fade-up 360ms var(--agent-ease) both;
+}
+.approval-card.slide-prev {
+  animation: agent-fade-down 360ms var(--agent-ease) both;
+}
+.approval-receipt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 3px 10px 3px 4px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--good);
+  background: var(--good-bg);
+  animation: agent-pop-in 260ms var(--agent-ease) both;
+}
+.approval-receipt.deny {
+  color: var(--tx1);
+  background: var(--bg3);
+}
+.approval-receipt-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  color: var(--bg1);
+  background: var(--good);
+}
+.approval-receipt.deny .approval-receipt-dot {
+  background: var(--tx2);
+}
+.roll {
+  display: inline-block;
+  position: relative;
+  overflow: hidden;
+  height: 1.2em;
+  line-height: 1.2em;
+  vertical-align: bottom;
+}
+.roll-track {
+  display: flex;
+  flex-direction: column;
+}
+.roll-track > span {
+  height: 1.2em;
+}
+.roll-track.up {
+  animation: agent-roll-up 350ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+.roll-track.down {
+  animation: agent-roll-down 350ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+/* ------------------------------------------------------------- motion */
+
+:root {
+  --agent-ease: cubic-bezier(0.23, 1, 0.32, 1);
+}
+@keyframes agent-shimmer {
+  from {
+    background-position: 150% center;
+  }
+  to {
+    background-position: -50% center;
+  }
+}
+@keyframes agent-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes agent-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+@keyframes agent-fade-down {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+@keyframes agent-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+}
+@keyframes agent-resolve {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+  }
+}
+@keyframes agent-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes agent-roll-up {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-1.2em);
+  }
+}
+@keyframes agent-roll-down {
+  from {
+    transform: translateY(-1.2em);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking-shimmer {
+    animation: none;
+    color: var(--tx1);
+    background: none;
+  }
+}
