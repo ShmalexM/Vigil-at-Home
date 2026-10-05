@@ -60,7 +60,8 @@ export function globToRegExp(glob: string, ignoreCase = true): RegExp {
   let src = '';
   let rest = glob;
   if (rest.startsWith('~/')) {
-    src += '/Users/[^/]+/';
+    // A home folder: /Users/<name> on macOS, /home/<name> or /root on Linux.
+    src += '(?:/Users/[^/]+|/home/[^/]+|/root)/';
     rest = rest.slice(2);
   }
   for (let i = 0; i < rest.length; i++) {

@@ -29,6 +29,7 @@ export {
   type SqliteDetectionStores,
 } from './state/sqlite.js';
 export { macosCoreRules, CREDENTIAL_STORE_GLOBS } from './packs/macos-core.js';
+export { linuxCoreRules } from './packs/linux-core.js';
 export {
   agentWatchRules,
   SECRET_PATH_RES,
@@ -57,6 +58,7 @@ export {
   PREFLIGHT_SOCKET_RULE_ID,
   PREFLIGHT_SOCKET_TOOL,
   builtinRules,
+  builtinRulesFor,
 } from './packs/agent-preflight.js';
 export {
   replayRule,

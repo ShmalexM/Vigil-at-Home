@@ -21,6 +21,7 @@ import {
   UPLOAD_RES,
 } from './agent-watch.js';
 import { macosCoreRules } from './macos-core.js';
+import { linuxCoreRules } from './linux-core.js';
 
 /**
  * Pre-flight rules: an agent's hook (Claude Code's PreToolUse) asks Vigil
@@ -338,3 +339,9 @@ export const builtinRules: DetectionRuleInput[] = [
   ...agentWatchRules,
   ...agentPreflightRules,
 ];
+
+/** Every rule Vigil ships for one OS: its core pack, agent watch and pre-flight. */
+export function builtinRulesFor(platform: string = process.platform): DetectionRuleInput[] {
+  if (platform !== 'linux') return builtinRules;
+  return [...linuxCoreRules, ...agentWatchRules, ...agentPreflightRules];
+}
