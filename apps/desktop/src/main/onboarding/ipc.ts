@@ -2,6 +2,7 @@ import { shell } from 'electron';
 import type { SettingsPane } from '../../shared/setup.js';
 import type { Handlers } from '../ipc.js';
 import type { OnboardingService } from './service.js';
+import { openLinuxTerminal } from './terminal.js';
 
 /** System Settings pages the setup steps link to. Fixed list: the renderer can't open arbitrary URLs. */
 const PANES: Record<Exclude<SettingsPane, 'terminal'>, string> = {
@@ -53,9 +54,15 @@ export function onboardingHandlers(
     },
     openSettingsPane: async (pane) => {
       if (pane === 'terminal') {
+        if (process.platform === 'linux') {
+          if (!openLinuxTerminal()) throw new Error('No terminal program found');
+          return;
+        }
         await shell.openPath('/System/Applications/Utilities/Terminal.app');
         return;
       }
+      // System Settings links only exist on macOS.
+      if (process.platform !== 'darwin') return;
       await shell.openExternal(PANES[pane]);
     },
   };

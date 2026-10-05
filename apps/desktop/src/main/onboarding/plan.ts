@@ -60,7 +60,24 @@ const ALL: readonly SetupMode[] = ['local', 'cloud', 'both'];
 const LOCAL_AI: readonly SetupMode[] = ['local', 'both'];
 const CLOUD_AI: readonly SetupMode[] = ['cloud', 'both'];
 
+/** Which package manager a Linux computer uses, from /etc/os-release. */
+export type LinuxDistro = 'debian' | 'fedora' | 'other';
+
+/** Debian, Ubuntu and their relatives use apt; Fedora, RHEL and theirs use dnf. */
+export function linuxDistro(osRelease: string): LinuxDistro {
+  const field = (name: string) =>
+    osRelease.match(new RegExp(`^${name}=["']?([^"'\\n]*)`, 'm'))?.[1]?.toLowerCase() ?? '';
+  const ids = `${field('ID')} ${field('ID_LIKE')}`.split(/\s+/);
+  if (ids.some((id) => id === 'debian' || id === 'ubuntu')) return 'debian';
+  if (ids.some((id) => ['fedora', 'rhel', 'centos'].includes(id))) return 'fedora';
+  return 'other';
+}
+
 export interface PlanInputs {
+  /** Which computer the steps are for; defaults to a Mac. */
+  platform?: NodeJS.Platform;
+  /** On Linux, which package manager the install commands use. */
+  distro?: LinuxDistro;
   /** Model to pull; defaults to the one for this Mac's memory. */
   localModel?: string;
   /** Command that installs Vigil's root helper; unset until the helper ships in the app. */
@@ -82,8 +99,15 @@ export interface PlanInputs {
  * changes which AI steps appear.
  */
 export function setupPlan(inputs: PlanInputs = {}): StepDef[] {
-  const model = inputs.localModel ?? LOCAL_MODEL;
-  const size = model === LOCAL_MODEL_SMALL ? 'about 400 MB' : 'about 1 GB';
+  const linux = inputs.platform === 'linux';
+  return [
+    ...(linux ? linuxProtection(inputs) : macProtection(inputs)),
+    ...aiSteps(inputs, linux),
+    ...(inputs.claudePreflight ? [claudePreflightStep(inputs.claudePreflight)] : []),
+  ];
+}
+
+function macProtection(inputs: PlanInputs): StepDef[] {
   return [
     {
       id: 'homebrew',
@@ -186,28 +210,44 @@ export function setupPlan(inputs: PlanInputs = {}): StepDef[] {
       unavailable:
         'Vigil makes this profile once the helper is running. It should appear in a few seconds.',
     },
+  ];
+}
+
+function aiSteps(inputs: PlanInputs, linux: boolean): StepDef[] {
+  const model = inputs.localModel ?? LOCAL_MODEL;
+  const size = model === LOCAL_MODEL_SMALL ? 'about 400 MB' : 'about 1 GB';
+  const computer = linux ? 'computer' : 'Mac';
+  const brew = linux ? {} : { after: ['homebrew'] };
+  return [
     {
       id: 'ollama',
       group: 'ai',
       title: 'Ollama',
-      why: 'Runs a small AI model on this Mac, so event summaries never leave it.',
+      why: `Runs a small AI model on this ${computer}, so event summaries never leave it.`,
       modes: LOCAL_AI,
-      commands: [
-        { label: 'Install Ollama', cmd: 'brew install ollama' },
-        {
-          label: 'Start it in the background, now and at login',
-          cmd: 'brew services start ollama',
-        },
-      ],
+      commands: linux
+        ? [
+            {
+              label: 'Install Ollama; it runs in the background, now and after a restart',
+              cmd: 'curl -fsSL https://ollama.com/install.sh | sh',
+            },
+          ]
+        : [
+            { label: 'Install Ollama', cmd: 'brew install ollama' },
+            {
+              label: 'Start it in the background, now and at login',
+              cmd: 'brew services start ollama',
+            },
+          ],
       check: 'ollama',
       checks: 'Ollama answers on 127.0.0.1:11434',
-      after: ['homebrew'],
+      ...brew,
     },
     {
       id: 'ollama-model',
       group: 'ai',
       title: 'Local model',
-      why: `${model} is ${size}, picked for this Mac’s memory, and only uses memory while it works. Vigil uses a model you already have instead, if there is one.`,
+      why: `${model} is ${size}, picked for this ${computer}’s memory, and only uses memory while it works. Vigil uses a model you already have instead, if there is one.`,
       modes: LOCAL_AI,
       commands: [{ label: 'Download the model', cmd: `ollama pull ${model}` }],
       check: 'ollama.model',
@@ -235,12 +275,116 @@ export function setupPlan(inputs: PlanInputs = {}): StepDef[] {
       why: 'Uses your ChatGPT plan. Vigil keeps its own Codex folder, so your Codex settings and tools never load, and you sign it in once from Vigil.',
       modes: CLOUD_AI,
       optional: true,
-      commands: [{ label: 'Install Codex', cmd: 'brew install --cask codex' }],
+      commands: [
+        linux
+          ? { label: 'Install Codex (needs Node.js)', cmd: 'sudo npm install -g @openai/codex' }
+          : { label: 'Install Codex', cmd: 'brew install --cask codex' },
+      ],
       check: 'codex',
       checks: 'codex is installed',
-      after: ['homebrew'],
+      ...brew,
     },
-    ...(inputs.claudePreflight ? [claudePreflightStep(inputs.claudePreflight)] : []),
+  ];
+}
+
+/** fapolicyd's rules that let everything run that Vigil hasn't blocked. */
+export const FAPOLICYD_ALLOW_RULES = '/etc/fapolicyd/rules.d/06-vigil-allow.rules';
+
+/**
+ * Linux: fapolicyd blocks by hash before a program runs, osquery watches,
+ * and the helper (systemd) carries out blocks and writes both their configs.
+ */
+function linuxProtection(inputs: PlanInputs): StepDef[] {
+  const distro = inputs.distro ?? 'other';
+  const install = (pkg: string) =>
+    distro === 'debian' ? `sudo apt-get install -y ${pkg}` : `sudo dnf install -y ${pkg}`;
+  const osquery: StepCommand[] =
+    distro === 'debian'
+      ? [
+          {
+            label: 'Trust osquery’s signing key (fetched by its fingerprint)',
+            cmd: 'gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys 1484120AC4E9F8A1A577AEEE97A80C63C9D8B80B && sudo install -d -m 755 /etc/apt/keyrings && gpg --export 1484120AC4E9F8A1A577AEEE97A80C63C9D8B80B | sudo tee /etc/apt/keyrings/osquery.gpg >/dev/null',
+          },
+          {
+            label: 'Add osquery’s package repository',
+            cmd: 'echo "deb [signed-by=/etc/apt/keyrings/osquery.gpg] https://pkg.osquery.io/deb deb main" | sudo tee /etc/apt/sources.list.d/osquery.list',
+          },
+          {
+            label: 'Install osquery',
+            cmd: 'sudo apt-get update && sudo apt-get install -y osquery',
+          },
+        ]
+      : [
+          {
+            label: 'Trust osquery’s signing key',
+            cmd: 'curl -fsSL https://pkg.osquery.io/rpm/GPG | sudo tee /etc/pki/rpm-gpg/RPM-GPG-KEY-osquery >/dev/null',
+          },
+          {
+            label: 'Add osquery’s package repository',
+            cmd: 'curl -fsSL https://pkg.osquery.io/rpm/osquery-s3-rpm.repo | sudo tee /etc/yum.repos.d/osquery.repo >/dev/null',
+          },
+          {
+            label: 'Install osquery',
+            cmd: 'sudo dnf install -y --enablerepo=osquery-s3-rpm-repo osquery',
+          },
+        ];
+  return [
+    {
+      id: 'fapolicyd',
+      group: 'protection',
+      title: 'fapolicyd',
+      why: 'Stops a program before it starts when Vigil has a block rule for it. It comes with your distribution. Vigil sets it to allow everything else, so it only blocks what you block in Vigil.',
+      modes: ALL,
+      commands: [
+        {
+          label: 'Let everything run that Vigil hasn’t blocked (do this before installing)',
+          cmd: `sudo mkdir -p /etc/fapolicyd/rules.d && echo 'allow perm=any all : all' | sudo tee ${FAPOLICYD_ALLOW_RULES} >/dev/null`,
+        },
+        ...(distro === 'other' ? [] : [{ label: 'Install fapolicyd', cmd: install('fapolicyd') }]),
+        {
+          label:
+            distro === 'other'
+              ? 'Install fapolicyd with your package manager, then load the rules and start it'
+              : 'Load the rules and start it, now and after a restart',
+          cmd: 'sudo fagenrules --load; sudo systemctl enable --now fapolicyd',
+        },
+      ],
+      check: 'fapolicyd',
+      checks: `fapolicyd is running and ${FAPOLICYD_ALLOW_RULES} exists`,
+    },
+    {
+      id: 'osquery',
+      group: 'protection',
+      title: 'osquery',
+      why: 'Shows which programs start, connect where, what listens for connections and which browser extensions you have.',
+      modes: ALL,
+      commands: distro === 'other' ? [] : osquery,
+      check: 'osquery',
+      checks: 'osqueryd is installed in /opt/osquery/bin or /usr/bin',
+      ...(distro === 'other'
+        ? { unavailable: 'Install osquery from https://osquery.io/downloads, then check again.' }
+        : {}),
+    },
+    {
+      id: 'helper',
+      group: 'protection',
+      title: 'Vigil helper',
+      why: 'The small root service that carries out blocks, pauses and quarantines, writes fapolicyd’s block rules and starts osquery. Undoing a block always asks for your password.',
+      modes: ALL,
+      commands: inputs.helperInstallCommand
+        ? [
+            {
+              label: 'Install the helper (asks for your password once)',
+              cmd: inputs.helperInstallCommand,
+            },
+          ]
+        : [],
+      check: 'helper',
+      checks: 'the helper answers on /run/vigil-helper.sock',
+      after: ['fapolicyd', 'osquery'],
+      unavailable:
+        'This build of Vigil doesn’t include the helper. Install Vigil from its .deb or AppImage, or run pnpm build:helper in the repo and restart Vigil.',
+    },
   ];
 }
 
