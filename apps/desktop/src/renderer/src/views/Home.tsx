@@ -9,7 +9,7 @@ import { Card, Chip, LevelPill, SectionHead, SeverityMark, StatusMark } from '..
 import { timeAgo } from '../format';
 import { isNoticed, needsDecision } from '../../../shared/attention';
 import { LEVEL_RULES } from '../../../shared/levels';
-import { diaryLines, type PackView } from '../../../shared/pack';
+import { diaryLines, pileWords, SCOUT_PILE_MIN, type PackView } from '../../../shared/pack';
 import { leadChat } from '../lead-chat';
 import { PageHead } from './AppShell';
 import { usePack } from './Pack';
@@ -23,7 +23,14 @@ const levelSentence = {
 export function HomeView({ go }: { go: (r: string) => void }) {
   const [status] = useLive(() => vigil.getStatus());
   const [alerts] = useLive(() => vigil.listAlerts('open'));
-  const needs = needsRows((alerts ?? []).filter(needsDecision));
+  const allNeeds = needsRows((alerts ?? []).filter(needsDecision));
+  // The biggest pile gets Scout's card instead of a row.
+  const bigPile = allNeeds.reduce<(typeof allNeeds)[number] | undefined>(
+    (best, r) =>
+      (r.count ?? 0) >= SCOUT_PILE_MIN && (r.count ?? 0) > (best?.count ?? 0) ? r : best,
+    undefined,
+  );
+  const needs = allNeeds.filter((r) => r !== bigPile);
   const noticed = (alerts ?? []).filter(isNoticed);
   const allRunning = !!status && status.sensors.every((s) => s.state === 'ok');
   const [pack] = usePack({ settings: false });
@@ -100,9 +107,38 @@ export function HomeView({ go }: { go: (r: string) => void }) {
         </Card>
       )}
 
-      {needs.length > 0 && (
+      {(needs.length > 0 || bigPile) && (
         <Card>
           <SectionHead title="Needs you" sub="Waiting on your decision, newest first" />
+          {bigPile && lead && pack && (
+            <div className="scout-pile">
+              <Dog breed={lead.breed} mood="waiting" size={64} className="still" />
+              <div className="col grow" style={{ gap: 6, minWidth: 0 }}>
+                <span className="t-small">
+                  <b>{lead.name}:</b>{' '}
+                  {pileWords(
+                    {
+                      who: bigPile.who ?? 'One program',
+                      title: bigPile.title,
+                      count: bigPile.count!,
+                    },
+                    pack.voice,
+                  )}
+                </span>
+                <span className="row wrap" style={{ gap: 8 }}>
+                  <button
+                    type="button"
+                    className="btn sm primary"
+                    onClick={() => go(`alerts/${bigPile.id}`)}
+                  >
+                    Look at all {bigPile.count}
+                  </button>
+                  <SeverityMark severity={bigPile.severity} />
+                  <span className="t-small nowrap">latest {timeAgo(bigPile.at)}</span>
+                </span>
+              </div>
+            </div>
+          )}
           <div className="list">
             {needs.slice(0, 6).map((r) => (
               <button
@@ -125,7 +161,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
           </div>
           {needs.length > 6 && (
             <button type="button" className="btn sm ghost" onClick={() => go('alerts')}>
-              All {needs.length}
+              All {allNeeds.length}
             </button>
           )}
         </Card>

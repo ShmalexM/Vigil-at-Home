@@ -338,3 +338,19 @@ export const NotesFilter = z.object({
   limit: z.number().int().min(1).max(200).optional(),
 });
 export type NotesFilter = z.infer<typeof NotesFilter>;
+
+/** Piles this size or bigger get Scout's card on Home. */
+export const SCOUT_PILE_MIN = 3;
+
+/**
+ * What the Lead dog says about the biggest pile in Needs you. Fixed wording
+ * from the pile's own fields (the grouping is the alerts' own), never AI.
+ */
+export function pileWords(
+  pile: { who: string; title: string; count: number },
+  voice: PackVoice = 'pack',
+): string {
+  return voice === 'plain'
+    ? `${pile.count} alerts from ${pile.who}: “${pile.title}”. They’re grouped so you can look at them and decide them together.`
+    : `${pile.who} set off “${pile.title}” ${pile.count} times. I’ve stacked them into one pile, so you can look once and decide them all together.`;
+}

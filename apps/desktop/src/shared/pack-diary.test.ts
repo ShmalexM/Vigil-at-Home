@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { diaryLines } from './pack';
+import { diaryLines, pileWords } from './pack';
 
 const DOGS = [
   { id: 'lead', name: 'Scout' },
@@ -38,5 +38,15 @@ describe('the pack diary', () => {
     expect(
       diaryLines(DOGS, [{ dog: 'helper-labeller', kind: 'label', n: 2, failed: 0 }], 'plain'),
     ).toEqual([{ dog: 'helper-labeller', text: 'Biscuit labelled new events twice', failed: 0 }]);
+  });
+});
+
+describe('Scout on a pile', () => {
+  it('says what the pile is from its own fields, in either voice', () => {
+    const pile = { who: 'Claude app', title: 'AI agent opened a credential file', count: 194 };
+    expect(pileWords(pile)).toBe(
+      'Claude app set off “AI agent opened a credential file” 194 times. I’ve stacked them into one pile, so you can look once and decide them all together.',
+    );
+    expect(pileWords(pile, 'plain')).toMatch(/^194 alerts from Claude app: /);
   });
 });

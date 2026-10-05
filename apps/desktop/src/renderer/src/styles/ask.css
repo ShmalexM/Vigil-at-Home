@@ -146,3 +146,14 @@
 .dog.still * {
   animation: none !important;
 }
+
+/* Scout presents the biggest pile in Needs you. */
+.scout-pile {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--ln0);
+  border-radius: 12px;
+  background: var(--bg2);
+}
