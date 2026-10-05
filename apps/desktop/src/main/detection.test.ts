@@ -395,7 +395,9 @@ describe('Detector: agents', () => {
 
 describe('built-in rule pack', () => {
   const ids = (platform: string) =>
-    setup({ platform }).core.detector!.engine.listRules().map((r) => r.id);
+    setup({ platform })
+      .core.detector!.engine.listRules()
+      .map((r) => r.id);
 
   it('loads the macOS pack on a Mac', () => {
     const rules = ids('darwin');

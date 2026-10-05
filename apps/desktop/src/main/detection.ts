@@ -158,29 +158,19 @@ export class Detector {
     // An agent added, edited or switched off changes the tags of what is running now.
     this.registry.onChange(() => this.tracker.retag());
     const builtins = builtinRulesFor(opts.platform ?? process.platform);
-    this.engine = new DetectionEngine(
-      mergeRules(builtins, this.stores.rules.list()),
-      this.stores,
-      {
-        learningUntil: opts.installedAt + LEARNING_DAYS * DAY,
-        safety: { selfPaths: opts.selfPaths },
-        recordHistory: false,
-      },
-    );
+    this.engine = new DetectionEngine(mergeRules(builtins, this.stores.rules.list()), this.stores, {
+      learningUntil: opts.installedAt + LEARNING_DAYS * DAY,
+      safety: { selfPaths: opts.selfPaths },
+      recordHistory: false,
+    });
     this.feedback = new Feedback(this.engine, undefined, this.now);
     this.feeds = new FeedImporter(DEFAULT_FEEDS, this.stores.lists, this.stores.feeds, {
       now: this.now,
       ...opts.feeds,
     });
-    this.editor = new RuleEditor(
-      this.engine,
-      builtins,
-      this.stores.rules,
-      this.stores.history,
-      {
-        now: this.now,
-      },
-    );
+    this.editor = new RuleEditor(this.engine, builtins, this.stores.rules, this.stores.history, {
+      now: this.now,
+    });
     this.pipeline = new RulePipeline(this.engine, this.stores.history, this.stores.proposals, {
       now: this.now,
       repository: this.stores.rules,
