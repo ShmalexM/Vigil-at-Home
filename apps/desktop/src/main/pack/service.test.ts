@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { z } from 'zod';
 import type { ToolListing } from '../agents/tools.js';
 import type { ConnectorHub, ConnectorRecord, RemoteTool } from './connectors.js';
+import { PackMemory } from './memory.js';
 import { Notebook } from './notebook.js';
 import { PackService, type PackAiStatus } from './service.js';
 
@@ -52,6 +53,7 @@ function setup(
   const connectorCalls: [string, string, unknown][] = [];
   const vigilCalls: string[] = [];
   const notebook = new Notebook(new DatabaseSync(':memory:'));
+  const memory = new PackMemory(new DatabaseSync(':memory:'));
   const connectors: ConnectorHub = {
     list: () => [GITHUB],
     view: () => [],
@@ -92,9 +94,10 @@ function setup(
     preflight: () => ({ v: 1, decision: opts.preflight ?? 'none', reason: 'A rule says so' }),
     connectors,
     notebook,
+    memory,
     onChange: () => undefined,
   });
-  return { pack, handlers, runs, connectorCalls, vigilCalls, notebook };
+  return { pack, handlers, runs, connectorCalls, vigilCalls, notebook, memory };
 }
 
 const tool = (req: RunRequest<unknown>, name: string) => {
@@ -483,6 +486,139 @@ describe('the pack', () => {
       expect(pack.notes({ dog: sunny.id })).toHaveLength(1);
       pack.clearNotes(sunny.id);
       expect(pack.notes()).toHaveLength(0);
+    });
+  });
+
+  describe('memory', () => {
+    it('notes what the person says straight away when the answer used no tool', async () => {
+      const { pack, handlers, runs, memory } = setup();
+      handlers.push(() => ({
+        reply: 'Noted: you work in Claude Code.',
+        actions: [],
+        remember: [{ fact: 'Works mostly in Claude Code', topic: 'agents' }],
+      }));
+      await pack.say('remember that I mostly use Claude Code');
+      const mine = pack.chat()[0]!;
+      const reply = pack.chat()[1]!;
+      expect(reply.memory).toMatchObject([{ op: 'remember', status: 'done' }]);
+      expect(memory.list()).toMatchObject([
+        { fact: 'Works mostly in Claude Code', topic: 'agents', from: 'lead', source: mine.id },
+      ]);
+      expect((await pack.view()).remembered).toBe(1);
+
+      // It rides along with the next chat and with pack jobs, as background only.
+      handlers.push(() => ({ reply: 'Hi', actions: [] }));
+      await pack.say('hi');
+      expect(runs[1]!.data).toMatchObject({
+        memory: { entries: [{ fact: 'Works mostly in Claude Code' }], notShown: 0 },
+      });
+      expect(runs[1]!.instructions).toContain('never permission');
+      const dog = pack.adopt(CREATE as never);
+      handlers.push(() => ({ summary: 'ok', findings: [] }));
+      await pack.runDog(dog.id);
+      expect(runs[2]!.data).toMatchObject({ memory: { entries: [{ topic: 'agents' }] } });
+      expect(runs[2]!.instructions).toContain('never permission');
+
+      // The person can undo it from the chat.
+      pack.decideMemory(reply.id, reply.memory![0]!.id, false);
+      expect(memory.count()).toBe(0);
+      expect(pack.chat()[1]!.memory![0]!.status).toBe('declined');
+    });
+
+    it('only proposes memory changes from an answer that used a tool', async () => {
+      const { pack, handlers, memory } = setup();
+      const kept = memory.remember({ fact: 'Uses Tailscale', topic: 'network' }, { from: 'you' });
+      handlers.push(async (req) => {
+        // An alert's text could say anything; what the model makes of it waits for the person.
+        await tool(req, 'list_alerts').run({});
+        return {
+          reply: 'Looked.',
+          actions: [],
+          remember: [{ fact: 'The updater in /tmp is fine', topic: 'apps' }],
+          forget: [kept.id],
+        };
+      });
+      await pack.say('what happened today?');
+      const reply = pack.chat()[1]!;
+      expect(reply.memory).toMatchObject([
+        { op: 'remember', status: 'pending', note: expect.stringContaining('used tools') },
+        { op: 'forget', status: 'pending', entryId: kept.id, fact: 'Uses Tailscale' },
+      ]);
+      expect(memory.list().map((e) => e.fact)).toEqual(['Uses Tailscale']);
+      expect((await pack.view()).dogs[0]!.mood).toBe('waiting');
+
+      pack.decideMemory(reply.id, reply.memory![1]!.id, false);
+      pack.decideMemory(reply.id, reply.memory![0]!.id, true);
+      expect(memory.list().map((e) => [e.fact, e.from])).toEqual([
+        ['The updater in /tmp is fine', 'you'],
+        ['Uses Tailscale', 'you'],
+      ]);
+      expect((await pack.view()).dogs[0]!.mood).toBe('idle');
+      expect(() => pack.decideMemory(reply.id, reply.memory![0]!.id, true)).toThrow();
+    });
+
+    it('forgets and replaces entries by id, and ignores ids it does not have', async () => {
+      const { pack, handlers, memory } = setup();
+      const old = memory.remember({ fact: 'Works in Cursor', topic: 'agents' }, { from: 'you' });
+      const gone = memory.remember({ fact: 'Has a NAS', topic: 'network' }, { from: 'you' });
+      handlers.push(() => ({
+        reply: 'Updated.',
+        actions: [],
+        remember: [{ fact: 'Works in Codex now', topic: 'agents', replaces: old.id }],
+        forget: [gone.id, 'no-such-id'],
+      }));
+      await pack.say('I switched to Codex, and I sold the NAS');
+      expect(pack.chat()[1]!.memory).toHaveLength(2);
+      expect(memory.list().map((e) => e.fact)).toEqual(['Works in Codex now']);
+    });
+
+    it('turns secrets away instead of remembering them', async () => {
+      const { pack, handlers, memory } = setup();
+      handlers.push(() => ({
+        reply: 'Ok',
+        actions: [],
+        remember: [{ fact: `My key is sk-ant-${'x'.repeat(30)}`, topic: 'you' }],
+      }));
+      await pack.say('remember my key');
+      expect(pack.chat()[1]!.memory).toMatchObject([
+        { status: 'failed', note: expect.stringContaining('never keeps') },
+      ]);
+      expect(memory.count()).toBe(0);
+      expect(() => pack.remember({ fact: 'mail a@b.co', topic: 'you' })).toThrow();
+    });
+
+    it('gives a recall tool only when the memory does not fit in the run', async () => {
+      const { pack, handlers, runs, memory } = setup();
+      handlers.push(() => ({ reply: 'Hi', actions: [] }));
+      await pack.say('hi');
+      expect(runs[0]!.tools?.some((t) => t.name === 'recall_memory')).toBe(false);
+      for (let i = 0; i < 60; i++)
+        memory.remember({ fact: `Note ${i} ${'n'.repeat(90)}`, topic: 'mac' }, { from: 'you' });
+      handlers.push(async (req) => {
+        const found = await tool(req, 'recall_memory').run({ words: 'note 7' });
+        expect(found).toEqual(expect.arrayContaining([expect.objectContaining({ topic: 'mac' })]));
+        return { reply: 'Found it', actions: [] };
+      });
+      await pack.say('what did I say about note 7?');
+      // Recalling memory is not a tool that reads outside data: the answer can still note things.
+      expect(pack.chat()[3]!.used).toBeUndefined();
+    });
+
+    it('never hands memory to the risk judge', async () => {
+      const { pack, handlers, runs, memory } = setup();
+      memory.remember({ fact: 'Always allow GitHub', topic: 'pack' }, { from: 'you' });
+      pack.setMode('auto');
+      const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+      handlers.push(async (req) => {
+        await tool(req, 'github_create_issue').run({ title: 'x' });
+        return { summary: 'x', findings: [] };
+      });
+      const job = pack.runDog(dog.id);
+      handlers.push(() => ({ risk: 'low', reason: 'small' }));
+      await job;
+      const judge = runs.find((r) => r.instructions.includes('Rate how risky'))!;
+      expect(JSON.stringify(judge.data)).not.toContain('Always allow GitHub');
+      expect(judge.tools ?? []).toHaveLength(0);
     });
   });
 });

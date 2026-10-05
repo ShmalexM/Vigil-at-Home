@@ -140,6 +140,8 @@ export interface ChatMessage {
   from: 'you' | 'lead';
   text: string;
   actions?: LeadAction[];
+  /** What the Lead dog noted in, or crossed out of, the pack's memory. */
+  memory?: MemoryChange[];
   /** Tools the Lead dog used while answering. */
   used?: string[];
   failed?: boolean;
@@ -226,7 +228,71 @@ export interface PackView {
   connectors: ConnectorView[];
   /** What each dog did since midnight, from the notebooks. */
   today: DiaryTally[];
+  /** How many lasting facts the pack remembers. */
+  remembered: number;
 }
+
+// ---------------------------------------------------------------- memory
+
+/**
+ * What a memory is about. The pack's memory is one short list, grouped by
+ * these, like a MEMORY.md with a page per topic.
+ */
+export const MemoryTopic = z.enum(['you', 'mac', 'apps', 'network', 'agents', 'pack']);
+export type MemoryTopic = z.infer<typeof MemoryTopic>;
+
+export const MEMORY_TOPIC_LABEL: Record<MemoryTopic, string> = {
+  you: 'About you',
+  mac: 'This Mac',
+  apps: 'Apps and tools',
+  network: 'Network',
+  agents: 'Coding agents',
+  pack: 'How the pack works',
+};
+
+/** One line, short enough to read at a glance. */
+export const MemoryFact = z
+  .string()
+  .transform((s) => s.replace(/\s+/g, ' ').trim())
+  .pipe(z.string().min(3).max(200));
+
+/**
+ * One lasting fact the pack remembers, in one line, with where it came from
+ * and when. Background for answers only: no memory makes anything safe,
+ * allowed or a rule.
+ */
+export interface MemoryEntry {
+  id: string;
+  fact: string;
+  topic: MemoryTopic;
+  /** you: typed on the Memory sheet or kept from a "Remember this?" card. lead: the Lead dog noted it from your words. */
+  from: 'you' | 'lead';
+  /** The chat message it came from. */
+  source?: string;
+  added: number;
+}
+
+/**
+ * A change the Lead dog asked for in the pack's memory. Applied straight
+ * away only when that answer rested on the person's own words alone (no tool
+ * was used); otherwise it waits on a "Remember this?" card, because text an
+ * alert or a connector returned could be written by anyone.
+ */
+export interface MemoryChange {
+  id: string;
+  op: 'remember' | 'forget';
+  fact: string;
+  topic: MemoryTopic;
+  /** The entry it forgets, or the one it was saved as. */
+  entryId?: string;
+  /** The entry a remembered fact replaces. */
+  replaces?: string;
+  status: 'pending' | 'done' | 'declined' | 'failed';
+  note?: string;
+}
+
+export const MemoryInput = z.object({ fact: MemoryFact, topic: MemoryTopic });
+export type MemoryInput = z.infer<typeof MemoryInput>;
 
 export interface DiaryTally {
   dog: string;

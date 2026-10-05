@@ -98,6 +98,11 @@ export const CALL_NAMES = [
   'refreshConnector',
   'listPackNotes',
   'clearPackNotes',
+  'listPackMemory',
+  'addPackMemory',
+  'forgetPackMemory',
+  'packMemoryMarkdown',
+  'decideLeadMemory',
 ] as const;
 
 export const PUSH_NAMES = [

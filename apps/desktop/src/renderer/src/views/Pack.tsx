@@ -2,6 +2,7 @@ import {
   ArrowUp,
   Bone,
   BookOpen,
+  Brain,
   Check,
   Dice5,
   Hand,
@@ -37,6 +38,7 @@ import { ApprovalStack } from '../components/ApprovalStack';
 import { NotebookSheet } from '../components/Notebook';
 import { StreamingText } from '../components/StreamingText';
 import { Thinking } from '../components/Thinking';
+import { MemoryChangeCard, MemorySheet } from '../components/PackMemory';
 import { BREEDS, Dog, breedName } from '../components/Dog';
 import { useToast } from '../components/Toasts';
 import { leadChat, useLeadChat } from '../lead-chat';
@@ -105,7 +107,10 @@ export function PackPage() {
   const waiting =
     pack.approvals.length +
     pack.chat.reduce(
-      (n, m) => n + (m.actions?.filter((a) => a.status === 'pending').length ?? 0),
+      (n, m) =>
+        n +
+        (m.actions?.filter((a) => a.status === 'pending').length ?? 0) +
+        (m.memory?.filter((c) => c.status === 'pending').length ?? 0),
       0,
     );
 
@@ -233,6 +238,7 @@ export function LeadPanel({
               </Button>
             )}
             <NotebookButton dog={lead} />
+            <MemoryButton count={pack.remembered} />
           </span>
         </div>
       </div>
@@ -425,6 +431,9 @@ function Message({
           <>
             {m.actions?.map((a) => (
               <ActionCard key={a.id} a={a} msgId={m.id} dogs={dogs} tools={tools} reload={reload} />
+            ))}
+            {m.memory?.map((c) => (
+              <MemoryChangeCard key={c.id} c={c} msgId={m.id} reload={reload} />
             ))}
             <span className="t-small muted">{timeAgo(m.at)}</span>
           </>
@@ -695,6 +704,19 @@ function NotebookButton({ dog }: { dog: PackDog }) {
           onClose={() => setOpen(false)}
         />
       )}
+    </>
+  );
+}
+
+/** Opens what the pack remembers. */
+function MemoryButton({ count }: { count: number }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Button size="sm" kind="ghost" icon={<Brain size={13} />} onClick={() => setOpen(true)}>
+        Memory{count > 0 && <span className="count">{count}</span>}
+      </Button>
+      {open && <MemorySheet onClose={() => setOpen(false)} />}
     </>
   );
 }
