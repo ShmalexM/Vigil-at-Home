@@ -4,7 +4,8 @@
 // so resume can check it again.
 
 import type { System } from '../system.js';
-import { PROTECTED_PROCESS_PREFIXES } from '../config.js';
+import type { Platform } from '../platform.js';
+import { protectionFor } from '../config.js';
 import { ActionError } from './errors.js';
 
 export interface ProcessIdentity {
@@ -16,7 +17,8 @@ export interface ProcessIdentity {
 
 /**
  * Identify a running process from kernel data: the executable path from its
- * text mapping (lsof "txt", which argv tricks cannot fake) and its start time.
+ * text mapping (lsof "txt" on macOS, /proc/<pid>/exe on Linux, neither of
+ * which argv tricks can fake) and its start time.
  */
 export async function identifyProcess(
   sys: System,
@@ -25,6 +27,10 @@ export async function identifyProcess(
   const ps = await sys.run('ps', ['-o', 'lstart=', '-p', String(pid)]);
   const started = ps.stdout.trim();
   if (ps.code !== 0 || !started) return undefined;
+  if (sys.platform === 'linux') {
+    const path = sys.procExe?.(pid);
+    return path?.startsWith('/') ? { pid, path, started } : undefined;
+  }
   const lsof = await sys.run('lsof', ['-a', '-p', String(pid), '-d', 'txt', '-Fn']);
   if (lsof.code !== 0) return undefined;
   // -Fn prints "p<pid>", then "f<fd>", "n<name>" pairs; the first txt name is the executable.
@@ -33,8 +39,8 @@ export async function identifyProcess(
   return { pid, path: nameLine.slice(1), started };
 }
 
-export function isProtectedProcess(path: string): boolean {
-  return PROTECTED_PROCESS_PREFIXES.some(
+export function isProtectedProcess(path: string, platform: Platform = 'darwin'): boolean {
+  return protectionFor(platform).processPrefixes.some(
     (p) => path === p.replace(/\/$/, '') || path.startsWith(p),
   );
 }
@@ -72,8 +78,11 @@ async function checkTarget(
       );
     }
   }
-  if (isProtectedProcess(id.path))
-    throw new ActionError('refused', `${id.path} is part of macOS or Vigil`);
+  if (isProtectedProcess(id.path, sys.platform))
+    throw new ActionError(
+      'refused',
+      `${id.path} is part of ${sys.platform === 'linux' ? 'the system' : 'macOS'} or Vigil`,
+    );
   return id;
 }
 

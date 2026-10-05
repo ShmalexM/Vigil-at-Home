@@ -28,7 +28,8 @@ import {
   suspendProcess,
   type ProcessIdentity,
 } from './commands/process.js';
-import { Firewall, normalizeTarget } from './commands/firewall.js';
+import { Firewall, normalizeTarget, type NetworkFirewall } from './commands/firewall.js';
+import { NftFirewall } from './commands/nftables.js';
 import {
   quarantine,
   realParentPath,
@@ -41,6 +42,7 @@ import {
   restorePersistence,
   type PersistenceRecord,
 } from './commands/persistence.js';
+import { disableLinuxPersistence, restoreLinuxPersistence } from './commands/linuxPersistence.js';
 
 export interface ExecutorDeps {
   sys: System;
@@ -48,7 +50,11 @@ export interface ExecutorDeps {
   approvals: Approvals;
   rules: RuleStore;
   quarantine: QuarantineOptions;
-  /** Folders whose plists persistence.disable accepts. Defaults to the real LaunchAgents/LaunchDaemons folders. */
+  /**
+   * Folders whose startup items persistence.disable accepts. Defaults to the
+   * real LaunchAgents/LaunchDaemons folders, or on Linux the systemd and
+   * autostart folders users and admins add to.
+   */
   launchDirs?: RegExp;
   syncPort: number;
   /** Ask Santa to sync now so a new rule applies in seconds, not at the next interval. */
@@ -86,10 +92,17 @@ const POLICY: Record<string, Exclude<RulePolicy, 'REMOVE'>> = {
 };
 
 export class Executor {
-  readonly firewall: Firewall;
+  readonly firewall: NetworkFirewall;
 
   constructor(private readonly d: ExecutorDeps) {
-    this.firewall = new Firewall(d.sys);
+    this.firewall = d.sys.platform === 'linux' ? new NftFirewall(d.sys) : new Firewall(d.sys);
+  }
+
+  /** Quarantine settings with the protected folders of the OS the helper acts on. */
+  private get quarantineOpts(): QuarantineOptions {
+    return this.d.sys.platform === 'linux'
+      ? { platform: 'linux', ...this.d.quarantine }
+      : this.d.quarantine;
   }
 
   async execute(cmd: HelperCommand, approval?: string): Promise<ExecOutcome> {
@@ -200,6 +213,9 @@ export class Executor {
 
   private async run(cmd: HelperCommand): Promise<unknown> {
     const { sys, journal } = this.d;
+    if (sys.platform === 'linux' && cmd.kind.startsWith('santa.')) {
+      throw new ActionError('invalid', 'Santa runs only on macOS');
+    }
     switch (cmd.kind) {
       case 'process.suspend': {
         const id = await suspendProcess(sys, cmd.pid, target(cmd));
@@ -248,7 +264,7 @@ export class Executor {
       }
       case 'file.quarantine': {
         const id = Journal.newId();
-        const rec = quarantine(cmd.path, id, this.d.quarantine);
+        const rec = quarantine(cmd.path, id, this.quarantineOpts);
         return this.record(cmd, `quarantined ${rec.originalPath}`, { quarantine: rec }, id);
       }
       case 'file.restore': {
@@ -259,13 +275,16 @@ export class Executor {
       }
       case 'persistence.disable': {
         const id = Journal.newId();
-        const rec = await disablePersistence(
-          sys,
-          cmd.path,
-          id,
-          this.d.quarantine,
-          this.d.launchDirs,
-        );
+        const rec =
+          sys.platform === 'linux'
+            ? await disableLinuxPersistence(
+                sys,
+                cmd.path,
+                id,
+                this.quarantineOpts,
+                this.d.launchDirs,
+              )
+            : await disablePersistence(sys, cmd.path, id, this.d.quarantine, this.d.launchDirs);
         return this.record(
           cmd,
           `disabled startup item ${rec.label ?? rec.quarantine.originalPath}`,
@@ -276,7 +295,8 @@ export class Executor {
       case 'persistence.enable': {
         const entry = this.findContainment(cmd)!;
         const rec = entry.undo?.persistence as PersistenceRecord;
-        await restorePersistence(sys, rec);
+        if (sys.platform === 'linux') await restoreLinuxPersistence(sys, rec);
+        else await restorePersistence(sys, rec);
         return this.release(
           entry,
           cmd,

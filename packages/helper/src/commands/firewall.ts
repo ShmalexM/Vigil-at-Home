@@ -61,7 +61,18 @@ export function normalizeAddress(address: string): string {
   return a;
 }
 
-export class Firewall {
+/** What the executor needs from a packet filter: pf on macOS, nftables on Linux. */
+export interface NetworkFirewall {
+  /** Load Vigil's rules and make sure the filter is running. Safe to call repeatedly. */
+  ensureLoaded(): Promise<void>;
+  release(): Promise<void>;
+  /** Blocks traffic both ways; returns the normalized address. */
+  block(address: string): Promise<string>;
+  unblock(address: string): Promise<void>;
+  list(): Promise<string[]>;
+}
+
+export class Firewall implements NetworkFirewall {
   private token: string | undefined;
 
   constructor(private readonly sys: System) {}
