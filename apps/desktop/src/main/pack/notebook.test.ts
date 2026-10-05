@@ -28,6 +28,14 @@ describe('Notebook', () => {
     expect(book.list({ subject: { kind: 'rule', id: 'a1' } })).toHaveLength(0);
     expect(book.countsSince(0)).toEqual({ lead: 2, 'helper-explainer': 1 });
     expect(changes).toHaveLength(3);
+    expect(book.tally(0)).toEqual(
+      expect.arrayContaining([
+        { dog: 'lead', kind: 'chat', n: 2, failed: 0 },
+        { dog: 'helper-explainer', kind: 'chat', n: 1, failed: 0 },
+      ]),
+    );
+    book.write({ ...NOTE, ok: false });
+    expect(book.tally(0).find((t) => t.dog === 'lead')).toMatchObject({ n: 3, failed: 1 });
   });
 
   it('keeps notes short: long text and long lists are clipped', () => {

@@ -463,7 +463,7 @@ export class AiBridge extends EventEmitter<{
             ? proposed.length
               ? `Suggested ${proposed.length} change${proposed.length === 1 ? '' : 's'} for you to review`
               : 'No changes to suggest'
-            : `Couldn’t finish (${r.reason})`,
+            : whyNot(r.reason),
           reasons: proposed,
           ...(r.ok ? { provider: r.provider } : {}),
           ...(this.models.has(r.logId) ? { model: this.models.get(r.logId)! } : {}),
@@ -632,13 +632,15 @@ export class AiBridge extends EventEmitter<{
       const ask = `Explain the alert “${alert.title}”`;
       const subject = { kind: 'alert' as const, id: alert.id };
       if (!result.ok) {
-        this.emit('note', 'explainer', {
-          kind: 'explain',
-          ok: false,
-          ask,
-          subject,
-          answer: `Couldn’t explain it (${result.reason})`,
-        });
+        // A background run that never reached an AI isn't worth a note.
+        if (asked || !NOTHING_RAN.has(result.reason))
+          this.emit('note', 'explainer', {
+            kind: 'explain',
+            ok: false,
+            ask,
+            subject,
+            answer: whyNot(result.reason),
+          });
         return undefined;
       }
       const v = result.value;
@@ -704,6 +706,24 @@ const Explanation = z.object({
   summary: z.string().min(1).max(600),
   details: z.string().max(2000).optional(),
 });
+
+/** Failures where no AI ran at all. */
+const NOTHING_RAN = new Set(['no_provider', 'quota']);
+
+function whyNot(reason: string): string {
+  switch (reason) {
+    case 'no_provider':
+      return 'No AI was ready';
+    case 'quota':
+      return 'The AI’s limit was used up';
+    case 'timeout':
+      return 'It took too long and was stopped';
+    case 'invalid_output':
+      return 'The answer came back garbled';
+    default:
+      return 'Something went wrong';
+  }
+}
 
 const VERDICT_WORDS: Record<z.infer<typeof Explanation>['verdict'], string> = {
   likely_malicious: 'Likely malicious',

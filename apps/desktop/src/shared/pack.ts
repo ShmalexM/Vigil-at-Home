@@ -219,6 +219,58 @@ export interface PackView {
   noAi: boolean;
   tools: ToolView[];
   connectors: ConnectorView[];
+  /** What each dog did since midnight, from the notebooks. */
+  today: DiaryTally[];
+}
+
+export interface DiaryTally {
+  dog: string;
+  kind: DogNoteKind;
+  n: number;
+  failed: number;
+}
+
+const DID: Record<DogNoteKind, (n: number) => string> = {
+  explain: (n) => `explained ${count(n, 'alert')}`,
+  label: (n) => `sniffed through new events ${times(n)}`,
+  review: (n) => `reviewed the rules${n > 1 ? ` ${times(n)}` : ''}`,
+  chat: (n) => `answered ${count(n, 'question')}`,
+  job: (n) => `went on ${count(n, 'job')}`,
+  judge: (n) => `checked ${count(n, 'tool call')}`,
+};
+const ORDER: DogNoteKind[] = ['chat', 'job', 'explain', 'label', 'review', 'judge'];
+
+/**
+ * The pack diary: one plain line per dog that did something today, Lead dog
+ * first, in the order the pack is listed. Fixed wording from counts, never
+ * written by an AI.
+ */
+export function diaryLines(
+  dogs: readonly Pick<Dog, 'id' | 'name'>[],
+  today: readonly DiaryTally[],
+): { dog: string; text: string; failed: number }[] {
+  return dogs.flatMap((d) => {
+    const mine = today.filter((t) => t.dog === d.id && t.n > 0);
+    if (mine.length === 0) return [];
+    const failed = mine.reduce((n, t) => n + t.failed, 0);
+    // Only finished runs count as done; the rest are the "didn't finish" count.
+    const did = ORDER.flatMap((k) => {
+      const t = mine.find((x) => x.kind === k);
+      return t && t.n > t.failed ? [DID[k](t.n - t.failed)] : [];
+    });
+    const text =
+      did.length === 0
+        ? `${d.name} tried ${times(failed)} but couldn’t finish`
+        : `${d.name} ${did.length > 1 ? `${did.slice(0, -1).join(', ')} and ${did.at(-1)}` : did[0]}`;
+    return [{ dog: d.id, text, failed: did.length === 0 ? 0 : failed }];
+  });
+}
+
+function count(n: number, thing: string): string {
+  return `${n} ${thing}${n === 1 ? '' : 's'}`;
+}
+function times(n: number): string {
+  return n === 1 ? 'once' : n === 2 ? 'twice' : `${n} times`;
 }
 
 /** What kind of work a note records. */

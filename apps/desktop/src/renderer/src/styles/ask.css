@@ -111,3 +111,38 @@
 .content:has(.ask-dock) .split-list {
   max-height: calc(100vh - 300px);
 }
+
+/* The pack diary on Home: still dogs, one line each. */
+.pack-diary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pack-diary ul {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.pack-diary-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 2px 6px 2px 0;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--tx1);
+  text-align: left;
+  cursor: pointer;
+}
+.pack-diary-line:hover {
+  background: var(--bg2);
+}
+.dog.still,
+.dog.still * {
+  animation: none !important;
+}

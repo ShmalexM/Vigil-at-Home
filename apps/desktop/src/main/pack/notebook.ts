@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { newId } from '@vigil/core';
-import type { DogNote, DogNoteInput, NotesFilter } from '../../shared/pack.js';
+import type { DiaryTally, DogNote, DogNoteInput, NotesFilter } from '../../shared/pack.js';
 
 /** Notes older than this are dropped. */
 export const NOTE_DAYS = 30;
@@ -95,6 +95,23 @@ export class Notebook {
       .prepare('SELECT dog, COUNT(*) AS n FROM pack_notes WHERE ts >= ? GROUP BY dog')
       .all(since) as { dog: string; n: number }[];
     return Object.fromEntries(rows.map((r) => [r.dog, Number(r.n)]));
+  }
+
+  /** Runs per dog and kind since a time, for the pack diary on Home. */
+  tally(since: number): DiaryTally[] {
+    const rows = this.db
+      .prepare(
+        `SELECT dog, json_extract(body, '$.kind') AS kind, COUNT(*) AS n,
+                SUM(CASE WHEN json_extract(body, '$.ok') THEN 0 ELSE 1 END) AS failed
+           FROM pack_notes WHERE ts >= ? GROUP BY dog, kind`,
+      )
+      .all(since) as { dog: string; kind: DiaryTally['kind']; n: number; failed: number }[];
+    return rows.map((r) => ({
+      dog: r.dog,
+      kind: r.kind,
+      n: Number(r.n),
+      failed: Number(r.failed),
+    }));
   }
 
   clear(dog?: string): void {

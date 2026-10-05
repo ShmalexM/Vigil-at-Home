@@ -4,10 +4,12 @@ import { useLive, vigil } from '../api';
 import { homeMood } from '../components/AskScout';
 import { NeedsYouLine, NoticedList, WatchLine } from '../components/Attention';
 import { Dog } from '../components/Dog';
+import { NotebookSheet } from '../components/Notebook';
 import { Card, Chip, LevelPill, SectionHead, SeverityMark, StatusMark } from '../components/ui';
 import { timeAgo } from '../format';
 import { isNoticed, needsDecision } from '../../../shared/attention';
 import { LEVEL_RULES } from '../../../shared/levels';
+import { diaryLines, type PackView } from '../../../shared/pack';
 import { leadChat } from '../lead-chat';
 import { PageHead } from './AppShell';
 import { usePack } from './Pack';
@@ -64,6 +66,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               What Vigil handled
             </button>
           </div>
+          {pack && <PackDiary pack={pack} />}
           {status.reasons.length > 0 && (
             <ul className="reasons">
               {status.reasons.map((r) => (
@@ -219,5 +222,50 @@ function InstallHelper({ reinstall }: { reinstall: boolean }) {
         </span>
       )}
     </>
+  );
+}
+
+/**
+ * What the pack did today, one line per dog that worked, each opening that
+ * dog's notebook. Counted from the notebooks; the wording is fixed, not AI.
+ */
+function PackDiary({ pack }: { pack: PackView }) {
+  const [open, setOpen] = useState<string | undefined>();
+  const lines = diaryLines(pack.dogs, pack.today);
+  if (lines.length === 0) return null;
+  const dog = (id: string) => pack.dogs.find((d) => d.id === id);
+  const shown = open ? dog(open) : undefined;
+  return (
+    <div className="pack-diary">
+      <span className="t-label">Today the pack</span>
+      <ul>
+        {lines.map((l) => {
+          const d = dog(l.dog)!;
+          return (
+            <li key={l.dog}>
+              <button
+                type="button"
+                className="pack-diary-line"
+                title={`Open ${d.name}’s notebook`}
+                onClick={() => setOpen(l.dog)}
+              >
+                <Dog breed={d.breed} mood="idle" size={28} className="still" />
+                <span className="t-small">
+                  {l.text}
+                  {l.failed > 0 && <span className="muted"> ({l.failed} didn’t finish)</span>}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      {shown && (
+        <NotebookSheet
+          title={`${shown.name}’s notebook`}
+          filter={{ dog: shown.id }}
+          onClose={() => setOpen(undefined)}
+        />
+      )}
+    </div>
   );
 }

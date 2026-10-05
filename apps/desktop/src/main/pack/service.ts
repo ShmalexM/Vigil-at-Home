@@ -94,7 +94,7 @@ export interface PackDeps {
   scheduler?: { every(name: string, ms: number, fn: () => Promise<void> | void): void };
   isBusy?: () => boolean;
   /** Where each dog writes down what it was asked, looked at and answered. */
-  notebook?: Pick<Notebook, 'write' | 'list' | 'clear'>;
+  notebook?: Pick<Notebook, 'write' | 'list' | 'clear' | 'tally'>;
   onChange(): void;
   now?: () => number;
   /** Local hour, for nightly jobs. */
@@ -373,6 +373,7 @@ export class PackService {
       noAi: !ai.anyReady,
       tools: this.toolViews(),
       connectors: this.o.connectors.view(),
+      today: this.o.notebook?.tally(startOfDay(this.now())) ?? [],
     };
   }
 
@@ -1201,4 +1202,10 @@ function subjectOf(c: ChatContext): DogNote['subject'] | undefined {
     c.page as 'alerts' | 'rules' | 'activity'
   ];
   return kind && c.selected ? { kind, id: c.selected } : undefined;
+}
+
+function startOfDay(at: number): number {
+  const d = new Date(at);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
 }
