@@ -32,6 +32,34 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+### Beautiful UI
+
+The chat's thinking trace, word-by-word answers and one-at-a-time tool approvals (`apps/desktop/src/renderer/src/components/Thinking.tsx`, `StreamingText.tsx`, `ApprovalStack.tsx`, `apps/desktop/src/renderer/src/agent-ui.ts` and `styles/agent-ui.css`) are adapted from [Beautiful UI](https://github.com/slev12397/beautiful-ui) (`components/primitives/ThinkingState.tsx`, `StreamingText.tsx`, `ApprovalCard.tsx`) and restyled on Vigil's own tokens. No Beautiful UI npm dependencies are used.
+
+```
+MIT License
+
+Copyright (c) 2026 Shane Levine
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### Santa
 
 `packages/sensors/src/logParser.test.ts` uses sample log lines from Santa's serializer tests. Santa is [North Pole Security's Santa](https://github.com/northpolesec/santa), licensed under the Apache License 2.0 (the same text as [LICENSE](LICENSE)).

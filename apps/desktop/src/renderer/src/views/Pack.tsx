@@ -17,7 +17,7 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type {
   Breed,
   ChatContext,
@@ -28,13 +28,15 @@ import type {
   PackView,
   PermissionMode,
   Schedule,
-  ToolApproval,
   ToolChoice,
   ToolView,
 } from '../../../shared/pack';
 import { vigil } from '../api';
 import { useDialogFocus } from '../components/dialog-focus';
+import { ApprovalStack } from '../components/ApprovalStack';
 import { NotebookSheet } from '../components/Notebook';
+import { StreamingText } from '../components/StreamingText';
+import { Thinking } from '../components/Thinking';
 import { BREEDS, Dog, breedName } from '../components/Dog';
 import { useToast } from '../components/Toasts';
 import { leadChat, useLeadChat } from '../lead-chat';
@@ -260,6 +262,8 @@ export function LeadConversation({
   const log = useRef<HTMLDivElement>(null);
   const names = new Map(pack.dogs.map((d) => [d.id, d]));
   const canSend = !!draft.trim() && !sending && !pack.noAi;
+  // Answers that arrive while the chat is open come in word by word; the rest are just there.
+  const [openedAt] = useState(Date.now);
 
   useEffect(() => {
     log.current?.scrollTo({ top: log.current.scrollHeight });
@@ -295,21 +299,23 @@ export function LeadConversation({
           </div>
         )}
         {pack.chat.map((m) => (
-          <Message key={m.id} m={m} lead={lead} dogs={names} tools={pack.tools} reload={reload} />
+          <Message
+            key={m.id}
+            m={m}
+            fresh={m.at > openedAt}
+            lead={lead}
+            dogs={names}
+            tools={pack.tools}
+            reload={reload}
+          />
         ))}
         {sending && (
           <div className="msg lead">
             <Dog breed={lead.breed} mood="thinking" size={48} className="msg-dog" />
-            <div className="bubble typing">
-              <span />
-              <span />
-              <span />
-            </div>
+            <Thinking working active={`${lead.name} is sniffing around`} done="" />
           </div>
         )}
-        {pack.approvals.map((a) => (
-          <ApprovalCard key={a.id} a={a} dog={names.get(a.dogId)} reload={reload} />
-        ))}
+        <ApprovalStack approvals={pack.approvals} dogs={names} reload={reload} />
       </div>
       {pack.noAi && (
         <span className="t-small no-ai">
@@ -373,17 +379,22 @@ function pageThing(page: string): string {
 
 function Message({
   m,
+  fresh,
   lead,
   dogs,
   tools,
   reload,
 }: {
   m: ChatMessage;
+  fresh: boolean;
   lead: PackDog;
   dogs: Map<string, PackDog>;
   tools: ToolView[];
   reload: () => void;
 }) {
+  const [revealed, setRevealed] = useState(!fresh);
+  const onRevealed = useCallback(() => setRevealed(true), []);
+  const used = [...new Set(m.used ?? [])];
   if (m.from === 'you')
     return (
       <div className="msg you">
@@ -399,16 +410,25 @@ function Message({
         className="msg-dog still"
       />
       <div className="col" style={{ gap: 6, minWidth: 0, flex: 1 }}>
-        <div className={`bubble ${m.failed ? 'failed' : ''}`}>{m.text}</div>
-        {m.used && m.used.length > 0 && (
-          <span className="t-small muted used">
-            Sniffed: {[...new Set(m.used)].map(toolLabel).join(', ')}
-          </span>
+        {used.length > 0 && (
+          <Thinking
+            working={false}
+            active=""
+            done={`Sniffed ${used.length === 1 ? '1 thing' : `${used.length} things`}`}
+            rows={used.map((t) => ({ primary: toolLabel(t) }))}
+          />
         )}
-        {m.actions?.map((a) => (
-          <ActionCard key={a.id} a={a} msgId={m.id} dogs={dogs} tools={tools} reload={reload} />
-        ))}
-        <span className="t-small muted">{timeAgo(m.at)}</span>
+        <div className={`bubble ${m.failed ? 'failed' : ''}`}>
+          <StreamingText text={m.text} animate={fresh && !m.failed} onDone={onRevealed} />
+        </div>
+        {revealed && (
+          <>
+            {m.actions?.map((a) => (
+              <ActionCard key={a.id} a={a} msgId={m.id} dogs={dogs} tools={tools} reload={reload} />
+            ))}
+            <span className="t-small muted">{timeAgo(m.at)}</span>
+          </>
+        )}
       </div>
     </div>
   );
@@ -485,49 +505,6 @@ function ActionCard({
           {a.status === 'done' ? 'Done' : a.status === 'failed' ? 'Couldn’t' : 'Declined'}
         </Chip>
       )}
-    </div>
-  );
-}
-
-const WHY: Record<ToolApproval['why'], string> = {
-  mode: 'You asked to approve tools that can change things.',
-  'always-ask': 'You set this tool to always ask.',
-  rule: 'A Vigil rule asks about this call.',
-  'judged-risky': 'Your AI rated this call risky.',
-  'no-judge': 'No AI could rate this call, so it asks.',
-};
-
-function ApprovalCard({
-  a,
-  dog,
-  reload,
-}: {
-  a: ToolApproval;
-  dog?: PackDog | undefined;
-  reload: () => void;
-}) {
-  const decide = (d: 'allow-once' | 'deny') => void vigil.decidePackTool(a.id, d).then(reload);
-  return (
-    <div className="approval-card">
-      {dog && <Dog breed={dog.breed} mood="waiting" size={58} />}
-      <div className="col grow" style={{ gap: 4, minWidth: 0 }}>
-        <span className="t-label">
-          {dog?.name ?? 'A dog'} wants to use {a.toolTitle}
-        </span>
-        <code className="approval-args mono">{a.args}</code>
-        <span className="t-small muted">
-          {WHY[a.why]}
-          {a.reason ? ` ${a.reason}` : ''}
-        </span>
-      </div>
-      <span className="col" style={{ gap: 6 }}>
-        <Button size="sm" kind="primary" onClick={() => decide('allow-once')}>
-          Allow once
-        </Button>
-        <Button size="sm" kind="ghost" onClick={() => decide('deny')}>
-          Deny
-        </Button>
-      </span>
     </div>
   );
 }

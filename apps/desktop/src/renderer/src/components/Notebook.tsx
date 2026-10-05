@@ -5,6 +5,7 @@ import { vigil } from '../api';
 import { timeAgo } from '../format';
 import '../styles/pack.css';
 import { useDialogFocus } from './dialog-focus';
+import { Thinking } from './Thinking';
 import { Chip } from './ui';
 
 const KIND: Record<DogNoteKind, string> = {
@@ -115,10 +116,16 @@ function NoteEntry({ note: n, who }: { note: DogNote; who?: string | undefined }
         </Field>
       )}
       {n.thinking && (
-        <details className="t-small">
-          <summary>Thinking summary (from the provider)</summary>
-          <p style={{ whiteSpace: 'pre-wrap' }}>{n.thinking}</p>
-        </details>
+        <Thinking
+          working={false}
+          active=""
+          done="Thinking summary (from the provider)"
+          rows={n.thinking
+            .split(/\n\s*\n/)
+            .filter((p) => p.trim())
+            .map((p) => ({ primary: p.trim() }))}
+          prose
+        />
       )}
     </li>
   );
