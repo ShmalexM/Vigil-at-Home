@@ -48,7 +48,54 @@ mac:
     LSUIElement: true
 dmg:
   title: Vigil at Home
-# Linux is only used to smoke-test packaging in CI; macOS is the product.
+# Linux: a .deb for Debian and Ubuntu, and an AppImage for everything else.
+# Setup installs the helper through polkit, so neither package runs anything
+# as root on its own.
 linux:
-  target: dir
+  target:
+    - target: deb
+      arch: [x64]
+    - target: AppImage
+      arch: [x64]
   executableName: vigil-at-home
+  maintainer: Vigil at Home contributors (https://github.com/ShmalexM/Vigil-at-Home/issues)
+  icon: resources/icon.png
+  category: System
+  synopsis: Your own security monitor for this computer
+  description: Vigil at Home watches this computer for malicious activity and blocks it.
+  artifactName: Vigil-at-Home-${version}-${arch}.${ext}
+  # XWayland, so the popover and popup can be placed and kept on top (display.ts).
+  executableArgs: ['--ozone-platform=x11']
+  desktop:
+    entry:
+      Keywords: security;antivirus;firewall;monitor;
+  # The helper, its systemd unit and polkit policy, and Node.js for this chip.
+  extraResources:
+    - from: build/helper/common
+      to: helper
+      # Leave out the macOS launchd job and scripts; Linux uses helper/linux/.
+      filter:
+        ['**/*', '!com.vigilathome.helper.plist', '!install.sh', '!uninstall.sh', '!vigil-helper']
+    - from: build/helper/linux-${arch}
+      to: helper
+      filter: [node]
+    - from: ../../LICENSE
+      to: LICENSE
+    - from: ../../NOTICE
+      to: NOTICE
+    - from: ../../THIRD_PARTY_NOTICES.md
+      to: THIRD_PARTY_NOTICES.md
+deb:
+  # pkexec shows the password dialog for setup and for every release or allow.
+  depends:
+    [
+      'pkexec | policykit-1',
+      'libnotify4',
+      'libnss3',
+      'libxss1',
+      'libxtst6',
+      'xdg-utils',
+      'libatspi2.0-0',
+      'libuuid1',
+      'libsecret-1-0',
+    ]

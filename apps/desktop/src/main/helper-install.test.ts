@@ -43,7 +43,7 @@ describe('helper install', () => {
     const cmd = helperInstallCommand(dir, 'darwin')!;
     expect(cmd).toBe(`sudo ${shellQuote(join(dir, 'install.sh'))}`);
     expect(helperInstallCommand(dir, 'linux')).toBe(
-      `sudo sh ${shellQuote(join(dir, 'linux', 'install.sh'))}`,
+      `d=$(mktemp -d) && cp -R ${shellQuote(dir)}/. "$d" && sudo sh "$d/linux/install.sh"`,
     );
     expect(shellQuote("a b'c")).toBe(`'a b'\\''c'`);
     expect(helperInstallCommand(null)).toBeUndefined();

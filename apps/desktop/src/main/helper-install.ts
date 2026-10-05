@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import type { HelperInstallResult } from '../shared/ipc.js';
 
 const hasHelper = (dir: string) =>
-  existsSync(join(dir, 'install.sh')) && existsSync(join(dir, 'node'));
+  existsSync(join(dir, 'node')) &&
+  (existsSync(join(dir, 'install.sh')) || existsSync(join(dir, 'linux', 'install.sh')));
 
 /**
  * The helper files shipped in the app (Contents/Resources/helper). A
@@ -41,9 +42,11 @@ export function helperInstallCommand(
   platform: NodeJS.Platform = process.platform,
 ): string | undefined {
   if (!dir) return undefined;
-  const script = shellQuote(helperScript(dir, 'install', platform));
-  // `sh` runs it even from a folder mounted without exec rights.
-  return platform === 'linux' ? `sudo sh ${script}` : `sudo ${script}`;
+  // Linux: root can't read an AppImage's mount, so copy the helper out first,
+  // as runWithPkexec does; `sh` runs the script whatever its permissions.
+  if (platform === 'linux')
+    return `d=$(mktemp -d) && cp -R ${shellQuote(dir)}/. "$d" && sudo sh "$d/linux/install.sh"`;
+  return `sudo ${shellQuote(helperScript(dir, 'install', platform))}`;
 }
 
 const PROMPTS = {
