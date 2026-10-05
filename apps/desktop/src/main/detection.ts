@@ -21,7 +21,7 @@ import {
   RuleEditor,
   RulePipeline,
   RuleReviewer,
-  builtinRules,
+  builtinRulesFor,
   decide,
   mergeRules,
   sqliteStores,
@@ -98,6 +98,8 @@ export interface DetectorOptions {
   selfPid?: number;
   /** What the agent service hears from the process tracker. */
   agentHooks?: Pick<TrackerOptions, 'onSession' | 'onMiss' | 'onCandidate'>;
+  /** Which built-in rule pack to load; defaults to this machine's platform. */
+  platform?: string;
 }
 
 /** What the pre-flight hook gets back, and what is recorded after it has its answer. */
@@ -155,8 +157,9 @@ export class Detector {
     });
     // An agent added, edited or switched off changes the tags of what is running now.
     this.registry.onChange(() => this.tracker.retag());
+    const builtins = builtinRulesFor(opts.platform ?? process.platform);
     this.engine = new DetectionEngine(
-      mergeRules(builtinRules, this.stores.rules.list()),
+      mergeRules(builtins, this.stores.rules.list()),
       this.stores,
       {
         learningUntil: opts.installedAt + LEARNING_DAYS * DAY,
@@ -171,7 +174,7 @@ export class Detector {
     });
     this.editor = new RuleEditor(
       this.engine,
-      builtinRules,
+      builtins,
       this.stores.rules,
       this.stores.history,
       {

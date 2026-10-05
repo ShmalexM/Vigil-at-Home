@@ -18,6 +18,7 @@ function setup(extra: Partial<DetectorOptions> = {}) {
   core.detector = new Detector(db, store, core.alerts, (e, o) => core.ingest(e, o), {
     installedAt: 1,
     selfPaths: ['/Applications/Vigil at Home.app'],
+    platform: 'darwin',
     feeds: {
       fetch: async (url: string) => {
         fetches.push(url);
@@ -389,5 +390,24 @@ describe('Detector: agents', () => {
     const ids = new Set(again.detections.map((d) => d.match.ruleId));
     core.detector!.recordToolRequest(again.event, again.detections, ids);
     expect(store.ruleMatchCounts(0)).toEqual(counts);
+  });
+});
+
+describe('built-in rule pack', () => {
+  const ids = (platform: string) =>
+    setup({ platform }).core.detector!.engine.listRules().map((r) => r.id);
+
+  it('loads the macOS pack on a Mac', () => {
+    const rules = ids('darwin');
+    expect(rules).toContain('tcc-database-tamper');
+    expect(rules).not.toContain('linux-reverse-shell');
+  });
+
+  it('loads the Linux pack on Linux, with the shared agent rules', () => {
+    const rules = ids('linux');
+    expect(rules).toContain('linux-reverse-shell');
+    expect(rules).not.toContain('tcc-database-tamper');
+    expect(rules).toContain('known-bad-hash');
+    expect(rules.some((id) => id.startsWith('agent-'))).toBe(true);
   });
 });
