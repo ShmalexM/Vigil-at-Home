@@ -2,6 +2,7 @@ import { ExternalLink, KeyRound } from 'lucide-react';
 import { useState } from 'react';
 import type { ApiKeyView, SetupView } from '../../../../shared/setup';
 import { vigil } from '../../api';
+import { onLinux } from '../../platform';
 import { Button, Card, Chip, SectionHead } from '../../components/ui';
 
 /** Electron wraps errors from main as "Error invoking remote method '…': Error: <message>". */
@@ -20,7 +21,7 @@ export function ApiKeys({ view, setView }: { view: SetupView; setView: (v: Setup
     <Card>
       <SectionHead
         title="API keys"
-        sub="Only needed if you don’t use Claude Code or Codex above, or want pay-per-use instead of your plan. Keys are encrypted with your Mac’s Keychain and stay in Vigil’s main process; this window never sees them again."
+        sub={`Only needed if you don’t use Claude Code or Codex above, or want pay-per-use instead of your plan. Keys are encrypted with ${onLinux ? 'your desktop’s keyring' : 'your Mac’s Keychain'} and stay in Vigil’s main process; this window never sees them again.`}
       />
       {!view.canSaveKeys && (
         <div className="attn fair">

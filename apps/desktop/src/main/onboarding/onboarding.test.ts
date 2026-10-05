@@ -5,8 +5,17 @@ import { describe, expect, it } from 'vitest';
 import { memoryStore } from '../testing.js';
 import { CHECKS, HELPER_SOCKET, type Probe } from './checks.js';
 import { KeyStore, type Cipher } from './keys.js';
-import { LOCAL_MODEL, LOCAL_MODEL_SMALL, localModelFor, setupPlan, stepsFor } from './plan.js';
+import {
+  FAPOLICYD_ALLOW_RULES,
+  LOCAL_MODEL,
+  LOCAL_MODEL_SMALL,
+  linuxDistro,
+  localModelFor,
+  setupPlan,
+  stepsFor,
+} from './plan.js';
 import { OnboardingService, type CodexSetup } from './service.js';
+import { linuxTerminal } from './terminal.js';
 
 /** A Mac described by the files, programs and command output it has. */
 function fakeMac(opts: {
@@ -454,5 +463,131 @@ describe('Codex sign-in', () => {
     const { svc } = service(fakeMac({}), testCipher(), codex);
     expect((await codexStep(svc)).state).not.toBe('done');
     expect(calls.status).toBe(0);
+  });
+});
+
+describe('setup on Linux', () => {
+  const linux = (distro: 'debian' | 'fedora' | 'other') =>
+    setupPlan({ platform: 'linux', distro, helperInstallCommand: 'sudo sh x' });
+
+  it('tells apt and dnf distributions apart from /etc/os-release', () => {
+    expect(linuxDistro('NAME="Ubuntu"\nID=ubuntu\nID_LIKE=debian\n')).toBe('debian');
+    expect(linuxDistro('ID=linuxmint\nID_LIKE="ubuntu debian"\n')).toBe('debian');
+    expect(linuxDistro('ID=debian\n')).toBe('debian');
+    expect(linuxDistro('ID=fedora\n')).toBe('fedora');
+    expect(linuxDistro('ID="rocky"\nID_LIKE="rhel centos fedora"\n')).toBe('fedora');
+    expect(linuxDistro('ID=arch\n')).toBe('other');
+    expect(linuxDistro('')).toBe('other');
+  });
+
+  it('protects with fapolicyd, osquery and the helper, with no Homebrew or Santa', () => {
+    for (const distro of ['debian', 'fedora', 'other'] as const) {
+      const plan = linux(distro);
+      const ids = plan.map((s) => s.id);
+      expect(ids.slice(0, 3)).toEqual(['fapolicyd', 'osquery', 'helper']);
+      expect(ids.some((id) => id === 'homebrew' || id.startsWith('santa'))).toBe(false);
+      plan.forEach((s, i) => {
+        for (const dep of s.after ?? []) {
+          const at = plan.findIndex((x) => x.id === dep);
+          expect(at, `${s.id} after ${dep}`).toBeGreaterThanOrEqual(0);
+          expect(at).toBeLessThan(i);
+        }
+      });
+      const cmds = plan.flatMap((s) => s.commands.map((c) => c.cmd)).join('\n');
+      expect(cmds).not.toMatch(/\bbrew\b/);
+    }
+  });
+
+  it('sets fapolicyd to allow everything Vigil hasn’t blocked before installing it', () => {
+    const cmds = linux('fedora')
+      .find((s) => s.id === 'fapolicyd')!
+      .commands.map((c) => c.cmd);
+    expect(cmds[0]).toContain(`'allow perm=any all : all' | sudo tee ${FAPOLICYD_ALLOW_RULES}`);
+    expect(cmds[1]).toBe('sudo dnf install -y fapolicyd');
+    expect(cmds[2]).toContain('fagenrules --load');
+    // Sorted right after the helper's 05-vigil.rules, ahead of the distribution's deny rules.
+    expect(FAPOLICYD_ALLOW_RULES).toMatch(/\/06-vigil-allow\.rules$/);
+    const deb = linux('debian').find((s) => s.id === 'fapolicyd')!;
+    expect(deb.commands[1]!.cmd).toBe('sudo apt-get install -y fapolicyd');
+    const other = linux('other').find((s) => s.id === 'fapolicyd')!;
+    expect(other.commands).toHaveLength(2);
+  });
+
+  it('installs osquery from its own signed repository', () => {
+    const deb = linux('debian')
+      .find((s) => s.id === 'osquery')!
+      .commands.map((c) => c.cmd);
+    expect(deb.join('\n')).toContain('1484120AC4E9F8A1A577AEEE97A80C63C9D8B80B');
+    expect(deb.join('\n')).toContain('signed-by=/etc/apt/keyrings/osquery.gpg');
+    expect(deb.at(-1)).toBe('sudo apt-get update && sudo apt-get install -y osquery');
+    const rpm = linux('fedora')
+      .find((s) => s.id === 'osquery')!
+      .commands.map((c) => c.cmd);
+    expect(rpm.at(-1)).toBe('sudo dnf install -y --enablerepo=osquery-s3-rpm-repo osquery');
+    const other = linux('other').find((s) => s.id === 'osquery')!;
+    expect(other.commands).toEqual([]);
+    expect(other.unavailable).toMatch(/osquery\.io/);
+  });
+
+  it('installs the AI tools without Homebrew', () => {
+    const ai = linux('debian').filter((s) => s.group === 'ai');
+    expect(ai.find((s) => s.id === 'ollama')!.commands[0]!.cmd).toBe(
+      'curl -fsSL https://ollama.com/install.sh | sh',
+    );
+    expect(ai.find((s) => s.id === 'codex')!.commands[0]!.cmd).toBe(
+      'sudo npm install -g @openai/codex',
+    );
+    expect(ai.every((s) => !(s.after ?? []).includes('homebrew'))).toBe(true);
+    expect(ai.find((s) => s.id === 'ollama')!.why).toContain('this computer');
+  });
+
+  const fakeLinux = (files: string[], fapolicydActive = false): Probe => ({
+    ...fakeMac({
+      files,
+      runs: fapolicydActive
+        ? { '/usr/bin/systemctl is-active --quiet fapolicyd': { code: 0, stdout: '' } }
+        : {},
+    }),
+    platform: 'linux',
+  });
+
+  it('checks osquery where its Linux packages put it', async () => {
+    expect((await CHECKS.osquery(fakeLinux(['/opt/osquery/bin/osqueryd']))).ok).toBe(true);
+    expect((await CHECKS.osquery(fakeLinux(['/usr/local/bin/osqueryi']))).ok).toBe(false);
+  });
+
+  it('counts fapolicyd only when it runs with Vigil’s allow rules', async () => {
+    expect((await CHECKS.fapolicyd(fakeLinux([]))).ok).toBe(false);
+    expect(await CHECKS.fapolicyd(fakeLinux(['/usr/sbin/fapolicyd'], true))).toMatchObject({
+      ok: false,
+      detail: expect.stringContaining('allow'),
+    });
+    expect(
+      await CHECKS.fapolicyd(fakeLinux(['/usr/sbin/fapolicyd', FAPOLICYD_ALLOW_RULES])),
+    ).toEqual({ ok: false, detail: 'Installed, not running' });
+    expect(
+      (await CHECKS.fapolicyd(fakeLinux(['/usr/sbin/fapolicyd', FAPOLICYD_ALLOW_RULES], true))).ok,
+    ).toBe(true);
+  });
+
+  it('shows Linux steps when the probe checks a Linux computer', async () => {
+    const { svc } = service(fakeLinux(['/usr/sbin/fapolicyd', FAPOLICYD_ALLOW_RULES], true));
+    const view = await svc.view(true);
+    const byId = Object.fromEntries(view.steps.map((s) => [s.id, s]));
+    expect(byId['fapolicyd']?.state).toBe('done');
+    // No package manager known, so it points at osquery's downloads.
+    expect(byId['osquery']).toMatchObject({ state: 'unavailable' });
+    expect(byId['helper']?.state).toBe('waiting');
+    expect(byId['santa']).toBeUndefined();
+  });
+});
+
+describe('opening a terminal on Linux', () => {
+  it('picks the first terminal the desktop has', () => {
+    expect(linuxTerminal(() => false)).toBeUndefined();
+    expect(linuxTerminal((p) => p === '/usr/bin/konsole' || p === '/usr/bin/xterm')).toBe(
+      '/usr/bin/konsole',
+    );
+    expect(linuxTerminal(() => true)).toBe('/usr/bin/x-terminal-emulator');
   });
 });

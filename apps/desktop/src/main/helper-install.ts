@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { HelperInstallResult } from '../shared/ipc.js';
 
@@ -25,9 +26,24 @@ export function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+/** The script that installs or removes the helper on this OS. */
+export function helperScript(
+  dir: string,
+  kind: 'install' | 'uninstall',
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return platform === 'linux' ? join(dir, 'linux', `${kind}.sh`) : join(dir, `${kind}.sh`);
+}
+
 /** The Terminal command that installs the helper, for the setup wizard. */
-export function helperInstallCommand(dir = helperBundleDir()): string | undefined {
-  return dir ? `sudo ${shellQuote(join(dir, 'install.sh'))}` : undefined;
+export function helperInstallCommand(
+  dir = helperBundleDir(),
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (!dir) return undefined;
+  const script = shellQuote(helperScript(dir, 'install', platform));
+  // `sh` runs it even from a folder mounted without exec rights.
+  return platform === 'linux' ? `sudo sh ${script}` : `sudo ${script}`;
 }
 
 const PROMPTS = {
@@ -69,16 +85,45 @@ const runFile: RunFile = (file, args) =>
     ),
   );
 
-/** Install or remove the helper through the macOS admin password dialog. */
+export const PKEXEC = '/usr/bin/pkexec';
+
+/**
+ * Linux: run the script as root through pkexec, which shows the desktop's own
+ * password dialog. An AppImage's files sit on a FUSE mount that root can't
+ * read, so the helper files are copied to a private temporary folder first.
+ */
+async function runWithPkexec(
+  kind: 'install' | 'uninstall',
+  dir: string,
+  run: RunFile,
+): Promise<HelperInstallResult> {
+  const stage = mkdtempSync(join(tmpdir(), 'vigil-helper-'));
+  try {
+    cpSync(dir, stage, { recursive: true });
+    const out = await run(PKEXEC, ['/bin/sh', helperScript(stage, kind, 'linux')]);
+    if (out.code === 0) return { ok: true };
+    // pkexec exits 126 when the password dialog is closed, 127 when not allowed.
+    if (out.code === 126) return { ok: false, error: 'cancelled' };
+    if (out.code === 127) return { ok: false, error: 'Your account isn’t allowed to do this' };
+    const msg = out.stderr.trim().split('\n').at(-1)?.trim();
+    return { ok: false, error: msg || `The ${kind} script failed` };
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+}
+
+/** Install or remove the helper through the system's admin password dialog. */
 export async function runHelperScript(
   kind: 'install' | 'uninstall',
   dir = helperBundleDir(),
   run: RunFile = runFile,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<HelperInstallResult> {
-  if (process.platform !== 'darwin' && run === runFile) {
-    return { ok: false, error: 'The helper only runs on macOS' };
+  if (platform !== 'darwin' && platform !== 'linux') {
+    return { ok: false, error: 'The helper only runs on macOS and Linux' };
   }
   if (!dir) return { ok: false, error: 'This build of Vigil does not include the helper' };
+  if (platform === 'linux') return runWithPkexec(kind, dir, run);
   const out = await run('/usr/bin/osascript', adminScriptArgs(join(dir, `${kind}.sh`), kind));
   if (out.code === 0) return { ok: true };
   // osascript reports a closed password dialog as error -128.
