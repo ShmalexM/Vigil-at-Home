@@ -75,5 +75,18 @@ export const Alert = z.object({
       lastAt: Timestamp,
     })
     .optional(),
+  /**
+   * Alerts that share `key` (one rule, one agent run or one program) form a
+   * pile: the app shows them as one row with one decision, and only the first
+   * of a burst interrupts. Each alert in a pile is still its own record.
+   * `who` names the agent or program, `what` the file or address this one is about.
+   */
+  pile: z
+    .object({
+      key: z.string(),
+      who: z.string(),
+      what: z.string().optional(),
+    })
+    .optional(),
 });
 export type Alert = z.infer<typeof Alert>;

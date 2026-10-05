@@ -16,6 +16,7 @@ import {
   type SensorEvent,
   type UserDecision,
 } from '@vigil/core';
+import { AGENT_CATALOG } from '@vigil/detection';
 import type { Store } from './db/store.js';
 import type { ActionExecutor } from './executor.js';
 
@@ -109,6 +110,12 @@ export class AlertService extends EventEmitter<AlertEvents> {
       ...(d.subject ? { subject: d.subject } : {}),
       ...(key ? { repeats: { key, count: 1, lastAt: at } } : {}),
     };
+    const pile = pileOf(d);
+    if (pile) {
+      alert.pile = pile;
+      // A burst interrupts once: the rest of a pile only adds to the badge.
+      if (alert.notify === 'popup' && this.openPileOf(pile.key, at)) alert.notify = 'badge';
+    }
     this.store.tx(() => {
       for (const e of d.events) this.store.insertEvent(e);
       this.store.saveAlert(alert);
@@ -141,6 +148,13 @@ export class AlertService extends EventEmitter<AlertEvents> {
     if (alert.notify === 'popup') this.emit('popup', alert);
     this.emit('raised', alert);
     return alert;
+  }
+
+  /** An open, undecided alert of the same pile that started within the last {@link REPEAT_WINDOW_MS}. */
+  private openPileOf(key: string, at: number): Alert | undefined {
+    return this.store
+      .listAlerts({ status: 'open' })
+      .find((a) => a.pile?.key === key && !a.decision && at - a.createdAt <= REPEAT_WINDOW_MS);
   }
 
   /**
@@ -399,6 +413,34 @@ export function repeatKey(d: Detection): string | undefined {
     d.subject ?? null,
     d.events.map(({ id: _id, ts: _ts, raw: _raw, ...rest }) => sorted(rest)),
   ]);
+}
+
+/**
+ * Which pile a detection joins: the same rule and version, in one agent run
+ * (or, outside an agent, from one program). Detections that run or suggest an
+ * action, critical ones, and ones marked standalone each stand alone, like
+ * {@link repeatKey}.
+ */
+export function pileOf(d: Detection): Alert['pile'] | undefined {
+  if (d.standalone || d.actions.length > 0 || d.rule.severity === 'critical') return undefined;
+  const e = d.events[0]!;
+  const proc = 'process' in e ? e.process : undefined;
+  const agent = proc?.agent;
+  const what = 'path' in e && typeof e.path === 'string' ? e.path : undefined;
+  if (agent) {
+    const name = AGENT_CATALOG.find((c) => c.id === agent.id)?.name ?? agent.id;
+    return {
+      key: JSON.stringify([d.rule.id, d.rule.version, 'agent', agent.session]),
+      who: name,
+      ...(what ? { what } : {}),
+    };
+  }
+  if (!proc?.path) return undefined;
+  return {
+    key: JSON.stringify([d.rule.id, d.rule.version, 'program', proc.path]),
+    who: proc.path.split('/').pop() || proc.path,
+    ...(what ? { what } : {}),
+  };
 }
 
 /** The same value with object keys in a fixed order, so equal evidence gives an equal key. */
