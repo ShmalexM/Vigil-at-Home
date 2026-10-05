@@ -1,7 +1,7 @@
 import { CircleCheck, Eye, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import { useLive, vigil } from '../api';
-import { NeedsYouLine, NoticedList, WatchLine } from '../components/Attention';
+import { NeedsYouLine, needsRows, NoticedList, pileLine, WatchLine } from '../components/Attention';
 import { Card, Chip, LevelPill, SectionHead, SeverityMark, StatusMark } from '../components/ui';
 import { timeAgo } from '../format';
 import { isNoticed, needsDecision } from '../../../shared/attention';
@@ -17,7 +17,7 @@ const levelSentence = {
 export function HomeView({ go }: { go: (r: string) => void }) {
   const [status] = useLive(() => vigil.getStatus());
   const [alerts] = useLive(() => vigil.listAlerts('open'));
-  const needs = (alerts ?? []).filter(needsDecision);
+  const needs = needsRows((alerts ?? []).filter(needsDecision));
   const noticed = (alerts ?? []).filter(isNoticed);
   const allRunning = !!status && status.sensors.every((s) => s.state === 'ok');
 
@@ -81,19 +81,22 @@ export function HomeView({ go }: { go: (r: string) => void }) {
         <Card>
           <SectionHead title="Needs you" sub="Waiting on your decision, newest first" />
           <div className="list">
-            {needs.slice(0, 6).map((a) => (
+            {needs.slice(0, 6).map((r) => (
               <button
-                key={a.id}
+                key={r.id}
                 type="button"
                 className="list-row"
-                onClick={() => go(`alerts/${a.id}`)}
+                onClick={() => go(`alerts/${r.id}`)}
               >
-                <SeverityMark severity={a.severity} />
-                <span className="grow clamp-2 t-h3" title={a.title}>
-                  {a.title}
+                <SeverityMark severity={r.severity} />
+                <span className="grow col" style={{ gap: 2 }}>
+                  <span className="clamp-2 t-h3" title={r.title}>
+                    {r.title}
+                  </span>
+                  {pileLine(r) && <span className="t-small">{pileLine(r)}</span>}
                 </span>
-                {a.containment === 'active' && <Chip tone="good">Blocked</Chip>}
-                <span className="t-small nowrap">{timeAgo(a.createdAt)}</span>
+                {r.blocked && <Chip tone="good">Blocked</Chip>}
+                <span className="t-small nowrap">{timeAgo(r.at)}</span>
               </button>
             ))}
           </div>

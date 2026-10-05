@@ -112,6 +112,20 @@
   background: var(--bg2);
   border: 1px solid var(--ln0);
 }
+.pile {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  border: 1px solid var(--ln0);
+}
+.pile-list {
+  margin: 0;
+  padding-left: 18px;
+  overflow-wrap: break-word;
+}
+.pile-base {
+  overflow-wrap: anywhere;
+}
 .event {
   display: flex;
   flex-direction: column;
