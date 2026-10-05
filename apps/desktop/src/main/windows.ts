@@ -1,11 +1,29 @@
 import { join } from 'node:path';
-import { app, BrowserWindow, nativeTheme, screen, shell, Tray, type Rectangle } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  nativeTheme,
+  screen,
+  shell,
+  Tray,
+  type Rectangle,
+} from 'electron';
 import trayIcon from '../../resources/trayTemplate.png?asset';
 import trayAlertIcon from '../../resources/trayAlertTemplate.png?asset';
+import trayLinuxIcon from '../../resources/trayLinux.png?asset';
+import trayLinuxAlertIcon from '../../resources/trayLinuxAlert.png?asset';
 import type { Pushes, ThemePref } from '../shared/ipc.js';
 import { DEFAULT_APPEARANCE, windowBackground, type AppearanceSettings } from '../shared/themes.js';
 import { isAppFrameUrl } from './app-frame.js';
 import { scaledSize, textScale } from './text-scale.js';
+
+// macOS tints template images to fit the menu bar; Linux shows them as drawn,
+// and its panels are mostly dark, so it gets white ones.
+const TRAY =
+  process.platform === 'darwin'
+    ? { idle: trayIcon, alert: trayAlertIcon }
+    : { idle: trayLinuxIcon, alert: trayLinuxAlertIcon };
 
 const POPOVER = { width: 380, height: 540 };
 const POPUP = { width: 420, height: 400 };
@@ -67,16 +85,26 @@ export class Windows {
   private readonly releaseTimers = new Map<BrowserWindow, ReturnType<typeof setTimeout>>();
 
   createTray(): void {
-    this.tray = new Tray(trayIcon);
+    this.tray = new Tray(TRAY.idle);
     this.tray.setToolTip('Vigil at Home');
     this.tray.on('click', () => this.togglePopover());
     this.tray.on('right-click', () => this.togglePopover());
+    // Linux tray hosts (GNOME's AppIndicator extension, KDE) often open a
+    // menu instead of passing on the click, so give them one.
+    if (process.platform === 'linux') {
+      this.tray.setContextMenu(
+        Menu.buildFromTemplate([
+          { label: 'What needs you', click: () => this.togglePopover() },
+          { label: 'Open Vigil at Home', click: () => this.openMain() },
+        ]),
+      );
+    }
   }
 
   /** Menu-bar icon: count of alerts waiting on the user, alert glyph when any. */
   setNeedsYou(count: number): void {
     if (!this.tray) return;
-    this.tray.setImage(count > 0 ? trayAlertIcon : trayIcon);
+    this.tray.setImage(count > 0 ? TRAY.alert : TRAY.idle);
     if (process.platform === 'darwin') this.tray.setTitle(count > 0 ? ` ${count}` : '');
     this.tray.setToolTip(count > 0 ? `Vigil at Home: ${count} need you` : 'Vigil at Home');
   }
@@ -140,8 +168,9 @@ export class Windows {
         minHeight: 600,
         show: false,
         title: 'Vigil at Home',
-        titleBarStyle: 'hiddenInset',
-        trafficLightPosition: { x: 16, y: 18 },
+        ...(process.platform === 'darwin'
+          ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 16, y: 18 } }
+          : {}),
         backgroundColor: this.background(),
         webPreferences: webPreferences(),
       }),
