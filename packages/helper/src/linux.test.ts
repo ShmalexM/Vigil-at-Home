@@ -25,6 +25,7 @@ import {
   userName,
 } from './commands/linuxPersistence.js';
 import { linuxSeatUid } from './system.js';
+import { FapolicydBlocks, fapolicydRules, VIGIL_RULES_FILE } from './commands/fapolicyd.js';
 import { FakeLinuxSystem } from './testing/fakeLinuxSystem.js';
 
 const PASSWD = 'root:x:0:0:root:/root:/bin/bash\nalex:x:1000:1000:Alex:/home/alex:/bin/bash\n';
@@ -343,10 +344,112 @@ describe('executor on Linux', () => {
     await expect(
       ex.execute({
         kind: 'santa.rule.set',
-        ruleType: 'binary',
-        identifier: 'a'.repeat(64),
+        ruleType: 'teamid',
+        identifier: 'EQHXZ8M8AV',
         policy: 'block',
       }),
     ).rejects.toMatchObject({ code: 'invalid' });
+    await expect(ex.execute({ kind: 'santa.profile' })).rejects.toMatchObject({ code: 'invalid' });
+  });
+});
+
+describe('fapolicyd blocks', () => {
+  let root: string;
+  let sys: FakeLinuxSystem;
+  const SHA = 'ab'.repeat(32);
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'vigil-fapolicyd-'));
+    sys = new FakeLinuxSystem();
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  const make = () =>
+    new FapolicydBlocks(sys, {
+      store: join(root, 'support', 'blocked-programs.json'),
+      rulesDir: join(root, 'etc', 'fapolicyd', 'rules.d'),
+    });
+
+  it('writes only deny lines built from hashes', () => {
+    expect(fapolicydRules([SHA])).toContain(`deny_audit perm=execute all : sha256hash=${SHA}\n`);
+    expect(
+      fapolicydRules([])
+        .split('\n')
+        .filter((l) => l && !l.startsWith('#')),
+    ).toEqual([]);
+  });
+
+  it('keeps the list without fapolicyd and writes the rules once it is installed', async () => {
+    const blocks = make();
+    expect(await blocks.block(SHA.toUpperCase())).toBe(true);
+    expect(await blocks.block(SHA)).toBe(false);
+    expect(blocks.status()).toEqual({ installed: false, blocked: 1, lastError: null });
+    expect(sys.runs).toEqual([]);
+
+    mkdirSync(join(root, 'etc', 'fapolicyd'), { recursive: true });
+    const reloaded = make();
+    expect(reloaded.has(SHA)).toBe(true);
+    expect(await reloaded.apply()).toBe(true);
+    const file = join(root, 'etc', 'fapolicyd', 'rules.d', VIGIL_RULES_FILE);
+    expect(readFileSync(file, 'utf8')).toContain(`sha256hash=${SHA}`);
+    expect(statSync(file).mode & 0o777).toBe(0o644);
+    expect(sys.runs.map((r) => `${r.bin} ${r.args.join(' ')}`)).toEqual(['fagenrules --load']);
+
+    expect(await reloaded.unblock(SHA)).toBe(true);
+    expect(existsSync(file)).toBe(false);
+    expect(await reloaded.unblock(SHA)).toBe(false);
+  });
+
+  it('reports a failed reload instead of throwing', async () => {
+    mkdirSync(join(root, 'etc', 'fapolicyd'), { recursive: true });
+    sys.fagenrulesFails = true;
+    const blocks = make();
+    await blocks.block(SHA);
+    expect(blocks.status().lastError).toBe('rule error');
+  });
+
+  it('refuses anything but a sha256', async () => {
+    await expect(make().block('/usr/bin/evil')).rejects.toMatchObject({ code: 'invalid' });
+  });
+
+  it('runs through the executor; unblocking needs the password', async () => {
+    const blocks = make();
+    const ex = new Executor({
+      sys,
+      journal: new Journal(join(root, 'journal.json')),
+      approvals: new Approvals({
+        dir: join(root, 'approvals'),
+        requiredOwnerUid: process.getuid!(),
+      }),
+      rules: new RuleStore(join(root, 'rules.json')),
+      quarantine: { quarantineDir: join(root, 'quarantine') },
+      syncPort: 47821,
+      fapolicyd: blocks,
+    });
+    const set = {
+      kind: 'santa.rule.set',
+      ruleType: 'binary',
+      identifier: SHA,
+      policy: 'block',
+    } as const;
+    const out = await ex.execute(set);
+    expect((out as { result: ActionOutcome }).result).toMatchObject({
+      summary: `blocked programs with hash ${SHA}`,
+      undoable: true,
+    });
+    expect(blocks.has(SHA)).toBe(true);
+    await expect(ex.execute({ ...set, policy: 'allow' })).rejects.toMatchObject({
+      code: 'invalid',
+    });
+
+    const remove = { kind: 'santa.rule.remove', ruleType: 'binary', identifier: SHA } as const;
+    const ask = await ex.execute(remove);
+    expect(ask).toMatchObject({ kind: 'needs_approval' });
+    expect((ask as { prompt: string }).prompt).toBe(
+      `Vigil wants to unblock the program with hash ${SHA}.`,
+    );
+    const nonce = (ask as { nonce: string }).nonce;
+    Approvals.writeApproval(join(root, 'approvals'), nonce);
+    await ex.execute(remove, nonce);
+    expect(blocks.has(SHA)).toBe(false);
   });
 });
