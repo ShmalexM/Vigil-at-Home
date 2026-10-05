@@ -1,9 +1,11 @@
+import { DatabaseSync } from 'node:sqlite';
 import type { RunRequest, RunResult } from '@vigil/ai';
 import type { PreflightReply } from '@vigil/core';
 import { describe, expect, it, vi } from 'vitest';
 import type { z } from 'zod';
 import type { ToolListing } from '../agents/tools.js';
 import type { ConnectorHub, ConnectorRecord, RemoteTool } from './connectors.js';
+import { Notebook } from './notebook.js';
 import { PackService, type PackAiStatus } from './service.js';
 
 type Handler = (req: RunRequest<unknown>) => Promise<unknown> | unknown;
@@ -49,6 +51,7 @@ function setup(
   const runs: RunRequest<unknown>[] = [];
   const connectorCalls: [string, string, unknown][] = [];
   const vigilCalls: string[] = [];
+  const notebook = new Notebook(new DatabaseSync(':memory:'));
   const connectors: ConnectorHub = {
     list: () => [GITHUB],
     view: () => [],
@@ -71,6 +74,7 @@ function setup(
         const value = await h(req as RunRequest<unknown>);
         return { ok: true, value: req.output.parse(value), provider: 'codex', logId: 'x' };
       },
+      modelOf: () => 'gpt-5.5',
       status: async () => ({
         anyReady: true,
         judge: { ready: true, detail: 'Codex checks risky calls' },
@@ -87,9 +91,10 @@ function setup(
     },
     preflight: () => ({ v: 1, decision: opts.preflight ?? 'none', reason: 'A rule says so' }),
     connectors,
+    notebook,
     onChange: () => undefined,
   });
-  return { pack, handlers, runs, connectorCalls, vigilCalls };
+  return { pack, handlers, runs, connectorCalls, vigilCalls, notebook };
 }
 
 const tool = (req: RunRequest<unknown>, name: string) => {
@@ -391,5 +396,76 @@ describe('the pack', () => {
       vi.useRealTimers();
     }
     expect(pack.dogs().find((d) => d.id === dog.id)?.lastReport?.ok).toBe(true);
+  });
+
+  describe('notebooks', () => {
+    it('writes down what the Lead dog was asked, looked at and the reasons it gave', async () => {
+      const { pack, handlers } = setup();
+      handlers.push(async (req) => {
+        await tool(req, 'list_alerts').run({});
+        return {
+          reply: 'That one is a test alert.',
+          actions: [],
+          why: ['list_alerts showed it came from the Test button'],
+        };
+      });
+      await pack.say('what is this?', { page: 'alerts', selected: 'alert-123' });
+      const [note] = pack.notes({ dog: 'lead' });
+      expect(note).toMatchObject({
+        kind: 'chat',
+        ok: true,
+        ask: 'what is this?',
+        subject: { kind: 'alert', id: 'alert-123' },
+        answer: 'That one is a test alert.',
+        reasons: ['list_alerts showed it came from the Test button'],
+        provider: 'codex',
+        model: 'gpt-5.5',
+      });
+      expect(note!.lookedAt).toHaveLength(1);
+      // The same note answers "why?" about that alert.
+      expect(pack.notes({ subject: { kind: 'alert', id: 'alert-123' } })).toHaveLength(1);
+    });
+
+    it('notes a run that failed, and a job’s findings and risk checks', async () => {
+      const { pack, handlers } = setup();
+      await pack.say('hello');
+      expect(pack.notes({ dog: 'lead' })[0]).toMatchObject({ ok: false, ask: 'hello' });
+
+      pack.setMode('auto');
+      const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+      handlers.push(async (req) => {
+        const call = tool(req, 'github_create_issue').run({ title: 'x' });
+        handlers.push(() => ({ risk: 'low', reason: 'files one issue, easy to close' }));
+        await call;
+        return {
+          summary: 'One new unsigned program',
+          findings: [{ title: 'unsigned.app ran', severity: 'medium' }],
+          why: ['search_events found one exec from Downloads'],
+        };
+      });
+      await pack.runDog(dog.id);
+      const [job, judged] = pack.notes({ dog: dog.id });
+      expect(job).toMatchObject({
+        kind: 'job',
+        ask: CREATE.job,
+        answer: 'One new unsigned program',
+        reasons: ['search_events found one exec from Downloads', 'medium: unsigned.app ran'],
+      });
+      expect(judged).toMatchObject({
+        kind: 'judge',
+        answer: 'low risk',
+        reasons: ['files one issue, easy to close'],
+        subject: { kind: 'tool', id: 'github.create_issue' },
+      });
+    });
+
+    it('files a built-in helper’s note under that helper', () => {
+      const { pack } = setup();
+      pack.helperNote('explainer', { kind: 'explain', ok: true, ask: 'Explain', answer: 'Fine' });
+      const sunny = pack.dogs().find((d) => d.helper === 'explainer')!;
+      expect(pack.notes({ dog: sunny.id })).toHaveLength(1);
+      pack.clearNotes(sunny.id);
+      expect(pack.notes()).toHaveLength(0);
+    });
   });
 });

@@ -37,7 +37,9 @@ import {
   ToolChoice,
   ToolDecision,
   ToolKey,
+  type DogNote,
   type PackView,
+  NotesFilter,
 } from './pack.js';
 import type { AppearanceSettings } from './themes.js';
 
@@ -287,6 +289,9 @@ export const calls = {
   setConnectorEnabled: z.tuple([ConnectorRef, z.boolean()]),
   removeConnector: z.tuple([ConnectorRef]),
   refreshConnector: z.tuple([ConnectorRef]),
+  /** A dog's notebook, or every note about one alert, rule, event or tool. */
+  listPackNotes: z.tuple([NotesFilter]),
+  clearPackNotes: z.tuple([DogRef.optional()]),
 } as const;
 export type CallName = keyof typeof calls;
 
@@ -629,6 +634,8 @@ export interface CallResults {
   setConnectorEnabled: void;
   removeConnector: void;
   refreshConnector: AiActionResult;
+  listPackNotes: DogNote[];
+  clearPackNotes: void;
 }
 
 /** One agent session: its process tree (at most 200 nodes) and events (at most 500). */

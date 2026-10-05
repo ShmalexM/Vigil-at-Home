@@ -79,6 +79,33 @@ A half-written message stays in the box when you change pages or close the drawe
 
 If only a Claude plan is set up, pack jobs can't run and Let AI decide asks about every risky call in them.
 
+## Notebooks
+
+Every dog keeps a notebook of its AI runs: what it was asked, which tools or
+evidence it looked at, what it answered, and the reasons it wrote down. Open
+it with **Notebook** on a dog's card, or **Why?** next to an alert's AI
+opinion, which shows every note about that alert (the explainer's, and any
+chat about it from the Ask drawer).
+
+```mermaid
+flowchart LR
+  run[AI run: chat, job, risk check,<br/>explain, label, rule review] --> answer[Answer the model writes<br/>reply, verdict, findings, why]
+  answer --> note[Notebook entry<br/>pack_notes table, 30 days]
+  provider[Reasoning summary,<br/>only where the provider's API returns one] -.-> note
+  note --> ui[Notebook sheet / Why?]
+  note -. never .-> decide[Blocks, rules, approvals]
+```
+
+- Reasons are only what the model put in its answer: the Lead dog's and pack
+  jobs' `why` points, a job's findings, the judge's one-line reason, the
+  explainer's details, the labeller's per-event reason and the rule reviewer's
+  rationale. Nothing a provider keeps private is asked for or extracted. The
+  `thinking` field is filled only from a reasoning summary an official API
+  returns, and today none of the runners return one, so it stays empty.
+- Notes stay on the Mac in Vigil's database, in a table the notebook creates
+  itself (no migration), for 30 days and at most 2,000 notes per dog.
+- Nothing reads notes back to decide anything. They are for the person.
+
 ## Connectors
 
 Connectors are your own MCP servers, added on the Pack page under Tools and connectors: a command on this Mac (stdio) or a URL (streamable HTTP). Vigil is the MCP client; the model sees only the tools and their results, never a token. Environment values and bearer tokens are encrypted with the Keychain-backed key the API keys use, in `pack-secrets.json` (mode 0600). Vigil never reads another app's MCP settings.

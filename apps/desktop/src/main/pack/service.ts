@@ -30,6 +30,9 @@ import {
   type ChatMessage,
   type Dog,
   type DogMood,
+  type DogNote,
+  type DogNoteInput,
+  type NotesFilter,
   type DogReport,
   type HelperId,
   type LeadAction,
@@ -39,6 +42,7 @@ import {
 } from '../../shared/pack.js';
 import type { ToolListing } from '../agents/tools.js';
 import type { ConnectorHub, RemoteTool } from './connectors.js';
+import type { Notebook } from './notebook.js';
 import { afterJudge, gateAction, gateTool } from './gate.js';
 import { shapeFromJsonSchema } from './schema.js';
 
@@ -72,6 +76,8 @@ export interface PackAiStatus {
 export interface PackAi {
   run<T>(req: RunRequest<T>): Promise<RunResult<T>>;
   status(): Promise<PackAiStatus>;
+  /** The model behind a run, when the provider said. */
+  modelOf?(logId: string): string | undefined;
 }
 
 export interface PackDeps {
@@ -87,6 +93,8 @@ export interface PackDeps {
   connectors: ConnectorHub;
   scheduler?: { every(name: string, ms: number, fn: () => Promise<void> | void): void };
   isBusy?: () => boolean;
+  /** Where each dog writes down what it was asked, looked at and answered. */
+  notebook?: Pick<Notebook, 'write' | 'list' | 'clear'>;
   onChange(): void;
   now?: () => number;
   /** Local hour, for nightly jobs. */
@@ -176,6 +184,8 @@ const LeadAnswer = z.object({
       }),
     )
     .max(5),
+  /** What the answer rests on, in the model's own words. Kept in the Lead dog's notebook. */
+  why: z.array(z.string().max(300)).max(5).optional(),
 });
 
 const JobAnswer = z.object({
@@ -189,6 +199,7 @@ const JobAnswer = z.object({
       }),
     )
     .max(20),
+  why: z.array(z.string().max(300)).max(5).optional(),
 });
 
 const Judged = z.object({
@@ -210,12 +221,14 @@ const LEAD_INSTRUCTIONS = [
   'Breeds: shepherd, doberman, husky, golden, beagle, corgi, dachshund, chihuahua. Match the breed to the job when you can (a beagle follows trails through logs, a doberman guards, a husky runs long overnight jobs).',
   'data.lookingAt, when present, is the Vigil page the person had open and the id of what was selected there (an alert on alerts, a rule on rules, an agent on agents, an event on activity). When they say "this" or "what\'s this?", that is what they mean: look it up with your tools before answering.',
   'Keep `reply` short and friendly, plain words, no markdown headings. A little dog humour is fine; never at the expense of clarity.',
+  'In `why`, give up to five short points on what your answer rests on (what a tool showed, what the person said). The person can read them in your notebook.',
 ].join('\n');
 
 function jobInstructions(dog: Dog): string {
   return [
     `You are ${dog.name}, a pack dog of Vigil (a personal security app). Do your standing job below, using only your tools, then report.`,
     'Report a short `summary` and any `findings` worth the person’s attention, each with a severity. No findings is a fine answer.',
+    'In `why`, give up to five short points on what you checked and what your summary rests on. The person can read them in your notebook.',
     'You cannot block, allow or release anything, or change a rule. If something looks wrong, say so in a finding; the person decides.',
     '',
     'Your job, written by the person or the Lead dog:',
@@ -389,6 +402,34 @@ export class PackService {
     if (forMs) setTimeout(() => this.changed(), forMs + 50).unref?.();
   }
 
+  // ---------------------------------------------------------------- notebooks
+
+  /** A dog's notes, newest first. Only for the person to read; nothing decides on them. */
+  notes(filter: NotesFilter = {}): DogNote[] {
+    return this.o.notebook?.list(filter) ?? [];
+  }
+
+  clearNotes(dog?: string): void {
+    this.o.notebook?.clear(dog);
+  }
+
+  /** A note from a built-in helper's run (wired from the AI bridge). */
+  helperNote(helper: HelperId, input: Omit<DogNoteInput, 'dog'>): void {
+    const id = this.dogs().find((d) => d.helper === helper)?.id;
+    if (id) this.note({ ...input, dog: id });
+  }
+
+  private note(input: DogNoteInput, logId?: string): void {
+    if (!this.o.notebook) return;
+    const model = input.model ?? (logId ? this.o.ai.modelOf?.(logId) : undefined);
+    try {
+      this.o.notebook.write({ ...input, ...(model ? { model } : {}) });
+    } catch (err) {
+      // A notebook that can't be written never stops the dog's work.
+      console.warn('[pack] could not write a notebook entry:', err);
+    }
+  }
+
   /** The built-in helpers move while their jobs run (wired from the AI bridge). */
   helperBusy(helper: HelperId, busy: boolean): void {
     const id = this.dogs().find((d) => d.helper === helper)?.id;
@@ -536,6 +577,14 @@ export class PackService {
         deadlineMs: CHAT_DEADLINE_MS,
       });
       if (!result.ok) {
+        this.note({
+          dog: lead.id,
+          kind: 'chat',
+          ok: false,
+          ask: words,
+          lookedAt: used,
+          answer: failText(result.reason),
+        });
         this.reply({
           text: failText(result.reason),
           failed: true,
@@ -545,6 +594,21 @@ export class PackService {
         return;
       }
       const actions = result.value.actions.map((a) => this.consider(a));
+      const about = lookingAt && subjectOf(lookingAt);
+      this.note(
+        {
+          dog: lead.id,
+          kind: 'chat',
+          ok: true,
+          ask: words,
+          ...(about ? { subject: about } : {}),
+          lookedAt: used,
+          answer: result.value.reply,
+          reasons: result.value.why ?? [],
+          provider: result.provider,
+        },
+        result.logId,
+      );
       this.reply({ text: result.value.reply, used, ...(actions.length ? { actions } : {}) });
       this.setMood(lead.id, 'done', 'Answered', DONE_MS);
       for (const a of actions)
@@ -677,8 +741,30 @@ export class PackService {
         providers: [...JOB_PROVIDERS],
       });
       const report: DogReport = result.ok
-        ? { at: this.now(), ok: true, ...result.value, provider: result.provider }
+        ? {
+            at: this.now(),
+            ok: true,
+            summary: result.value.summary,
+            findings: result.value.findings,
+            provider: result.provider,
+          }
         : { at: this.now(), ok: false, summary: failText(result.reason), findings: [] };
+      this.note(
+        {
+          dog: id,
+          kind: 'job',
+          ok: report.ok,
+          ask: dog.job,
+          lookedAt: used,
+          answer: report.summary,
+          reasons: [
+            ...(result.ok ? (result.value.why ?? []) : []),
+            ...report.findings.map((f) => `${f.severity}: ${f.title}`),
+          ],
+          ...(result.ok ? { provider: result.provider } : {}),
+        },
+        result.logId,
+      );
       const dogs = this.dogs();
       if (dogs.some((d) => d.id === id))
         this.saveDogs(dogs.map((d) => (d.id === id ? { ...d, lastReport: report } : d)));
@@ -915,6 +1001,20 @@ export class PackService {
       deadlineMs: JUDGE_DEADLINE_MS,
       providers: [...JOB_PROVIDERS],
     });
+    this.note(
+      {
+        dog: dog.id,
+        kind: 'judge',
+        ok: r.ok,
+        ask: `How risky is ${t.title} from ${t.sourceName}?`,
+        subject: { kind: 'tool', id: t.key },
+        lookedAt: [t.title],
+        answer: r.ok ? `${r.value.risk} risk` : failText(r.reason),
+        reasons: r.ok ? [r.value.reason] : [],
+        ...(r.ok ? { provider: r.provider } : {}),
+      },
+      r.logId,
+    );
     return r.ok ? r.value : undefined;
   }
 
@@ -1094,4 +1194,11 @@ function failText(reason: string): string {
 
 function clip(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}…` : s;
+}
+
+function subjectOf(c: ChatContext): DogNote['subject'] | undefined {
+  const kind = ({ alerts: 'alert', rules: 'rule', activity: 'event' } as const)[
+    c.page as 'alerts' | 'rules' | 'activity'
+  ];
+  return kind && c.selected ? { kind, id: c.selected } : undefined;
 }

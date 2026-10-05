@@ -220,3 +220,54 @@ export interface PackView {
   tools: ToolView[];
   connectors: ConnectorView[];
 }
+
+/** What kind of work a note records. */
+export type DogNoteKind = 'explain' | 'label' | 'review' | 'chat' | 'job' | 'judge';
+
+/**
+ * One entry in a dog's notebook: an AI run in plain words. `reasons` are the
+ * reasons the model gave in its own answer; `thinking` is a reasoning summary
+ * only where a provider returns one through its official API. Never used by
+ * any decision.
+ */
+export interface DogNote {
+  id: string;
+  at: number;
+  /** A dog id: lead, explainer, labeller, rule-reviewer, or a pack dog's id. */
+  dog: string;
+  kind: DogNoteKind;
+  ok: boolean;
+  /** What it was asked, in plain words. */
+  ask: string;
+  /** What the note is about, to find it from that item. */
+  subject?: { kind: 'alert' | 'event' | 'rule' | 'tool'; id: string };
+  /** What it looked at: tools it used, records it was shown. */
+  lookedAt: string[];
+  answer: string;
+  reasons: string[];
+  thinking?: string;
+  provider?: string;
+  model?: string;
+}
+
+export type DogNoteInput = Omit<DogNote, 'id' | 'at' | 'lookedAt' | 'reasons'> & {
+  lookedAt?: string[];
+
+  reasons?: string[];
+};
+
+export const NoteSubject = z.object({
+  kind: z.enum(['alert', 'event', 'rule', 'tool']),
+  id: z.string().min(1).max(160),
+});
+
+/** Which notes to read: one dog's, or every dog's about one thing. */
+export const NotesFilter = z.object({
+  dog: z
+    .string()
+    .regex(/^[a-z0-9-]{1,64}$/)
+    .optional(),
+  subject: NoteSubject.optional(),
+  limit: z.number().int().min(1).max(200).optional(),
+});
+export type NotesFilter = z.infer<typeof NotesFilter>;

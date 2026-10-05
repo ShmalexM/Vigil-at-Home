@@ -1,6 +1,7 @@
 import {
   ArrowUp,
   Bone,
+  BookOpen,
   Check,
   Dice5,
   Hand,
@@ -33,6 +34,7 @@ import type {
 } from '../../../shared/pack';
 import { vigil } from '../api';
 import { useDialogFocus } from '../components/dialog-focus';
+import { NotebookSheet } from '../components/Notebook';
 import { BREEDS, Dog, breedName } from '../components/Dog';
 import { useToast } from '../components/Toasts';
 import { leadChat, useLeadChat } from '../lead-chat';
@@ -196,6 +198,9 @@ export function LeadPanel({ pack, reload }: { pack: PackView; reload: () => void
           </span>
           <span className="t-small">{breedName(lead.breed)}</span>
           <MoodLine dog={lead} fallback="Ready when you are" />
+          <span>
+            <NotebookButton dog={lead} />
+          </span>
         </div>
       </div>
       <LeadConversation pack={pack} reload={reload} />
@@ -651,6 +656,7 @@ function DogCard({
         <Button size="sm" kind="ghost" icon={<Pencil size={13} />} onClick={onEdit}>
           {dog.role === 'helper' ? 'Rename' : 'Edit'}
         </Button>
+        <NotebookButton dog={dog} />
         {dog.role === 'pack' && (
           <Button
             size="sm"
@@ -663,6 +669,25 @@ function DogCard({
         )}
       </div>
     </div>
+  );
+}
+
+/** Opens the dog's notebook: what it was asked and the reasons it gave. */
+function NotebookButton({ dog }: { dog: PackDog }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Button size="sm" kind="ghost" icon={<BookOpen size={13} />} onClick={() => setOpen(true)}>
+        Notebook
+      </Button>
+      {open && (
+        <NotebookSheet
+          title={`${dog.name}’s notebook`}
+          filter={{ dog: dog.id }}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
   );
 }
 

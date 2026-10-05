@@ -95,6 +95,8 @@ export const CALL_NAMES = [
   'setConnectorEnabled',
   'removeConnector',
   'refreshConnector',
+  'listPackNotes',
+  'clearPackNotes',
 ] as const;
 
 export const PUSH_NAMES = [

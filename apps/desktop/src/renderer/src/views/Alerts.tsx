@@ -1,8 +1,9 @@
 import type { Alert, SensorEvent } from '@vigil/core';
-import { Bell, RotateCcw, Sparkles } from 'lucide-react';
+import { Bell, BookOpen, RotateCcw, Sparkles } from 'lucide-react';
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { useLive, vigil } from '../api';
 import { DecisionControls, type Decided } from '../components/Decision';
+import { NotebookSheet } from '../components/Notebook';
 import { useToast } from '../components/Toasts';
 import { toolRequestFields } from '../components/ToolRequestFields';
 import { Button, Card, Chip, SectionHead, SeverityMark, StatusMark } from '../components/ui';
@@ -192,6 +193,7 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
             sub={`${alert.ai.provider}${alert.ai.model ? ` · ${alert.ai.model}` : ''} · advisory, may be wrong`}
             right={
               <div className="row">
+                <WhyButton alertId={alert.id} />
                 <ExplainButton alertId={alert.id} again />
                 <Chip tone="ai">
                   <Sparkles size={12} /> {alert.ai.verdict.replace('_', ' ')}
@@ -390,6 +392,25 @@ function EventBlock({ event, links }: { event: SensorEvent; links: AgentLinks })
  * Asks Vigil to explain this alert now. The one place Vigil may use the
  * user's Claude plan, and only when they've turned it on in Settings › AI.
  */
+/** The explainer's notebook entries for this alert: what it looked at and why it said so. */
+function WhyButton({ alertId }: { alertId: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Button size="sm" kind="ghost" icon={<BookOpen size={13} />} onClick={() => setOpen(true)}>
+        Why?
+      </Button>
+      {open && (
+        <NotebookSheet
+          title="Why the AI said this"
+          filter={{ subject: { kind: 'alert', id: alertId } }}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
+  );
+}
+
 function ExplainButton({ alertId, again = false }: { alertId: string; again?: boolean }) {
   const [plan] = useLive(async () => (await vigil.getAiPrefs()).claudePlan);
   const [busy, setBusy] = useState(false);

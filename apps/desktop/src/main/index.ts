@@ -25,6 +25,7 @@ import { demoProbe } from './onboarding/demo.js';
 import { KeyStore } from './onboarding/keys.js';
 import { OnboardingService } from './onboarding/service.js';
 import { Connectors, ConnectorRecord } from './pack/connectors.js';
+import { Notebook } from './pack/notebook.js';
 import { PackService } from './pack/service.js';
 import { seedPackDemo } from './pack/demo.js';
 import { PowerPolicy } from './power.js';
@@ -248,9 +249,11 @@ function start(): void {
     connectors,
     scheduler: core.scheduler,
     isBusy: () => power.isBusy(),
+    notebook: new Notebook(db, { onChange: pushPack }),
     onChange: pushPack,
   });
   ai.on('busy', (helper, busy) => pack.helperBusy(helper, busy));
+  ai.on('note', (helper, note) => pack.helperNote(helper, note));
   pack.start();
   if (demo)
     seedPackDemo(pack, connectors, join(app.getAppPath(), 'src/main/pack/fixtures/demo-mcp.mjs'));

@@ -29,7 +29,7 @@ import {
   type AiView,
 } from '../shared/ai.js';
 import type { AlertDetail, EventOutcome } from '../shared/ipc.js';
-import type { HelperId } from '../shared/pack.js';
+import type { DogNoteInput, HelperId } from '../shared/pack.js';
 import type { PackAi } from './pack/service.js';
 import type { ApiKeyProvider, SetupMode } from '../shared/setup.js';
 import type { Store } from './db/store.js';
@@ -129,6 +129,8 @@ export class AiBridge extends EventEmitter<{
   changed: [];
   /** A built-in helper started or finished a run (the Pack page's dogs move). */
   busy: [helper: HelperId, busy: boolean];
+  /** What a built-in helper was asked and answered, for its notebook on the Pack page. */
+  note: [helper: HelperId, note: Omit<DogNoteInput, 'dog'>];
 }> {
   private instance: { ai: VigilAi; key: string } | undefined;
   private readonly now: () => number;
@@ -451,6 +453,21 @@ export class AiBridge extends EventEmitter<{
         const r = await this.busyWhile('rule-reviewer', () =>
           this.ai().run({ ...req, providers: REVIEW_PROVIDERS }),
         );
+        const proposed = r.ok ? reviewReasons(r.value) : [];
+        this.emit('note', 'rule-reviewer', {
+          kind: 'review',
+          ok: r.ok,
+          ask: 'Review Vigil’s rules against recent activity',
+          lookedAt: (req.tools ?? []).map((t) => t.name),
+          answer: r.ok
+            ? proposed.length
+              ? `Suggested ${proposed.length} change${proposed.length === 1 ? '' : 's'} for you to review`
+              : 'No changes to suggest'
+            : `Couldn’t finish (${r.reason})`,
+          reasons: proposed,
+          ...(r.ok ? { provider: r.provider } : {}),
+          ...(this.models.has(r.logId) ? { model: this.models.get(r.logId)! } : {}),
+        });
         if (r.ok) return { ok: true, value: r.value, provider: r.provider };
         return { ok: false, reason: r.reason, ...(r.detail ? { detail: r.detail } : {}) };
       },
@@ -508,6 +525,7 @@ export class AiBridge extends EventEmitter<{
       },
     }));
     store.setEventLabels(labelled);
+    this.emit('note', 'labeller', labelNote(batch, result.labels));
     if (this.worthALook) {
       const byId = new Map(batch.map((e) => [e.id, e]));
       for (const l of labelled) {
@@ -540,6 +558,7 @@ export class AiBridge extends EventEmitter<{
   packAi(): PackAi {
     return {
       run: (req) => this.ai().run(req),
+      modelOf: (logId) => this.models.get(logId),
       status: async () => {
         const v = await this.view();
         const ready = (p: AiProvider) =>
@@ -610,8 +629,30 @@ export class AiBridge extends EventEmitter<{
           deadlineMs: urgent ? EXPLAIN_NOW_DEADLINE_MS : EXPLAIN_BACKGROUND_DEADLINE_MS,
         }),
       );
-      if (!result.ok) return undefined;
+      const ask = `Explain the alert “${alert.title}”`;
+      const subject = { kind: 'alert' as const, id: alert.id };
+      if (!result.ok) {
+        this.emit('note', 'explainer', {
+          kind: 'explain',
+          ok: false,
+          ask,
+          subject,
+          answer: `Couldn’t explain it (${result.reason})`,
+        });
+        return undefined;
+      }
       const v = result.value;
+      this.emit('note', 'explainer', {
+        kind: 'explain',
+        ok: true,
+        ask,
+        subject,
+        lookedAt: ['The alert, its evidence and the program behind it'],
+        answer: `${VERDICT_WORDS[v.verdict]}. ${v.summary}`,
+        reasons: v.details ? [v.details] : [],
+        provider: result.provider,
+        ...(this.models.has(result.logId) ? { model: this.models.get(result.logId)! } : {}),
+      });
       return {
         provider: result.provider,
         ...(this.models.has(result.logId) ? { model: this.models.get(result.logId)! } : {}),
@@ -663,6 +704,67 @@ const Explanation = z.object({
   summary: z.string().min(1).max(600),
   details: z.string().max(2000).optional(),
 });
+
+const VERDICT_WORDS: Record<z.infer<typeof Explanation>['verdict'], string> = {
+  likely_malicious: 'Likely malicious',
+  suspicious: 'Suspicious',
+  likely_benign: 'Likely fine',
+  unsure: 'Unsure',
+};
+
+/** The rationale the rule reviewer wrote for each change it proposed. */
+function reviewReasons(value: unknown): string[] {
+  if (!value || typeof value !== 'object') return [];
+  const out: string[] = [];
+  for (const list of ['newRules', 'tunings', 'retirements'] as const) {
+    const items = (value as Record<string, unknown>)[list];
+    if (!Array.isArray(items)) continue;
+    for (const it of items) {
+      const why = (it as { rationale?: unknown } | null)?.rationale;
+      if (typeof why === 'string' && why.trim()) out.push(why);
+    }
+  }
+  return out;
+}
+
+/** One notebook entry per labelling batch: what was looked at, and why anything stood out. */
+function labelNote(
+  batch: readonly SensorEvent[],
+  labels: readonly { eventId: string; label: string; score: number; reason: string; by: string }[],
+): Omit<DogNoteInput, 'dog'> {
+  const byId = new Map(batch.map((e) => [e.id, e]));
+  const flagged = labels.filter((l) => l.label !== 'benign' && l.reason.trim());
+  return {
+    kind: 'label',
+    ok: true,
+    ask: `Label ${batch.length} new event${batch.length === 1 ? '' : 's'}`,
+    lookedAt: batch.map(describeEvent),
+    answer: flagged.length
+      ? `${flagged.length} of ${labels.length} stood out`
+      : `All ${labels.length} looked routine`,
+    reasons: flagged.map((l) => {
+      const e = byId.get(l.eventId);
+      return `${e ? describeEvent(e) : 'An event'} (${l.label}): ${l.reason}`;
+    }),
+    ...(labels.some((l) => l.by === 'jev') ? { provider: 'jev' } : {}),
+  };
+}
+
+function describeEvent(e: SensorEvent): string {
+  const name = (p: string | undefined) => (p ? (p.split('/').pop() ?? p) : 'a program');
+  switch (e.kind) {
+    case 'process.exec':
+      return `${name(e.process.path)} started`;
+    case 'network.connection':
+      return `${name(e.process?.path)} connected to ${e.remoteHost ?? e.remoteAddress}`;
+    case 'network.listen':
+      return `${name(e.process?.path)} listened on port ${e.localPort}`;
+    case 'file':
+      return `${name(e.process?.path)} touched ${name(e.path)}`;
+    default:
+      return e.kind;
+  }
+}
 
 const EXPLAIN_INSTRUCTIONS =
   "A security rule on this person's Mac raised the alert in the data. Explain it to someone who " +

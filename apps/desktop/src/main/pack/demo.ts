@@ -16,6 +16,7 @@ export function seedPackDemo(
     connectors.add({ kind: 'stdio', name: 'GitHub', command: 'node', args: [fixture] });
   }
   void pack.refreshConnector('github').catch(() => undefined);
+  if (pack.notes({ limit: 1 }).length === 0) demoNotes(pack);
   if (pack.dogs().some((d) => d.role === 'pack')) {
     pack.demoMoods();
     return;
@@ -62,4 +63,38 @@ export function seedPackDemo(
   );
   pack.demoChat(now, { bolt: bolt.id, pip: pip.id, noodle: noodle.id });
   pack.demoMoods();
+}
+
+function demoNotes(pack: PackService): void {
+  pack.helperNote('labeller', {
+    kind: 'label',
+    ok: true,
+    ask: 'Label 6 new events',
+    lookedAt: [
+      'zoom.us started',
+      'node connected to registry.npmjs.org',
+      'Cursor Helper started',
+      'curl connected to 185.220.101.4',
+      'python3 touched id_ed25519',
+      'Slack started',
+    ],
+    answer: '2 of 6 stood out',
+    reasons: [
+      'curl connected to 185.220.101.4 (suspicious): a bare IP on a hosting range, fetched by a shell right after a download.',
+      'python3 touched id_ed25519 (unusual): a script reading an SSH key is rare for this Mac.',
+    ],
+  });
+  pack.helperNote('explainer', {
+    kind: 'explain',
+    ok: true,
+    ask: 'Explain the alert “Script read an SSH key”',
+    lookedAt: ['The alert, its evidence and the program behind it'],
+    answer:
+      'Suspicious. A Python script in Downloads read your SSH key, then the same script opened a connection out.',
+    reasons: [
+      'The script was downloaded today and isn’t signed. Reading a private key and then connecting out is the pattern of a key stealer, though a backup tool could do the same.',
+    ],
+    provider: 'codex',
+    model: 'gpt-5.5',
+  });
 }

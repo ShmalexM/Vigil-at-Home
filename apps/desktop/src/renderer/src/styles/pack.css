@@ -507,3 +507,41 @@
 .approval-card .btn {
   white-space: nowrap;
 }
+
+/* ---------------------------------------------------------------- notebooks */
+.notebook {
+  width: min(640px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  box-shadow: 0 20px 60px var(--shadow);
+}
+.notes {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.note {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--ln0);
+  border-radius: 10px;
+  background: var(--bg2);
+}
+.note.failed {
+  border-style: dashed;
+}
+.note-field {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+.note-reasons {
+  margin: 0;
+  padding-left: 16px;
+}

@@ -17,7 +17,9 @@ type PackCall =
   | 'addConnector'
   | 'setConnectorEnabled'
   | 'removeConnector'
-  | 'refreshConnector';
+  | 'refreshConnector'
+  | 'listPackNotes'
+  | 'clearPackNotes';
 
 /**
  * The Pack page. Every call here is the user's own click or message; what
@@ -55,5 +57,7 @@ export function packHandlers(pack: PackService, connectors: Connectors): Pick<Ha
     setConnectorEnabled: (id, on) => connectors.setEnabled(id, on),
     removeConnector: (id) => connectors.remove(id),
     refreshConnector: (id) => result(() => pack.refreshConnector(id)),
+    listPackNotes: (filter) => pack.notes(filter),
+    clearPackNotes: (dog) => pack.clearNotes(dog),
   };
 }
