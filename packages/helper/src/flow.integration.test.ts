@@ -170,7 +170,14 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
   afterAll(async () => {
     for (const c of children) c.kill('SIGKILL');
     client?.close();
-    await stop?.();
+    if (logs.length) console.log(`helper log:\n${logs.join('\n')}`);
+    // Only put back what this test's helper changed: if it never started,
+    // another test may be using the same nft table.
+    if (!stop) {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    }
+    await stop();
     spawnSync(LINUX_BINARIES.nft, ['delete', 'table', 'inet', 'vigil']);
     rmSync('/etc/fapolicyd/rules.d/05-vigil.rules', { force: true });
     if (fapolicyd) {
@@ -179,7 +186,6 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
     }
     await removeLinuxOsquery(sys);
     rmSync(dir, { recursive: true, force: true });
-    if (logs.length) console.log(`helper log:\n${logs.join('\n')}`);
   }, 120_000);
 
   it('kills known malware when it starts, and refuses to run it again', async () => {
