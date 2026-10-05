@@ -46,6 +46,14 @@ export class FakeLinuxSystem implements System {
             this.active.add(`${user} ${unit}`);
             return ok();
           case 'daemon-reload':
+          case 'restart':
+            return ok();
+          case 'enable':
+          case 'disable':
+            if (rest[1] === '--now') {
+              if (rest[0] === 'enable') this.active.add(`${user} ${unit}`);
+              else this.active.delete(`${user} ${unit}`);
+            }
             return ok();
         }
         return fail();

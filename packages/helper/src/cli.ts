@@ -9,11 +9,19 @@
 // vigil-helper osquery-setup     (root) write Vigil's osquery config and start osquery
 // vigil-helper osquery-remove    (root) stop Vigil's osquery job, restore osquery's old config
 
-import { osqueryConfig, osqueryFlags, santaProfile } from '@vigil/sensors';
+import {
+  osqueryConfig,
+  osqueryFlags,
+  osqueryLinuxConfig,
+  osqueryLinuxFlags,
+  santaProfile,
+} from '@vigil/sensors';
 import { Approvals } from './approval.js';
 import { defaultPaths, SANTA_SYNC_PORT } from './config.js';
 import { runDaemon } from './daemon.js';
 import { ensureOsquery, removeOsquery } from './osquery.js';
+import { ensureLinuxOsquery, removeLinuxOsquery } from './linuxOsquery.js';
+import { hostPlatform } from './platform.js';
 import { realSystem } from './system.js';
 
 async function main(argv: string[]): Promise<number> {
@@ -50,10 +58,10 @@ async function main(argv: string[]): Promise<number> {
       process.stdout.write(santaProfile({ syncPort: SANTA_SYNC_PORT }));
       return 0;
     case 'osquery-config':
-      process.stdout.write(osqueryConfig());
+      process.stdout.write(hostPlatform() === 'linux' ? osqueryLinuxConfig() : osqueryConfig());
       return 0;
     case 'osquery-flags':
-      process.stdout.write(osqueryFlags());
+      process.stdout.write(hostPlatform() === 'linux' ? osqueryLinuxFlags() : osqueryFlags());
       return 0;
     case 'osquery-setup':
     case 'osquery-remove': {
@@ -61,8 +69,13 @@ async function main(argv: string[]): Promise<number> {
         console.error(`${cmd} must run as root`);
         return 1;
       }
-      if (cmd === 'osquery-remove') await removeOsquery(realSystem());
-      else console.log(`osquery: ${await ensureOsquery(realSystem())}`);
+      const linux = hostPlatform() === 'linux';
+      if (cmd === 'osquery-remove')
+        await (linux ? removeLinuxOsquery(realSystem()) : removeOsquery(realSystem()));
+      else
+        console.log(
+          `osquery: ${await (linux ? ensureLinuxOsquery(realSystem()) : ensureOsquery(realSystem()))}`,
+        );
       return 0;
     }
     default:

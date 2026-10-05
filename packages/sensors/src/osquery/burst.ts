@@ -73,7 +73,7 @@ export function burstQuery(pids: number[]): string {
   return (
     'SELECT DISTINCT p.pid, p.path, p.uid, s.remote_address, s.remote_port, s.local_address, ' +
     's.local_port, s.protocol FROM process_open_sockets s JOIN processes p USING (pid) ' +
-    `WHERE p.pid IN (${pids.map((n) => Math.trunc(n)).join(', ')}) AND s.family IN (2, 30) ` +
+    `WHERE p.pid IN (${pids.map((n) => Math.trunc(n)).join(', ')}) AND s.family IN (2, 10, 30) ` +
     "AND s.remote_port != 0 AND s.remote_address NOT IN ('127.0.0.1', '::1', '0.0.0.0', '::', '') " +
     "AND s.remote_address NOT LIKE 'fe80:%';"
   );

@@ -18,7 +18,12 @@ export function compareSeverity(a: Severity, b: Severity): number {
   return severityRank[a] - severityRank[b];
 }
 
-/** How a binary is signed, as reported by Santa or osquery's `signature` table. */
+/**
+ * How a binary is signed, as reported by Santa or osquery's `signature`
+ * table. Linux has no code signing, so there a program installed by the
+ * package manager (dpkg, rpm, a system snap) counts as `package`, and any
+ * other program as `unsigned`.
+ */
 export const SigningStatus = z.enum([
   'apple', // platform binary
   'app_store',
@@ -27,6 +32,7 @@ export const SigningStatus = z.enum([
   'unsigned',
   'invalid',
   'unknown',
+  'package', // Linux: installed by the package manager
 ]);
 export type SigningStatus = z.infer<typeof SigningStatus>;
 

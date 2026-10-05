@@ -55,7 +55,11 @@ export const NetworkConnectionEvent = z.object({
   process: ProcessRef.optional(),
 });
 
-/** A launch agent, launch daemon, login item or similar was added or changed. */
+/**
+ * A launch agent, launch daemon, login item or similar was added or changed.
+ * On Linux: a systemd unit or XDG autostart entry outside the package
+ * manager's folders.
+ */
 export const PersistenceEvent = z.object({
   ...base,
   kind: z.literal('persistence'),
@@ -66,6 +70,8 @@ export const PersistenceEvent = z.object({
     'login_item',
     'cron',
     'shell_profile',
+    'systemd_unit',
+    'autostart',
     'other',
   ]),
   path: z.string(),
