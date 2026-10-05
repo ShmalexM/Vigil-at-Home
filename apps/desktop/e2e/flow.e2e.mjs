@@ -69,7 +69,12 @@ const children = [];
 /** A copy of /bin/sleep under a new name: harmless, and killable or pausable. */
 function sleeper(name) {
   const path = join(STAND_IN_DIR, name);
-  if (!existsSync(path)) copyFileSync('/bin/sleep', path);
+  if (!existsSync(path)) {
+    copyFileSync('/bin/sleep', path);
+    // macOS 26 kills a copied platform binary run from elsewhere; an ad hoc
+    // signature makes the copy an ordinary program again.
+    execFileSync('codesign', ['-f', '-s', '-', path], { stdio: 'ignore' });
+  }
   const child = spawn(path, ['900'], { stdio: 'ignore' });
   children.push(child);
   return child;
