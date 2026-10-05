@@ -268,6 +268,7 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
       [sh('sudo launchctl bootout system/com.vigilathome.helper'), SUSPEND],
       [sh('sudo pfctl -d'), SUSPEND],
       [sh('sudo spctl --master-disable'), SUSPEND],
+      [sh('csrutil disable'), SUSPEND],
       [
         sh(
           'sqlite3 ~/Library/Application\\ Support/Vigil\\ at\\ Home/vigil.db "DELETE FROM alerts"',
@@ -280,6 +281,7 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
       sh('pfctl -s rules'),
       sh('pfctl -f /etc/pf.conf'),
       sh('spctl --assess -v X.app'),
+      sh('csrutil status'),
       sh('launchctl list | grep vigil'),
     ],
   },
@@ -389,6 +391,12 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
       [write('/System/Volumes/Data/Applications/Vigil at Home.app/Contents/x'), DENY],
       [write('/private/var/run/vigil-helper.sock'), DENY],
       [write('/var/db/../db/santa//rules.db'), DENY],
+      [
+        bash(
+          `sqlite3 "${home}/Library/Application Support/Vigil at Home/vigil.db" "delete from alerts"`,
+        ),
+        DENY,
+      ],
     ],
     good: [
       bash('santactl status'),
@@ -397,6 +405,9 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
       bash('spctl --assess -v X.app'),
       bash('launchctl list | grep vigil'),
       read(`${home}/Library/Application Support/Vigil at Home/vigil.db`),
+      bash(
+        `sqlite3 -readonly "${home}/Library/Application Support/Vigil at Home/vigil.db" .tables`,
+      ),
     ],
   },
   'preflight-agent-config-write': {
@@ -777,6 +788,33 @@ describe('agent rule packs', () => {
         'cd /Applications && mv Vigil\\ at\\ Home.app /tmp/',
         "echo '' > ~/Library/Application\\ Support/Vigil\\ at\\ Home/vigil.db",
         'sudo cp /tmp/x /Library/PrivilegedHelperTools/vigil-helper',
+      ]) {
+        expect(fired(sh(c)), c).toContain('agent-guard-tamper');
+      }
+    });
+
+    it('lets an agent read Vigil’s database, but not change it or write a copy there', () => {
+      const db = '~/Library/Application\\ Support/Vigil\\ at\\ Home/vigil.db';
+      const dir = `"${home}/Library/Application Support/Vigil at Home`;
+      const reads = [
+        `sqlite3 -readonly ${db} "select rule_id, count(*) from alerts group by 1"`,
+        `sqlite3 -header -readonly ${db} 'select * from events limit 5'`,
+        `sqlite3 'file:${home}/Library/Application Support/Vigil at Home/vigil.db?mode=ro' .tables`,
+        `sqlite3 -readonly ${db} .dump > /tmp/vigil-copy.sql`,
+      ];
+      for (const c of reads) {
+        expect(fired(sh(c)), c).not.toContain('agent-guard-tamper');
+        expect(fired(sh(`source ~/.claude/shell-snapshots/s.sh && eval '${c}'`)), c).not.toContain(
+          'agent-guard-tamper',
+        );
+      }
+      for (const c of [
+        `sqlite3 ${db} "delete from alerts"`,
+        `sqlite3 -readonly /tmp/x.db ".backup ${dir}/vigil.db"`,
+        `sqlite3 -readonly ${db} ".once ${dir}/rules.json" "select 1"`,
+        `sqlite3 -readonly /tmp/x.db "vacuum into '${home}/Library/Application Support/Vigil at Home/v.db'"`,
+        `sqlite3 -readonly /tmp/x.db .dump > ${db}`,
+        `sqlite3 -readonly ${db} "select 1"; rm ${db}`,
       ]) {
         expect(fired(sh(c)), c).toContain('agent-guard-tamper');
       }

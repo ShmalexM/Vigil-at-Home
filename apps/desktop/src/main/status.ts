@@ -1,5 +1,6 @@
 import type { Alert } from '@vigil/core';
 import { isNoticed, needsDecision } from '../shared/attention.js';
+import { pileUp } from '../shared/piles.js';
 
 export type Level = 'good' | 'fair' | 'poor';
 
@@ -52,7 +53,8 @@ export function computeStatus(
   const level: Level = poor.length ? 'poor' : fair.length ? 'fair' : 'good';
   return {
     level,
-    needsYou: openAlerts.filter(needsDecision).length,
+    // A pile is one decision, so it counts once.
+    needsYou: pileUp(openAlerts.filter(needsDecision)).length,
     noticed: openAlerts.filter(isNoticed).length,
     reasons: [...poor, ...fair],
   };

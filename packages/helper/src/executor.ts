@@ -28,7 +28,9 @@ import {
   suspendProcess,
   type ProcessIdentity,
 } from './commands/process.js';
-import { Firewall, normalizeTarget } from './commands/firewall.js';
+import { Firewall, normalizeTarget, type NetworkFirewall } from './commands/firewall.js';
+import { NftFirewall } from './commands/nftables.js';
+import type { FapolicydBlocks } from './commands/fapolicyd.js';
 import {
   quarantine,
   realParentPath,
@@ -41,6 +43,7 @@ import {
   restorePersistence,
   type PersistenceRecord,
 } from './commands/persistence.js';
+import { disableLinuxPersistence, restoreLinuxPersistence } from './commands/linuxPersistence.js';
 
 export interface ExecutorDeps {
   sys: System;
@@ -48,7 +51,11 @@ export interface ExecutorDeps {
   approvals: Approvals;
   rules: RuleStore;
   quarantine: QuarantineOptions;
-  /** Folders whose plists persistence.disable accepts. Defaults to the real LaunchAgents/LaunchDaemons folders. */
+  /**
+   * Folders whose startup items persistence.disable accepts. Defaults to the
+   * real LaunchAgents/LaunchDaemons folders, or on Linux the systemd and
+   * autostart folders users and admins add to.
+   */
   launchDirs?: RegExp;
   syncPort: number;
   /** Ask Santa to sync now so a new rule applies in seconds, not at the next interval. */
@@ -58,6 +65,8 @@ export interface ExecutorDeps {
   preexec?: PreexecSync;
   /** Blocking rules the helper runs on the sensor stream itself. */
   fastPath?: FastPath;
+  /** Linux: programs blocked by hash, enforced by fapolicyd and the helper. */
+  fapolicyd?: FapolicydBlocks;
 }
 
 export type ExecOutcome =
@@ -86,13 +95,22 @@ const POLICY: Record<string, Exclude<RulePolicy, 'REMOVE'>> = {
 };
 
 export class Executor {
-  readonly firewall: Firewall;
+  readonly firewall: NetworkFirewall;
 
   constructor(private readonly d: ExecutorDeps) {
-    this.firewall = new Firewall(d.sys);
+    this.firewall = d.sys.platform === 'linux' ? new NftFirewall(d.sys) : new Firewall(d.sys);
+  }
+
+  /** Quarantine settings with the protected folders of the OS the helper acts on. */
+  private get quarantineOpts(): QuarantineOptions {
+    return this.d.sys.platform === 'linux'
+      ? { platform: 'linux', ...this.d.quarantine }
+      : this.d.quarantine;
   }
 
   async execute(cmd: HelperCommand, approval?: string): Promise<ExecOutcome> {
+    // Refuse what Linux can't do before asking for a password for it.
+    if (this.d.sys.platform === 'linux') checkLinuxBlock(cmd);
     if (cmd.kind === 'detection.sync') {
       // Whether a sync weakens anything depends on the policy in force.
       const weakens = this.d.fastPath?.loosening(cmd) ?? [];
@@ -116,7 +134,9 @@ export class Executor {
       case 'santa.rule.set':
         return `Vigil wants to always allow programs matching ${cmd.ruleType} ${cmd.identifier}.`;
       case 'santa.rule.remove':
-        return `Vigil wants to remove its Santa rule for ${cmd.ruleType} ${cmd.identifier}.`;
+        return this.d.sys.platform === 'linux'
+          ? `Vigil wants to unblock the program with hash ${cmd.identifier}.`
+          : `Vigil wants to remove its Santa rule for ${cmd.ruleType} ${cmd.identifier}.`;
       default: {
         const e = this.findContainment(cmd);
         return e ? `Vigil wants to undo: ${e.summary}.` : 'Vigil needs your permission.';
@@ -200,6 +220,7 @@ export class Executor {
 
   private async run(cmd: HelperCommand): Promise<unknown> {
     const { sys, journal } = this.d;
+    if (sys.platform === 'linux' && cmd.kind.startsWith('santa.')) return this.runLinuxBlock(cmd);
     switch (cmd.kind) {
       case 'process.suspend': {
         const id = await suspendProcess(sys, cmd.pid, target(cmd));
@@ -248,7 +269,7 @@ export class Executor {
       }
       case 'file.quarantine': {
         const id = Journal.newId();
-        const rec = quarantine(cmd.path, id, this.d.quarantine);
+        const rec = quarantine(cmd.path, id, this.quarantineOpts);
         return this.record(cmd, `quarantined ${rec.originalPath}`, { quarantine: rec }, id);
       }
       case 'file.restore': {
@@ -259,13 +280,16 @@ export class Executor {
       }
       case 'persistence.disable': {
         const id = Journal.newId();
-        const rec = await disablePersistence(
-          sys,
-          cmd.path,
-          id,
-          this.d.quarantine,
-          this.d.launchDirs,
-        );
+        const rec =
+          sys.platform === 'linux'
+            ? await disableLinuxPersistence(
+                sys,
+                cmd.path,
+                id,
+                this.quarantineOpts,
+                this.d.launchDirs,
+              )
+            : await disablePersistence(sys, cmd.path, id, this.d.quarantine, this.d.launchDirs);
         return this.record(
           cmd,
           `disabled startup item ${rec.label ?? rec.quarantine.originalPath}`,
@@ -276,7 +300,8 @@ export class Executor {
       case 'persistence.enable': {
         const entry = this.findContainment(cmd)!;
         const rec = entry.undo?.persistence as PersistenceRecord;
-        await restorePersistence(sys, rec);
+        if (sys.platform === 'linux') await restoreLinuxPersistence(sys, rec);
+        else await restorePersistence(sys, rec);
         return this.release(
           entry,
           cmd,
@@ -364,6 +389,41 @@ export class Executor {
     }
   }
 
+  /**
+   * Linux has no Santa. A binary block becomes a fapolicyd rule by hash
+   * (commands/fapolicyd.ts); every other Santa rule type is macOS-only.
+   */
+  private async runLinuxBlock(cmd: HelperCommand): Promise<unknown> {
+    const blocks = this.d.fapolicyd;
+    checkLinuxBlock(cmd);
+    if (cmd.kind !== 'santa.rule.set' && cmd.kind !== 'santa.rule.remove') return undefined;
+    if (!blocks) throw new ActionError('failed', 'program blocking is not set up');
+    const sha = cmd.identifier.toLowerCase();
+    if (cmd.kind === 'santa.rule.set') {
+      await blocks.block(sha);
+      const existing = this.d.journal
+        .active()
+        .find(
+          (e) =>
+            e.kind === 'santa.rule.set' &&
+            (e.command as HelperAction & { identifier: string }).identifier.toLowerCase() === sha,
+        );
+      if (existing) return this.outcome(existing);
+      return this.record(cmd, `blocked programs with hash ${sha}`, {
+        ruleType: 'BINARY',
+        previous: null,
+      });
+    }
+    if (!(await blocks.unblock(sha)))
+      throw new ActionError('not_found', 'that program is not blocked');
+    for (const e of this.d.journal.active()) {
+      const c = e.command as HelperAction;
+      if (c.kind === 'santa.rule.set' && c.identifier.toLowerCase() === sha)
+        this.d.journal.markUndone(e.id);
+    }
+    return this.record(cmd as HelperAction, `unblocked programs with hash ${sha}`);
+  }
+
   private async syncSanta(): Promise<void> {
     try {
       await this.d.triggerSantaSync?.();
@@ -387,6 +447,17 @@ export function syncPrompt(weakens: string[]): string {
   const shown = weakens.slice(0, 3).join('; ');
   const more = weakens.length > 3 ? ` and ${weakens.length - 3} more` : '';
   return `Vigil wants to loosen its blocking rules: ${shown}${more}.`;
+}
+
+/** The Santa commands Linux can carry out: blocking or unblocking a program by hash. */
+function checkLinuxBlock(cmd: HelperCommand): void {
+  if (!cmd.kind.startsWith('santa.')) return;
+  if (cmd.kind !== 'santa.rule.set' && cmd.kind !== 'santa.rule.remove')
+    throw new ActionError('invalid', 'Santa runs only on macOS');
+  if (cmd.ruleType !== 'binary')
+    throw new ActionError('invalid', 'on Linux a program can only be blocked by its sha256');
+  if (cmd.kind === 'santa.rule.set' && cmd.policy === 'allow')
+    throw new ActionError('invalid', 'Linux needs no allow rules; Vigil only blocks there');
 }
 
 function policyError(err: unknown): ActionError {

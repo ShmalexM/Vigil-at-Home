@@ -13,11 +13,14 @@
 
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import { chmodSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
+  FileHasher,
   OSQUERYD_PATH,
   RuleStore,
+  type SensorEvent,
   SantaSyncServer,
+  type SignatureInfo,
   SensorHub,
   ensureSyncTls,
   fileAccessPolicy,
@@ -38,7 +41,11 @@ import {
 import { HelperServer } from './server.js';
 import { PreexecSync } from './preexec.js';
 import { signatureLookup } from './signature.js';
-import { BINARIES, realSystem, type System } from './system.js';
+import { linuxPackageIndex } from './packageTrust.js';
+import { ensureLinuxOsquery, type LinuxOsqueryPaths } from './linuxOsquery.js';
+import { FapolicydBlocks } from './commands/fapolicyd.js';
+import type { HelperRan } from './fastpath.js';
+import { BINARIES, LINUX_BINARIES, realSystem, type System } from './system.js';
 
 export interface DaemonOptions {
   paths?: HelperPaths;
@@ -49,9 +56,15 @@ export interface DaemonOptions {
   approvalOwnerUid?: number;
   opensslBin?: string;
   /** Files whose presence means Santa and osquery are installed; tests point these elsewhere. */
-  sensorBinaries?: { santa: string; osquery: string };
+  sensorBinaries?: { santa: string | false; osquery: string };
   /** Where osquery lives; false leaves osquery alone (tests). Only acted on as root. */
   osquery?: OsqueryPaths | false;
+  /** Linux: where osquery lives; false leaves it alone. Only acted on as root. */
+  linuxOsquery?: LinuxOsqueryPaths;
+  /** Linux: fapolicyd's rules folder; tests point it elsewhere. */
+  fapolicydRulesDir?: string;
+  /** Linux: the trust answer for a program path. Defaults to the dpkg/rpm index. */
+  trust?: (path: string) => SignatureInfo | undefined;
 }
 
 /** What helper.status reports about each sensor. The app decides what counts as stale. */
@@ -61,8 +74,11 @@ export interface SensorHealth {
 }
 
 export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise<void>> {
-  const paths = opts.paths ?? defaultPaths();
   const sys = opts.sys ?? realSystem();
+  // Linux has no Santa: no sync server, certificate or file-access policy,
+  // and network blocks go through nftables (see executor.ts).
+  const linux = sys.platform === 'linux';
+  const paths = opts.paths ?? defaultPaths(undefined, linux ? 'linux' : 'darwin');
   const log = opts.log ?? ((m: string) => console.error(`[vigil-helper] ${m}`));
   const syncPort = opts.syncPort ?? SANTA_SYNC_PORT;
 
@@ -76,12 +92,14 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   chmodSync(paths.supportDir, 0o755);
 
   const tls = syncTlsPaths(paths.tlsDir);
-  await ensureSyncTls(tls, opts.opensslBin);
+  if (!linux) {
+    await ensureSyncTls(tls, opts.opensslBin);
 
-  // Vigil owns this policy file; Santa re-reads it every minute. Rewriting it
-  // brings watch items added in newer versions to existing installs, keeping
-  // blocking on if the user turned it on.
-  writeFileAccessPolicy(paths.fileAccessPolicy);
+    // Vigil owns this policy file; Santa re-reads it every minute. Rewriting it
+    // brings watch items added in newer versions to existing installs, keeping
+    // blocking on if the user turned it on.
+    writeFileAccessPolicy(paths.fileAccessPolicy);
+  }
 
   const rules = new RuleStore(paths.santaRules);
   const journal = new Journal(paths.journal);
@@ -89,14 +107,18 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     dir: paths.approvalsDir,
     requiredOwnerUid: opts.approvalOwnerUid ?? 0,
   });
-  const bins = opts.sensorBinaries ?? { santa: BINARIES.santactl, osquery: OSQUERYD_PATH };
+  const bins =
+    opts.sensorBinaries ??
+    (linux
+      ? { santa: false as const, osquery: LINUX_BINARIES.osqueryd }
+      : { santa: BINARIES.santactl, osquery: OSQUERYD_PATH });
   // Created below, after the socket is up; status calls before then report no activity.
   const live: { hub?: SensorHub; sync?: SantaSyncServer } = {};
   const sensors = (): SensorHealth => {
     const seen = live.hub?.lastEventAt();
     return {
       santa: {
-        installed: existsSync(bins.santa),
+        installed: bins.santa !== false && existsSync(bins.santa),
         lastEventAt: seen?.santa ?? null,
         lastSyncAt: live.sync?.lastSyncAt ?? null,
       },
@@ -116,6 +138,14 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   });
   fastPath.load();
 
+  // Linux: programs blocked by hash (fapolicyd, plus the check on each launch below).
+  const fapolicyd = linux
+    ? new FapolicydBlocks(sys, {
+        store: join(paths.supportDir, 'blocked-programs.json'),
+        ...(opts.fapolicydRulesDir ? { rulesDir: opts.fapolicydRulesDir } : {}),
+      })
+    : undefined;
+
   const executor: Executor = new Executor({
     sys,
     journal,
@@ -123,12 +153,21 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     rules,
     quarantine: { quarantineDir: paths.quarantineDir },
     syncPort,
-    triggerSantaSync: async () => {
-      await sys.run('santactl', ['sync'], { timeoutMs: 60_000 });
-    },
-    statusExtra: () => ({ sensors: sensors(), helperRules: fastPath.status() }),
-    preexec: new PreexecSync(sys, rules, existsSync),
+    ...(linux
+      ? {}
+      : {
+          triggerSantaSync: async () => {
+            await sys.run('santactl', ['sync'], { timeoutMs: 60_000 });
+          },
+          preexec: new PreexecSync(sys, rules, existsSync),
+        }),
+    statusExtra: () => ({
+      sensors: sensors(),
+      helperRules: fastPath.status(),
+      ...(fapolicyd ? { fapolicyd: fapolicyd.status() } : {}),
+    }),
     fastPath,
+    ...(fapolicyd ? { fapolicyd } : {}),
   });
 
   const server = new HelperServer({
@@ -139,6 +178,27 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   });
   await server.listen();
 
+  // Linux: a blocked program that got past fapolicyd (not installed, or not
+  // reloaded yet) is stopped as soon as its launch is seen.
+  const stopBlockedLaunch = async (e: SensorEvent): Promise<HelperRan[]> => {
+    if (!fapolicyd || e.kind !== 'process.exec' || !e.process.sha256) return [];
+    if (!fapolicyd.has(e.process.sha256)) return [];
+    const action = { kind: 'process.kill' as const, pid: e.process.pid, path: e.process.path };
+    try {
+      const out = await executor.execute(action);
+      return [
+        {
+          ruleId: 'blocked-program',
+          action,
+          at: Date.now(),
+          ...(out.kind === 'done' ? { outcome: out.result as ActionOutcome } : {}),
+        },
+      ];
+    } catch (err) {
+      return [{ ruleId: 'blocked-program', action, at: Date.now(), error: (err as Error).message }];
+    }
+  };
+
   let delivered = Promise.resolve();
   const hub = new SensorHub({
     santaLogPath: paths.santaLog,
@@ -146,10 +206,16 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     // One event at a time, in order: a block finishes before the next event
     // is looked at, and the app hears about each event with what was done.
     sink: (e) => {
-      delivered = delivered.then(async () => server.publish(e, await fastPath.check(e)));
+      delivered = delivered.then(async () => {
+        const ran = [...(await stopBlockedLaunch(e)), ...(await fastPath.check(e))];
+        server.publish(e, ran);
+      });
     },
     // Signatures of programs that started before Vigil (codesign is macOS-only).
-    ...(process.platform === 'darwin' ? { signatureLookup: signatureLookup(sys) } : {}),
+    ...(process.platform === 'darwin' && !linux ? { signatureLookup: signatureLookup(sys) } : {}),
+    // Linux: whether the package manager installed each program, answered at
+    // once, and the hash of each untrusted one (blocks are by hash).
+    ...(linux ? { trust: opts.trust ?? trustFromPackages(), hash: hasher() } : {}),
     // The closer look at suspicious programs' connections needs osquery and root.
     ...(existsSync(bins.osquery) && process.getuid?.() === 0 && opts.osquery !== false
       ? { osqueryRunner: osqueryShellRunner(sys) }
@@ -159,22 +225,38 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   await hub.start();
   live.hub = hub;
 
-  const sync = new SantaSyncServer({
-    store: rules,
-    onEvent: (e) => hub.emit(e),
-    log,
-    eventDetailUrl: 'vigil://santa/event?sha256=%file_sha%',
-    eventDetailText: 'Open Vigil',
-  });
-  live.sync = sync;
-  const https: HttpsServer = createHttpsServer(
-    { key: readFileSync(tls.serverKey), cert: readFileSync(tls.serverCert), minVersion: 'TLSv1.2' },
-    sync.handler,
-  );
-  await new Promise<void>((resolve, reject) => {
-    https.once('error', reject);
-    https.listen(syncPort, '127.0.0.1', () => resolve());
-  });
+  let https: HttpsServer | undefined;
+  if (!linux) {
+    const sync = new SantaSyncServer({
+      store: rules,
+      onEvent: (e) => hub.emit(e),
+      log,
+      eventDetailUrl: 'vigil://santa/event?sha256=%file_sha%',
+      eventDetailText: 'Open Vigil',
+    });
+    live.sync = sync;
+    const server = createHttpsServer(
+      {
+        key: readFileSync(tls.serverKey),
+        cert: readFileSync(tls.serverCert),
+        minVersion: 'TLSv1.2',
+      },
+      sync.handler,
+    );
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(syncPort, '127.0.0.1', () => resolve());
+    });
+    https = server;
+  }
+
+  if (fapolicyd) {
+    try {
+      await fapolicyd.apply();
+    } catch (err) {
+      log(`could not apply fapolicyd rules: ${(err as Error).message}`);
+    }
+  }
 
   try {
     const n = await executor.reapplyFirewallBlocks();
@@ -186,7 +268,16 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   // Start osquery with Vigil's queries once it is installed, and keep it loaded.
   const osqueryPaths = opts.osquery ?? defaultOsqueryPaths();
   const keepOsquery = () => {
-    if (!osqueryPaths || process.getuid?.() !== 0) return;
+    if (opts.osquery === false || process.getuid?.() !== 0) return;
+    if (linux) {
+      ensureLinuxOsquery(sys, opts.linuxOsquery)
+        .then((state) => {
+          if (state === 'started' || state === 'restarted') log(`osquery ${state}`);
+        })
+        .catch((err: Error) => log(`could not start osquery: ${err.message}`));
+      return;
+    }
+    if (!osqueryPaths) return;
     // osquery's startup-item query slows to a 5 minute safety net only while
     // Santa is actually reporting (it can be installed but not yet approved).
     const santaAt = hub.lastEventAt().santa;
@@ -206,10 +297,12 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   // Renew the sync certificate daily if it is close to expiring.
   const renew = setInterval(
     () => {
+      if (!https) return;
+      const server = https;
       ensureSyncTls(tls, opts.opensslBin)
         .then((changed) => {
           if (changed)
-            https.setSecureContext({
+            server.setSecureContext({
               key: readFileSync(tls.serverKey),
               cert: readFileSync(tls.serverCert),
             });
@@ -220,14 +313,21 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   );
   renew.unref();
 
-  log(`ready: socket ${paths.socket}, Santa sync on https://127.0.0.1:${syncPort}/`);
+  log(
+    https
+      ? `ready: socket ${paths.socket}, Santa sync on https://127.0.0.1:${syncPort}/`
+      : `ready: socket ${paths.socket}`,
+  );
 
   return async () => {
     clearInterval(renew);
     clearInterval(osqueryTimer);
     await hub.stop();
     await server.close();
-    await new Promise<void>((r) => https.close(() => r()));
+    if (https) {
+      const server = https;
+      await new Promise<void>((r) => server.close(() => r()));
+    }
   };
 }
 
@@ -243,4 +343,15 @@ function writeFileAccessPolicy(path: string): void {
   if (next === current) return;
   writeFileSync(path, next, { mode: 0o644 });
   chmodSync(path, 0o644);
+}
+
+/** The package index, built once at start and reloaded when packages change. */
+function trustFromPackages(): (path: string) => SignatureInfo | undefined {
+  const index = linuxPackageIndex();
+  return (path) => index.trust(path);
+}
+
+function hasher(): (path: string) => string | undefined {
+  const h = new FileHasher();
+  return (path) => h.sha256(path);
 }

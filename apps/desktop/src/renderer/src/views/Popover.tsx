@@ -1,6 +1,13 @@
 import { CircleCheck, Power, Settings } from 'lucide-react';
 import { useLive, vigil } from '../api';
-import { NeedsYouLine, NoticedList, WatchLine, WorkingHeadline } from '../components/Attention';
+import {
+  NeedsYouLine,
+  needsRows,
+  NoticedList,
+  pileLine,
+  WatchLine,
+  WorkingHeadline,
+} from '../components/Attention';
 import { Shield } from '../components/Shield';
 import { Button, Chip, IconButton, LevelPill, SeverityMark } from '../components/ui';
 import { timeAgo } from '../format';
@@ -10,7 +17,7 @@ import { isNoticed, needsDecision } from '../../../shared/attention';
 export function Popover() {
   const [status] = useLive(() => vigil.getStatus());
   const [alerts] = useLive(() => vigil.listAlerts('open'));
-  const needs = (alerts ?? []).filter(needsDecision);
+  const needs = needsRows((alerts ?? []).filter(needsDecision));
   const noticed = (alerts ?? []).filter(isNoticed);
   const open = (id: string) => void vigil.openMain(`alerts/${id}`);
 
@@ -45,14 +52,15 @@ export function Popover() {
               <span className="count hot">{needs.length}</span>
             </div>
             <div className="list">
-              {needs.map((a) => (
-                <button key={a.id} type="button" className="list-row" onClick={() => open(a.id)}>
+              {needs.map((r) => (
+                <button key={r.id} type="button" className="list-row" onClick={() => open(r.id)}>
                   <div className="col grow" style={{ gap: 2 }}>
-                    <span className="t-h3 ellipsis">{a.title}</span>
+                    <span className="t-h3 ellipsis">{r.title}</span>
                     <span className="row t-small">
-                      <SeverityMark severity={a.severity} />
-                      <span>· {timeAgo(a.createdAt)}</span>
-                      {a.containment === 'active' && <Chip tone="good">Blocked</Chip>}
+                      <SeverityMark severity={r.severity} />
+                      {pileLine(r) && <span>· {pileLine(r)}</span>}
+                      <span>· {timeAgo(r.at)}</span>
+                      {r.blocked && <Chip tone="good">Blocked</Chip>}
                     </span>
                   </div>
                 </button>

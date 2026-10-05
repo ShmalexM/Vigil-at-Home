@@ -3,7 +3,8 @@
 // shell), and signal delivery. Tests swap in fakes.
 
 import { execFile } from 'node:child_process';
-import { statSync } from 'node:fs';
+import { readFileSync, readlinkSync, statSync } from 'node:fs';
+import { hostPlatform, type Platform } from './platform.js';
 
 export const BINARIES = {
   pfctl: '/sbin/pfctl',
@@ -17,7 +18,29 @@ export const BINARIES = {
   osqueryd: '/opt/osquery/lib/osquery.app/Contents/MacOS/osqueryd',
 } as const;
 
-export type BinaryName = keyof typeof BINARIES;
+/**
+ * The Linux set. Paths are the merged-/usr locations every current Debian,
+ * Ubuntu and Fedora release uses (/bin and /sbin link into /usr there).
+ */
+export const LINUX_BINARIES = {
+  ps: '/usr/bin/ps',
+  nft: '/usr/sbin/nft',
+  systemctl: '/usr/bin/systemctl',
+  pkexec: '/usr/bin/pkexec',
+  dpkgQuery: '/usr/bin/dpkg-query',
+  rpm: '/usr/bin/rpm',
+  fagenrules: '/usr/sbin/fagenrules',
+  osqueryd: '/opt/osquery/bin/osqueryd',
+} as const;
+
+export type MacBinaryName = keyof typeof BINARIES;
+export type LinuxBinaryName = keyof typeof LINUX_BINARIES;
+export type BinaryName = MacBinaryName | LinuxBinaryName;
+
+/** Absolute paths for every binary the helper may run on `platform`; the others are left out. */
+export function binariesFor(platform: Platform): Partial<Record<BinaryName, string>> {
+  return platform === 'linux' ? LINUX_BINARIES : BINARIES;
+}
 
 export interface RunResult {
   code: number;
@@ -35,14 +58,33 @@ export interface System {
   /** uid of the user logged in at the screen, if any. */
   consoleUid(): number | undefined;
   now(): number;
+  /** Which OS the commands target. Absent means macOS, which is what every fake assumed. */
+  readonly platform?: Platform;
+  /**
+   * Linux only: the executable a pid runs, from /proc/<pid>/exe. The kernel
+   * keeps that link, so argv tricks can't fake it.
+   */
+  procExe?(pid: number): string | undefined;
 }
 
-export function realSystem(binaries: Record<BinaryName, string> = BINARIES): System {
+export function realSystem(
+  binaries: Partial<Record<BinaryName, string>> = binariesFor(hostPlatform()),
+  platform: Platform = hostPlatform(),
+): System {
   return {
+    platform,
     run(bin, args, opts = {}) {
+      const file = binaries[bin];
+      if (!file) {
+        return Promise.resolve({
+          code: 127,
+          stdout: '',
+          stderr: `${bin} is not used on ${platform}`,
+        });
+      }
       return new Promise((resolve) => {
         const child = execFile(
-          binaries[bin],
+          file,
           args,
           {
             timeout: opts.timeoutMs ?? 15_000,
@@ -69,6 +111,7 @@ export function realSystem(binaries: Record<BinaryName, string> = BINARIES): Sys
       process.kill(pid, sig);
     },
     consoleUid() {
+      if (platform === 'linux') return linuxSeatUid();
       try {
         return statSync('/dev/console').uid;
       } catch {
@@ -76,5 +119,28 @@ export function realSystem(binaries: Record<BinaryName, string> = BINARIES): Sys
       }
     },
     now: () => Date.now(),
+    procExe(pid) {
+      try {
+        return readlinkSync(`/proc/${pid}/exe`).replace(/ \(deleted\)$/, '');
+      } catch {
+        return undefined;
+      }
+    },
   };
+}
+
+/**
+ * The user at the screen on Linux. /dev/console belongs to root there, so
+ * ask systemd-logind instead: it writes the active session's owner of the
+ * first seat to /run/systemd/seats/seat0.
+ */
+export function linuxSeatUid(
+  read: (path: string) => string = (p) => readFileSync(p, 'utf8'),
+): number | undefined {
+  try {
+    const m = /^ACTIVE_UID=(\d+)$/m.exec(read('/run/systemd/seats/seat0'));
+    return m ? Number(m[1]) : undefined;
+  } catch {
+    return undefined;
+  }
 }

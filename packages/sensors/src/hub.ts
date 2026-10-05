@@ -26,6 +26,17 @@ export interface SensorHubOptions {
    */
   signatureLookup?: (path: string) => Promise<SignatureInfo | undefined>;
   /**
+   * Answers at once, while the event is in hand, for programs no sensor
+   * gave a signature. On Linux this is the package index: every launch
+   * comes from osquery without one, and rules need it on the first event.
+   */
+  trust?: (path: string) => SignatureInfo | undefined;
+  /**
+   * Linux: the sha256 of an untrusted program at launch, which osquery
+   * doesn't report and a block by hash needs.
+   */
+  hash?: (path: string) => string | undefined;
+  /**
    * Runs one-off osquery queries. When set, programs worth a closer look get
    * their connections checked every 2 s for a minute (see osquery/burst.ts).
    */
@@ -112,7 +123,7 @@ export class SensorHub {
       this.burst?.alreadyReported(incoming)
     )
       return;
-    const event = this.enricher.enrich(incoming);
+    const event = this.enricher.enrich(this.withTrust(incoming));
     this.burst?.observe(event);
     this.seen.add(event.id);
     if (this.seen.size > DEDUPE_WINDOW) {
@@ -122,6 +133,22 @@ export class SensorHub {
     }
     if (this.opts.filter && !this.opts.filter(event)) return;
     this.opts.sink(event);
+  }
+
+  /** Adds the trust answer to a process that has no signature yet, and an untrusted launch's hash. */
+  private withTrust(e: SensorEvent): SensorEvent {
+    const trust = this.opts.trust;
+    const p = trust && 'process' in e ? e.process : undefined;
+    if (!p || p.signing !== undefined || !p.path || p.pid === 0) return e;
+    const info = trust!(p.path);
+    if (!info) return e;
+    const process = { ...p, signing: info.signing };
+    if (info.signingId) process.signingId = info.signingId;
+    if (e.kind === 'process.exec' && info.signing !== 'package' && !p.sha256 && this.opts.hash) {
+      const sha256 = this.opts.hash(p.path);
+      if (sha256) process.sha256 = sha256;
+    }
+    return { ...e, process } as SensorEvent;
   }
 
   async start(): Promise<void> {

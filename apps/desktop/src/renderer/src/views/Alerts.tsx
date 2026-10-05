@@ -4,6 +4,8 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 import { useLive, vigil } from '../api';
 import { DecisionControls, type Decided } from '../components/Decision';
 import { NotebookSheet } from '../components/Notebook';
+import { PileBox } from '../components/Pile';
+import { pileUp } from '../../../shared/piles';
 import { useToast } from '../components/Toasts';
 import { toolRequestFields } from '../components/ToolRequestFields';
 import { Button, Card, Chip, SectionHead, SeverityMark, StatusMark } from '../components/ui';
@@ -79,14 +81,19 @@ export function AlertsView({
               </span>
             </div>
           )}
-          {list.map((a) => (
-            <AlertRow
-              key={a.id}
-              alert={a}
-              current={a.id === current}
-              onClick={() => go(`alerts/${a.id}`)}
-            />
-          ))}
+          {pileUp(list).map((r) => {
+            const a = r.kind === 'alert' ? r.alert : r.alerts[0]!;
+            const ids = r.kind === 'alert' ? [a.id] : r.alerts.map((x) => x.id);
+            return (
+              <AlertRow
+                key={a.id}
+                alert={a}
+                pile={r.kind === 'pile' ? `${r.who} · ${r.alerts.length} times` : undefined}
+                current={!!current && ids.includes(current)}
+                onClick={() => go(`alerts/${a.id}`)}
+              />
+            );
+          })}
         </div>
         <div className="split-detail">
           {current ? <AlertDetailView id={current} go={go} /> : null}
@@ -98,10 +105,13 @@ export function AlertsView({
 
 function AlertRow({
   alert,
+  pile,
   current,
   onClick,
 }: {
   alert: Alert;
+  /** For a pile's row: who and how many. */
+  pile?: string | undefined;
   current: boolean;
   onClick: () => void;
 }) {
@@ -113,6 +123,7 @@ function AlertRow({
         </span>
         <span className="row t-small">
           <SeverityMark severity={alert.severity} />
+          {pile && <span>· {pile}</span>}
           <span>· {timeAgo(alert.createdAt)}</span>
           {seenTimes(alert) && <Chip>{seenTimes(alert)}</Chip>}
           {alert.containment === 'active' && <Chip tone="good">Blocked</Chip>}
@@ -183,6 +194,12 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
               Reopen
             </Button>
           </div>
+        )}
+        {alert.status === 'open' && (
+          <PileBox
+            alert={alert}
+            onDone={(n) => toast({ text: `Closed ${n} ${n === 1 ? 'alert' : 'alerts'}` })}
+          />
         )}
       </Card>
 

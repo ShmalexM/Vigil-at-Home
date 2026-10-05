@@ -13,3 +13,6 @@ export * from './osquery/config.js';
 export * from './osquery/resultParser.js';
 export * from './osquery/burst.js';
 export * from './hub.js';
+export * from './osquery/linuxConfig.js';
+export * from './linux/packages.js';
+export * from './linux/hash.js';
