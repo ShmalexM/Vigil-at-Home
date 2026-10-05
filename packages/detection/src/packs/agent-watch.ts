@@ -423,7 +423,9 @@ export const agentWatchRules: DetectionRuleInput[] = [
       },
       { field: 'path', op: 'glob', value: ['~/.ssh/*.pub'] },
       // Codex (in the ChatGPT app) talks to OpenAI's own ChatGPT extension for Chrome
-      // through its storage (seen on a real Mac, 2026-10-02; listed by OpenAI).
+      // through its storage (seen on a real Mac, 2026-10-02; listed by OpenAI). It
+      // opens the folder itself as well as the files in it (seen 2026-10-05), and
+      // `/**` needs something after the slash, so the folder is listed too.
       {
         all: [
           { field: 'process.agent.id', op: 'in', value: ['codex', 'codex-app'] },
@@ -431,6 +433,7 @@ export const agentWatchRules: DetectionRuleInput[] = [
             field: 'path',
             op: 'glob',
             value: [
+              '~/Library/Application Support/Google/Chrome/*/Local Extension Settings/hehggadaopoacecdllhhajmbjkdcmajg',
               '~/Library/Application Support/Google/Chrome/*/Local Extension Settings/hehggadaopoacecdllhhajmbjkdcmajg/**',
             ],
           },
