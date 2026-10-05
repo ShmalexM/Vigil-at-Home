@@ -27,7 +27,9 @@ export interface Probe {
 }
 
 export const SANTA_SYNC_PORT = 47821;
-export const HELPER_SOCKET = '/var/run/vigil-helper.sock';
+/** The helper's socket: /var/run on macOS, /run on Linux (see the helper's config). */
+export const HELPER_SOCKET =
+  process.platform === 'linux' ? '/run/vigil-helper.sock' : '/var/run/vigil-helper.sock';
 const SANTACTL = '/usr/local/bin/santactl';
 const BIN_DIRS = (home: string) => [
   '/opt/homebrew/bin',

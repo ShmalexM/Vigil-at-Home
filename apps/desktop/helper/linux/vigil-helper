@@ -1,0 +1,3 @@
+#!/bin/sh
+# The Vigil helper: Node and the bundled helper, both root-owned.
+exec /usr/libexec/vigil-helper.d/node /usr/libexec/vigil-helper.d/helper.mjs "$@"
