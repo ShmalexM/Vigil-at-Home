@@ -33,3 +33,29 @@ jobs:
           # No Claude or Codex logins here, so the real-CLI plan usage test is safe to run.
           VIGIL_TEST_REAL_CLI_USAGE: '1'
       - run: pnpm --filter @vigil/desktop build
+
+  linux:
+    # Root-only Linux integration tests (nftables blocks, process signals). Each
+    # one is a *.integration.test.ts under a package's src/ and skips itself
+    # unless VIGIL_LINUX_INTEGRATION=1, so the plain test run above ignores it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      - name: Linux integration tests (root)
+        run: |
+          mapfile -t files < <(find apps packages -path '*/node_modules' -prune -o -path '*/src/*' -name '*.integration.test.ts' -print | sort)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No Linux integration tests yet."
+            exit 0
+          fi
+          printf 'Running %s\n' "${files[@]}"
+          command -v nft >/dev/null || sudo apt-get install -y nftables
+          sudo -E env "PATH=$PATH" VIGIL_LINUX_INTEGRATION=1 pnpm vitest run "${files[@]}"
