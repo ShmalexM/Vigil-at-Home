@@ -86,8 +86,11 @@ function isZombie(pid: number): boolean {
 const systemctl = (...args: string[]) => spawnSync('systemctl', args, { encoding: 'utf8' });
 
 describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'vigil-flow-'));
-  const paths = { ...linuxPaths(join(dir, 'state')), socket: join(dir, 'helper.sock') };
+  // Made in beforeAll: the body of a skipped describe still runs on every OS.
+  let dir = '';
+  let paths: ReturnType<typeof linuxPaths> = linuxPaths();
+  let evil = '';
+  let evilHash = '';
   const children: ChildProcess[] = [];
   const seen: Array<{ e: SensorEvent; ran: HelperRan[] }> = [];
   const logs: string[] = [];
@@ -95,15 +98,17 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
   let client: HelperClient | undefined;
   const fapolicyd = existsSync('/usr/sbin/fapolicyd');
 
-  // A copy of sleep with a few random bytes added: runs the same, but has a
-  // hash of its own, so blocking it never blocks the real sleep.
-  const evil = join(dir, 'evil-miner');
-  copyFileSync('/usr/bin/sleep', evil);
-  appendFileSync(evil, randomBytes(64));
-  spawnSync('chmod', ['755', evil]);
-  const evilHash = createHash('sha256').update(readFileSync(evil)).digest('hex');
-
   beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'vigil-flow-'));
+    paths = { ...linuxPaths(join(dir, 'state')), socket: join(dir, 'helper.sock') };
+    // A copy of sleep with a few random bytes added: runs the same, but has a
+    // hash of its own, so blocking it never blocks the real sleep.
+    evil = join(dir, 'evil-miner');
+    copyFileSync('/usr/bin/sleep', evil);
+    appendFileSync(evil, randomBytes(64));
+    spawnSync('chmod', ['755', evil]);
+    evilHash = createHash('sha256').update(readFileSync(evil)).digest('hex');
+
     expect(
       existsSync(LINUX_BINARIES.osqueryd),
       'osquery must be installed (setup installs it earlier in the same job)',
@@ -174,7 +179,7 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
     // Only put back what this test's helper changed: if it never started,
     // another test may be using the same nft table.
     if (!stop) {
-      rmSync(dir, { recursive: true, force: true });
+      if (dir) rmSync(dir, { recursive: true, force: true });
       return;
     }
     await stop();
