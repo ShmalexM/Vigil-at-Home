@@ -149,7 +149,7 @@ jobs:
         run: |
           node scripts/build-helper.mjs --arch arm64
           mkdir -p "$RUNNER_TEMP/Vigil at Home.app/Contents/Resources/helper"
-          cp build/helper/common/* build/helper/darwin-arm64/node \
+          cp -R build/helper/common/* build/helper/darwin-arm64/node \
             "$RUNNER_TEMP/Vigil at Home.app/Contents/Resources/helper/"
       - name: Install, check, uninstall
         run: |
