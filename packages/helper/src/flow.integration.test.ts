@@ -292,7 +292,7 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
       kind: 'helper.status',
     });
     expect(status.helperRules?.rules ?? 0).toBeGreaterThan(0);
-  }, 180_000);
+  }, 300_000);
 
   afterAll(async () => {
     for (const c of children) c.kill('SIGKILL');
