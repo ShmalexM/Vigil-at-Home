@@ -150,6 +150,37 @@ async function bpfProbe(): Promise<string> {
   return `${lines.slice(-25).join('\n')}\nprobe rows: ${results.split('\n').filter(Boolean).length}\n${results.slice(-1500)}`;
 }
 
+/**
+ * Why fapolicyd let a blocked program run: its state and rules, then
+ * whether it refuses the program after a while, or after a restart.
+ */
+async function fapolicydDiagnosis(program: string): Promise<string> {
+  const sh = (cmd: string) => {
+    const r = spawnSync('sh', ['-c', cmd], { encoding: 'utf8' });
+    return `${r.stdout}${r.stderr}`.trim() || '(nothing)';
+  };
+  const runs = () => spawnSync(program, ['0']).status === 0;
+  const out = [
+    'fapolicyd let the blocked program start',
+    `active: ${sh('systemctl is-active fapolicyd')}`,
+    `compiled rules:\n${sh('cut -c1-120 /etc/fapolicyd/compiled.rules')}`,
+    `loaded rules:\n${sh('fapolicyd-cli --list 2>&1 | cut -c1-120')}`,
+    `status:\n${sh('fapolicyd-cli --check-status 2>&1 | head -n 30')}`,
+    `watch_fs:\n${sh('fapolicyd-cli --check-watch_fs 2>&1 | tail -n 5')}`,
+    `mount: ${sh(`findmnt -no TARGET,FSTYPE -T ${program}`)}`,
+    `journal:\n${sh('journalctl -u fapolicyd --no-pager -n 25 2>&1')}`,
+  ];
+  const later = await waitUntil(() => !runs(), 30_000, 2000);
+  out.push(`refused within 30 s more: ${later}`);
+  if (!later) {
+    systemctl('restart', 'fapolicyd');
+    const restarted = await waitUntil(() => !runs(), 60_000, 2000);
+    out.push(`refused within 60 s of a restart: ${restarted}`);
+    out.push(`journal after restart:\n${sh('journalctl -u fapolicyd --no-pager -n 15 2>&1')}`);
+  }
+  return out.join('\n');
+}
+
 describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
   // Made in beforeAll: the body of a skipped describe still runs on every OS.
   let dir = '';
@@ -301,11 +332,12 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
     if (fapolicyd) {
       expect(status.fapolicyd?.lastError ?? null).toBeNull();
       const again = spawnSync(evil, ['0']);
-      expect(again.error ?? again.status, 'fapolicyd let the blocked program start').not.toBe(0);
+      const refused = again.error !== undefined || again.status !== 0;
+      expect(refused, refused ? '' : await fapolicydDiagnosis(evil)).toBe(true);
       // The real sleep, with a different hash, still runs.
       expect(spawnSync('/usr/bin/sleep', ['0']).status).toBe(0);
     }
-  }, 120_000);
+  }, 240_000);
 
   it('blocks a beacon to a command server, and the user can undo it', async () => {
     expect(await reachable(C2, 443)).toBe(true);
