@@ -19,7 +19,14 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { appendFileSync, copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import {
+  appendFileSync,
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -94,14 +101,53 @@ function osqueryDiagnosis(): string {
     `osqueryd journal:\n${sh('journalctl -u osqueryd --no-pager -n 30 2>/dev/null')}`,
     `launch rows logged: ${sh('grep -c vigil_process_events /var/log/osquery/osqueryd.results.log 2>/dev/null')}`,
     `last launch row:\n${sh('grep vigil_process_events /var/log/osquery/osqueryd.results.log 2>/dev/null | tail -n 1 | cut -c1-600')}`,
-    // A fresh osquery shell with the same eBPF flags: does it see launches at
-    // all, and what do its rows look like?
-    `osquery shell, eBPF:\n${sh(
-      `(sleep 8; /bin/true; sleep 4; echo "SELECT name, active, events, subscriptions FROM osquery_events WHERE name LIKE '%bpf%' OR publisher LIKE '%bpf%';"; ` +
-        `echo "SELECT syscall, exit_code, probe_error, path FROM bpf_process_events ORDER BY time DESC LIMIT 8;") | ` +
-        `${LINUX_BINARIES.osqueryd} -S --disable_events=false --enable_bpf_events=true --disable_extensions=true --database_path=/tmp/vigil-flow-osqueryi --verbose 2>&1 | grep -viE 'eventfactory|^I.*(extension|database|registry)' | tail -n 40; rm -rf /tmp/vigil-flow-osqueryi`,
-    )}`,
   ].join('\n');
+}
+
+/**
+ * A second osqueryd in the foreground with eBPF on, verbose, and one query
+ * of raw launch rows: shows whether eBPF launch events work on this machine
+ * at all, and what their rows look like.
+ */
+async function bpfProbe(): Promise<string> {
+  const d = mkdtempSync(join(tmpdir(), 'vigil-bpf-probe-'));
+  const query = 'SELECT syscall, exit_code, probe_error, path FROM bpf_process_events;';
+  writeFileSync(join(d, 'conf'), JSON.stringify({ schedule: { probe: { query, interval: 2 } } }));
+  const p = spawn(
+    LINUX_BINARIES.osqueryd,
+    [
+      `--pidfile=${join(d, 'pid')}`,
+      `--database_path=${join(d, 'db')}`,
+      `--logger_path=${d}`,
+      `--config_path=${join(d, 'conf')}`,
+      '--disable_extensions',
+      '--disable_watchdog',
+      '--disable_events=false',
+      '--enable_bpf_events=true',
+      '--disable_audit=true',
+      '--enable_file_events=false',
+      '--verbose',
+    ],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  let out = '';
+  p.stdout.on('data', (b: Buffer) => (out += b.toString()));
+  p.stderr.on('data', (b: Buffer) => (out += b.toString()));
+  await sleep(8000);
+  for (let i = 0; i < 3; i++) spawnSync('/bin/true');
+  await sleep(6000);
+  p.kill('SIGKILL');
+  let results: string;
+  try {
+    results = readFileSync(join(d, 'osqueryd.results.log'), 'utf8');
+  } catch {
+    results = '(no results log)';
+  }
+  rmSync(d, { recursive: true, force: true });
+  const lines = out
+    .split('\n')
+    .filter((l) => /bpf|publisher|error|fail|memlock/i.test(l) && !l.includes('scheduler.cpp'));
+  return `${lines.slice(-25).join('\n')}\nprobe rows: ${results.split('\n').filter(Boolean).length}\n${results.slice(-1500)}`;
 }
 
 describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
@@ -225,7 +271,7 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
     expect(
       killed,
       `still running; helper ran ${JSON.stringify(ran)}; launches seen: ${launchesSeen}\n` +
-        `${logs.join('\n')}\n${osqueryDiagnosis()}`,
+        `${logs.join('\n')}\n${osqueryDiagnosis()}\nosquery eBPF probe:\n${killed ? '' : await bpfProbe()}`,
     ).toBe(true);
     console.log(`launch to kill: ${Date.now() - t0} ms`);
     expect(ran?.map((r) => r.ruleId)).toContain('known-bad-hash');
@@ -243,7 +289,7 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
       // The real sleep, with a different hash, still runs.
       expect(spawnSync('/usr/bin/sleep', ['0']).status).toBe(0);
     }
-  }, 90_000);
+  }, 120_000);
 
   it('blocks a beacon to a command server, and the user can undo it', async () => {
     expect(await reachable(C2, 443)).toBe(true);
