@@ -25,6 +25,10 @@ export const OSQUERY_PATHS = [
   '/usr/local/bin/osqueryd',
   '/opt/homebrew/bin/osqueryd',
 ];
+/** Where osquery's Linux packages put osqueryd. */
+export const LINUX_OSQUERY_PATHS = ['/opt/osquery/bin/osqueryd', '/usr/bin/osqueryd'];
+/** fapolicyd, which blocks programs by hash on Linux, as Fedora and Debian install it. */
+export const FAPOLICYD_PATHS = ['/usr/sbin/fapolicyd', '/usr/bin/fapolicyd'];
 
 /** What helper.status reports about the sensors, when the helper has that (PR #14). */
 export interface HelperSensors {
@@ -41,14 +45,18 @@ export interface HealthProbe {
   /** The helper's own view; it can see files and logs the app can't. */
   helperSensors?(): Promise<HelperSensors | null>;
   now(): number;
+  /** Which OS's layers to check; defaults to macOS. */
+  platform?: NodeJS.Platform;
 }
 
 export function macProbe(
   lastEventAt: HealthProbe['lastEventAt'],
   helper: HealthProbe['helper'],
   helperSensors?: HealthProbe['helperSensors'],
+  platform: NodeJS.Platform = process.platform,
 ): HealthProbe {
   return {
+    platform,
     ...(helperSensors ? { helperSensors } : {}),
     exists: existsSync,
     running: (name) =>
@@ -117,6 +125,9 @@ export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
     return { ...base, state: 'ok' };
   };
 
+  if (p.platform === 'linux') {
+    return [await fapolicyd(p, helperState), await linuxOsquery(), helper];
+  }
   return [
     await sensor('santa', 'Santa', 'Blocks programs before they run', SANTA_PATHS, SANTA_PROCESSES),
     await sensor('osquery', 'osquery', 'Watches processes, files and network', OSQUERY_PATHS, [
@@ -124,6 +135,32 @@ export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
     ]),
     helper,
   ];
+
+  async function linuxOsquery(): Promise<SensorHealth> {
+    return sensor(
+      'osquery',
+      'osquery',
+      'Watches processes, files and network',
+      LINUX_OSQUERY_PATHS,
+      ['osqueryd'],
+    );
+  }
+}
+
+/**
+ * Linux: fapolicyd blocks a program by hash before it runs, from the deny
+ * rules the helper writes. It sends Vigil no events, so being installed and
+ * running is all there is to check.
+ */
+async function fapolicyd(p: HealthProbe, helperState: HelperState): Promise<SensorHealth> {
+  const base = { id: 'fapolicyd', name: 'fapolicyd', detail: 'Blocks programs before they run' };
+  if (!FAPOLICYD_PATHS.some((path) => p.exists(path))) return { ...base, state: 'not_installed' };
+  if (!(await p.running('fapolicyd')))
+    return { ...base, state: 'down', note: 'Installed, not running' };
+  if (helperState !== 'connected') {
+    return { ...base, state: 'degraded', note: 'Running; Vigil needs its helper to add blocks' };
+  }
+  return { ...base, state: 'ok' };
 }
 
 /** Re-check and report every layer. */

@@ -16,6 +16,7 @@ export type CheckId =
   | 'santa.running'
   | 'santa.profile'
   | 'osquery'
+  | 'fapolicyd'
   | 'helper'
   | 'ollama'
   | 'ollama.model'

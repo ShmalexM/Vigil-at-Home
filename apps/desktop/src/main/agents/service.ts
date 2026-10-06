@@ -81,7 +81,7 @@ import {
   type ToolsRequest,
 } from './endpoint.js';
 import { hookFiles, hookSnippet, mcpSnippet } from './hook-snippet.js';
-import { readProcessTable } from './ps.js';
+import { processTableReader } from './ps.js';
 import { VigilTools, type StatusFacts } from './tools.js';
 
 const KEY_PREFS = 'agents.prefs';
@@ -294,8 +294,7 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
   constructor(private readonly o: AgentServiceDeps) {
     super();
     this.now = o.now ?? Date.now;
-    this.readPs =
-      o.readPs ?? (process.platform === 'darwin' ? () => readProcessTable() : async () => []);
+    this.readPs = o.readPs ?? processTableReader();
     this.statInstall = o.statInstall ?? existsSync;
     this.home = o.home ?? homedir();
     this.log = o.log ?? ((msg) => console.warn(`[agents] ${msg}`));

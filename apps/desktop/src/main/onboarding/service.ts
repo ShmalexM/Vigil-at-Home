@@ -126,8 +126,14 @@ export class OnboardingService extends EventEmitter<{ changed: [] }> {
 
   async view(fresh = false): Promise<SetupView> {
     const mode = this.mode();
-    const supported = this.o.supported ?? process.platform === 'darwin';
-    const inputs = { localModel: localModelFor(totalmem()), ...this.o.plan?.() };
+    const supported =
+      this.o.supported ?? (process.platform === 'darwin' || process.platform === 'linux');
+    const inputs = {
+      // The probe says which computer it checks, so steps and checks agree.
+      ...(this.o.probe.platform ? { platform: this.o.probe.platform } : {}),
+      localModel: localModelFor(totalmem()),
+      ...this.o.plan?.(),
+    };
     // Before a mode is chosen, show everything so the choice screen can count steps.
     const defs = stepsFor(mode ?? 'both', inputs);
     const results = supported
@@ -174,7 +180,11 @@ export class OnboardingService extends EventEmitter<{ changed: [] }> {
           detail: codex.account ? `Signed in as ${codex.account}` : 'Signed in',
         };
       } else if (!supported) {
-        view = { ...base, state: 'unavailable', detail: 'Setup checks run on macOS only' };
+        view = {
+          ...base,
+          state: 'unavailable',
+          detail: 'Setup checks run on macOS and Linux only',
+        };
       } else if (r?.ok) {
         view = { ...base, state: 'done', ...(r.detail ? { detail: r.detail } : {}) };
       } else if ((d.after ?? []).some((id) => defs.some((x) => x.id === id) && !doneIds.has(id))) {

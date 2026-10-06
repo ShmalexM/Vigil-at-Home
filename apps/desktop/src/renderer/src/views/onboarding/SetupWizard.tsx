@@ -12,6 +12,7 @@ import {
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { SetupMode, SetupStepView, SetupView } from '../../../../shared/setup';
 import { useLive, vigil } from '../../api';
+import { computer } from '../../platform';
 import { PreflightSetup } from '../../components/PreflightSetup';
 import { Shield } from '../../components/Shield';
 import { useToast } from '../../components/Toasts';
@@ -35,8 +36,8 @@ const MODES: { id: SetupMode; icon: ReactNode; title: string; body: string; cost
   {
     id: 'local',
     icon: <Laptop size={20} />,
-    title: 'On this Mac only',
-    body: 'A small model on your Mac explains alerts and suggests rules. Nothing leaves your Mac, and it works offline.',
+    title: `On this ${computer} only`,
+    body: `A small model on your ${computer} explains alerts and suggests rules. Nothing leaves your ${computer}, and it works offline.`,
     cost: 'About 1 GB of disk. Uses memory only while it thinks.',
   },
   {
@@ -44,7 +45,7 @@ const MODES: { id: SetupMode; icon: ReactNode; title: string; body: string; cost
     icon: <Cloud size={20} />,
     title: 'Cloud AI',
     body: 'Your ChatGPT plan or an API key explains alerts, and your Claude plan can too when you ask. Vigil sends redacted event summaries only.',
-    cost: 'Lightest on your Mac. Uses a small share of your plan.',
+    cost: `Lightest on your ${computer}. Uses a small share of your plan.`,
   },
   {
     id: 'both',
@@ -138,14 +139,15 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
 
         {!view.supported && (
           <div className="attn fair">
-            Vigil can only check these steps on macOS. The commands are shown so you can read them.
+            Vigil can only check these steps on macOS and Linux. The commands are shown so you can
+            read them.
           </div>
         )}
 
         {stage === 'protection' && (
           <StepList
             title="Protection"
-            intro="These run on your Mac whichever way the AI runs, and they do the blocking. Paste each command into Terminal; Vigil checks for the result by itself. Nothing is installed until you run it."
+            intro={`These run on your ${computer} whichever way the AI runs, and they do the blocking. Paste each command into a terminal; Vigil checks for the result by itself. Nothing is installed until you run it.`}
             steps={steps('protection')}
             setView={setView}
             checking={checking}
@@ -233,9 +235,9 @@ function ChooseMode({
       <div className="col" style={{ gap: 6 }}>
         <h1 className="t-title">Add AI? (optional)</h1>
         <span>
-          Protection is already set: detection and blocking run on your Mac with fixed rules and
-          never wait for AI. AI only explains alerts and suggests new rules for you to approve. You
-          can skip it and add it later in Settings.
+          Protection is already set: detection and blocking run on your {computer} with fixed rules
+          and never wait for AI. AI only explains alerts and suggests new rules for you to approve.
+          You can skip it and add it later in Settings.
         </span>
       </div>
       <div
@@ -483,7 +485,7 @@ function Command({ label, cmd }: { label: string; cmd: string }) {
           aria-label={`Copy: ${label}`}
           onClick={async () => {
             await navigator.clipboard.writeText(cmd);
-            toast({ text: 'Copied. Paste it into Terminal.' });
+            toast({ text: 'Copied. Paste it into a terminal.' });
           }}
         >
           Copy

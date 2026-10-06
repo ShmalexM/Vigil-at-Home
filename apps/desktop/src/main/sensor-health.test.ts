@@ -77,4 +77,41 @@ describe('checkHealth', () => {
     expect(h['osquery']?.state).toBe('ok');
     expect(h['santa']?.state).toBe('not_installed');
   });
+
+  describe('on Linux', () => {
+    const linux = (over: Parameters<typeof probe>[0] = {}) =>
+      byId({ ...probe(over), platform: 'linux' });
+
+    it('checks fapolicyd, osquery and the helper, not Santa', async () => {
+      const h = await linux();
+      expect(Object.keys(h)).toEqual(['fapolicyd', 'osquery', 'helper']);
+      expect(h['fapolicyd']?.state).toBe('not_installed');
+      expect(h['osquery']?.state).toBe('not_installed');
+    });
+
+    it('finds osquery where its Linux packages put it', async () => {
+      const h = await linux({
+        installed: ['/opt/osquery/bin/osqueryd'],
+        procs: ['osqueryd'],
+        helper: () => 'connected' as const,
+        lastEventAt: () => 1_000_000_000 - 60_000,
+      });
+      expect(h['osquery']?.state).toBe('ok');
+    });
+
+    it('needs fapolicyd running and the helper connected to block', async () => {
+      const installed = ['/usr/sbin/fapolicyd'];
+      expect((await linux({ installed }))['fapolicyd']?.state).toBe('down');
+      expect((await linux({ installed, procs: ['fapolicyd'] }))['fapolicyd']).toMatchObject({
+        state: 'degraded',
+        note: 'Running; Vigil needs its helper to add blocks',
+      });
+      const ok = await linux({
+        installed,
+        procs: ['fapolicyd'],
+        helper: () => 'connected' as const,
+      });
+      expect(ok['fapolicyd']?.state).toBe('ok');
+    });
+  });
 });

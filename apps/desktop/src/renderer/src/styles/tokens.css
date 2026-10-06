@@ -39,9 +39,6 @@
   --ai-bg: rgb(167 139 250 / 13%);
   --scrim: rgb(0 0 0 / 62%);
   --shadow: rgb(0 0 0 / 55%);
-  --shield-red: #d92424;
-  --shield-black: #0c0a0e;
-  --shield-silver: #a9b0b8;
 }
 
 .theme-light {
@@ -80,9 +77,6 @@
   --ai-bg: rgb(109 63 217 / 9%);
   --scrim: rgb(11 15 25 / 38%);
   --shadow: rgb(11 15 25 / 18%);
-  --shield-red: #d92424;
-  --shield-black: #0c0a0e;
-  --shield-silver: #8a939e;
 }
 
 :root {
