@@ -104,18 +104,25 @@ export const catalog = (): CompiledAgentMatcher =>
  */
 export function agentTree(
   agentPath = CLAUDE_BIN,
-  opts: { args?: string[]; basePid?: number; tracker?: Partial<TrackerOptions> } = {},
+  opts: {
+    args?: string[];
+    basePid?: number;
+    tracker?: Partial<TrackerOptions>;
+    /** The root is a connector Vigil (`tracker.self`) started for the pack. */
+    connector?: boolean;
+  } = {},
 ) {
   const tracker = new AgentTracker({ matcher: catalog, ...opts.tracker });
   let next = opts.basePid ?? 60_000;
+  if (opts.connector) tracker.connectorStarted(next);
   const launch = (p: Partial<DetectionProcessRef> & { path: string }, ppid: number) =>
     tracker.observe(
       ev({ kind: 'process.exec', process: proc({ ...p, pid: next++, ppid }) }) as ExecEvent,
     );
   const root = launch(
     { path: agentPath, args: opts.args ?? ['claude'], signing: 'developer_id' },
-    // A shell in the user's terminal, which the tracker has not seen.
-    501,
+    // A shell in the user's terminal, which the tracker has not seen (or Vigil, for a connector).
+    opts.connector ? opts.tracker!.self!.pid : 501,
   );
   const exec = (
     path: string,

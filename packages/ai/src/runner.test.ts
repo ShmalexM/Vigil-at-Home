@@ -77,6 +77,9 @@ describe('runner', () => {
     expect(mayUsePlan({ purpose: 'explain' })).toBe(false);
     expect(mayUsePlan({ purpose: 'classify', requestedByUser: true })).toBe(false);
     expect(mayUsePlan({ purpose: 'analyze', requestedByUser: true })).toBe(false);
+    // The user's own message to the Lead dog may; a chat Vigil starts may not.
+    expect(mayUsePlan({ purpose: 'chat', requestedByUser: true })).toBe(true);
+    expect(mayUsePlan({ purpose: 'chat' })).toBe(false);
 
     const answer = () => ({
       kind: 'ok' as const,

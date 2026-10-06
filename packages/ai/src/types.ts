@@ -9,8 +9,9 @@ export const LOCAL_PROVIDERS: readonly ProviderId[] = ['ollama'];
 /**
  * "explain": the text behind a popup. "analyze": out-of-band work such as proposing rules.
  * "classify": labelling a batch of events a rule didn't already explain.
+ * "chat": the user talking with Vigil's Lead dog (the Pack page).
  */
-export type Purpose = 'explain' | 'analyze' | 'classify';
+export type Purpose = 'explain' | 'analyze' | 'classify' | 'chat';
 
 /** "now" runs immediately. "background" waits for quota headroom and may be skipped. */
 export type Urgency = 'now' | 'background';
@@ -42,8 +43,8 @@ export interface RunRequest<T> {
   readonly providers?: readonly ProviderId[];
   /**
    * The user asked for this run themselves (an "Explain with my Claude plan"
-   * button, Ask Vigil). Only such an explanation may use a Claude plan; see
-   * `mayUsePlan`.
+   * button, a message to the Lead dog). Only such an explanation or chat may
+   * use a Claude plan; see `mayUsePlan`.
    */
   readonly requestedByUser?: boolean;
 }
@@ -51,12 +52,16 @@ export interface RunRequest<T> {
 /**
  * Anthropic's terms bar apps from running their own work through a user's
  * Claude plan (Free, Pro or Max). So a plan serves only an explanation the user
- * asked for; automatic explanations, labelling and rule reviews never reach it.
+ * asked for, or the user's own message to the Lead dog; automatic
+ * explanations, labelling, rule reviews and pack dogs' jobs never reach it.
  */
 export function mayUsePlan(
   request: Pick<RunRequest<unknown>, 'purpose' | 'requestedByUser'>,
 ): boolean {
-  return request.requestedByUser === true && request.purpose === 'explain';
+  return (
+    request.requestedByUser === true &&
+    (request.purpose === 'explain' || request.purpose === 'chat')
+  );
 }
 
 export type RunFailureReason = 'quota' | 'timeout' | 'invalid_output' | 'no_provider' | 'error';

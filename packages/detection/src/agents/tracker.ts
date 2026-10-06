@@ -1,5 +1,5 @@
 import type { AgentIdentity, AgentTag, ProcessRef, SensorEvent } from '@vigil/core';
-import { VIGIL_SELF } from './catalog.js';
+import { VIGIL_CONNECTOR, VIGIL_SELF } from './catalog.js';
 import type { AgentProc, CompiledAgentMatcher } from './match.js';
 import type { PsRow } from './ps-table.js';
 import { sessionId } from './session-id.js';
@@ -70,6 +70,8 @@ const MAX_KEPT_ARGS = 1024;
 const SAME_START_MS = 2000;
 /** Session ids already reported, so a retag does not report them again. */
 const MAX_ANNOUNCED = 4096;
+/** Connector processes Vigil has started and not yet stopped. */
+const MAX_CONNECTORS = 64;
 /** Agent roots kept apart from the LRU, so a quiet agent is not forgotten while others run. */
 const MAX_KEPT_ROOTS = 256;
 /** Tagged processes recently evicted, so a `ps` seed can give them back their tag. */
@@ -254,6 +256,8 @@ export class AgentTracker {
   private readonly maxNodes: number;
   private readonly windows = new Map<number, ShellWindow>();
   private readonly announced = new Set<string>();
+  /** Pids of the connectors Vigil started: their trees are not Vigil's own. */
+  private readonly connectors = new Set<number>();
 
   constructor(private readonly opts: TrackerOptions) {
     this.maxNodes = opts.maxNodes ?? MAX_NODES;
@@ -416,6 +420,30 @@ export class AgentTracker {
     return n.tag ? { path: n.path, tag: n.tag } : { path: n.path };
   }
 
+  /**
+   * Vigil started a connector (a user's MCP server) as `pid`. Its tree is
+   * tagged `vigil-connector` from here on, in a session of its own, so agent
+   * rules watch it and nothing treats it as Vigil. Call before the launch
+   * event can arrive when possible; a process already seen is retagged.
+   */
+  connectorStarted(pid: number): void {
+    if (pid <= 1 || pid === this.self?.pid) return;
+    this.connectors.delete(pid);
+    this.connectors.add(pid);
+    if (this.connectors.size > MAX_CONNECTORS) {
+      this.connectors.delete(this.connectors.values().next().value!);
+    }
+    if (this.find(pid)) this.retag();
+  }
+
+  /**
+   * The connector was closed. A process Vigil already tagged keeps its tag;
+   * a new process that reuses the pid later is not a connector.
+   */
+  connectorStopped(pid: number): void {
+    this.connectors.delete(pid);
+  }
+
   size(): number {
     return this.nodes.size + this.keptRoots.size + (this.self ? 1 : 0);
   }
@@ -438,7 +466,8 @@ export class AgentTracker {
       // The same process running a new program (a shell's exec, a wrapper script).
       // It keeps its tag unless the new program is itself an agent.
       n = prev;
-      if (n.tag && n.tag.depth === 0 && n.tag.id !== VIGIL_SELF) n.wasAgent = n.tag.id;
+      if (n.tag && n.tag.depth === 0 && n.tag.id !== VIGIL_SELF && n.tag.id !== VIGIL_CONNECTOR)
+        n.wasAgent = n.tag.id;
       this.setProgram(n, p, m);
       delete n.psPath;
       n.seeded = false;
@@ -485,8 +514,28 @@ export class AgentTracker {
     identity: AgentIdentity | undefined,
     base: AgentTag | undefined,
   ): AgentTag | undefined {
+    // A connector Vigil started runs the user's program: a session of its own.
+    // Once tagged it stays a connector, even after Vigil stops tracking the pid.
+    if (base?.id === VIGIL_SELF && n.tag?.id === VIGIL_CONNECTOR && n.tag.depth === 0) return n.tag;
+    if (base?.id === VIGIL_SELF && base.depth === 1 && this.connectors.has(n.pid)) {
+      if (n.seeded) this.reuseStart(n, VIGIL_CONNECTOR);
+      const session = sessionId(VIGIL_CONNECTOR, n.pid, n.startedAt);
+      if (n.tag?.depth === 0 && n.tag.session === session) return n.tag;
+      this.announce({
+        id: session,
+        agentId: VIGIL_CONNECTOR,
+        rootPid: n.pid,
+        rootPath: n.path,
+        startedAt: n.startedAt,
+        seeded: n.seeded,
+        parentSession: base.session,
+      });
+      return { id: VIGIL_CONNECTOR, session, depth: 0 };
+    }
     // Vigil's own tree stays Vigil's: the claude and codex it runs are its helpers.
     if (base?.id === VIGIL_SELF) return base;
+    // A connector's tree stays the connector's, whatever it runs.
+    if (base?.id === VIGIL_CONNECTOR) return base;
     if (!identity?.watch || identity.status !== 'active' || identity.id === base?.id) return base;
     if (n.seeded) this.reuseStart(n, identity.id);
     const session = sessionId(identity.id, n.pid, n.startedAt);
@@ -515,7 +564,7 @@ export class AgentTracker {
   }
 
   private stillWatched(t: AgentTag | undefined, m: CompiledAgentMatcher): AgentTag | undefined {
-    if (!t || t.id === VIGIL_SELF) return t;
+    if (!t || t.id === VIGIL_SELF || t.id === VIGIL_CONNECTOR) return t;
     return m.byId(t.id)?.watch ? t : undefined;
   }
 

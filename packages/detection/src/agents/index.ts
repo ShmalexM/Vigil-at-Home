@@ -1,4 +1,4 @@
-export { AGENT_CATALOG, VIGIL_SELF, type CatalogEntry } from './catalog.js';
+export { AGENT_CATALOG, VIGIL_CONNECTOR, VIGIL_SELF, type CatalogEntry } from './catalog.js';
 export {
   AGENT_FIELD_PREFIXES,
   AI_EXCLUSION_DENY,
