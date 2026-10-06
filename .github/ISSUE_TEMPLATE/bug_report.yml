@@ -24,24 +24,25 @@ body:
     id: version
     attributes:
       label: Vigil version
-      description: Settings › About, or the DMG name.
+      description: Settings › About, or the name of the file you downloaded.
       placeholder: 0.1.0-alpha.2
     validations:
       required: true
   - type: dropdown
     id: chip
     attributes:
-      label: Mac
+      label: Computer
       options:
-        - Apple silicon
-        - Intel
+        - Mac with Apple silicon
+        - Intel Mac
+        - Linux (64-bit Intel or AMD)
     validations:
       required: true
   - type: input
     id: macos
     attributes:
-      label: macOS version
-      placeholder: '15.6'
+      label: macOS version or Linux distribution
+      placeholder: macOS 26.1, or Ubuntu 24.04
     validations:
       required: true
   - type: dropdown
@@ -57,5 +58,5 @@ body:
     id: logs
     attributes:
       label: Logs
-      description: Anything relevant from /Library/Logs/Vigil/helper.log. Check it for paths or names you'd rather not share before pasting.
+      description: Anything relevant from /Library/Logs/Vigil/helper.log on a Mac, or `journalctl -u vigil-helper` on Linux. Check it for paths or names you'd rather not share before pasting.
       render: text

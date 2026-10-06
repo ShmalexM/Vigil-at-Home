@@ -66,7 +66,7 @@ SOFTWARE.
 
 ## Shipped inside the app
 
-The DMG bundles these, each under its own license:
+The DMG, the .deb and the AppImage bundle these, each under its own license:
 
 | Component                                                                                             | License                                                                                                                                            |
 | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -81,11 +81,24 @@ The DMG bundles these, each under its own license:
 
 Vigil talks to these but does not bundle them. You install them yourself, under their own terms.
 
-| Component                                           | License or terms                                         |
-| --------------------------------------------------- | -------------------------------------------------------- |
-| [Santa](https://github.com/northpolesec/santa)      | Apache License 2.0                                       |
-| [osquery](https://github.com/osquery/osquery)       | Apache License 2.0 or GPL-2.0                            |
-| [Ollama](https://github.com/ollama/ollama)          | MIT                                                      |
-| Qwen 2.5 models (0.5B, 1.5B), pulled through Ollama | Apache License 2.0                                       |
-| Claude Code, OpenAI Codex CLI                       | Their vendors' terms; Vigil uses your own signed-in copy |
-| Jev (TypeSafe), OpenRouter                          | Hosted APIs under their providers' terms                 |
+| Component                                                                        | License or terms                                         |
+| -------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| [Santa](https://github.com/northpolesec/santa)                                   | Apache License 2.0                                       |
+| [osquery](https://github.com/osquery/osquery)                                    | Apache License 2.0 or GPL-2.0                            |
+| [fapolicyd](https://github.com/linux-application-whitelisting/fapolicyd) (Linux) | GPL-3.0                                                  |
+| [Ollama](https://github.com/ollama/ollama)                                       | MIT                                                      |
+| Qwen 2.5 models (0.5B, 1.5B), pulled through Ollama                              | Apache License 2.0                                       |
+| Claude Code, OpenAI Codex CLI                                                    | Their vendors' terms; Vigil uses your own signed-in copy |
+| Jev (TypeSafe), OpenRouter                                                       | Hosted APIs under their providers' terms                 |
+
+## Threat data
+
+Vigil downloads these lists at run time; they are not stored in this repository or shipped in the app.
+
+| Source                                                                                                                                                               | License |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| [abuse.ch](https://abuse.ch) feeds: [Feodo Tracker](https://feodotracker.abuse.ch/), [URLhaus](https://urlhaus.abuse.ch/), [MalwareBazaar](https://bazaar.abuse.ch/) | CC0     |
+
+## Original artwork
+
+The Scout logo, the menu-bar and tray icons, and the pack's dog drawings (`apps/desktop/resources`, `apps/desktop/src/renderer/src/components/Dog.tsx`) were made for this project and are licensed under Apache-2.0 with the rest of the code.
