@@ -5,6 +5,7 @@ import { vigil } from '../api';
 import { seenTimes, timeAgo } from '../format';
 import type { AlertView, WatchSummary } from '../../../shared/ipc';
 import { Segmented } from './ui';
+import { pileUp } from '../../../shared/piles';
 
 /** Proof Vigil is running, in one line. */
 export function WatchLine({ watch }: { watch: WatchSummary }) {
@@ -145,4 +146,47 @@ export function NoticedList({
       )}
     </section>
   );
+}
+
+/** What a Needs-you row shows: one alert, or a pile told as one thing. */
+export interface NeedsRowView {
+  /** The alert the row opens. */
+  id: string;
+  title: string;
+  severity: Alert['severity'];
+  at: number;
+  blocked: boolean;
+  /** For a pile: how many alerts, and the agent or program behind them. */
+  count?: number;
+  who?: string;
+}
+
+export function needsRows(alerts: readonly Alert[]): NeedsRowView[] {
+  return pileUp(alerts).map((r) => {
+    if (r.kind === 'alert') {
+      const a = r.alert;
+      return {
+        id: a.id,
+        title: a.title,
+        severity: a.severity,
+        at: a.createdAt,
+        blocked: a.containment === 'active',
+      };
+    }
+    const newest = r.alerts.reduce((x, y) => (y.createdAt > x.createdAt ? y : x));
+    return {
+      id: newest.id,
+      title: newest.title,
+      severity: newest.severity,
+      at: newest.createdAt,
+      blocked: false,
+      count: r.alerts.length,
+      who: r.who,
+    };
+  });
+}
+
+/** "Claude app · 194 times" for a pile. */
+export function pileLine(r: NeedsRowView): string | undefined {
+  return r.count ? `${r.who} · ${r.count} times` : undefined;
 }

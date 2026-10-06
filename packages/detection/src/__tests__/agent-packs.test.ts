@@ -742,6 +742,8 @@ describe('agent rule packs', () => {
     it("lets Codex open its own ChatGPT extension's storage, and no other extension's", () => {
       const ext = (id: string, profile = 'Default') =>
         `${home}/Library/Application Support/Google/Chrome/${profile}/Local Extension Settings/${id}/000003.log`;
+      const dir = (id: string) =>
+        `${home}/Library/Application Support/Google/Chrome/Default/Local Extension Settings/${id}`;
       const chatgpt = 'hehggadaopoacecdllhhajmbjkdcmajg';
       const metamask = 'nkbihfbeogaeaoehlefnkodbefgpgknn';
       const node = codex.exec(NODE, ['node', 'node_repl'], codex.root.process).process;
@@ -749,7 +751,10 @@ describe('agent rule packs', () => {
         const opened = (path: string) => fired(codex.observe(fileOpen(raw(p), path)));
         expect(opened(ext(chatgpt))).not.toContain('agent-secret-read');
         expect(opened(ext(chatgpt, 'Profile 2'))).not.toContain('agent-secret-read');
+        // The folder itself, as ChatGPT's cua_node opens it.
+        expect(opened(dir(chatgpt))).not.toContain('agent-secret-read');
         expect(opened(ext(metamask))).toContain('agent-secret-read');
+        expect(opened(dir(metamask))).toContain('agent-secret-read');
       }
       // Another agent opening ChatGPT's extension storage still counts.
       expect(fired(claude.observe(fileOpen(raw(claude.root.process), ext(chatgpt))))).toContain(

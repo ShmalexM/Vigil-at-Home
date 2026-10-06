@@ -1,20 +1,30 @@
-// The shield mark. Paths only; colours come from the --shield-* tokens.
-const OUTLINE = 'M20 0.8L38.8 7.4V33C38.8 42 30.5 48 20 51.2C9.5 48 1.2 42 1.2 33V7.4Z';
-const BLOCKS =
-  'M1.20 7.40L13.73 3.00L13.73 11.67L1.20 11.67ZM26.27 3.00L38.80 7.40L38.80 11.67L26.27 11.67ZM13.73 11.67L26.27 11.67L26.27 21.55L13.73 21.55ZM1.20 21.55L13.73 21.55L13.73 31.43L1.20 31.43ZM26.27 21.55L38.80 21.55L38.80 31.43L26.27 31.43ZM13.73 31.43L26.27 31.43L26.27 40.33L13.73 40.33ZM13.61 48.76L11.68 47.77L9.87 46.69L8.19 45.53L6.66 44.28L5.29 42.93L4.10 41.50L3.32 40.33L13.73 40.33L13.73 48.81ZM33.34 44.27L31.81 45.53L30.13 46.69L28.32 47.77L26.39 48.76L26.27 48.81L26.27 40.33L36.68 40.33L35.90 41.50L34.71 42.93Z';
+import { useId } from 'react';
+
+// The Vigil mark: a shield holding a vigil flame. Same drawing as resources/shield.svg.
+const SHIELD = 'M7 2H33Q38 2 38 7V22C38 33 30.5 41 20 46C9.5 41 2 33 2 22V7Q2 2 7 2Z';
+const FLAME =
+  'M20.5 8.5C22 13.5 27.8 17 27.8 24.6C27.8 29.6 24.2 33.6 20 33.6C15.8 33.6 12.2 29.6 12.2 25C12.2 21.4 14 18.8 16 17.2C16 19.8 17 21.7 18.7 22.6C18 17.8 18.6 12.3 20.5 8.5Z';
+const CORE =
+  'M20.2 20.6C22 23 23.8 24.8 23.8 27.6C23.8 29.9 22.1 31.4 20 31.4C17.9 31.4 16.2 29.9 16.2 27.8C16.2 25.4 18.4 23.4 20.2 20.6Z';
 
 export function Shield({ height = 22 }: { height?: number }) {
+  // Gradient ids must be unique per page, and the mark can appear more than once.
+  const id = useId();
   return (
-    <svg width={(height * 40) / 52} height={height} viewBox="0 0 40 52" aria-hidden="true">
-      <path d={OUTLINE} fill="var(--shield-black)" />
-      <path d={BLOCKS} fill="var(--shield-red)" />
-      <path
-        d={OUTLINE}
-        fill="none"
-        stroke="var(--shield-silver)"
-        strokeWidth="1.6"
-        strokeLinejoin="round"
-      />
+    <svg width={(height * 40) / 48} height={height} viewBox="0 0 40 48" aria-hidden="true">
+      <defs>
+        <linearGradient id={`${id}-body`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#4b9dff" />
+          <stop offset="1" stopColor="#1d4fc4" />
+        </linearGradient>
+        <linearGradient id={`${id}-flame`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#ffd45a" />
+          <stop offset="1" stopColor="#ff8a2a" />
+        </linearGradient>
+      </defs>
+      <path d={SHIELD} fill={`url(#${id}-body)`} />
+      <path d={FLAME} fill={`url(#${id}-flame)`} />
+      <path d={CORE} fill="#fff4cf" />
     </svg>
   );
 }

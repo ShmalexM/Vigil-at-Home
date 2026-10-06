@@ -29,6 +29,7 @@ import { PowerPolicy } from './power.js';
 import { HEALTH_CHECK_MS, macProbe, reportHealth, type HelperSensors } from './sensor-health.js';
 import { VigilCore } from './service.js';
 import { UpdateChecker } from './updates.js';
+import { wantsX11 } from './display.js';
 import { Windows } from './windows.js';
 
 app.setName('Vigil at Home');
@@ -55,6 +56,9 @@ const distro = thisDistro();
 // profile and drives it from the main process.
 const perf = !app.isPackaged && !!process.env['VIGIL_PERF'];
 if (perf && process.env['VIGIL_USER_DATA']) app.setPath('userData', process.env['VIGIL_USER_DATA']);
+
+if (wantsX11(process.platform, process.argv, process.env))
+  app.commandLine.appendSwitch('ozone-platform', 'x11');
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
