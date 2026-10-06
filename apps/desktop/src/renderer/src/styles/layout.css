@@ -23,6 +23,18 @@
 .brand {
   padding: 0 8px 6px;
   gap: 10px;
+  white-space: nowrap;
+}
+/* Shown while a newer Vigil is out, until it's installed; the banner's Later doesn't hide it. */
+.btn.update-pill {
+  flex-shrink: 0;
+  margin-left: auto;
+  border: 1px solid var(--ac-ln);
+  background: var(--ac-bg);
+  color: var(--ac);
+}
+.btn.update-pill svg {
+  flex-shrink: 0;
 }
 .nav-item {
   display: flex;

@@ -1,4 +1,4 @@
-import { CircleCheck, Power, Settings } from 'lucide-react';
+import { CircleCheck, Download, Power, Settings } from 'lucide-react';
 import { useLive, vigil } from '../api';
 import {
   NeedsYouLine,
@@ -17,6 +17,7 @@ import { isNoticed, needsDecision } from '../../../shared/attention';
 export function Popover() {
   const [status] = useLive(() => vigil.getStatus());
   const [alerts] = useLive(() => vigil.listAlerts('open'));
+  const [updates] = useLive(() => vigil.getUpdates());
   const needs = needsRows((alerts ?? []).filter(needsDecision));
   const noticed = (alerts ?? []).filter(isNoticed);
   const open = (id: string) => void vigil.openMain(`alerts/${id}`);
@@ -85,6 +86,16 @@ export function Popover() {
         <Button kind="primary" className="grow" onClick={() => void vigil.openMain('home')}>
           Open Vigil
         </Button>
+        {updates?.available && (
+          <Button
+            className="update-pill"
+            icon={<Download size={14} />}
+            title={`Download Vigil at Home ${updates.available.version}`}
+            onClick={() => void vigil.downloadUpdate()}
+          >
+            Update
+          </Button>
+        )}
         <IconButton label="Settings" onClick={() => void vigil.openMain('settings')}>
           <Settings size={16} />
         </IconButton>

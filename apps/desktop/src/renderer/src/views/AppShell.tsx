@@ -18,7 +18,7 @@ import { LEVEL_RULES } from '../../../shared/levels';
 import { useLive, vigil } from '../api';
 import { AskScout } from '../components/AskScout';
 import { Shield } from '../components/Shield';
-import { Button, LevelPill } from '../components/ui';
+import { Button, IconButton, LevelPill } from '../components/ui';
 import { ActivityView } from './Activity';
 import { AgentsView } from './Agents';
 import { AlertsView } from './Alerts';
@@ -108,6 +108,16 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
         <div className="row brand">
           <Shield height={22} />
           <span className="t-h3">Vigil at Home</span>
+          {updates?.available && (
+            <IconButton
+              size="sm"
+              className="btn icon-btn sm update-pill"
+              label={`Download Vigil at Home ${updates.available.version}`}
+              onClick={() => void vigil.downloadUpdate()}
+            >
+              <Download size={15} />
+            </IconButton>
+          )}
         </div>
         <nav className="col" style={{ gap: 2 }}>
           {NAV.map((n) => (
