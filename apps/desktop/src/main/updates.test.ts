@@ -42,8 +42,22 @@ describe('newest', () => {
 
   it('says nothing when this is the newest, and skips pre-releases on a full release', () => {
     expect(newest([release('0.1.0-alpha.2')], '0.1.0-alpha.2', 'arm64')).toBeUndefined();
-    expect(newest([release('0.2.0-alpha.1')], '0.1.0', 'arm64')).toBeUndefined();
+    expect(newest([release('0.2.0-alpha.1'), release('0.1.0')], '0.1.0', 'arm64')).toBeUndefined();
     expect(newest([release('0.1.1')], '0.1.0', 'arm64')?.version).toBe('0.1.1');
+  });
+
+  it('offers pre-releases to a full-release build while no full release is published', () => {
+    // What GitHub lists today: alpha.1 tagged without the v and no assets, and alpha.3.
+    const list = [
+      release('0.1.0-alpha.3'),
+      { ...release('0.1.0-alpha.1'), tag_name: '0.1.0-alpha.1', assets: [] },
+    ];
+    expect(newest(list, '0.0.1', 'arm64')).toMatchObject({
+      version: '0.1.0-alpha.3',
+      downloadUrl: expect.stringMatching(/0\.1\.0-alpha\.3-arm64\.dmg$/),
+    });
+    // A published full release ends that: pre-releases stay hidden on 0.0.1 again.
+    expect(newest([...list, release('0.0.2')], '0.0.1', 'arm64')?.version).toBe('0.0.2');
   });
 
   it('ignores links that are not github.com', () => {

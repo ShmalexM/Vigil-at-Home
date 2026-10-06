@@ -135,19 +135,26 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
   }
 }
 
-/** The newest release newer than `current`, or undefined. Pre-releases count only on a pre-release. */
+/**
+ * The newest release newer than `current`, or undefined. Pre-releases count on
+ * a pre-release, and on any build while no full release has been published yet
+ * (every Vigil release so far is an alpha, and local builds say 0.0.1).
+ */
 export function newest(
   raw: unknown[],
   current: string,
   arch: string,
 ): UpdateView['available'] | undefined {
-  const onPre = parseVersion(current)?.pre.length !== 0;
-  let best: { version: string; r: z.infer<typeof Release> } | undefined;
-  for (const item of raw) {
+  const releases = raw.flatMap((item) => {
     const p = Release.safeParse(item);
-    if (!p.success || p.data.draft) continue;
-    const r = p.data;
-    if (r.prerelease && !onPre) continue;
+    return p.success && !p.data.draft ? [p.data] : [];
+  });
+  const takePre =
+    parseVersion(current)?.pre.length !== 0 ||
+    !releases.some((r) => !r.prerelease && parseVersion(r.tag_name.replace(/^v/, '')));
+  let best: { version: string; r: z.infer<typeof Release> } | undefined;
+  for (const r of releases) {
+    if (r.prerelease && !takePre) continue;
     const version = r.tag_name.replace(/^v/, '');
     if (!parseVersion(version) || !isGitHub(r.html_url)) continue;
     if (compareVersions(version, current) <= 0) continue;
