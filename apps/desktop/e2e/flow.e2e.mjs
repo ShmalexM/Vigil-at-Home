@@ -69,10 +69,28 @@ const children = [];
 /** A copy of /bin/sleep under a new name: harmless, and killable or pausable. */
 function sleeper(name) {
   const path = join(STAND_IN_DIR, name);
-  if (!existsSync(path)) copyFileSync('/bin/sleep', path);
+  if (!existsSync(path)) {
+    copyFileSync('/bin/sleep', path);
+    // macOS 26 kills a copied platform binary run from elsewhere; an ad hoc
+    // signature makes the copy an ordinary program again. macOS 15 runs the
+    // plain copy but kills the re-signed one, so re-sign only when needed.
+    if (!runs(path)) {
+      execFileSync('codesign', ['-f', '-s', '-', path], { stdio: 'ignore' });
+      if (!runs(path)) throw new Error(`stand-in ${name} will not run, even re-signed`);
+    }
+  }
   const child = spawn(path, ['900'], { stdio: 'ignore' });
   children.push(child);
   return child;
+}
+
+function runs(path) {
+  try {
+    execFileSync(path, ['0'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** A copy of Node under a new name, running a tiny script. */
