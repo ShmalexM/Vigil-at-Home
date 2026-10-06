@@ -392,7 +392,10 @@ describe('fapolicyd blocks', () => {
     const file = join(root, 'etc', 'fapolicyd', 'rules.d', VIGIL_RULES_FILE);
     expect(readFileSync(file, 'utf8')).toContain(`sha256hash=${SHA}`);
     expect(statSync(file).mode & 0o777).toBe(0o644);
-    expect(sys.runs.map((r) => `${r.bin} ${r.args.join(' ')}`)).toEqual(['fagenrules --load']);
+    expect(sys.runs.map((r) => `${r.bin} ${r.args.join(' ')}`)).toEqual([
+      'fagenrules --load',
+      'systemctl try-restart fapolicyd',
+    ]);
 
     expect(await reloaded.unblock(SHA)).toBe(true);
     expect(existsSync(file)).toBe(false);

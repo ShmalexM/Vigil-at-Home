@@ -5,7 +5,10 @@
 //   "block this program" (santa.rule.set, binary, sha256)
 //     ─► blocks.json (the helper's list)
 //     ─► /etc/fapolicyd/rules.d/05-vigil.rules: deny_audit perm=execute all : sha256hash=<hex>
-//     ─► fagenrules --load (compiles rules.d and tells fapolicyd to reload)
+//     ─► fagenrules --load (compiles rules.d into compiled.rules)
+//     ─► systemctl try-restart fapolicyd (a reload on SIGHUP lists the new
+//        rule but, in fapolicyd 1.3, never matches a sha256hash with it; a
+//        fresh start does, and takes a second with setup's trust = file)
 //
 // The file holds nothing but deny lines built from validated hashes, and it
 // sorts ahead of the distribution's own rules, so it can only ever add a
@@ -132,8 +135,15 @@ export class FapolicydBlocks {
       renameSync(file + '.tmp', file);
     }
     const r = await this.sys.run('fagenrules', ['--load'], { timeoutMs: 60_000 });
-    this.lastError = r.code === 0 ? null : r.stderr.trim() || `fagenrules exited with ${r.code}`;
-    return r.code === 0;
+    if (r.code !== 0) {
+      this.lastError = r.stderr.trim() || `fagenrules exited with ${r.code}`;
+      return false;
+    }
+    // Only if it runs: a stopped fapolicyd reads the rules when it starts.
+    const s = await this.sys.run('systemctl', ['try-restart', 'fapolicyd'], { timeoutMs: 60_000 });
+    this.lastError =
+      s.code === 0 ? null : s.stderr.trim() || `restarting fapolicyd exited with ${s.code}`;
+    return s.code === 0;
   }
 
   private save(): void {

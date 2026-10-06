@@ -50,6 +50,7 @@ export class FakeLinuxSystem implements System {
             return ok();
           case 'daemon-reload':
           case 'restart':
+          case 'try-restart':
             return ok();
           case 'enable':
           case 'disable':
