@@ -85,6 +85,18 @@ function isZombie(pid: number): boolean {
 
 const systemctl = (...args: string[]) => spawnSync('systemctl', args, { encoding: 'utf8' });
 
+/** What osquery itself said, for a failure message: is eBPF up, are launches logged? */
+function osqueryDiagnosis(): string {
+  const sh = (cmd: string) =>
+    spawnSync('sh', ['-c', cmd], { encoding: 'utf8' }).stdout.trim() || '(nothing)';
+  return [
+    `osquery about eBPF:\n${sh("grep -ih 'bpf' /var/log/osquery/osqueryd.* 2>/dev/null | tail -n 20")}`,
+    `osqueryd journal:\n${sh('journalctl -u osqueryd --no-pager -n 30 2>/dev/null')}`,
+    `launch rows logged: ${sh('grep -c vigil_process_events /var/log/osquery/osqueryd.results.log 2>/dev/null')}`,
+    `last launch row:\n${sh('grep vigil_process_events /var/log/osquery/osqueryd.results.log 2>/dev/null | tail -n 1 | cut -c1-600')}`,
+  ].join('\n');
+}
+
 describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
   // Made in beforeAll: the body of a skipped describe still runs on every OS.
   let dir = '';
@@ -93,6 +105,7 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
   let evilHash = '';
   const children: ChildProcess[] = [];
   const seen: Array<{ e: SensorEvent; ran: HelperRan[] }> = [];
+  let launchesSeen = 0;
   const logs: string[] = [];
   let stop: (() => Promise<void>) | undefined;
   let client: HelperClient | undefined;
@@ -153,6 +166,7 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
     }
     // Only to see what happened; the helper blocks whether or not anyone listens.
     client.onEvent((e, ran) => {
+      if (e.kind === 'process.exec') launchesSeen++;
       if (ran.length) seen.push({ e, ran });
     });
     await client.subscribe();
@@ -201,9 +215,11 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
     // osquery's process events arrive every 5 seconds.
     const killed = await waitUntil(() => !alive(pid), 60_000);
     const ran = seen.find((s) => s.e.kind === 'process.exec' && s.e.process.pid === pid)?.ran;
-    expect(killed, `still running; helper ran ${JSON.stringify(ran)}\n${logs.join('\n')}`).toBe(
-      true,
-    );
+    expect(
+      killed,
+      `still running; helper ran ${JSON.stringify(ran)}; launches seen: ${launchesSeen}\n` +
+        `${logs.join('\n')}\n${osqueryDiagnosis()}`,
+    ).toBe(true);
     console.log(`launch to kill: ${Date.now() - t0} ms`);
     expect(ran?.map((r) => r.ruleId)).toContain('known-bad-hash');
     expect(ran?.find((r) => r.action.kind === 'process.kill')?.error).toBeUndefined();
