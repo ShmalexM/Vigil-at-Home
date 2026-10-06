@@ -32,13 +32,6 @@
   min-width: 260px;
 }
 
-/* Two columns of conversation and dogs use a wide window instead of stopping short of it. */
-.page.pack {
-  max-width: 1440px;
-}
-.content:has(.page.pack) .setup-banner {
-  max-width: 1384px;
-}
 .pack-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr);
@@ -404,16 +397,15 @@
   padding: 24px;
 }
 .dog-editor {
-  width: min(780px, 100%);
+  width: min(680px, 100%);
   max-height: calc(100vh - 48px);
   overflow-y: auto;
   box-shadow: 0 20px 60px var(--shadow);
 }
-/* One row of breeds, so the job and its tools fit on screen with it. */
 .breed-picker {
   display: grid;
-  grid-template-columns: repeat(8, minmax(0, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
 }
 .breed {
   display: flex;
@@ -422,7 +414,6 @@
   gap: 0;
   padding: 0 4px 8px;
   overflow: hidden;
-  text-align: center;
   border: 1px solid var(--ln0);
   border-radius: 12px;
   background: var(--bg2);
@@ -441,7 +432,7 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
-  max-height: clamp(220px, calc(100vh - 610px), 440px);
+  max-height: 220px;
   overflow-y: auto;
   border: 1px solid var(--ln0);
   border-radius: 10px;

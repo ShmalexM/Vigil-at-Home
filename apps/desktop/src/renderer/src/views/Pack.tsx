@@ -859,7 +859,7 @@ function DogEditor({
               onClick={() => setBreed(b.id)}
               title={b.blurb}
             >
-              <Dog breed={b.id} mood={breed === b.id ? 'done' : 'idle'} size={72} />
+              <Dog breed={b.id} mood={breed === b.id ? 'done' : 'idle'} size={104} />
               <span className="t-small">{b.name}</span>
             </button>
           ))}
