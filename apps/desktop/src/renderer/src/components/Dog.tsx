@@ -67,14 +67,15 @@ const LOOKS: Record<Breed, Look> = {
     snout: 13,
   },
   husky: {
-    coat: '#5f6c79',
-    shade: '#47525d',
-    light: '#f3f2ee',
+    // Black and white with blue eyes, like the logo's Scout.
+    coat: '#26252a',
+    shade: '#18171b',
+    light: '#f6f5f1',
     mask: true,
     ear: 'pointy',
     tail: 'curl',
-    tailTip: '#f3f2ee',
-    eye: '#4fb3f0',
+    tailTip: '#f6f5f1',
+    eye: '#8ed1f7',
     legH: 22,
     bodyW: 48,
     bodyH: 24,
@@ -151,9 +152,9 @@ const LOOKS: Record<Breed, Look> = {
 };
 
 export const BREEDS: readonly { id: Breed; name: string; blurb: string }[] = [
-  { id: 'shepherd', name: 'German Shepherd', blurb: 'Steady, watchful, leads well' },
+  { id: 'husky', name: 'Husky', blurb: 'Tireless and watchful, leads well' },
+  { id: 'shepherd', name: 'German Shepherd', blurb: 'Steady, loyal, guards the yard' },
   { id: 'doberman', name: 'Doberman', blurb: 'Alert guard, quick to spot trouble' },
-  { id: 'husky', name: 'Husky', blurb: 'Tireless, happy to run all night' },
   { id: 'golden', name: 'Golden Retriever', blurb: 'Fetches anything you ask for' },
   { id: 'beagle', name: 'Beagle', blurb: 'Follows a scent through the logs' },
   { id: 'corgi', name: 'Corgi', blurb: 'Small legs, big opinions' },
@@ -370,6 +371,7 @@ export function Dog({
             strokeLinecap="round"
           />
           <g className="dog-eye" style={{ transformOrigin: `${eyeX}px ${eyeY}px` }}>
+            {L.mask && <circle cx={eyeX} cy={eyeY} r={eyeR + 1.5} fill={L.coat} />}
             {L.eye && <circle cx={eyeX} cy={eyeY} r={eyeR + 0.7} fill={L.eye} />}
             <circle cx={eyeX} cy={eyeY} r={eyeR} fill={NOSE} />
             <circle cx={eyeX + eyeR * 0.35} cy={eyeY - eyeR * 0.4} r={eyeR * 0.35} fill="#fff" />

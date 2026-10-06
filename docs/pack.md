@@ -176,7 +176,7 @@ A connector runs your program, not Vigil's. Vigil tells Agent watch the server's
 
 ## Animations
 
-The dogs are original SVG drawings built from shapes in `components/Dog.tsx`: shepherd, doberman, husky, golden retriever, beagle, corgi, dachshund and chihuahua. Moods come from real work:
+The dogs are original SVG drawings built from shapes in `components/Dog.tsx`: husky (Scout, the Lead dog, by default), shepherd, doberman, golden retriever, beagle, corgi, dachshund and chihuahua. Moods come from real work:
 
 | Mood     | When                            | Animation                                 |
 | -------- | ------------------------------- | ----------------------------------------- |
