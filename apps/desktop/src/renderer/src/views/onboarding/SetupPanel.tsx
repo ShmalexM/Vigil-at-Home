@@ -2,6 +2,7 @@ import { RefreshCw, SquareTerminal, Wrench } from 'lucide-react';
 import { useState } from 'react';
 import type { SetupMode } from '../../../../shared/setup';
 import { vigil } from '../../api';
+import { computer } from '../../platform';
 import { Button, Card, SectionHead, Segmented } from '../../components/ui';
 import { ApiKeys } from './ApiKeys';
 import { StepCard, useSetupPolling, useSetupView } from './SetupWizard';
@@ -28,14 +29,14 @@ export function SetupPanel() {
       <Card>
         <SectionHead
           title="Where the AI runs"
-          sub="Detection and blocking always run on this Mac. This only changes what explains alerts and suggests rules."
+          sub={`Detection and blocking always run on this ${computer}. This only changes what explains alerts and suggests rules.`}
           right={
             <Segmented<SetupMode>
               label="Where the AI runs"
               value={view.mode ?? 'both'}
               onChange={async (m) => setView(await vigil.setSetupMode(m))}
               options={[
-                { value: 'local', label: 'This Mac' },
+                { value: 'local', label: `This ${computer}` },
                 { value: 'cloud', label: 'Cloud' },
                 { value: 'both', label: 'Both' },
               ]}
@@ -46,7 +47,7 @@ export function SetupPanel() {
       <Card>
         <SectionHead
           title="Setup"
-          sub="What’s installed and connected, checked live. Paste a command into Terminal and its step turns green by itself."
+          sub="What’s installed and connected, checked live. Paste a command into a terminal and its step turns green by itself."
           right={
             <>
               <Button

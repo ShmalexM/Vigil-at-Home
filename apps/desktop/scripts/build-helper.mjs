@@ -2,12 +2,14 @@
 //   build/helper/common/        helper.mjs (the helper, bundled), the launchd job,
 //                               the install/uninstall scripts and the vigil-helper launcher,
 //                               and vigil-hook.mjs (the Claude Code pre-flight hook, bundled)
-//   build/helper/darwin-<arch>/ node, Node.js's own signed and notarized macOS binary
+//                               and linux/ (the systemd unit, polkit policy and Linux scripts)
+//   build/helper/<os>-<arch>/   node, Node.js's own binary for that OS and chip
+//                               (signed and notarized on macOS)
 //   build/helper/dev-<arch>/    both together, which a development build installs from
-// electron-builder copies common and darwin-<arch> into Contents/Resources/helper.
+// electron-builder copies common and <os>-<arch> into the app's resources/helper.
 //
-// Usage: node scripts/build-helper.mjs [--arch arm64,x64] [--skip-node] [--dev]
-//   --dev builds for this Mac only, and only bundles the helper elsewhere.
+// Usage: node scripts/build-helper.mjs [--os darwin|linux] [--arch arm64,x64] [--skip-node] [--dev]
+//   --os defaults to this machine's. --dev builds for this machine only.
 
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -37,7 +39,15 @@ const args = process.argv.slice(2);
 const dev = args.includes('--dev');
 const archArg = args.includes('--arch') ? args[args.indexOf('--arch') + 1] : 'arm64,x64';
 const arches = dev ? [process.arch] : archArg.split(',').filter(Boolean);
-const skipNode = args.includes('--skip-node') || (dev && process.platform !== 'darwin');
+const os = args.includes('--os')
+  ? args[args.indexOf('--os') + 1]
+  : process.platform === 'linux'
+    ? 'linux'
+    : 'darwin';
+if (os !== 'darwin' && os !== 'linux') throw new Error(`--os must be darwin or linux, not ${os}`);
+const skipNode =
+  args.includes('--skip-node') ||
+  (dev && process.platform !== 'darwin' && process.platform !== 'linux');
 
 async function bundle() {
   const common = join(out, 'common');
@@ -64,8 +74,21 @@ async function bundle() {
     join(repo, 'packages/helper/launchd/com.vigilathome.helper.plist'),
     join(common, 'com.vigilathome.helper.plist'),
   );
+  mkdirSync(join(common, 'linux'));
+  for (const f of LINUX_FILES) {
+    copyFileSync(join(app, 'helper', 'linux', f), join(common, 'linux', f));
+    chmodSync(join(common, 'linux', f), f.includes('.') && !f.endsWith('.sh') ? 0o644 : 0o755);
+  }
   console.log(`helper and pre-flight hook bundled to ${common}`);
 }
+
+const LINUX_FILES = [
+  'install.sh',
+  'uninstall.sh',
+  'vigil-helper',
+  'vigil-helper.service',
+  'com.vigilathome.helper.policy',
+];
 
 async function fetchOk(url) {
   const res = await fetch(url);
@@ -74,9 +97,9 @@ async function fetchOk(url) {
 }
 
 async function node(arch) {
-  const dir = join(out, `darwin-${arch}`);
+  const dir = join(out, `${os}-${arch}`);
   const target = join(dir, 'node');
-  const name = `node-${HELPER_NODE_VERSION}-darwin-${arch}`;
+  const name = `node-${HELPER_NODE_VERSION}-${os}-${arch}`;
   const stamp = join(dir, 'VERSION');
   if (existsSync(target) && existsSync(stamp) && readFileSync(stamp, 'utf8') === name) {
     console.log(`${name} already present`);
@@ -111,7 +134,7 @@ function devDir(arch) {
   const dir = join(out, `dev-${arch}`);
   rmSync(dir, { recursive: true, force: true });
   cpSync(join(out, 'common'), dir, { recursive: true });
-  copyFileSync(join(out, `darwin-${arch}`, 'node'), join(dir, 'node'));
+  copyFileSync(join(out, `${os}-${arch}`, 'node'), join(dir, 'node'));
   chmodSync(join(dir, 'node'), 0o755);
   console.log(`development helper ready in ${dir}`);
 }

@@ -126,7 +126,7 @@ jobs:
           node scripts/build-helper.mjs --arch arm64
           h="$RUNNER_TEMP/Vigil at Home.app/Contents/Resources/helper"
           mkdir -p "$h"
-          cp build/helper/common/* build/helper/darwin-arm64/node "$h/"
+          cp -R build/helper/common/* build/helper/darwin-arm64/node "$h/"
           sudo "$h/install.sh"
           test -S /var/run/vigil-helper.sock
           # Let osquery finish its first (baseline) run before the test.

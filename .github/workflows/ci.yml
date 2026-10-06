@@ -58,4 +58,9 @@ jobs:
           fi
           printf 'Running %s\n' "${files[@]}"
           command -v nft >/dev/null || sudo apt-get install -y nftables
-          sudo -E env "PATH=$PATH" VIGIL_LINUX_INTEGRATION=1 pnpm vitest run "${files[@]}"
+          # One file at a time, in the sorted order above (Vitest would reorder
+          # them): they install packages and start and stop the same system
+          # services, so they must not overlap.
+          for f in "${files[@]}"; do
+            sudo -E env "PATH=$PATH" VIGIL_LINUX_INTEGRATION=1 pnpm vitest run "$f"
+          done
