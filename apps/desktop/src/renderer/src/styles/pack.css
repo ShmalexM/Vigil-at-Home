@@ -59,6 +59,10 @@
   border-bottom: 1px solid var(--ln0);
   background: radial-gradient(120px 70px at 70px 88%, var(--ac-bg), transparent 70%), transparent;
 }
+.lead-actions {
+  flex-wrap: wrap;
+  gap: 4px;
+}
 .lead-dog {
   flex-shrink: 0;
   margin: -22px -14px -6px -18px;
@@ -376,6 +380,7 @@
   align-items: baseline;
 }
 .dog-actions {
+  flex-wrap: wrap;
   gap: 4px;
   margin-top: auto;
 }
@@ -506,6 +511,11 @@
 
 .approval-card .btn {
   white-space: nowrap;
+}
+/* Its own width: .col may shrink to nothing, which squeezed "Allow once" out of its button. */
+.approval-actions {
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 /* ---------------------------------------------------------------- notebooks */
