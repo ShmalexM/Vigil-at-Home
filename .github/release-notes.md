@@ -14,6 +14,13 @@ Not sure which you have? Apple menu > About This Mac: "Chip: Apple M..." means A
 
 You only do steps 2 and 3 once. Building from source skips them; see the README.
 
+## Linux
+
+- **Debian, Ubuntu and their relatives**: `sudo apt install ./Vigil-at-Home-<version>-amd64.deb`, then open Vigil at Home from your apps.
+- **Other distributions**: download `Vigil-at-Home-<version>-x86_64.AppImage`, make it executable (`chmod +x`) and run it.
+
+Setup in the app installs osquery, fapolicyd and the Vigil helper, asking for your password through your desktop's own dialog. On GNOME, the shield shows in the top bar once the AppIndicator extension is on (Ubuntu has it on already). Linux builds are for 64-bit Intel and AMD computers for now.
+
 ## What works in this build
 
 See the README's status section. Until the sensors and the Vigil helper are installed, blocks are simulated and labelled that way in the app.

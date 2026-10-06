@@ -1,8 +1,9 @@
 name: Release
 
-# Builds the Mac app for Apple silicon and Intel. Pushing a tag like v0.1.0, or
-# running it by hand with a version, creates a draft GitHub release with the
-# DMGs attached; a maintainer publishes it. Versions with a hyphen
+# Builds the Mac app for Apple silicon and Intel, and the Linux app as a .deb
+# and an AppImage. Pushing a tag like v0.1.0, or running it by hand with a
+# version, creates a draft GitHub release with them attached; a maintainer
+# publishes it. Versions with a hyphen
 # (0.1.0-alpha.1) are marked as pre-releases. Running it by hand without a
 # version only uploads the build as a workflow artifact.
 #
@@ -43,6 +44,8 @@ jobs:
   mac:
     runs-on: macos-latest
     timeout-minutes: 45
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -134,12 +137,92 @@ jobs:
             apps/desktop/dist/*.dmg
             apps/desktop/dist/*.zip
 
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Set the app version
+        env:
+          INPUT: ${{ inputs.version }}
+        working-directory: apps/desktop
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF_NAME#v}"; else v="${INPUT#v}"; fi
+          if [[ -n "$v" ]]; then npm pkg set version="$v"; fi
+
+      - name: Build and package
+        working-directory: apps/desktop
+        run: |
+          pnpm build
+          node scripts/build-helper.mjs --os linux --arch x64
+          pnpm exec electron-builder --linux --publish never
+
+      - name: Check the package carries the helper
+        working-directory: apps/desktop/dist
+        run: |
+          h=linux-unpacked/resources/helper
+          for f in node helper.mjs linux/install.sh linux/uninstall.sh linux/vigil-helper \
+            linux/vigil-helper.service linux/com.vigilathome.helper.policy; do
+            test -f "$h/$f" || { echo "Missing $h/$f"; exit 1; }
+          done
+          file "$h/node" | grep -q 'x86-64' || { file "$h/node"; exit 1; }
+
+      # Install the .deb as a user would, set up the helper from the installed
+      # copy, and check the app starts and stays running.
+      - name: Install the .deb and its helper
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q xvfb ./apps/desktop/dist/*.deb
+          sudo sh "/opt/Vigil at Home/resources/helper/linux/install.sh"
+          systemctl is-active vigil-helper
+          test -S /run/vigil-helper.sock
+
+      - name: Check the installed app starts
+        run: |
+          log="$RUNNER_TEMP/launch.log"
+          xvfb-run -a vigil-at-home > "$log" 2>&1 &
+          pid=$!
+          sleep 30
+          alive=yes; kill -0 "$pid" 2>/dev/null || alive=no
+          kill "$pid" 2>/dev/null || true
+          cat "$log"
+          test "$alive" = yes || { echo "The app quit during startup"; exit 1; }
+          if grep -Eq 'could not start|UnhandledPromiseRejection|Failed to load image' "$log"; then
+            echo "The app reported a startup error"; exit 1
+          fi
+
+      - name: Remove the helper
+        if: always()
+        run: sudo sh "/opt/Vigil at Home/resources/helper/linux/uninstall.sh" || true
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vigil-at-home-linux
+          path: |
+            apps/desktop/dist/*.deb
+            apps/desktop/dist/*.AppImage
+
+  release:
+    needs: [mac, linux]
+    if: needs.mac.outputs.version != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
       - name: Draft a GitHub release
-        if: steps.version.outputs.version != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.mac.outputs.version }}
         run: |
           flags=(--draft --target "$GITHUB_SHA" --title "Vigil at Home $VERSION" --notes-file .github/release-notes.md)
           [[ "$VERSION" == *-* ]] && flags+=(--prerelease)
-          gh release create "v$VERSION" "${flags[@]}" apps/desktop/dist/*.dmg apps/desktop/dist/*.zip
+          gh release create "v$VERSION" "${flags[@]}" dist/*.dmg dist/*.zip dist/*.deb dist/*.AppImage
