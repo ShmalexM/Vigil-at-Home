@@ -1,9 +1,10 @@
 name: Release
 
 # Builds the Mac app for Apple silicon and Intel, and the Linux app as a .deb
-# and an AppImage. Pushing a tag like v0.1.0, or running it by hand with a
-# version, creates a draft GitHub release with them attached; a maintainer
-# publishes it. Versions with a hyphen
+# and an AppImage. Running it by hand with a version creates a draft GitHub
+# release with them attached; a maintainer publishes it. It does not run on tag
+# pushes: publishing a draft creates its tag, and a tag trigger would build again
+# and leave a second draft. Versions with a hyphen
 # (0.1.0-alpha.1) are marked as pre-releases. Running it by hand without a
 # version only uploads the build as a workflow artifact.
 #
@@ -15,8 +16,6 @@ name: Release
 #   APPLE_API_KEY_ID, APPLE_API_ISSUER
 
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
     inputs:
       version:
@@ -35,7 +34,7 @@ permissions:
   contents: write
 
 # Hosted Mac runners are scarce, so a newer push to the same pull request
-# replaces the older build. Tag and hand-started builds always finish.
+# replaces the older build. Hand-started builds always finish.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -61,7 +60,7 @@ jobs:
         env:
           INPUT: ${{ inputs.version }}
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF_NAME#v}"; else v="${INPUT#v}"; fi
+          v="${INPUT#v}"
           if [[ -n "$v" && ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
             echo "Not a version: $v" >&2; exit 1
           fi
@@ -153,7 +152,7 @@ jobs:
           INPUT: ${{ inputs.version }}
         working-directory: apps/desktop
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then v="${GITHUB_REF_NAME#v}"; else v="${INPUT#v}"; fi
+          v="${INPUT#v}"
           if [[ -n "$v" ]]; then npm pkg set version="$v"; fi
 
       - name: Build and package
@@ -223,6 +222,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.mac.outputs.version }}
         run: |
+          # One release per version: a draft or published release with this tag
+          # already exists, so leave it for the maintainer instead of adding another.
+          if gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name' | grep -Fxq "v$VERSION"; then
+            echo "::notice::A release for v$VERSION already exists, so no new draft was made."
+            exit 0
+          fi
           flags=(--draft --target "$GITHUB_SHA" --title "Vigil at Home $VERSION" --notes-file .github/release-notes.md)
           [[ "$VERSION" == *-* ]] && flags+=(--prerelease)
           gh release create "v$VERSION" "${flags[@]}" dist/*.dmg dist/*.zip dist/*.deb dist/*.AppImage
