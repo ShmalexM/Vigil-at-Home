@@ -210,7 +210,20 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
       existsSync(LINUX_BINARIES.osqueryd),
       'osquery must be installed (setup installs it earlier in the same job)',
     ).toBe(true);
-    if (fapolicyd) expect(systemctl('enable', '--now', 'fapolicyd').status).toBe(0);
+    if (fapolicyd) {
+      expect(systemctl('enable', '--now', 'fapolicyd').status).toBe(0);
+      // fapolicyd enforces nothing until it has loaded its trust database,
+      // and answers no status request until then.
+      const ready = await waitUntil(
+        () => spawnSync('fapolicyd-cli', ['--check-status'], { timeout: 15_000 }).status === 0,
+        90_000,
+        3000,
+      );
+      const log = spawnSync('journalctl', ['-u', 'fapolicyd', '--no-pager', '-n', '8'], {
+        encoding: 'utf8',
+      }).stdout;
+      expect(ready, `fapolicyd isn't enforcing yet:\n${log}`).toBe(true);
+    }
 
     stop = await runDaemon({
       paths,
