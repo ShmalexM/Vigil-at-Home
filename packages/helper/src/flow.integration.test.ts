@@ -21,9 +21,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import {
   appendFileSync,
+  closeSync,
   copyFileSync,
   existsSync,
   mkdtempSync,
+  openSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -159,7 +161,8 @@ async function fapolicydDiagnosis(program: string): Promise<string> {
     const r = spawnSync('sh', ['-c', cmd], { encoding: 'utf8' });
     return `${r.stdout}${r.stderr}`.trim() || '(nothing)';
   };
-  const runs = () => spawnSync(program, ['0']).status === 0;
+  // Time-limited: a launch waits on fapolicyd's answer.
+  const runs = () => spawnSync(program, ['0'], { timeout: 10_000 }).status === 0;
   const out = [
     'fapolicyd let the blocked program start',
     `active: ${sh('systemctl is-active fapolicyd')}`,
@@ -184,15 +187,19 @@ async function fapolicydDiagnosis(program: string): Promise<string> {
   sh(
     `sed -i 's/^syslog_format.*/syslog_format = rule,dec,perm,pid,exe,:,path,ftype,sha256hash/' ${conf}`,
   );
-  const d = spawn('fapolicyd', ['--debug'], { stdio: ['ignore', 'pipe', 'pipe'] });
-  let debug = '';
-  d.stdout.on('data', (b: Buffer) => (debug += b.toString()));
-  d.stderr.on('data', (b: Buffer) => (debug += b.toString()));
+  // Its log goes to a file, not a pipe: while a launch below blocks this
+  // process, nothing would read a pipe, and fapolicyd would stall writing
+  // to it with that very launch waiting on its answer.
+  const fd = openSync(log, 'w');
+  const d = spawn('fapolicyd', ['--debug'], { stdio: ['ignore', fd, fd] });
+  closeSync(fd);
   await sleep(15_000);
   out.push(`under --debug, the program ${runs() ? 'still runs' : 'is refused'}`);
   await sleep(2000);
   d.kill('SIGKILL');
-  sh(`mv ${conf}.flow ${conf}; rm -f ${log}`);
+  sh(`mv ${conf}.flow ${conf}`);
+  const debug = readFileSync(log, 'utf8');
+  rmSync(log, { force: true });
   const name = program.split('/').pop()!;
   const lines = debug.split('\n');
   out.push(
@@ -373,11 +380,11 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
     expect(status.fapolicyd?.blocked).toBe(1);
     if (fapolicyd) {
       expect(status.fapolicyd?.lastError ?? null).toBeNull();
-      const again = spawnSync(evil, ['0']);
+      const again = spawnSync(evil, ['0'], { timeout: 10_000 });
       const refused = again.error !== undefined || again.status !== 0;
       expect(refused, refused ? '' : await fapolicydDiagnosis(evil)).toBe(true);
       // The real sleep, with a different hash, still runs.
-      expect(spawnSync('/usr/bin/sleep', ['0']).status).toBe(0);
+      expect(spawnSync('/usr/bin/sleep', ['0'], { timeout: 10_000 }).status).toBe(0);
     }
   }, 240_000);
 
