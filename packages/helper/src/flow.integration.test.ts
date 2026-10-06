@@ -233,6 +233,17 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
       1000,
     );
     expect(up, logs.join('\n')).toBe(true);
+    // osqueryd is up a few seconds before its eBPF probes are: a launch in
+    // between is never reported. Wait until a harmless launch comes through.
+    const reporting = await waitUntil(
+      () => {
+        spawnSync('/bin/true');
+        return launchesSeen > 0;
+      },
+      90_000,
+      2000,
+    );
+    expect(reporting, `osquery reports no launches\n${osqueryDiagnosis()}`).toBe(true);
     const status = await client.call<{ helperRules?: { rules: number } }>({
       kind: 'helper.status',
     });
