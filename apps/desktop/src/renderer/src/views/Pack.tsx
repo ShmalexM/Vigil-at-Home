@@ -231,7 +231,7 @@ export function LeadPanel({
           </span>
           <span className="t-small">{breedName(lead.breed)}</span>
           <MoodLine dog={lead} fallback="Ready when you are" />
-          <span className="row" style={{ gap: 4 }}>
+          <span className="row lead-actions">
             {onEdit && (
               <Button size="sm" kind="ghost" icon={<Dice5 size={13} />} onClick={onEdit}>
                 Change Lead dog

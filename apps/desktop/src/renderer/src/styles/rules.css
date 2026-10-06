@@ -78,3 +78,11 @@
 .warn-text {
   color: var(--fair);
 }
+
+/* A narrow window puts a rule's controls under its name instead of squeezing the name. */
+.rule-row {
+  flex-wrap: wrap;
+}
+.rule-row > .col.grow {
+  flex-basis: 260px;
+}

@@ -122,7 +122,7 @@ export function ApprovalStack({
             {a.reason ? ` ${a.reason}` : ''}
           </span>
         </div>
-        <span className="col" style={{ gap: 6 }}>
+        <span className="col approval-actions">
           <Button size="sm" kind="primary" onClick={() => decide('allow-once')}>
             Allow once
           </Button>

@@ -111,7 +111,7 @@ function RuleRow({
 
   return (
     <Card tight>
-      <div className="row">
+      <div className="row rule-row">
         <div className="col grow" style={{ gap: 2 }}>
           <div className="row">
             <span className="t-h3 ellipsis">{rule.name}</span>
