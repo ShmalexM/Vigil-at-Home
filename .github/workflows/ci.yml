@@ -39,6 +39,8 @@ jobs:
     # one is a *.integration.test.ts under a package's src/ and skips itself
     # unless VIGIL_LINUX_INTEGRATION=1, so the plain test run above ignores it.
     runs-on: ubuntu-latest
+    # A full run takes about 10 minutes; a hang must not hold a runner for hours.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6

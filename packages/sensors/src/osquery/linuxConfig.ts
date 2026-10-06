@@ -88,10 +88,11 @@ export function osqueryLinuxConfig(
     },
     schedule: {
       [LINUX_QUERY_NAMES.processEvents]: {
-        // syscall is execve or execveat; failed launches (exit_code < 0) never ran.
+        // Launches only (execve, execveat), not forks; failed ones (exit_code < 0)
+        // never ran. exit_code is text, so it is compared as a number.
         query:
           'SELECT pid, parent, uid, path, cwd, cmdline, json_cmdline, time FROM bpf_process_events ' +
-          "WHERE syscall IN ('execve', 'execveat') AND exit_code >= 0;",
+          "WHERE syscall LIKE 'exec%' AND CAST(exit_code AS INTEGER) >= 0;",
         interval: 5,
         description: 'Every program launch',
       },
