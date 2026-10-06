@@ -278,7 +278,10 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
     const pid = child.pid!;
     // osquery's process events arrive every 5 seconds.
     const killed = await waitUntil(() => !alive(pid), 60_000);
-    const ran = seen.find((s) => s.e.kind === 'process.exec' && s.e.process.pid === pid)?.ran;
+    // The kill comes first; the report of it reaches this client just after.
+    const report = () => seen.find((s) => s.e.kind === 'process.exec' && s.e.process.pid === pid);
+    if (killed) await waitUntil(() => !!report(), 10_000, 100);
+    const ran = report()?.ran;
     expect(
       killed,
       `still running; helper ran ${JSON.stringify(ran)}; launches seen: ${launchesSeen}\n` +
