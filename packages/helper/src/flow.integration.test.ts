@@ -289,12 +289,14 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
     expect(ran?.find((r) => r.action.kind === 'process.kill')?.error).toBeUndefined();
 
     // The hash is now blocked before launch.
-    const status = await client!.call<{ fapolicyd?: { blocked: number; lastError?: string } }>({
+    const status = await client!.call<{
+      fapolicyd?: { blocked: number; lastError: string | null };
+    }>({
       kind: 'helper.status',
     });
     expect(status.fapolicyd?.blocked).toBe(1);
     if (fapolicyd) {
-      expect(status.fapolicyd?.lastError).toBeUndefined();
+      expect(status.fapolicyd?.lastError ?? null).toBeNull();
       const again = spawnSync(evil, ['0']);
       expect(again.error ?? again.status, 'fapolicyd let the blocked program start').not.toBe(0);
       // The real sleep, with a different hash, still runs.
