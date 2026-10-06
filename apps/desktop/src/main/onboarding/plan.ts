@@ -291,6 +291,18 @@ function aiSteps(inputs: PlanInputs, linux: boolean): StepDef[] {
 export const FAPOLICYD_ALLOW_RULES = '/etc/fapolicyd/rules.d/06-vigil-allow.rules';
 
 /**
+ * Loads the rules and starts fapolicyd. "trust = file" first: with the
+ * allow-all rule nothing consults fapolicyd's trust list, and the package
+ * backends (debdb above all) hash every installed package on each start,
+ * for minutes, enforcing nothing until done. The kill skips a stop that
+ * would otherwise wait out that hashing (the install may have started it).
+ */
+export const FAPOLICYD_START =
+  "sudo sed -i 's/^trust *=.*/trust = file/' /etc/fapolicyd/fapolicyd.conf; " +
+  'sudo systemctl kill --signal=SIGKILL fapolicyd 2>/dev/null; ' +
+  'sudo fagenrules --load; sudo systemctl enable fapolicyd && sudo systemctl restart fapolicyd';
+
+/**
  * Linux: fapolicyd blocks by hash before a program runs, osquery watches,
  * and the helper (systemd) carries out blocks and writes both their configs.
  */
@@ -346,7 +358,7 @@ function linuxProtection(inputs: PlanInputs): StepDef[] {
             distro === 'other'
               ? 'Install fapolicyd with your package manager, then load the rules and start it'
               : 'Load the rules and start it, now and after a restart',
-          cmd: 'sudo fagenrules --load; sudo systemctl enable --now fapolicyd',
+          cmd: FAPOLICYD_START,
         },
       ],
       check: 'fapolicyd',

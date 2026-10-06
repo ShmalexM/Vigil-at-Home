@@ -505,6 +505,8 @@ describe('setup on Linux', () => {
     expect(cmds[0]).toContain(`'allow perm=any all : all' | sudo tee ${FAPOLICYD_ALLOW_RULES}`);
     expect(cmds[1]).toBe('sudo dnf install -y fapolicyd');
     expect(cmds[2]).toContain('fagenrules --load');
+    // No package hashing at each start: nothing consults the trust list.
+    expect(cmds[2]).toMatch(/^sudo sed -i 's\/\^trust .*trust = file/);
     // Sorted right after the helper's 05-vigil.rules, ahead of the distribution's deny rules.
     expect(FAPOLICYD_ALLOW_RULES).toMatch(/\/06-vigil-allow\.rules$/);
     const deb = linux('debian').find((s) => s.id === 'fapolicyd')!;
