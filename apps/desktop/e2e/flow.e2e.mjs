@@ -69,10 +69,28 @@ const children = [];
 /** A copy of /bin/sleep under a new name: harmless, and killable or pausable. */
 function sleeper(name) {
   const path = join(STAND_IN_DIR, name);
-  if (!existsSync(path)) copyFileSync('/bin/sleep', path);
+  if (!existsSync(path)) {
+    copyFileSync('/bin/sleep', path);
+    // macOS 26 kills a copied platform binary run from elsewhere; an ad hoc
+    // signature makes the copy an ordinary program again. macOS 15 runs the
+    // plain copy but kills the re-signed one, so re-sign only when needed.
+    if (!runs(path)) {
+      execFileSync('codesign', ['-f', '-s', '-', path], { stdio: 'ignore' });
+      if (!runs(path)) throw new Error(`stand-in ${name} will not run, even re-signed`);
+    }
+  }
   const child = spawn(path, ['900'], { stdio: 'ignore' });
   children.push(child);
   return child;
+}
+
+function runs(path) {
+  try {
+    execFileSync(path, ['0'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** A copy of Node under a new name, running a tiny script. */
@@ -225,6 +243,19 @@ async function detail(alertId) {
   return main((_e, id) => globalThis.vigil.core.alertDetail(id), alertId);
 }
 
+/**
+ * The alert's detail once its `kind` action has finished. A blocking rule
+ * saves the alert first and then awaits each action, so a poll can see the
+ * alert while the helper call is still pending.
+ */
+async function settled(alertId, kind) {
+  return waitUntil(async () => {
+    const d = await detail(alertId);
+    const a = d?.actions.find((x) => x.action.kind === kind);
+    return a && a.status !== 'pending' ? d : null;
+  }, 10000).then((d) => d ?? detail(alertId));
+}
+
 async function popupPage() {
   return waitUntil(async () => {
     for (const w of app.windows()) if ((await w.url()).includes('#popup')) return w;
@@ -336,7 +367,7 @@ try {
     });
     const alert = await waitUntil(() => alertFor('credential-theft-untrusted', t0), 5000);
     check('stealer: alert raised', !!alert);
-    const d = alert && (await detail(alert.id));
+    const d = alert && (await settled(alert.id, 'process.suspend'));
     const suspend = d?.actions.find((a) => a.action.kind === 'process.suspend');
     check('stealer: helper paused the process', suspend?.status === 'done', suspend?.result);
     check('stealer: process is really paused', procState(pid).startsWith('T'), procState(pid));
@@ -388,7 +419,7 @@ try {
     });
     const alert = await waitUntil(() => alertFor('fake-password-prompt', t0), 5000);
     check('fake prompt: alert raised', !!alert);
-    const d = alert && (await detail(alert.id));
+    const d = alert && (await settled(alert.id, 'process.kill'));
     const kill = d?.actions.find((a) => a.action.kind === 'process.kill');
     check('fake prompt: helper stopped the process', kill?.status === 'done', kill?.result);
     const gone = await waitUntil(

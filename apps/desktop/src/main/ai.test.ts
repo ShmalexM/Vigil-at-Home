@@ -171,10 +171,24 @@ describe('AiBridge settings', () => {
 describe('AiBridge explanations', () => {
   it('explains a new popup alert, stores it on the alert and counts the run', async () => {
     const { core, ai, calls } = setup();
+    const notes: unknown[] = [];
+    ai.on('note', (helper, note) => notes.push({ helper, ...note }));
     ai.explainAlertsFrom(core);
     const alert = await core.alerts.raise({ rule: makeRule(), events: [makeExec()], actions: [] });
     await settle();
     expect(calls).toHaveLength(1);
+    // The explainer's notebook keeps what it said and why, filed under the alert.
+    expect(notes).toEqual([
+      expect.objectContaining({
+        helper: 'explainer',
+        kind: 'explain',
+        ok: true,
+        subject: { kind: 'alert', id: alert.id },
+        answer: 'Suspicious. An unsigned program ran from /tmp.',
+        provider: 'claude',
+        model: 'm-1',
+      }),
+    ]);
     expect(calls[0]).toMatchObject({ purpose: 'explain', urgency: 'now' });
     const saved = core.store.getAlert(alert.id)!;
     expect(saved.ai).toMatchObject({
@@ -435,6 +449,8 @@ describe('AiBridge event labels', () => {
       score: 0.9,
       by: 'jev',
     });
+    const notes: unknown[] = [];
+    jev.ai.on('note', (helper, note) => notes.push({ helper, ...note }));
     jev.ai.labelEventsFrom(jev.core);
     const e = makeExec('/tmp/stealer');
     jev.core.ingest(e, unmatched);
@@ -453,6 +469,16 @@ describe('AiBridge event labels', () => {
       'Unsigned program reading browser data. No rule matched this and nothing was blocked. Labelled by Jev.',
     );
     expect(isNoticed(alert!)).toBe(true);
+    expect(notes).toEqual([
+      expect.objectContaining({
+        helper: 'labeller',
+        kind: 'label',
+        ask: 'Label 1 new event',
+        lookedAt: ['stealer started'],
+        answer: '1 of 1 stood out',
+        provider: 'jev',
+      }),
+    ]);
 
     const local = labelling((ids) => ({ labels: ids, deferred: [] }), {
       label: 'suspicious',

@@ -25,7 +25,7 @@ import { Button, Card, Chip, Segmented, StatusMark } from '../components/ui';
 import { realProcess } from '../evidence';
 import { actorLabel, clock, describeAction, describeEvent, timeAgo, timeOfDay } from '../format';
 import { matchText } from '../rule-modes';
-import { parseActivityParam, VIGIL_SELF } from './agents-format';
+import { parseActivityParam, VIGIL_CONNECTOR, VIGIL_SELF } from './agents-format';
 import { PageHead } from './AppShell';
 import { onRovingKeyDown } from '../components/roving';
 
@@ -51,7 +51,11 @@ export function useAgentLinks(go?: (route: string) => void): AgentLinks {
   const [agents] = useLive(() => vigil.listAgentNames());
   return {
     nameOf: (id) =>
-      id === VIGIL_SELF ? 'Vigil’s own AI helper' : (agents?.find((a) => a.id === id)?.name ?? id),
+      id === VIGIL_SELF
+        ? 'Vigil’s own AI helper'
+        : id === VIGIL_CONNECTOR
+          ? 'A pack connector'
+          : (agents?.find((a) => a.id === id)?.name ?? id),
     go,
   };
 }

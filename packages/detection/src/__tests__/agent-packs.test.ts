@@ -59,6 +59,13 @@ const helper = agentTree(CLAUDE_BIN, {
   basePid: 70_000,
   tracker: { self: { pid: 501, path: VIGIL_APP } },
 });
+/** A connector the user added to the pack: Vigil (pid 501) starts it, but it is not Vigil's. */
+const connector = agentTree(NODE, {
+  basePid: 75_000,
+  args: ['node', `${home}/mcp/server.js`],
+  connector: true,
+  tracker: { self: { pid: 501, path: VIGIL_APP } },
+});
 /** A person's own terminal: nothing in it is tagged. */
 const human = agentTree(TERMINAL, { basePid: 80_000, args: ['Terminal'] });
 
@@ -129,6 +136,7 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
   'agent-secret-read': {
     bad: [
       [claude.observe(fileOpen(raw(mcpServer.process), `${home}/.ssh/id_ed25519`)), ALERT],
+      [connector.observe(fileOpen(raw(connector.root.process), `${home}/.ssh/id_ed25519`)), ALERT],
       // The agent's own Read tool: depth 0 counts.
       [claude.observe(fileOpen(raw(claude.root.process), `${home}/.aws/credentials`)), ALERT],
       [
@@ -345,6 +353,9 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
       helper.exec('/usr/bin/git', ['git', 'log', '-1']),
       // Another agent's shell is that agent's business.
       sh('ls'),
+      // So is what a pack connector runs: agent watch covers it, not this rule.
+      connector.sh('curl -s https://x.test/p'),
+      connector.exec('/usr/bin/python3', ['python3', '-c', 'print(1)']),
     ],
   },
 
@@ -742,6 +753,8 @@ describe('agent rule packs', () => {
     it("lets Codex open its own ChatGPT extension's storage, and no other extension's", () => {
       const ext = (id: string, profile = 'Default') =>
         `${home}/Library/Application Support/Google/Chrome/${profile}/Local Extension Settings/${id}/000003.log`;
+      const dir = (id: string) =>
+        `${home}/Library/Application Support/Google/Chrome/Default/Local Extension Settings/${id}`;
       const chatgpt = 'hehggadaopoacecdllhhajmbjkdcmajg';
       const metamask = 'nkbihfbeogaeaoehlefnkodbefgpgknn';
       const node = codex.exec(NODE, ['node', 'node_repl'], codex.root.process).process;
@@ -749,7 +762,10 @@ describe('agent rule packs', () => {
         const opened = (path: string) => fired(codex.observe(fileOpen(raw(p), path)));
         expect(opened(ext(chatgpt))).not.toContain('agent-secret-read');
         expect(opened(ext(chatgpt, 'Profile 2'))).not.toContain('agent-secret-read');
+        // The folder itself, as ChatGPT's cua_node opens it.
+        expect(opened(dir(chatgpt))).not.toContain('agent-secret-read');
         expect(opened(ext(metamask))).toContain('agent-secret-read');
+        expect(opened(dir(metamask))).toContain('agent-secret-read');
       }
       // Another agent opening ChatGPT's extension storage still counts.
       expect(fired(claude.observe(fileOpen(raw(claude.root.process), ext(chatgpt))))).toContain(

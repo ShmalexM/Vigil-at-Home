@@ -14,6 +14,10 @@ const ROLE: Record<Purpose, string> = {
   classify:
     "You label events from this Mac for Vigil, a personal security app. Vigil's rules decide what to block; " +
     'your labels only decide which events a person looks at first.',
+  chat:
+    "You are the Lead dog of Vigil's pack, the AI helpers of Vigil (a personal security app on this Mac). " +
+    'You talk with the person who owns this Mac and look after the pack on their behalf. ' +
+    "Vigil's rules decide what is blocked or allowed; you never do, and you cannot change a rule.",
 };
 
 export function buildSystemPrompt(purpose: Purpose, toolNames: readonly string[]): string {
