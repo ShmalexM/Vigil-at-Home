@@ -170,14 +170,43 @@ async function fapolicydDiagnosis(program: string): Promise<string> {
     `mount: ${sh(`findmnt -no TARGET,FSTYPE -T ${program}`)}`,
     `journal:\n${sh('journalctl -u fapolicyd --no-pager -n 25 2>&1')}`,
   ];
-  const later = await waitUntil(() => !runs(), 30_000, 2000);
-  out.push(`refused within 30 s more: ${later}`);
-  if (!later) {
-    systemctl('restart', 'fapolicyd');
-    const restarted = await waitUntil(() => !runs(), 60_000, 2000);
-    out.push(`refused within 60 s of a restart: ${restarted}`);
-    out.push(`journal after restart:\n${sh('journalctl -u fapolicyd --no-pager -n 15 2>&1')}`);
-  }
+  out.push(`kernel: ${sh('uname -r')}`);
+  out.push(
+    `marks: ${sh("journalctl -u fapolicyd --no-pager 2>&1 | grep -iE 'EXEC_PERM|fanotify|mark' | tail -n 5")}`,
+  );
+  // fapolicyd in the foreground with every decision logged, hash included,
+  // while the program starts once more.
+  const conf = '/etc/fapolicyd/fapolicyd.conf';
+  const log = join(tmpdir(), 'vigil-fapolicyd-debug.log');
+  sh(
+    `systemctl kill --signal=SIGKILL fapolicyd; systemctl stop fapolicyd; cp ${conf} ${conf}.flow`,
+  );
+  sh(
+    `sed -i 's/^syslog_format.*/syslog_format = rule,dec,perm,pid,exe,:,path,ftype,sha256hash/' ${conf}`,
+  );
+  const d = spawn('fapolicyd', ['--debug'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let debug = '';
+  d.stdout.on('data', (b: Buffer) => (debug += b.toString()));
+  d.stderr.on('data', (b: Buffer) => (debug += b.toString()));
+  await sleep(15_000);
+  out.push(`under --debug, the program ${runs() ? 'still runs' : 'is refused'}`);
+  await sleep(2000);
+  d.kill('SIGKILL');
+  sh(`mv ${conf}.flow ${conf}; rm -f ${log}`);
+  const name = program.split('/').pop()!;
+  const lines = debug.split('\n');
+  out.push(
+    `debug log (${lines.length} lines):\n` +
+      lines
+        .filter((l) => /OPEN_EXEC|mark|Loaded|rule|error|fail/i.test(l) && !l.includes('dec=allow'))
+        .slice(0, 15)
+        .join('\n') +
+      '\n...\n' +
+      lines
+        .filter((l) => l.includes(name))
+        .slice(-6)
+        .join('\n'),
+  );
   return out.join('\n');
 }
 
