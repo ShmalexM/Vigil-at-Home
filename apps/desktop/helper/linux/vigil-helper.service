@@ -1,0 +1,12 @@
+[Unit]
+Description=Vigil at Home helper (blocks, quarantines and approvals)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/vigil-helper daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

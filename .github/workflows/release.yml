@@ -33,9 +33,16 @@ on:
 permissions:
   contents: write
 
+# Hosted Mac runners are scarce, so a newer push to the same pull request
+# replaces the older build. Tag and hand-started builds always finish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   mac:
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6

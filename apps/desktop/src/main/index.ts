@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { app, dialog, Notification, powerMonitor, safeStorage, shell } from 'electron';
@@ -23,6 +23,7 @@ import { registerIpc } from './ipc.js';
 import { systemProbe } from './onboarding/checks.js';
 import { demoProbe } from './onboarding/demo.js';
 import { KeyStore } from './onboarding/keys.js';
+import { linuxDistro, type LinuxDistro } from './onboarding/plan.js';
 import { OnboardingService } from './onboarding/service.js';
 import { Connectors, ConnectorRecord } from './pack/connectors.js';
 import { Notebook } from './pack/notebook.js';
@@ -33,6 +34,7 @@ import { PowerPolicy } from './power.js';
 import { HEALTH_CHECK_MS, macProbe, reportHealth, type HelperSensors } from './sensor-health.js';
 import { VigilCore } from './service.js';
 import { UpdateChecker } from './updates.js';
+import { wantsX11 } from './display.js';
 import { Windows } from './windows.js';
 
 app.setName('Vigil at Home');
@@ -41,10 +43,27 @@ app.setName('Vigil at Home');
 // end up in the installed app's database.
 if (!app.isPackaged) app.setPath('userData', join(app.getPath('appData'), 'Vigil at Home Dev'));
 
+/** Where the root helper runs: macOS (launchd) and Linux (systemd). */
+const HELPER_PLATFORMS = new Set<NodeJS.Platform>(['darwin', 'linux']);
+
+/** Linux: which package manager setup's install commands use. */
+function thisDistro(): LinuxDistro | undefined {
+  if (process.platform !== 'linux') return undefined;
+  try {
+    return linuxDistro(readFileSync('/etc/os-release', 'utf8'));
+  } catch {
+    return 'other';
+  }
+}
+const distro = thisDistro();
+
 // The resource check (perf/measure.mjs) runs the app against a throwaway
 // profile and drives it from the main process.
 const perf = !app.isPackaged && !!process.env['VIGIL_PERF'];
 if (perf && process.env['VIGIL_USER_DATA']) app.setPath('userData', process.env['VIGIL_USER_DATA']);
+
+if (wantsX11(process.platform, process.argv, process.env))
+  app.commandLine.appendSwitch('ozone-platform', 'x11');
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -118,7 +137,7 @@ function start(): void {
 
   // A development build installs the helper that `pnpm build:helper` made.
   const helperDir = () => helperBundleDir(process.resourcesPath, devHelperDir);
-  core.helperInstallable = process.platform === 'darwin' && helperDir() !== null;
+  core.helperInstallable = HELPER_PLATFORMS.has(process.platform) && helperDir() !== null;
   // Santa's configuration profile comes from the helper, which holds the sync
   // server's certificate. Setup offers it once it has been written here.
   const santaProfilePath = join(dataDir, 'Vigil Santa.mobileconfig');
@@ -164,6 +183,7 @@ function start(): void {
       const command = helperInstallCommand(helperDir());
       const claudePreflight = agents.claudePreflightStep();
       return {
+        ...(distro ? { distro } : {}),
         ...(command ? { helperInstallCommand: command } : {}),
         ...(existsSync(santaProfilePath) ? { santaProfilePath } : {}),
         ...(claudePreflight ? { claudePreflight } : {}),
@@ -345,7 +365,7 @@ function start(): void {
       void syncHelperRules();
     }
   });
-  if (process.platform === 'darwin') {
+  if (HELPER_PLATFORMS.has(process.platform)) {
     helper.start();
     core.scheduler.every(
       'sensor-health',

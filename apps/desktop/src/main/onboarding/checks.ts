@@ -3,7 +3,7 @@ import { accessSync, constants, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { CheckId } from '../../shared/setup.js';
-import { LOCAL_MODEL, LOCAL_MODEL_SMALL } from './plan.js';
+import { FAPOLICYD_ALLOW_RULES, LOCAL_MODEL, LOCAL_MODEL_SMALL } from './plan.js';
 
 export interface CheckResult {
   ok: boolean;
@@ -24,10 +24,14 @@ export interface Probe {
   /** Ask the running helper for its status over its socket; true when it answers. */
   helperAnswers?(): Promise<boolean>;
   home: string;
+  /** Which computer is being checked; defaults to a Mac. */
+  platform?: NodeJS.Platform;
 }
 
 export const SANTA_SYNC_PORT = 47821;
-export const HELPER_SOCKET = '/var/run/vigil-helper.sock';
+/** The helper's socket: /var/run on macOS, /run on Linux (see the helper's config). */
+export const HELPER_SOCKET =
+  process.platform === 'linux' ? '/run/vigil-helper.sock' : '/var/run/vigil-helper.sock';
 const SANTACTL = '/usr/local/bin/santactl';
 const BIN_DIRS = (home: string) => [
   '/opt/homebrew/bin',
@@ -83,8 +87,25 @@ export const CHECKS: Record<CheckId, (p: Probe) => Promise<CheckResult>> = {
   },
 
   osquery: async (p) => {
-    const bin = ['/usr/local/bin/osqueryi', '/opt/osquery/lib/osquery.app/Contents/MacOS/osqueryd'];
+    const bin =
+      p.platform === 'linux'
+        ? ['/opt/osquery/bin/osqueryd', '/usr/bin/osqueryd']
+        : ['/usr/local/bin/osqueryi', '/opt/osquery/lib/osquery.app/Contents/MacOS/osqueryd'];
     return bin.some((f) => p.exists(f)) ? { ok: true } : { ok: false };
+  },
+
+  fapolicyd: async (p) => {
+    if (!['/usr/sbin/fapolicyd', '/usr/bin/fapolicyd'].some((f) => p.exists(f))) {
+      return { ok: false };
+    }
+    if (!p.exists(FAPOLICYD_ALLOW_RULES)) {
+      return {
+        ok: false,
+        detail: 'Installed, but it isn’t set to allow what Vigil hasn’t blocked',
+      };
+    }
+    const r = await p.run('/usr/bin/systemctl', ['is-active', '--quiet', 'fapolicyd']);
+    return r.code === 0 ? { ok: true } : { ok: false, detail: 'Installed, not running' };
   },
 
   helper: async (p) => {
@@ -183,6 +204,7 @@ export function systemProbe(home = homedir(), helperAnswers?: () => Promise<bool
   env['PATH'] = [...BIN_DIRS(home), '/usr/bin', '/bin'].join(':');
   return {
     home,
+    platform: process.platform,
     ...(helperAnswers ? { helperAnswers } : {}),
     exists: (path) => existsSync(path),
     executable: (path) => {

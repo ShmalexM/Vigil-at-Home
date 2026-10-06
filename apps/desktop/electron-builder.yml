@@ -28,6 +28,8 @@ mac:
   extraResources:
     - from: build/helper/common
       to: helper
+      # The systemd unit and polkit policy are for Linux builds only.
+      filter: ['**/*', '!linux/**']
     - from: build/helper/darwin-${arch}
       to: helper
       filter: [node]
