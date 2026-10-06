@@ -114,6 +114,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for conventions.
 
 Issues and pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), and follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report security problems privately, as [SECURITY.md](SECURITY.md) describes, not as issues.
 
+## Thanks
+
+Vigil at Home stands on [Santa](https://github.com/northpolesec/santa), [osquery](https://github.com/osquery/osquery) and [fapolicyd](https://github.com/linux-application-whitelisting/fapolicyd) for watching and blocking, and on [abuse.ch](https://abuse.ch)'s free threat feeds. Parts of the UI are adapted from [T3 Code](https://github.com/pingdotgg/t3code) and [Beautiful UI](https://github.com/slev12397/beautiful-ui).
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE). Third-party code and assets are credited in [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
