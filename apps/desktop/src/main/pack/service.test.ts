@@ -124,8 +124,9 @@ describe('the pack', () => {
       ['helper', 'Biscuit'],
       ['helper', 'Duke'],
     ]);
-    pack.updateDog('lead', { name: 'Rex', breed: 'husky' });
-    expect(pack.dogs()[0]).toMatchObject({ name: 'Rex', breed: 'husky', role: 'lead' });
+    expect(pack.dogs()[0]).toMatchObject({ name: 'Scout', breed: 'husky' });
+    pack.updateDog('lead', { name: 'Rex', breed: 'shepherd' });
+    expect(pack.dogs()[0]).toMatchObject({ name: 'Rex', breed: 'shepherd', role: 'lead' });
   });
 
   it('runs the Lead dog as the user’s own chat, and pack jobs as background work', async () => {

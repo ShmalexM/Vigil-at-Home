@@ -760,9 +760,9 @@ function NameField({ dog, reload }: { dog: PackDog; reload: () => void }) {
 // ---------------------------------------------------------------- adopting and editing
 
 const NAMES: Record<Breed, string[]> = {
-  shepherd: ['Scout', 'Ranger', 'Atlas', 'Sarge'],
+  shepherd: ['Ranger', 'Atlas', 'Sarge', 'Bolt'],
   doberman: ['Duke', 'Onyx', 'Blitz', 'Vesper'],
-  husky: ['Bolt', 'Aurora', 'Koda', 'Nova'],
+  husky: ['Scout', 'Koda', 'Aurora', 'Nova'],
   golden: ['Sunny', 'Honey', 'Maple', 'Biscuit'],
   beagle: ['Biscuit', 'Clue', 'Sherlock', 'Pepper'],
   corgi: ['Waffles', 'Nugget', 'Loaf', 'Toast'],

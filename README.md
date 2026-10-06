@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="apps/desktop/resources/icon.png" alt="Vigil at Home logo: Scout, a German shepherd, on a blue shield" width="128" height="128">
+  <img src="apps/desktop/resources/icon.png" alt="Vigil at Home logo: Scout, a black and white husky, on a blue shield" width="128" height="128">
 </p>
 
 # Vigil at Home

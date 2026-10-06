@@ -360,7 +360,7 @@ export class PackService {
         id: 'lead',
         role: 'lead',
         name: 'Scout',
-        breed: 'shepherd',
+        breed: 'husky',
         job: LEAD_JOB,
         schedule: 'manual',
         tools: this.vigilEntries().map((t) => t.key),
