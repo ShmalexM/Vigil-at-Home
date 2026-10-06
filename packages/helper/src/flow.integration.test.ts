@@ -94,6 +94,13 @@ function osqueryDiagnosis(): string {
     `osqueryd journal:\n${sh('journalctl -u osqueryd --no-pager -n 30 2>/dev/null')}`,
     `launch rows logged: ${sh('grep -c vigil_process_events /var/log/osquery/osqueryd.results.log 2>/dev/null')}`,
     `last launch row:\n${sh('grep vigil_process_events /var/log/osquery/osqueryd.results.log 2>/dev/null | tail -n 1 | cut -c1-600')}`,
+    // A fresh osquery shell with the same eBPF flags: does it see launches at
+    // all, and what do its rows look like?
+    `osquery shell, eBPF:\n${sh(
+      `(sleep 8; /bin/true; sleep 4; echo "SELECT name, active, events, subscriptions FROM osquery_events WHERE name LIKE '%bpf%' OR publisher LIKE '%bpf%';"; ` +
+        `echo "SELECT syscall, exit_code, probe_error, path FROM bpf_process_events ORDER BY time DESC LIMIT 8;") | ` +
+        `${LINUX_BINARIES.osqueryd} -S --disable_events=false --enable_bpf_events=true --disable_extensions=true --database_path=/tmp/vigil-flow-osqueryi --verbose 2>&1 | grep -viE 'eventfactory|^I.*(extension|database|registry)' | tail -n 40; rm -rf /tmp/vigil-flow-osqueryi`,
+    )}`,
   ].join('\n');
 }
 
