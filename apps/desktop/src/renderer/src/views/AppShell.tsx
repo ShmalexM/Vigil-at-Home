@@ -3,12 +3,14 @@ import {
   Bell,
   Bot,
   ChartSpline,
+  ChevronRight,
   Dog as DogIcon,
   Download,
   History as HistoryIcon,
   House,
   ListChecks,
   Settings as SettingsIcon,
+  SlidersHorizontal,
   Wrench,
 } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
@@ -38,8 +40,8 @@ const NAV: NavItem[] = [
 ];
 
 /**
- * The detail behind what Vigil does. Listed in the sidebar only when turned on
- * in Settings › Advanced, but always reachable by route (popups link to alerts).
+ * The detail behind what Vigil does: a collapsible Advanced group in the sidebar,
+ * always reachable by route too (popups link to alerts).
  */
 export const ADVANCED_NAV: NavItem[] = [
   { id: 'alerts', label: 'Alerts', icon: <Bell size={16} /> },
@@ -80,7 +82,22 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
   const suggestions = agents?.filter((a) => a.status === 'suggested').length ?? 0;
   const [section = 'home', param] = route.split('/');
   const onAdvanced = ADVANCED_NAV.some((n) => n.id === section);
-  const showAdvanced = !!settings?.showAdvanced || onAdvanced;
+  // The Advanced group starts closed and remembers how it was left. Landing on one
+  // of its pages opens it for this window without changing what's remembered.
+  const [advancedOpen, setAdvancedOpen] = useState<boolean | undefined>(undefined);
+  const savedOpen = settings?.showAdvanced;
+  useEffect(() => {
+    if (savedOpen !== undefined) setAdvancedOpen((open) => open ?? savedOpen);
+  }, [savedOpen]);
+  useEffect(() => {
+    if (onAdvanced) setAdvancedOpen(true);
+  }, [onAdvanced]);
+  const showAdvanced = advancedOpen ?? onAdvanced;
+  const toggleAdvanced = () => {
+    const open = !showAdvanced;
+    setAdvancedOpen(open);
+    void vigil.setShowAdvanced(open);
+  };
 
   if (section === 'setup') return <SetupWizard onDone={() => go('home')} />;
 
@@ -102,9 +119,24 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
               onClick={() => go(n.id)}
             />
           ))}
+          <button
+            type="button"
+            className="nav-item nav-group"
+            aria-expanded={showAdvanced}
+            aria-controls="nav-advanced"
+            onClick={toggleAdvanced}
+          >
+            <SlidersHorizontal size={16} />
+            <span className="grow">Advanced</span>
+            {!showAdvanced && suggestions > 0 && (
+              <span className="count" title="Suggested agents waiting on you">
+                {suggestions}
+              </span>
+            )}
+            <ChevronRight size={14} className="nav-chevron" />
+          </button>
           {showAdvanced && (
-            <>
-              <span className="nav-group t-small">Advanced</span>
+            <div id="nav-advanced" className="col nav-sub" role="group" aria-label="Advanced">
               {ADVANCED_NAV.map((n) => (
                 <NavButton
                   key={n.id}
@@ -120,7 +152,7 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
                   onClick={() => go(n.id)}
                 />
               ))}
-            </>
+            </div>
           )}
         </nav>
         <div className="grow" />

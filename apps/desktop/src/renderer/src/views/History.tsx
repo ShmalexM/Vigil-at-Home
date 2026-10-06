@@ -98,7 +98,7 @@ export function HistoryView({ go }: { go: (r: string) => void }) {
       ))}
       {entries.length === LIMIT && (
         <span className="t-small">
-          Showing the latest {LIMIT}. Settings › Advanced › Activity has everything.
+          Showing the latest {LIMIT}. Advanced › Activity in the sidebar has everything.
         </span>
       )}
     </div>
