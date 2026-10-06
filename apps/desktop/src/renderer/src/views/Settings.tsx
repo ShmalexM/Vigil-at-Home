@@ -3,7 +3,7 @@ import { BellRing } from 'lucide-react';
 import { useLive, vigil } from '../api';
 import { AlertViewSwitch } from '../components/Attention';
 import { useToast } from '../components/Toasts';
-import { Button, Card, SectionHead, Segmented } from '../components/ui';
+import { Button, Card, SectionHead } from '../components/ui';
 import { AiSection } from './Ai';
 import { AppearanceSection } from './Appearance';
 import { UpdatesRow } from './Updates';
@@ -71,18 +71,7 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
         <Card>
           <SectionHead
             title="Advanced pages"
-            sub="Alerts, Rules, Activity and Usage. Hidden from the sidebar unless you turn them on."
-            right={
-              <Segmented
-                label="Advanced pages in the sidebar"
-                value={settings.showAdvanced ? 'shown' : 'hidden'}
-                options={[
-                  { value: 'hidden', label: 'Hidden' },
-                  { value: 'shown', label: 'In the sidebar' },
-                ]}
-                onChange={(v) => void vigil.setShowAdvanced(v === 'shown')}
-              />
-            }
+            sub="Alerts, Rules, Agents, Pack, Activity and Usage. Also under Advanced in the sidebar."
           />
           <div className="row" style={{ flexWrap: 'wrap' }}>
             {ADVANCED_NAV.map((n) => (

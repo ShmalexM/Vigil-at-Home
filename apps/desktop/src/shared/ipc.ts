@@ -543,7 +543,7 @@ export interface SettingsView {
   version: string;
   /** Short commit hash of the build, '' when unknown. */
   commit: string;
-  /** Advanced pages (Alerts, Rules, Activity, Usage) are listed in the sidebar. */
+  /** The sidebar's Advanced group was left open. */
   showAdvanced: boolean;
 }
 

@@ -449,10 +449,21 @@ body.transparent {
 .noticed .list .list-row {
   padding: 8px 12px;
 }
+/* The Advanced group: a sidebar row that opens and closes its pages. */
 .nav-group {
-  padding: 12px 10px 4px;
+  margin-top: 10px;
+  color: var(--tx2);
+}
+.nav-group .nav-chevron {
   color: var(--tx3);
-  font-weight: 600;
+  transition: transform 120ms ease;
+}
+.nav-group[aria-expanded='true'] .nav-chevron {
+  transform: rotate(90deg);
+}
+.nav-sub {
+  gap: 2px;
+  padding-left: 12px;
 }
 div.history-row,
 div.history-row:hover {
