@@ -84,8 +84,9 @@ to `OnboardingService` and those two steps turn on.
 pnpm --filter @vigil/desktop dist   # on a Mac: dmg and zip in apps/desktop/dist
 ```
 
-Releases come from `.github/workflows/release.yml` (push a `v*` tag, or run it
-by hand). Until Apple signing secrets are added they are ad hoc signed, so macOS
+Releases come from `.github/workflows/release.yml`, run by hand with a version
+(`gh workflow run release.yml --ref main -f version=0.1.0`). It makes a draft
+release, and publishing that draft builds nothing more. Until Apple signing secrets are added they are ad hoc signed, so macOS
 asks the user to approve the app once under System Settings › Privacy &
 Security › Open Anyway. The workflow signs and notarizes automatically once the
 secrets exist; nothing else changes.
