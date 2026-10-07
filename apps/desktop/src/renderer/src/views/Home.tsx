@@ -207,9 +207,19 @@ export function HomeView({ go }: { go: (r: string) => void }) {
                       {s.note}
                     </span>
                   )}
-                  {s.id === 'helper' && s.state !== 'ok' && status.helperInstallable && (
-                    <InstallHelper reinstall={s.state === 'down'} />
-                  )}
+                  {s.id === 'helper' &&
+                    (s.state !== 'ok' || status.helperOutdated) &&
+                    status.helperInstallable && (
+                      <InstallHelper
+                        kind={
+                          status.helperOutdated
+                            ? 'update'
+                            : s.state === 'down'
+                              ? 'reinstall'
+                              : 'install'
+                        }
+                      />
+                    )}
                 </span>
               </div>
             ))}
@@ -233,8 +243,8 @@ export function HomeView({ go }: { go: (r: string) => void }) {
   );
 }
 
-/** Installs the helper through macOS's own password dialog. */
-function InstallHelper({ reinstall }: { reinstall: boolean }) {
+/** Installs or updates the helper through the system's own password dialog. */
+function InstallHelper({ kind }: { kind: 'install' | 'reinstall' | 'update' }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const run = async () => {
@@ -250,10 +260,20 @@ function InstallHelper({ reinstall }: { reinstall: boolean }) {
         type="button"
         className="btn sm"
         disabled={busy}
-        title="macOS asks for your password once"
+        title={
+          kind === 'update'
+            ? 'This version of Vigil ships a newer helper. Your password is asked once.'
+            : 'Your password is asked once'
+        }
         onClick={() => void run()}
       >
-        {busy ? 'Installing…' : reinstall ? 'Reinstall helper' : 'Install helper'}
+        {busy
+          ? kind === 'update'
+            ? 'Updating…'
+            : 'Installing…'
+          : { install: 'Install helper', reinstall: 'Reinstall helper', update: 'Update helper' }[
+              kind
+            ]}
       </button>
       {error && (
         <span className="t-small" style={{ color: 'var(--poor)', textAlign: 'right' }}>

@@ -25,14 +25,14 @@ for f in "$SRC/node" "$SRC/helper.mjs" "$HERE/vigil-helper" "$HERE/vigil-helper.
 done
 command -v systemctl >/dev/null || { echo "The helper needs systemd." >&2; exit 1; }
 
-# Stop the running copy, if any, before replacing its files.
-systemctl stop vigil-helper.service 2>/dev/null || true
-
+# Copy the new files first, then stop the running copy, if any, and swap them
+# in, so an update leaves the helper stopped for as short a time as possible.
 install -d -o root -g root -m 755 "$LIBEXEC"
 rm -rf "$DEST.new"
 install -d -o root -g root -m 755 "$DEST.new"
 install -o root -g root -m 755 "$SRC/node" "$DEST.new/node"
 install -o root -g root -m 644 "$SRC/helper.mjs" "$DEST.new/helper.mjs"
+systemctl stop vigil-helper.service 2>/dev/null || true
 rm -rf "$DEST"
 mv "$DEST.new" "$DEST"
 install -o root -g root -m 755 "$HERE/vigil-helper" "$LIBEXEC/vigil-helper"

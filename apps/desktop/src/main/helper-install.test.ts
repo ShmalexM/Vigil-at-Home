@@ -1,11 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   adminScriptArgs,
   helperBundleDir,
   helperInstallCommand,
+  helperMatch,
+  installedHelperFiles,
   runHelperScript,
   shellQuote,
   type RunFile,
@@ -130,4 +132,66 @@ describe('helper install', () => {
     expect(staged).toMatch(/linux\/uninstall\.sh$/);
     expect(await runHelperScript('install', dir, answer(0), 'win32')).toMatchObject({ ok: false });
   });
+
+  it('runs install.sh for an update, with a dialog that says why', async () => {
+    const { dir } = bundle();
+    const seen: string[][] = [];
+    const ok: RunFile = async (file, args) => {
+      seen.push([file, ...args]);
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    expect(await runHelperScript('update', dir, ok, 'darwin')).toEqual({ ok: true });
+    expect(seen[0]?.at(-1)).toBe(join(dir, 'install.sh'));
+    expect(seen[0]?.join(' ')).toContain('was updated and wants to update its helper');
+    expect(await runHelperScript('update', dir, ok, 'linux')).toEqual({ ok: true });
+    expect(seen[1]?.at(-1)).toMatch(/linux\/install\.sh$/);
+  });
+
+  for (const platform of ['darwin', 'linux'] as const) {
+    it(`tells an installed helper that matches the app's from an older one (${platform})`, () => {
+      const { dir } = bundle();
+      writeFileSync(join(dir, 'helper.mjs'), 'helper v2');
+      writeFileSync(join(dir, 'node'), 'node 22');
+      writeFileSync(join(dir, 'vigil-helper'), 'launcher');
+      writeFileSync(join(dir, 'com.vigilathome.helper.plist'), 'plist');
+      for (const f of ['vigil-helper', 'vigil-helper.service', 'com.vigilathome.helper.policy'])
+        writeFileSync(join(dir, 'linux', f), f);
+      const root = mkdtempSync(join(tmpdir(), 'root-'));
+      const files = installedHelperFiles(dir, platform, root);
+      const install = () => {
+        for (const f of files) {
+          mkdirSync(dirname(f.installed), { recursive: true });
+          writeFileSync(f.installed, readFileSync(f.bundled));
+        }
+      };
+
+      const none = helperMatch(dir, platform, root);
+      expect(none.installed).toBe('none');
+      install();
+      expect(helperMatch(dir, platform, root)).toEqual({
+        installed: 'current',
+        bundle: none.bundle,
+      });
+
+      // The app was replaced by a newer one; the helper it installed stays.
+      writeFileSync(join(dir, 'helper.mjs'), 'helper v3');
+      const newer = helperMatch(dir, platform, root);
+      expect(newer.installed).toBe('outdated');
+      expect(newer.bundle).not.toBe(none.bundle);
+      install();
+      expect(helperMatch(dir, platform, root).installed).toBe('current');
+
+      // A new Node release, compared by size.
+      writeFileSync(join(dir, 'node'), 'node 24.1');
+      expect(helperMatch(dir, platform, root).installed).toBe('outdated');
+      install();
+      // A changed launcher or service file needs install.sh as well.
+      writeFileSync(files[2]!.installed, 'old launcher');
+      expect(helperMatch(dir, platform, root).installed).toBe('outdated');
+      // An installed file that is gone counts as outdated, not as a crash.
+      install();
+      rmSync(files[3]!.installed);
+      expect(helperMatch(dir, platform, root).installed).toBe('outdated');
+    });
+  }
 });

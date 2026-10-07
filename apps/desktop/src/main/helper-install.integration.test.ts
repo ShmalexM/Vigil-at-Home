@@ -1,7 +1,9 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { helperMatch } from './helper-install.js';
 
 // Installs the real helper with the Linux install.sh, as root, under systemd,
 // then removes it. Runs in CI's linux job (sudo, VIGIL_LINUX_INTEGRATION=1).
@@ -40,8 +42,19 @@ describe.skipIf(!enabled)('Linux helper install', () => {
       const approve = spawnSync('/usr/libexec/vigil-helper', ['approve', 'a'.repeat(32)]);
       expect(approve.status).toBe(0);
 
+      // The app sees that the installed helper is the one it ships.
+      expect(helperMatch(dev, 'linux').installed).toBe('current');
+      // An updated app carrying a different helper sees the installed one as outdated.
+      const newer = mkdtempSync(join(tmpdir(), 'vigil-newer-'));
+      cpSync(dev, newer, { recursive: true });
+      writeFileSync(join(newer, 'helper.mjs'), '// a newer helper\n', { flag: 'a' });
+      expect(helperMatch(newer, 'linux').installed).toBe('outdated');
+
       // Installing again replaces the running copy.
       expect(sh('install.sh').status).toBe(0);
+      expect(spawnSync('systemctl', ['is-active', '--quiet', 'vigil-helper.service']).status).toBe(
+        0,
+      );
 
       const remove = sh('uninstall.sh');
       expect(remove.status).toBe(0);

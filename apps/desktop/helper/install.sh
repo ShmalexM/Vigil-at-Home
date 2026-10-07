@@ -22,14 +22,15 @@ for f in node helper.mjs vigil-helper "$LABEL.plist"; do
   [ -f "$SRC/$f" ] || { echo "Missing $f next to install.sh" >&2; exit 1; }
 done
 
-# Stop the running copy, if any, before replacing its files.
-launchctl bootout "system/$LABEL" 2>/dev/null || true
-
+# Copy the new files first, then stop the running copy, if any, and swap them
+# in, so an update leaves the helper stopped for as short a time as possible.
+# Santa keeps enforcing the rules it already has while the helper restarts.
 install -d -o root -g wheel -m 755 "$TOOLS"
 rm -rf "$DEST.new"
 install -d -o root -g wheel -m 755 "$DEST.new"
 install -o root -g wheel -m 755 "$SRC/node" "$DEST.new/node"
 install -o root -g wheel -m 644 "$SRC/helper.mjs" "$DEST.new/helper.mjs"
+launchctl bootout "system/$LABEL" 2>/dev/null || true
 rm -rf "$DEST"
 mv "$DEST.new" "$DEST"
 install -o root -g wheel -m 755 "$SRC/vigil-helper" "$TOOLS/vigil-helper"
