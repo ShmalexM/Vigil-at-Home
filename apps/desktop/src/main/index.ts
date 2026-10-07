@@ -17,7 +17,12 @@ import {
   type HelperSyncOptions,
   type HelperSyncOutcome,
 } from './detection.js';
-import { helperBundleDir, helperInstallCommand, runHelperScript } from './helper-install.js';
+import {
+  helperBundleDir,
+  helperInstallCommand,
+  helperMatch,
+  runHelperScript,
+} from './helper-install.js';
 import { HelperLink } from './helper.js';
 import { registerIpc } from './ipc.js';
 import { systemProbe } from './onboarding/checks.js';
@@ -149,8 +154,24 @@ function start(): void {
       // The next connection tries again.
     }
   };
-  // Installing or removing the helper shows macOS's own password dialog.
+  // After an update that replaced the app, the helper it installed before keeps
+  // running until install.sh runs again. Compared at start and after each script.
+  const checkHelperMatch = () => {
+    const dir = helperDir();
+    try {
+      const m = dir && core.helperInstallable && !demo ? helperMatch(dir) : null;
+      core.helperOutdated = m?.installed === 'outdated';
+      return m;
+    } catch (err) {
+      console.error('[helper] could not compare the installed helper:', err);
+      core.helperOutdated = false;
+      return null;
+    }
+  };
+  const helperAtStart = checkHelperMatch();
+  // Installing or removing the helper shows the system's own password dialog.
   const afterHelperScript = async (r: HelperInstallResult) => {
+    checkHelperMatch();
     await helper.reconnect();
     await reportHealth(core.sensors, probe);
     return r;
@@ -290,7 +311,10 @@ function start(): void {
     agents,
     { service: pack, connectors },
     {
-      install: async () => afterHelperScript(await runHelperScript('install', helperDir())),
+      install: async () =>
+        afterHelperScript(
+          await runHelperScript(core.helperOutdated ? 'update' : 'install', helperDir()),
+        ),
       uninstall: async () => afterHelperScript(await runHelperScript('uninstall', helperDir())),
     },
   );
@@ -311,6 +335,24 @@ function start(): void {
   core.alerts.on('popup', (alert) => windows.showPopup(alert.id));
   core.feed.on('events', (n) => windows.broadcast('events', n));
   refresh();
+
+  // An app updated in place asks once, for each helper it ships, to replace the
+  // older one still installed, with the dialog the first install used. If that
+  // is declined, Home keeps an Update helper button.
+  if (helperAtStart?.installed === 'outdated' && app.isPackaged) {
+    const bundle = helperAtStart.bundle;
+    if (store.getSetting('helper.updateAsked', z.string(), '') !== bundle) {
+      setTimeout(() => {
+        void runHelperScript('update', helperDir())
+          .then(afterHelperScript)
+          .then((r) => {
+            store.setSetting('helper.updateAsked', bundle);
+            if (!r.ok && r.error !== 'cancelled') console.error('[helper] update failed:', r.error);
+            windows.broadcast('changed');
+          });
+      }, 3000).unref?.();
+    }
+  }
 
   core.applyPower(power.mode);
   power.on('change', (mode) => core.applyPower(mode));

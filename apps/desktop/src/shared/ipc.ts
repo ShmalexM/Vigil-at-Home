@@ -342,6 +342,8 @@ export interface StatusView {
   dryRun: boolean;
   /** True when this build carries the helper, so the app can install it. */
   helperInstallable: boolean;
+  /** True when the installed helper is older than (or not) the one this build ships. */
+  helperOutdated: boolean;
 }
 
 export interface HelperInstallResult {

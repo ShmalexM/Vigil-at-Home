@@ -60,6 +60,8 @@ export class VigilCore {
   readonly events: EventLog;
   /** Set at startup when this build ships the helper. */
   helperInstallable = false;
+  /** Set when the installed helper isn't the one this build ships. */
+  helperOutdated = false;
   /** Emits `events` (count) at most once per FEED_BATCH_MS while events arrive. */
   readonly feed = new EventEmitter<{ events: [number] }>();
   /** Vigil's AI runs and plan limits, for the Usage page. */
@@ -251,6 +253,7 @@ export class VigilCore {
       sensors: this.sensors.list(),
       dryRun: this.executor.simulated ?? this.dryRun,
       helperInstallable: this.helperInstallable,
+      helperOutdated: this.helperOutdated,
     };
   }
 
