@@ -50,7 +50,7 @@ jobs:
           BENCH_OUT: ${{ github.workspace }}/bench-results
       - if: always()
         run: node packages/bench/scripts/summary.mjs bench-results >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: bench-detection
@@ -94,7 +94,7 @@ jobs:
       - run: pnpm --filter @vigil/bench bench:labels
       - if: always()
         run: node packages/bench/scripts/summary.mjs bench-results >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: bench-labels-${{ strategy.job-index }}
@@ -142,7 +142,7 @@ jobs:
       - name: Remove the helper
         if: always()
         run: sudo "$RUNNER_TEMP/Vigil at Home.app/Contents/Resources/helper/uninstall.sh" || true
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: bench-flow
