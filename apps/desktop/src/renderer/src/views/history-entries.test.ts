@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ActionRecord, Alert } from '@vigil/core';
-import { historyEntries, outcome } from './history-entries';
+import { filterEntries, historyEntries, outcome } from './history-entries';
 
 const now = Date.UTC(2026, 9, 2, 12);
 const alert = (id: string, at: number, extra: Partial<Alert> = {}): Alert => ({
@@ -74,5 +74,38 @@ describe('outcome', () => {
       outcome(alert('a', t, { decision: { at: t, verdict: 'expected', remember: false } })),
     ).toBe('You marked it fine');
     expect(outcome(alert('a', t))).toBe('Closed');
+  });
+});
+
+describe('filterEntries', () => {
+  const entries = historyEntries(
+    [
+      alert('a1', now - 1000, {
+        title: 'Unsigned zoom_update connected out',
+        subject: { kind: 'process', label: 'Zoom Helper', path: '/Users/me/Downloads/zoom_update' },
+      }),
+      alert('a2', now - 2000, { title: 'Launch agent pipes curl' }),
+    ],
+    [action('x1', now - 500)],
+    now,
+  );
+  const describe = (r: ActionRecord) => `Pause process ${r.id}`;
+  const ids = (q: string) =>
+    filterEntries(entries, q, describe).map((e) => (e.kind === 'alert' ? e.alert.id : e.record.id));
+
+  it('keeps everything for an empty search', () => {
+    expect(ids('  ')).toEqual(['x1', 'a1', 'a2']);
+  });
+
+  it('matches every word, ignoring case, across title, path and actions', () => {
+    expect(ids('ZOOM downloads')).toEqual(['a1']);
+    expect(ids('curl')).toEqual(['a2']);
+    expect(ids('Zoom Helper')).toEqual(['a1']);
+    expect(ids('pause x1')).toEqual(['x1']);
+    expect(ids('zoom curl')).toEqual([]);
+  });
+
+  it('matches what the row says happened', () => {
+    expect(ids('closed')).toEqual(['a1', 'a2']);
   });
 });

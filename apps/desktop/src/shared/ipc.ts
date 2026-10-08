@@ -195,6 +195,8 @@ export const calls = {
   staleAlerts: z.tuple([]),
   alertCounts: z.tuple([]),
   clearStale: z.tuple([z.array(Id).min(1).max(2000)]),
+  /** Every Noticed alert raised up to this time (when the user opened the confirm). */
+  clearNoticedUpTo: z.tuple([z.number().int().nonnegative()]),
   undoAction: z.tuple([Id]),
   approveProposal: z.tuple([Id]),
   rejectProposal: z.tuple([Id]),
@@ -262,6 +264,7 @@ export const calls = {
   setUpdateAuto: z.tuple([z.boolean()]),
   dismissUpdate: z.tuple([]),
   downloadUpdate: z.tuple([]),
+  openUpdateNotes: z.tuple([]),
   // Agents (main/agents).
   listAgents: z.tuple([]),
   listAgentNames: z.tuple([]),
@@ -339,6 +342,8 @@ export interface StatusView {
   needsYou: number;
   /** Open alerts Vigil only noticed; they don't badge or lower the level. */
   noticed: number;
+  /** Of those, the ones "Those were me" closes: nothing taken, held or suggested on them. */
+  noticedClearable: number;
   reasons: string[];
   watch: WatchSummary;
   /** The user's Show me less / Show me more choice. */
@@ -358,6 +363,8 @@ export interface HelperInstallResult {
   ok: boolean;
   /** Set when it failed; "cancelled" when the user closed the password dialog. */
   error?: string;
+  /** A failed install: the command that does the same from a terminal. */
+  command?: string;
 }
 
 export interface AlertDetail {
@@ -569,6 +576,9 @@ export interface SettingsView {
   commit: string;
   /** The sidebar's Advanced group was left open. */
   showAdvanced: boolean;
+  /** process.platform and process.arch, for About and bug reports. */
+  platform: string;
+  arch: string;
 }
 
 /** Return types, one per call. */
@@ -588,6 +598,7 @@ export interface CallResults {
   alertCounts: { open: number; resolved: number };
   /** How many of them were closed. */
   clearStale: number;
+  clearNoticedUpTo: number;
   undoAction: ActionRecord;
   approveProposal: ActionRecord;
   rejectProposal: void;
@@ -647,6 +658,7 @@ export interface CallResults {
   setUpdateAuto: void;
   dismissUpdate: void;
   downloadUpdate: void;
+  openUpdateNotes: void;
   listAgents: AgentView[];
   /** The registry only, without listAgents' stats. */
   listAgentNames: Pick<AgentView, 'id' | 'name' | 'status'>[];

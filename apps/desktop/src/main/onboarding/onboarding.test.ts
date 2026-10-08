@@ -194,13 +194,37 @@ describe('checks', () => {
   });
 
   it('prefers the small model but accepts one already installed', async () => {
-    expect(await CHECKS['ollama.model'](fakeMac({ ollama: [LOCAL_MODEL] }))).toEqual({
+    const lots = 32 * 1024 ** 3;
+    expect(
+      await CHECKS['ollama.model']({ ...fakeMac({ ollama: [LOCAL_MODEL] }), memoryBytes: lots }),
+    ).toMatchObject({
       ok: true,
-      detail: LOCAL_MODEL,
+      detail: expect.stringContaining(LOCAL_MODEL),
     });
-    expect((await CHECKS['ollama.model'](fakeMac({ ollama: ['llama3.2:3b'] }))).detail).toContain(
-      'llama3.2:3b',
+    expect((await CHECKS['ollama.model'](fakeMac({ ollama: ['gemma3:1b'] }))).detail).toContain(
+      'gemma3:1b',
     );
+    // A big model explains alerts but the labeller never picks it, so the step isn't done.
+    const big = await CHECKS['ollama.model'](fakeMac({ ollama: ['hermes-local:quality'] }));
+    expect(big.ok).toBe(false);
+    expect(big.detail).toMatch(/hermes-local:quality.*labelling events needs a small model/);
+  });
+
+  it('agrees with the labeller on memory and on a model set in AI settings', async () => {
+    const GB = 1024 ** 3;
+    // Below 16 GB the labeller only looks at the small list, which leaves out 1.5b.
+    const small = { ...fakeMac({ ollama: [LOCAL_MODEL] }), memoryBytes: 8 * GB };
+    expect((await CHECKS['ollama.model'](small)).ok).toBe(false);
+    const smallOk = { ...fakeMac({ ollama: [LOCAL_MODEL_SMALL] }), memoryBytes: 8 * GB };
+    expect((await CHECKS['ollama.model'](smallOk)).ok).toBe(true);
+    // A model set in settings is the only one the labeller uses.
+    const set = (installed: string[]) => ({
+      ...fakeMac({ ollama: installed }),
+      memoryBytes: 32 * GB,
+      classifierModel: () => 'mistral:7b',
+    });
+    expect((await CHECKS['ollama.model'](set(['mistral:7b']))).ok).toBe(true);
+    expect((await CHECKS['ollama.model'](set([LOCAL_MODEL]))).ok).toBe(false);
     expect((await CHECKS['ollama.model'](fakeMac({ ollama: [] }))).ok).toBe(false);
     expect((await CHECKS.ollama(fakeMac({ ollama: 'down' }))).ok).toBe(false);
   });
@@ -236,6 +260,34 @@ describe('checks', () => {
 });
 
 describe('OnboardingService', () => {
+  it('offers a one-click helper install, and treats a closed password dialog as no error', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vigil-setup-'));
+    let answer: { ok: boolean; error?: string } = { ok: false, error: 'cancelled' };
+    let installs = 0;
+    const svc = new OnboardingService({
+      store: memoryStore(),
+      keys: new KeyStore(join(dir, 'k.json'), testCipher()),
+      probe: { ...fakeMac({}), platform: 'linux' },
+      supported: true,
+      plan: () => ({ helperInstallCommand: 'sudo sh install.sh' }),
+      installHelper: async () => (installs++, answer),
+    });
+    svc.skip('fapolicyd', true);
+    svc.skip('osquery', true);
+    const helper = (await svc.view(true)).steps.find((s) => s.id === 'helper');
+    expect(helper).toMatchObject({
+      state: 'todo',
+      action: { id: 'helper-install', label: 'Install helper' },
+    });
+    // The command to paste stays as the fallback.
+    expect(helper?.commands.map((c) => c.cmd)).toEqual(['sudo sh install.sh']);
+
+    await expect(svc.runAction('helper-install')).resolves.toHaveProperty('steps');
+    answer = { ok: false, error: 'No password dialog could open' };
+    await expect(svc.runAction('helper-install')).rejects.toThrow('No password dialog');
+    expect(installs).toBe(2);
+  });
+
   it('shows the pre-flight step as done once the hook has checked in, without running a check', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'vigil-setup-'));
     let connected = false;

@@ -66,6 +66,7 @@ export function registerIpc(
       resolved: core.store.countAlerts('resolved'),
     }),
     clearStale: (ids) => core.clearStale(ids),
+    clearNoticedUpTo: (at) => core.clearNoticedUpTo(at),
     undoAction: (id) => core.alerts.undo(id),
     approveProposal: (id) => core.alerts.approveProposal(id),
     rejectProposal: (id) => core.alerts.rejectProposal(id),
@@ -113,6 +114,8 @@ export function registerIpc(
       version: app.getVersion(),
       commit: typeof __VIGIL_COMMIT__ === 'string' ? __VIGIL_COMMIT__ : '',
       showAdvanced: core.showAdvanced(),
+      platform: process.platform,
+      arch: process.arch,
     }),
     setTheme: (theme) => {
       core.setTheme(theme);
@@ -146,6 +149,7 @@ export function registerIpc(
     setUpdateAuto: (auto) => updates.setAuto(auto),
     dismissUpdate: () => updates.dismiss(),
     downloadUpdate: () => updates.download(),
+    openUpdateNotes: () => updates.openNotes(),
     getAi: () => ai.view(),
     getAiPrefs: () => ai.prefs(),
     setAiPrefs: (patch) => ai.setPrefs(patch),

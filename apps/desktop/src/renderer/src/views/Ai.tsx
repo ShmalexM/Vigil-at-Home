@@ -13,6 +13,7 @@ import {
   StatusMark,
   type MarkState,
 } from '../components/ui';
+import { computer } from '../platform';
 
 const MARK: Record<AiProviderView['state'], MarkState> = {
   ready: 'done',
@@ -39,9 +40,9 @@ const STATE_TEXT: Record<AiProviderView['state'], string> = {
 };
 
 const MODE_TEXT = {
-  local: 'on this Mac only',
+  local: `on this ${computer} only`,
   cloud: 'in the cloud',
-  both: 'on this Mac and in the cloud',
+  both: `on this ${computer} and in the cloud`,
 };
 
 /**
@@ -73,7 +74,7 @@ export function AiSection() {
 
   const act = async (run: () => Promise<{ ok: boolean; error?: string } | void>, done: string) => {
     const r = await run();
-    if (r && !r.ok) toast({ text: r.error ?? 'That didn’t work' });
+    if (r && !r.ok) toast({ text: r.error ?? 'That didn’t work', tone: 'error' });
     else toast({ text: done });
     await load();
   };
@@ -84,7 +85,7 @@ export function AiSection() {
       <div className="ai-main">
         <div className="ai-name">
           {p.name}
-          <Chip>{p.local ? 'On this Mac' : 'Cloud'}</Chip>
+          <Chip>{p.local ? `On this ${computer}` : 'Cloud'}</Chip>
         </div>
         <div className="ai-used">{usedFor(p, view)}</div>
         <div className="ai-sub">{describe(p, view)}</div>
@@ -251,7 +252,7 @@ function usedFor(p: AiProviderView, view: AiView): string {
       ? `Used for: ${explain}, and labelling events with a small model when ${before} can’t.`
       : `Used for: ${explain}, and labelling events with a small model.`;
   }
-  if (view.mode === 'local') return 'Not used while Vigil runs AI on this Mac only.';
+  if (view.mode === 'local') return `Not used while Vigil runs AI on this ${computer} only.`;
   if (p.provider === 'claude') {
     if (!view.anthropicKey)
       return view.prefs.claudePlan
@@ -270,15 +271,15 @@ function usedFor(p: AiProviderView, view: AiView): string {
 
 function labellingText(view: AiView): string {
   if (view.mode === 'local')
-    return 'A small model on this Mac labels unusual programs and connections in Activity.';
+    return `A small model on this ${computer} labels unusual programs and connections in Activity.`;
   const fallback =
     view.mode === 'cloud'
       ? view.jevVia
         ? 'Jev, then the other apps above, take over'
         : 'The other apps above take over'
       : view.jevVia
-        ? 'Jev, then the model on this Mac, take over'
-        : 'The model on this Mac takes over';
+        ? `Jev, then the model on this ${computer}, take over`
+        : `The model on this ${computer} takes over`;
   if (haikuLabels(view))
     return `Claude Haiku labels unusual programs and connections in Activity, using your Anthropic API key. ${fallback} when it can’t.`;
   const addHaiku =
@@ -287,11 +288,13 @@ function labellingText(view: AiView): string {
       : '';
   if (view.jevVia)
     return `Jev labels unusual programs and connections in Activity. ${
-      view.mode === 'cloud' ? 'The apps above take over' : 'The model on this Mac takes over'
+      view.mode === 'cloud'
+        ? 'The apps above take over'
+        : `The model on this ${computer} takes over`
     } when it can’t.${addHaiku}`;
   return view.mode === 'cloud'
     ? `The apps above label unusual programs and connections in Activity, within their background share. An OpenRouter or TypeSafe key adds Jev.${addHaiku}`
-    : `A small model on this Mac labels unusual programs and connections in Activity. An OpenRouter or TypeSafe key adds Jev.${addHaiku}`;
+    : `A small model on this ${computer} labels unusual programs and connections in Activity. An OpenRouter or TypeSafe key adds Jev.${addHaiku}`;
 }
 
 function describe(p: AiProviderView, view: AiView): string {

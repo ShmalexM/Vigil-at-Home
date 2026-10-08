@@ -22,7 +22,7 @@ import {
   type StatusView,
 } from '../shared/ipc.js';
 import { isNoticed } from '../shared/attention.js';
-import { closableUnasked } from '../shared/piles.js';
+import { untouched } from '../shared/piles.js';
 import { DEFAULT_APPEARANCE, type AppearanceSettings } from '../shared/themes.js';
 import { AlertService, type DecisionInput } from './alerts.js';
 import { redactEvidence } from './evidence-redact.js';
@@ -226,8 +226,9 @@ export class VigilCore {
    * Open alerts that a rule's exclusion, or the user's exception, now lets
    * off: raised before that exclusion existed (an update made the rule
    * quieter, or the user excluded the same thing from another alert). Only
-   * alerts that can be closed without asking count (closableUnasked: nothing
-   * held back, no action taken or suggested), and only when the rule excuses
+   * alerts that can be closed without asking count (untouched: nothing
+   * held back, no action taken or suggested, and no rule suggestion waiting
+   * in the proposals table), and only when the rule excuses
    * every event the alert points to.
    */
   staleAlerts(): string[] {
@@ -241,7 +242,7 @@ export class VigilCore {
     if (c && c.mark === mark && now - c.at < STALE_TTL_MS) return c.ids;
     const out: string[] = [];
     for (const a of this.store.listAlerts({ status: 'open', limit: STALE_SCAN_LIMIT })) {
-      if (!closableUnasked(a)) continue;
+      if (!untouched(a) || this.store.hasPendingProposal(a.id)) continue;
       const events = this.store.getEvents(a.eventIds);
       if (events.length === 0) continue;
       if (events.every((e) => engine.excuses(a.ruleId, e))) out.push(a.id);
@@ -282,7 +283,10 @@ export class VigilCore {
     let cleared = 0;
     for (const id of new Set(ids)) {
       const alert = this.store.getAlert(id);
-      if (!alert || !isNoticed(alert)) continue;
+      // One with an action taken or a suggestion waiting (the AI's or a rule's) stays
+      // for a look of its own, so a bulk tap never quietly expires a suggestion.
+      if (!alert || !isNoticed(alert) || !untouched(alert)) continue;
+      if (this.store.hasPendingProposal(id)) continue;
       await this.alerts.decide(id, {
         verdict: 'expected',
         release: false,
@@ -291,6 +295,20 @@ export class VigilCore {
       cleared++;
     }
     return cleared;
+  }
+
+  /**
+   * "Those were me" for every Noticed alert, not only the newest the lists
+   * loaded. Only alerts last seen by `at`, when the user opened the confirm,
+   * are cleared, so anything that turned up while they read it stays, a
+   * repeat folded into an older alert included.
+   */
+  async clearNoticedUpTo(at: number): Promise<number> {
+    const ids = this.store
+      .listAlerts({ status: 'open', limit: -1 })
+      .filter((a) => isNoticed(a) && untouched(a) && (a.repeats?.lastAt ?? a.createdAt) <= at)
+      .map((a) => a.id);
+    return this.clearNoticed(ids);
   }
 
   private statsCache: { at: number; stats: EventStats } | undefined;
@@ -321,7 +339,9 @@ export class VigilCore {
   }
 
   status(): StatusView {
-    const s = computeStatus(this.store.listAlerts({ status: 'open' }), this.sensors.list());
+    // Counted over every open alert, not the newest 200 the lists load, so Home,
+    // the menu bar and the badge agree however many have piled up.
+    const s = { ...computeStatus([], this.sensors.list()), ...this.store.openAlertCounts() };
     const today = startOfDay(this.now());
     const alertView = this.alertView();
     return {

@@ -295,8 +295,9 @@ function EventFeed({
             </span>
             <span className="t-h3">Nothing to show yet</span>
             <span className="t-small" style={{ maxWidth: 440 }}>
-              Vigil sees programs starting, network connections and new startup items once Santa and
-              osquery are installed. Everything it sees will show up here as it happens.
+              Vigil sees programs starting, network connections and new startup items once{' '}
+              {onLinux ? 'osquery and the Vigil helper are' : 'Santa and osquery are'} installed.
+              Everything it sees will show up here as it happens.
             </span>
           </div>
         ) : rows && rows.length === 0 && !canSearchBack ? (

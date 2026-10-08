@@ -33,16 +33,21 @@ export function pileUp(alerts: readonly Alert[]): Row[] {
   );
 }
 
+/** The pile this alert joins in Needs you, or undefined when it shows on its own. */
+export function pileKey(a: Alert): string | undefined {
+  return pileable(a) ? a.pile!.key : undefined;
+}
+
 function pileable(a: Alert): boolean {
-  return !!a.pile && closableUnasked(a);
+  return !!a.pile && untouched(a);
 }
 
 /**
- * An alert that can be closed in bulk without asking about it: open,
- * undecided, holding nothing back, with no action taken or suggested (an
- * AI suggestion would otherwise expire unseen).
+ * Open and undecided, with nothing held, no action taken and no AI
+ * suggestion waiting: safe to group, or to close in bulk ("Those were me")
+ * without quietly expiring something.
  */
-export function closableUnasked(a: Alert): boolean {
+export function untouched(a: Alert): boolean {
   return (
     !a.decision &&
     a.status === 'open' &&

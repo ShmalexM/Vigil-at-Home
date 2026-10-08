@@ -511,6 +511,26 @@ describe('stale open alerts', () => {
     expect(store.getAlert(suggested.id)?.status).toBe('open');
   });
 
+  it("leaves an alert with a rule's pending suggestion, so Close all never expires it", async () => {
+    const { core, store } = setup();
+    const rule = makeRule({ id: 'agent-keychain-secret', mode: 'alert', severity: 'high' });
+    // Only the proposals table knows: no action taken, no AI assessment.
+    const suggested = await core.alerts.raise({
+      rule,
+      events: [read('Claude Code-credentials')],
+      actions: [{ kind: 'process.suspend', pid: 4242 }],
+    });
+    expect(suggested.ai).toBeUndefined();
+    expect(store.listProposals({ alertId: suggested.id }).map((p) => p.status)).toEqual([
+      'pending',
+    ]);
+    expect(core.staleAlerts()).toEqual([]);
+    expect(await core.clearStale([suggested.id])).toBe(0);
+    expect(store.listProposals({ alertId: suggested.id }).map((p) => p.status)).toEqual([
+      'pending',
+    ]);
+  });
+
   it('reuses its answer until an open alert changes', async () => {
     const { core, store } = setup();
     const rule = makeRule({ id: 'agent-keychain-secret', mode: 'alert', severity: 'high' });

@@ -1,5 +1,6 @@
 import type { HelperOutcome } from '../../shared/ipc';
 import type { Action, ActionRecord, Alert, SensorEvent, Severity } from '@vigil/core';
+import type { ResponseProvenance } from './decision';
 
 export const severityLabel: Record<Severity, string> = {
   critical: 'Critical',
@@ -140,8 +141,24 @@ export function describeEvent(e: SensorEvent): string {
   }
 }
 
-export function headline(a: Alert): string {
-  if (a.containment === 'active') return 'Vigil blocked something';
+/**
+ * `response`: what Vigil's actions on this alert really did (responseProvenance).
+ * Only an all-real response says "blocked"; one an older build recorded
+ * without saying is never claimed as real.
+ */
+export function headline(a: Alert, response: ResponseProvenance | undefined): string {
+  if (a.containment === 'active') {
+    switch (response) {
+      case 'real':
+        return 'Vigil blocked something';
+      case 'simulated':
+        return 'Vigil would have blocked this';
+      case 'mixed':
+        return 'Vigil blocked part of this; the rest was only simulated';
+      default:
+        return 'Vigil acted on this';
+    }
+  }
   if (a.containment === 'released') return 'Released by you';
   return 'Vigil needs you';
 }

@@ -31,6 +31,12 @@ export interface UpdateOptions {
   current: string;
   /** process.arch: arm64 (Apple silicon) or x64 (Intel), matching the DMG names. */
   arch: string;
+  /**
+   * process.platform. Only macOS gets a direct installer link: the Linux .deb
+   * and AppImage can't be told apart from here, and an x64 DMG must never be
+   * offered to an x64 Linux machine. Elsewhere the release page opens instead.
+   */
+  platform?: NodeJS.Platform;
   load: () => unknown;
   save: (s: Saved) => void;
   fetch?: typeof fetch;
@@ -98,7 +104,12 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
         signal: AbortSignal.timeout(20_000),
       });
       if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
-      this.available = newest(Releases.parse(await res.json()), this.o.current, this.o.arch);
+      this.available = newest(
+        Releases.parse(await res.json()),
+        this.o.current,
+        this.o.arch,
+        this.o.platform,
+      );
       this.error = undefined;
       const v = this.available?.version;
       if (v && !this.told.has(v) && this.saved().dismissed !== v) {
@@ -133,6 +144,11 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
     if (!a) return;
     await this.o.openExternal(a.downloadUrl ?? a.notesUrl);
   }
+
+  /** Opens the release's page on GitHub, to read what changed. */
+  async openNotes(): Promise<void> {
+    if (this.available) await this.o.openExternal(this.available.notesUrl);
+  }
 }
 
 /**
@@ -144,6 +160,7 @@ export function newest(
   raw: unknown[],
   current: string,
   arch: string,
+  platform: NodeJS.Platform = 'darwin',
 ): UpdateView['available'] | undefined {
   const releases = raw.flatMap((item) => {
     const p = Release.safeParse(item);
@@ -158,18 +175,33 @@ export function newest(
     const version = r.tag_name.replace(/^v/, '');
     if (!parseVersion(version) || !isGitHub(r.html_url)) continue;
     if (compareVersions(version, current) <= 0) continue;
+    // A release with nothing to install on this Linux machine isn't an update for it.
+    if (platform === 'linux' && !r.assets.some((a) => isLinuxPackage(a.name, arch))) continue;
     if (!best || compareVersions(version, best.version) > 0) best = { version, r };
   }
   if (!best) return undefined;
-  const dmg = best.r.assets.find(
-    (a) => a.name.endsWith(`-${arch}.dmg`) && isGitHub(a.browser_download_url),
-  );
+  const dmg =
+    platform === 'darwin'
+      ? best.r.assets.find(
+          (a) => a.name.endsWith(`-${arch}.dmg`) && isGitHub(a.browser_download_url),
+        )
+      : undefined;
   return {
     version: best.version,
     notesUrl: best.r.html_url,
     ...(dmg ? { downloadUrl: dmg.browser_download_url } : {}),
     ...(best.r.published_at ? { publishedAt: best.r.published_at } : {}),
   };
+}
+
+/**
+ * A .deb or AppImage for this chip, as electron-builder names them: the
+ * .deb says amd64 and the AppImage x86_64 for x64; both say arm64 for ARM.
+ */
+export function isLinuxPackage(name: string, arch: string): boolean {
+  const tags =
+    arch === 'x64' ? ['amd64.deb', 'x86_64.AppImage'] : [`${arch}.deb`, `${arch}.AppImage`];
+  return tags.some((t) => name.endsWith(`-${t}`));
 }
 
 /** Only ever open github.com links from the releases list. */

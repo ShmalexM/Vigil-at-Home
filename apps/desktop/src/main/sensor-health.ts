@@ -45,6 +45,12 @@ export interface HealthProbe {
   /** The helper's own view; it can see files and logs the app can't. */
   helperSensors?(): Promise<HelperSensors | null>;
   now(): number;
+  /**
+   * How long, since `since`, Vigil has been running with the computer awake.
+   * A sensor can't send anything while the app is closed or the computer
+   * sleeps, so only that time counts towards a sensor being quiet.
+   */
+  awakeMs?(since: number): number;
   /** Which OS's layers to check; defaults to macOS. */
   platform?: NodeJS.Platform;
 }
@@ -118,9 +124,14 @@ export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
     );
     const last = times.length ? Math.max(...times) : null;
     if (last === null) return { ...base, state: 'ok', note: 'Starting; no events yet' };
-    const quiet = p.now() - last;
-    if (quiet > QUIET_AFTER_MS[id]) {
-      return { ...base, state: 'degraded', note: `No events for ${minutes(quiet)} minutes` };
+    const awake = p.awakeMs?.(last) ?? p.now() - last;
+    if (awake > QUIET_AFTER_MS[id]) {
+      // The note says how long it really has been.
+      return {
+        ...base,
+        state: 'degraded',
+        note: `No events for ${minutes(p.now() - last)} minutes`,
+      };
     }
     return { ...base, state: 'ok' };
   };
@@ -168,5 +179,44 @@ export async function reportHealth(registry: SensorRegistry, probe: HealthProbe)
   for (const h of await checkHealth(probe)) {
     const prev = registry.get(h.id);
     if (prev?.state !== h.state || prev?.note !== h.note) registry.report(h);
+  }
+}
+
+/**
+ * The time Vigil has been running with the computer awake, from its start and
+ * the sleeps the power monitor reports. Keeps the last day of sleeps.
+ */
+export class AwakeClock {
+  private readonly sleeps: { from: number; to: number }[] = [];
+  private asleepAt: number | undefined;
+
+  constructor(
+    private readonly startedAt: number,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  suspend(at = this.now()): void {
+    this.asleepAt ??= at;
+  }
+
+  resume(at = this.now()): void {
+    if (this.asleepAt === undefined) return;
+    this.sleeps.push({ from: this.asleepAt, to: at });
+    this.asleepAt = undefined;
+    const keep = at - 24 * 60 * 60_000;
+    while (this.sleeps.length && this.sleeps[0]!.to < keep) this.sleeps.shift();
+  }
+
+  /** Awake running time since `since`. */
+  awakeMs(since: number): number {
+    const now = this.now();
+    const from = Math.max(since, this.startedAt);
+    let ms = Math.max(0, now - from);
+    const sleeps =
+      this.asleepAt === undefined
+        ? this.sleeps
+        : [...this.sleeps, { from: this.asleepAt, to: now }];
+    for (const z of sleeps) ms -= Math.max(0, Math.min(z.to, now) - Math.max(z.from, from));
+    return Math.max(0, ms);
   }
 }

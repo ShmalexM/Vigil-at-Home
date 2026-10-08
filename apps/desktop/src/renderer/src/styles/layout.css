@@ -94,16 +94,16 @@
 }
 .page-head {
   align-items: flex-end;
-  gap: 20px;
+  gap: 12px 20px;
+  /* At narrow widths the controls drop under the title instead of pushing the page sideways. */
+  flex-wrap: wrap;
 }
 .grid-2 {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
 }
-.reasons {
-  margin: 0;
-  padding-left: 18px;
+.home-why {
   color: var(--tx1);
 }
 .split {
@@ -513,6 +513,46 @@ div.history-row:hover {
 }
 
 /* Home's one quiet line for what Vigil only noticed, linking to History. */
+.history-search {
+  width: 280px;
+  max-width: 100%;
+}
+.history-chevron {
+  flex: none;
+  color: var(--tx3);
+  transition: transform 0.15s;
+}
+.history-item.open .history-search {
+  width: 280px;
+  max-width: 100%;
+}
+.history-chevron {
+  transform: rotate(90deg);
+}
+.history-detail {
+  gap: 8px;
+  margin: 0 12px 10px 34px;
+  padding: 10px 12px;
+  border-left: 2px solid var(--ln2);
+}
+.history-detail p,
+.history-detail ul {
+  margin: 0;
+}
+.history-detail ul {
+  padding-left: 18px;
+}
+.history-detail .subject {
+  overflow-wrap: anywhere;
+}
+.noticed-confirm {
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  border: 1px solid var(--ln1);
+}
 .noticed-hint {
   gap: 6px;
   padding: 2px 4px;
