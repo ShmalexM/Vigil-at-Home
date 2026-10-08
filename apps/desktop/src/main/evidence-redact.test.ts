@@ -144,6 +144,43 @@ describe('command lines in copied evidence', () => {
   });
 });
 
+describe('round 7 shapes', () => {
+  it('withholds a credential value whatever its first character', () => {
+    expect(command('PASSWORD=:hunter2 app')).toBe(WITHHELD);
+    expect(command('PGPASSWORD==hunter2 psql')).toBe(WITHHELD);
+    expect(redactEvidence({ args: ['tool', '--password', '-hunter2'] }, {})).toEqual({
+      args: [WITHHELD],
+    });
+  });
+
+  it('withholds a persistence label that repeats a withheld command', () => {
+    const out = redactEvidence(
+      {
+        events: [
+          { item: { label: 'tool --token=hunter2', programArgs: ['tool', '--token=hunter2'] } },
+          { item: { label: 'com.example.agent', programArgs: ['/bin/true'] } },
+        ],
+      },
+      {},
+    );
+    expect(out).toEqual({
+      events: [
+        { item: { label: WITHHELD, programArgs: [WITHHELD] } },
+        { item: { label: 'com.example.agent', programArgs: ['/bin/true'] } },
+      ],
+    });
+  });
+
+  it('counts auth only as its own word', () => {
+    expect(command('git log --author Alice')).toBe('git log --author Alice');
+    expect(command('curl --user-agent myapp https://h/')).toBe(
+      'curl --user-agent myapp https://h/',
+    );
+    for (const c of ['x --auth y', 'X-Auth: y', 'Authorization: y', 'OAUTH_TOKEN=y', 'auth=y'])
+      expect(command(c), c).toBe(WITHHELD);
+  });
+});
+
 describe('plain words and paths', () => {
   it('pass through when no value is given to a secret-sounding name', () => {
     for (const text of [

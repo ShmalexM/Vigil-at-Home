@@ -41,20 +41,23 @@ const URL_FIELDS = new Set(['url', 'originUrl']);
 const FIXED_TEXT = new Set(['title', 'label']);
 
 /** A name that may label a secret, as in `PGPASSWORD`, `api_key` or `x-auth`. */
-const SECRET_NAME = '[A-Za-z0-9_.-]*(?:pass|pwd|secret|token|key|auth|cred)[A-Za-z0-9_.-]*';
+const SECRET_NAME =
+  '[A-Za-z0-9_.-]*(?:(?:pass|pwd|secret|token|key|cred)[A-Za-z0-9_.-]*|auth(?:oriz[a-z]*|entic[a-z]*)?(?![A-Za-z])[A-Za-z0-9_.-]*)';
 
 /**
  * What a secret looks like in a command line: an assignment or flag whose
  * name says so, a tool's own password flag, or a value shaped like a known
  * kind of key. Plain words and paths (`cat /etc/passwd`, `ls /opt/compass`)
- * pass, since a name only counts when a value is given to it. The value
+ * pass, since a name only counts when a value is given to it, and `auth`
+ * counts only as its own word (`x-auth`, `authorization`, not `--author`).
+ * Any value counts, whatever its first character (`PASSWORD=:x`, `--password -x`). The value
  * shapes follow @vigil/ai/redact's SECRET_PATTERNS, loosened.
  */
 const SECRET_HINTS: readonly RegExp[] = [
   // NAME=value or NAME: value, also inside quotes, `$(…)` or a URL query.
-  new RegExp(`(?:^|[^A-Za-z0-9_])${SECRET_NAME}\\s*[=:]\\s*[^\\s=:]`, 'i'),
+  new RegExp(`(?:^|[^A-Za-z0-9_])${SECRET_NAME}\\s*[=:]\\s*\\S`, 'i'),
   // --password hunter2, -pass x, --token=x (the = form is caught above).
-  new RegExp(`(?:^|\\s)--?${SECRET_NAME}\\s+[^\\s-]`, 'i'),
+  new RegExp(`(?:^|\\s)--?${SECRET_NAME}\\s+\\S`, 'i'),
   /\bpass:\S/i,
   /sshpass/i,
   /-----BEGIN/i,
@@ -72,7 +75,7 @@ function mightHoldSecret(text: string): boolean {
   if (SECRET_HINTS.some((p) => p.test(text))) return true;
   if (/mysql|mariadb/i.test(text) && /-p/i.test(text)) return true;
   if (/redis-cli/i.test(text) && /-a|\bauth\b/i.test(text)) return true;
-  if (/curl/i.test(text) && /\s-[a-z]*[uK]|--user|--config/.test(text)) return true;
+  if (/curl/i.test(text) && /\s-[a-z]*[uK]|--user(?![-\w])|--config/.test(text)) return true;
   if (/unzip/i.test(text) && /-P/.test(text)) return true;
   if (/7z|7za|rar/i.test(text) && /-p\S/.test(text)) return true;
   return false;
@@ -157,23 +160,29 @@ function carries(text: unknown, withheld: Withheld): boolean {
 /**
  * Evidence ready to copy. Keys are kept. When any command line in it was
  * withheld, so is the alert's summary, which rules fill from the command,
- * and its title and subject when they repeat the command or one of its args.
+ * and any title or label, anywhere, that repeats the command or one of its args.
  */
 export function redactEvidence(value: unknown, names: EvidenceNames): unknown {
   const withheld: Withheld = [];
   const out = walk(value, names, withheld);
+  if (withheld.length === 0) return out;
   const alert = isRecord(value) && isRecord(value['alert']) ? value['alert'] : undefined;
   const copied = isRecord(out) && isRecord(out['alert']) ? out['alert'] : undefined;
-  if (withheld.length > 0 && alert && copied) {
-    if (copied['summary'] !== undefined) copied['summary'] = WITHHELD;
-    if (carries(alert['title'], withheld)) copied['title'] = WITHHELD;
-    const subject = alert['subject'];
-    const copiedSubject = copied['subject'];
-    if (isRecord(subject) && isRecord(copiedSubject) && carries(subject['label'], withheld)) {
-      copiedSubject['label'] = WITHHELD;
+  if (alert && copied && copied['summary'] !== undefined) copied['summary'] = WITHHELD;
+  withholdRepeats(value, out, withheld);
+  return out;
+}
+
+/** Withhold each title or label in `out` whose original in `value` repeats something withheld. */
+function withholdRepeats(value: unknown, out: unknown, withheld: Withheld): void {
+  if (Array.isArray(value) && Array.isArray(out)) {
+    value.forEach((v, i) => withholdRepeats(v, out[i], withheld));
+  } else if (isRecord(value) && isRecord(out)) {
+    for (const [k, v] of Object.entries(value)) {
+      if (FIXED_TEXT.has(k) && carries(v, withheld)) out[k] = WITHHELD;
+      else withholdRepeats(v, out[k], withheld);
     }
   }
-  return out;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
