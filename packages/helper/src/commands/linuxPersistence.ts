@@ -15,7 +15,7 @@ import { lstatSync, readFileSync } from 'node:fs';
 import type { System } from '../system.js';
 import { protectionFor } from '../config.js';
 import { ActionError } from './errors.js';
-import { quarantine, restore, type QuarantineOptions } from './quarantine.js';
+import { quarantine, resolveTarget, restore, type QuarantineOptions } from './quarantine.js';
 import type { PersistenceRecord } from './persistence.js';
 
 /** Folders whose items persistence.disable accepts on Linux. */
@@ -97,6 +97,8 @@ export async function disableLinuxPersistence(
   if (dirname(path).endsWith('/autostart') !== isDesktop) {
     throw new ActionError('invalid', `${name} does not belong in ${dirname(path)}`);
   }
+  // Vetted before systemd is touched, so a protected file is never even stopped.
+  resolveTarget(path, startupQuarantine(opts));
   let st;
   try {
     st = lstatSync(path);

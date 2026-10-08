@@ -33,10 +33,55 @@ export interface QuarantineRecord {
 
 export interface QuarantineOptions {
   quarantineDir: string;
+  /**
+   * The helper's state folder (config supportDir). Like the platform's
+   * default one (Protection stateDir), nothing in it or above it is ever
+   * moved, deleted or restored into.
+   */
+  stateDir?: string;
   protectedPrefixes?: string[];
   protectedExact?: Set<string>;
   /** Picks the protected lists when they aren't given. macOS when absent. */
   platform?: Platform;
+}
+
+/** macOS disks ignore case by default, so paths there are compared without it. */
+const caseless = (opts: QuarantineOptions) => opts.platform !== 'linux';
+
+function realpathOrUndefined(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch {
+    return undefined; // Not created yet: nothing can be inside it.
+  }
+}
+
+/**
+ * The folders the helper keeps for itself: the quarantine folder and its
+ * whole state folder (the one configured and the platform's default), each
+ * as given and at its real location, so a path that reaches one through a
+ * symlink (like /var -> /private/var on macOS) is caught too.
+ */
+function helperRoots(opts: QuarantineOptions): string[] {
+  const roots = new Set<string>();
+  for (const dir of [opts.quarantineDir, opts.stateDir, protectionFor(opts.platform).stateDir]) {
+    if (!dir) continue;
+    const trimmed = dir.replace(/\/+$/, '');
+    for (const r of [trimmed, realpathOrUndefined(trimmed)])
+      if (r) roots.add(caseless(opts) ? r.toLowerCase() : r);
+  }
+  return [...roots];
+}
+
+/**
+ * Whether `path` is one of the helper's own folders (helperRoots), is
+ * inside one, or holds one. Every file command refuses such a path, so no
+ * client can move, delete or restore over anything the helper keeps there,
+ * the app pin included.
+ */
+export function touchesHelperState(path: string, opts: QuarantineOptions): boolean {
+  const p = caseless(opts) ? path.toLowerCase() : path;
+  return helperRoots(opts).some((q) => p === q || p.startsWith(q + '/') || q.startsWith(p + '/'));
 }
 
 /** Reject relative, unnormalized or protected paths, and user home folders themselves. */
@@ -47,26 +92,15 @@ export function vetPath(path: string, opts: QuarantineOptions): string {
   const protection = protectionFor(opts.platform);
   const exact = opts.protectedExact ?? protection.exact;
   const prefixes = opts.protectedPrefixes ?? protection.prefixes;
-  const quarantineRoot = opts.quarantineDir.replace(/\/$/, '');
-  // Compare against the quarantine folder's real location too, so a path that
-  // reaches it through a symlink (like /var -> /private/var on macOS) is caught.
-  const quarantineRoots = [quarantineRoot];
-  try {
-    quarantineRoots.push(realpathSync(quarantineRoot));
-  } catch {
-    // Not created yet: nothing can be inside it.
-  }
+  const key = (s: string) => (caseless(opts) ? s.toLowerCase() : s);
+  const p = key(path);
   if (
-    exact.has(path) ||
-    prefixes.some(
-      (p) =>
-        path === p.replace(/\/$/, '') ||
-        path.startsWith(p.endsWith('/') ? p : p + '/') ||
-        path === p,
-    ) ||
-    quarantineRoots.some(
-      (q) => path === q || path.startsWith(q + '/') || q.startsWith(path + '/'),
-    ) ||
+    [...exact].some((e) => key(e) === p) ||
+    prefixes.some((raw) => {
+      const pre = key(raw);
+      return p === pre.replace(/\/$/, '') || p.startsWith(pre.endsWith('/') ? pre : pre + '/');
+    }) ||
+    touchesHelperState(path, opts) ||
     protection.homes.some((re) => re.test(path))
   ) {
     throw new ActionError('refused', `${path} is protected`);

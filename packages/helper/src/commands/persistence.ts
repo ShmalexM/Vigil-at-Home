@@ -8,6 +8,7 @@ import type { System } from '../system.js';
 import { ActionError } from './errors.js';
 import {
   quarantine,
+  resolveTarget,
   restore,
   type QuarantineOptions,
   type QuarantineRecord,
@@ -59,6 +60,8 @@ export async function disablePersistence(
       'only plists directly inside a LaunchAgents or LaunchDaemons folder can be disabled',
     );
   }
+  // Vetted before launchd is touched, so a protected file is never even unloaded.
+  resolveTarget(path, opts);
   let st;
   try {
     st = lstatSync(path);

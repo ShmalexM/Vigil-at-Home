@@ -36,6 +36,7 @@ import {
   quarantine,
   realParentPath,
   restore,
+  touchesHelperState,
   type QuarantineOptions,
   type QuarantineRecord,
 } from './commands/quarantine.js';
@@ -132,6 +133,12 @@ export class Executor {
     };
   }
 
+  /** No file command moves, deletes or restores anything into the helper's own folders. */
+  private refuseHelperState(path: string): void {
+    if (touchesHelperState(path, this.quarantineOpts))
+      throw new ActionError('refused', `${path} is protected`);
+  }
+
   /** Quarantine settings with the protected folders of the OS the helper acts on. */
   private get quarantineOpts(): QuarantineOptions {
     return this.d.sys.platform === 'linux'
@@ -220,20 +227,27 @@ export class Executor {
           `network block for ${cmd.address}`,
         );
       }
-      case 'file.restore':
-        return pick(
+      case 'file.restore': {
+        const found = pick(
           (e) => e.kind === 'file.quarantine' && e.id === cmd.quarantineId,
           'quarantine with that id',
         );
+        this.refuseHelperState((found.undo?.quarantine as QuarantineRecord).originalPath);
+        return found;
+      }
       case 'persistence.enable': {
         // The journal holds the resolved path (see resolveTarget).
         const paths = new Set([cmd.path, realParentPath(cmd.path)]);
-        return pick(
+        const found = pick(
           (e) =>
             e.kind === 'persistence.disable' &&
             paths.has((e.undo?.persistence as PersistenceRecord).quarantine.originalPath),
           `disabled startup item at ${cmd.path}`,
         );
+        this.refuseHelperState(
+          (found.undo?.persistence as PersistenceRecord).quarantine.originalPath,
+        );
+        return found;
       }
       default:
         return undefined;

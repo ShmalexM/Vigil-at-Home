@@ -154,7 +154,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     journal,
     approvals,
     rules,
-    quarantine: { quarantineDir: paths.quarantineDir },
+    quarantine: { quarantineDir: paths.quarantineDir, stateDir: paths.supportDir },
     syncPort,
     ...(linux
       ? {}

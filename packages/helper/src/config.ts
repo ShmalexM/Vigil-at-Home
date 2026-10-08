@@ -88,6 +88,8 @@ export const PROTECTED_PREFIXES = [
   '/usr/share/',
   '/private/var/db/',
   '/Library/Apple/',
+  // The helper's whole state folder (journal, rules, app pin); see Protection stateDir.
+  '/Library/Application Support/Vigil/',
   '/Applications/Santa.app',
   '/Library/PrivilegedHelperTools/vigil-helper',
   // The helper's Node runtime and code, and the app itself.
@@ -214,6 +216,12 @@ export function installedSelf(platform: Platform = 'darwin'): string[] {
 }
 
 export interface Protection {
+  /**
+   * The helper's own state folder as installed (defaultPaths supportDir):
+   * its journal, rules, approvals and the app pin. No file command ever
+   * touches anything in it or above it, whatever lists a caller passes.
+   */
+  stateDir: string;
   prefixes: string[];
   exact: Set<string>;
   processPrefixes: string[];
@@ -222,6 +230,7 @@ export interface Protection {
 }
 
 const MAC_PROTECTION: Protection = {
+  stateDir: macPaths().supportDir,
   prefixes: PROTECTED_PREFIXES,
   exact: PROTECTED_EXACT,
   processPrefixes: PROTECTED_PROCESS_PREFIXES,
@@ -229,6 +238,7 @@ const MAC_PROTECTION: Protection = {
 };
 
 const LINUX_PROTECTION: Protection = {
+  stateDir: linuxPaths().supportDir,
   prefixes: LINUX_PROTECTED_PREFIXES,
   exact: LINUX_PROTECTED_EXACT,
   processPrefixes: LINUX_PROTECTED_PROCESS_PREFIXES,
