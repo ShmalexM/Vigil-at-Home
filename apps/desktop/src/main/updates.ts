@@ -175,6 +175,8 @@ export function newest(
     const version = r.tag_name.replace(/^v/, '');
     if (!parseVersion(version) || !isGitHub(r.html_url)) continue;
     if (compareVersions(version, current) <= 0) continue;
+    // A release with nothing to install on this Linux machine isn't an update for it.
+    if (platform === 'linux' && !r.assets.some((a) => isLinuxPackage(a.name, arch))) continue;
     if (!best || compareVersions(version, best.version) > 0) best = { version, r };
   }
   if (!best) return undefined;
@@ -190,6 +192,16 @@ export function newest(
     ...(dmg ? { downloadUrl: dmg.browser_download_url } : {}),
     ...(best.r.published_at ? { publishedAt: best.r.published_at } : {}),
   };
+}
+
+/**
+ * A .deb or AppImage for this chip, as electron-builder names them: the
+ * .deb says amd64 and the AppImage x86_64 for x64; both say arm64 for ARM.
+ */
+export function isLinuxPackage(name: string, arch: string): boolean {
+  const tags =
+    arch === 'x64' ? ['amd64.deb', 'x86_64.AppImage'] : [`${arch}.deb`, `${arch}.AppImage`];
+  return tags.some((t) => name.endsWith(`-${t}`));
 }
 
 /** Only ever open github.com links from the releases list. */
