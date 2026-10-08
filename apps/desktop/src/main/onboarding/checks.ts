@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync } from 'node:fs';
 import { homedir, totalmem } from 'node:os';
-import { pickClassifierModel } from '@vigil/ai';
+import { classifierModelChoice } from '@vigil/ai';
 import { join } from 'node:path';
 import type { CheckId } from '../../shared/setup.js';
 import { FAPOLICYD_ALLOW_RULES, LOCAL_MODEL, LOCAL_MODEL_SMALL } from './plan.js';
@@ -29,6 +29,8 @@ export interface Probe {
   platform?: NodeJS.Platform;
   /** Total memory, which decides the labelling models Vigil will pick; defaults to this machine's. */
   memoryBytes?: number;
+  /** The labelling model set in AI settings (`classifier.model`), if any. */
+  classifierModel?(): string | undefined;
 }
 
 export const SANTA_SYNC_PORT = 47821;
@@ -132,13 +134,16 @@ export const CHECKS: Record<CheckId, (p: Probe) => Promise<CheckResult>> = {
    */
   'ollama.model': async (p) => {
     const names = (await ollamaModels(p)) ?? [];
-    const ours = [LOCAL_MODEL, LOCAL_MODEL_SMALL].find((m) => names.includes(m));
-    if (ours) return { ok: true, detail: `${ours}, which labels events` };
-    const picked = pickClassifierModel(
+    // The labeller's own choice, so this step is done exactly when labelling has a model.
+    const picked = classifierModelChoice(
       names.map((name) => ({ name })),
+      p.classifierModel?.(),
       p.memoryBytes ?? totalmem(),
     );
-    if (picked) return { ok: true, detail: `${picked}, already installed, labels events` };
+    if (picked) {
+      const ours = picked === LOCAL_MODEL || picked === LOCAL_MODEL_SMALL;
+      return { ok: true, detail: `${picked}${ours ? '' : ', already installed,'} labels events` };
+    }
     if (names.length) {
       return {
         ok: false,
@@ -210,7 +215,11 @@ const INHERITED_ENV = [
   'SSL_CERT_FILE',
 ] as const;
 
-export function systemProbe(home = homedir(), helperAnswers?: () => Promise<boolean>): Probe {
+export function systemProbe(
+  home = homedir(),
+  helperAnswers?: () => Promise<boolean>,
+  classifierModel?: () => string | undefined,
+): Probe {
   // Finder-launched apps get a minimal PATH. Vendor CLIs installed with npm
   // are node scripts, so node has to be findable too.
   const env: Record<string, string> = {};
@@ -224,6 +233,7 @@ export function systemProbe(home = homedir(), helperAnswers?: () => Promise<bool
     home,
     platform: process.platform,
     ...(helperAnswers ? { helperAnswers } : {}),
+    ...(classifierModel ? { classifierModel } : {}),
     exists: (path) => existsSync(path),
     executable: (path) => {
       try {

@@ -188,12 +188,23 @@ function start(): void {
     ...(demo
       ? { probe: demoProbe(), supported: true }
       : {
-          probe: systemProbe(undefined, async () => {
-            if (await helper.ping()) return true;
-            // Just installed: connect now rather than on the next retry.
-            await helper.tryConnect();
-            return helper.ping();
-          }),
+          probe: systemProbe(
+            undefined,
+            async () => {
+              if (await helper.ping()) return true;
+              // Just installed: connect now rather than on the next retry.
+              await helper.tryConnect();
+              return helper.ping();
+            },
+            // The labelling model set in AI settings; `ai` is created below, and checks run later.
+            () => {
+              try {
+                return ai.settings().classifier.model;
+              } catch {
+                return undefined;
+              }
+            },
+          ),
         }),
     // Setup's Codex step can use the user's own Codex sign-in (set up below).
     ...(demo

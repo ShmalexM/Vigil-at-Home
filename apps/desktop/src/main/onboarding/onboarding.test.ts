@@ -194,7 +194,10 @@ describe('checks', () => {
   });
 
   it('prefers the small model but accepts one already installed', async () => {
-    expect(await CHECKS['ollama.model'](fakeMac({ ollama: [LOCAL_MODEL] }))).toMatchObject({
+    const lots = 32 * 1024 ** 3;
+    expect(
+      await CHECKS['ollama.model']({ ...fakeMac({ ollama: [LOCAL_MODEL] }), memoryBytes: lots }),
+    ).toMatchObject({
       ok: true,
       detail: expect.stringContaining(LOCAL_MODEL),
     });
@@ -205,6 +208,23 @@ describe('checks', () => {
     const big = await CHECKS['ollama.model'](fakeMac({ ollama: ['hermes-local:quality'] }));
     expect(big.ok).toBe(false);
     expect(big.detail).toMatch(/hermes-local:quality.*labelling events needs a small model/);
+  });
+
+  it('agrees with the labeller on memory and on a model set in AI settings', async () => {
+    const GB = 1024 ** 3;
+    // Below 16 GB the labeller only looks at the small list, which leaves out 1.5b.
+    const small = { ...fakeMac({ ollama: [LOCAL_MODEL] }), memoryBytes: 8 * GB };
+    expect((await CHECKS['ollama.model'](small)).ok).toBe(false);
+    const smallOk = { ...fakeMac({ ollama: [LOCAL_MODEL_SMALL] }), memoryBytes: 8 * GB };
+    expect((await CHECKS['ollama.model'](smallOk)).ok).toBe(true);
+    // A model set in settings is the only one the labeller uses.
+    const set = (installed: string[]) => ({
+      ...fakeMac({ ollama: installed }),
+      memoryBytes: 32 * GB,
+      classifierModel: () => 'mistral:7b',
+    });
+    expect((await CHECKS['ollama.model'](set(['mistral:7b']))).ok).toBe(true);
+    expect((await CHECKS['ollama.model'](set([LOCAL_MODEL]))).ok).toBe(false);
     expect((await CHECKS['ollama.model'](fakeMac({ ollama: [] }))).ok).toBe(false);
     expect((await CHECKS.ollama(fakeMac({ ollama: 'down' }))).ok).toBe(false);
   });
