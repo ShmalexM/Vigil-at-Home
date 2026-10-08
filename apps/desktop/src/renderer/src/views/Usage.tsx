@@ -169,6 +169,14 @@ export function UsageView() {
 
 // ---------------------------------------------------------------- cost and tokens
 
+/**
+ * A provider whose price is only Claude Code's estimate at API prices: priced,
+ * but none of it charged to a key (the plan covers it). Local models are free,
+ * not estimated.
+ */
+const planEstimate = (p: { costUsd: number; billedUsd: number }) =>
+  p.costUsd > 0 && p.billedUsd === 0;
+
 function CostSection({
   report,
   metric,
@@ -197,7 +205,9 @@ function CostSection({
               {formatCount(totals.runs)} {totals.runs === 1 ? 'run' : 'runs'}
               {metric === 'cost' && (
                 <>
-                  {' · API estimate'}
+                  {usesBilled
+                    ? ` · ${formatUsd(totals.billedUsd)} billed to your keys, the rest at API prices`
+                    : ' · at API prices, nothing billed'}
                   <span
                     className="usage-info"
                     tabIndex={0}
@@ -241,7 +251,9 @@ function CostSection({
                     {metric === 'cost'
                       ? p.unpricedRuns === p.runs
                         ? 'Unpriced'
-                        : formatUsd(p.costUsd)
+                        : p.provider === 'ollama'
+                          ? 'Free'
+                          : formatUsd(p.costUsd)
                       : formatTokens(p.totalTokens)}
                   </span>
                 </div>
@@ -249,6 +261,16 @@ function CostSection({
                   {metric === 'cost'
                     ? `${p.unpricedRuns === p.runs ? 'Unpriced' : `${formatPercent(shareOf)} of cost`} · ${formatTokens(p.totalTokens)} tokens`
                     : `${formatPercent(shareOf)} of tokens · ${p.unpricedRuns === p.runs ? 'unpriced' : formatUsd(p.costUsd)}`}
+                  {metric === 'cost' && planEstimate(p) && ' · at API prices, not charged'}
+                  {p.failed > 0 && (
+                    <span
+                      className="usage-failed"
+                      title="Runs that timed out or failed. They used no tokens that Vigil saw. A local model too big for this Mac often times out."
+                    >
+                      {' · '}
+                      {formatCount(p.failed)} failed
+                    </span>
+                  )}
                 </span>
               </div>
             );
