@@ -6,15 +6,15 @@
 
 Your own security operations center, running on your Mac or Linux PC.
 
-Vigil at Home watches what runs on your computer, blocks malicious activity as it happens, and pops up to tell you when it does. It uses AI you already have (an API key, your ChatGPT plan through Codex, a local model, or your Claude plan when you ask it about an alert) to explain what it found and help you decide, but it never waits on the AI to block, and only you can allow or release something.
+Vigil at Home watches what runs on your computer, blocks the malicious activity it recognizes as it happens, and pops up to tell you when it does. It uses AI you already have (an API key, your ChatGPT plan through Codex, a local model, or your Claude plan when you ask it about an alert) to explain what it found and help you decide, but it never waits on the AI to block, and only you can allow or release something.
 
-- **Blocks in real time.** Deterministic rules catch malware, persistence, credential theft and beacons in seconds, and keep blocking with the app closed.
+- **Blocks in real time.** Deterministic rules look for malware, persistence, credential theft and beacons, block what they match in seconds, and keep blocking with the app closed.
 - **Stays quiet.** Routine things go to History. You're interrupted only when something needs your decision.
 - **Watches your AI agents.** Claude Code, Codex and other coding agents are tracked down to every command they start, and Claude Code can ask Vigil before a tool runs. See [docs/agents.md](docs/agents.md).
 - **A pack of AI helpers.** Scout, your Lead dog, answers questions from Vigil's data and runs small jobs for you; the other dogs explain alerts, label events and review rules. No dog can block, allow or change a rule. See [docs/pack.md](docs/pack.md).
-- **Local.** Everything lives in a SQLite database on your computer. No server, and no account to sign up for.
+- **Local.** Everything lives in a SQLite database on your computer. No server, and no account to sign up for. When you set up a cloud AI, the details of the alert or event it works on (program paths, command lines, host names) go to that provider under its terms; a local model keeps everything on your computer.
 
-> Status: early alpha. Sensors, detection rules, blocking (once the helper is installed), the popup and AI explanations work on a real Mac, and on Ubuntu in CI, but expect rough edges. Releases aren't signed yet.
+> Status: early alpha. Sensors, detection rules, blocking (once the helper is installed), the popup and AI explanations work on a real Mac, and on Ubuntu in CI, but expect rough edges. Releases aren't signed yet. Vigil at Home is free software provided as is, without warranty (see [LICENSE](LICENSE)). It will miss some attacks, so keep your operating system's own protections on.
 
 ## Install on a Mac
 
@@ -121,3 +121,5 @@ Vigil at Home stands on [Santa](https://github.com/northpolesec/santa), [osquery
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE). Third-party code and assets are credited in [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Vigil at Home is an independent project, not affiliated with or endorsed by the makers of the tools it works with. Claude and Claude Code are trademarks of Anthropic, PBC; OpenAI, ChatGPT and Codex are trademarks of OpenAI; macOS is a trademark of Apple Inc.; Linux® is the registered trademark of Linus Torvalds; Ubuntu is a trademark of Canonical Ltd.; MITRE ATT&CK® is a registered trademark of The MITRE Corporation. Other names belong to their owners.

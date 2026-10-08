@@ -2,7 +2,8 @@
  * Where the known-bad lists come from. Each source feeds one list; several
  * sources may feed the same list and their entries are combined.
  *
- * The defaults are abuse.ch feeds, published under CC0 and chosen for a low
+ * The defaults are abuse.ch feeds, free for not-for-profit use under
+ * https://abuse.ch/terms-of-use/ (Feodo Tracker's list is also CC0), chosen for a low
  * false-positive rate: confirmed botnet command servers, hosts currently
  * serving malware, and hashes of confirmed malware samples. URLhaus and
  * MalwareBazaar downloads take the user's own free abuse.ch Auth-Key when
@@ -70,7 +71,7 @@ export const DEFAULT_FEEDS: readonly FeedSource[] = [
     format: 'hosts',
     intervalHours: 6,
     retainDays: 0,
-    license: 'CC0-1.0',
+    license: 'abuse.ch terms of use (not-for-profit)',
     homepage: 'https://urlhaus.abuse.ch/',
     auth: ABUSE_CH_AUTH,
   },
@@ -83,7 +84,7 @@ export const DEFAULT_FEEDS: readonly FeedSource[] = [
     intervalHours: 1,
     // The export only covers the last 48 hours, so keep what it has shown.
     retainDays: 180,
-    license: 'CC0-1.0',
+    license: 'abuse.ch terms of use (not-for-profit)',
     homepage: 'https://bazaar.abuse.ch/',
     auth: ABUSE_CH_AUTH,
   },
