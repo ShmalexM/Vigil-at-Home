@@ -152,7 +152,7 @@ export const linuxCoreRules: DetectionRuleInput[] = [
     condition: {
       all: [
         { field: 'process.name', op: 'in', value: SHELLS },
-        { field: 'process.commandLineRemote', op: 'regex', value: PIPE_TO_RUN_RES },
+        { field: 'process.commandLine', op: 'regex', value: PIPE_TO_RUN_RES },
       ],
     },
     response: [SUSPEND],
