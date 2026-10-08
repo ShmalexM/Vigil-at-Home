@@ -20,6 +20,8 @@ The mode at the top of the page works like a coding agent's permission modes.
 
 Retiring a dog always asks in Let AI decide.
 
+A change from an answer that read someone else's text waits for your OK in every mode. Provenance travels with the text: a tool's output, a connector's tool titles and descriptions, a dog's report, a job or memory fact that came from such an answer (even one you then approved), and anything saved before this was recorded all count. The Lead dog's prompt leaves a tainted report, job or memory fact out unless your message asks about it (names the dog with a word like "report", "found" or "job", or shares a word with the fact), so a typed "Rename Pip to Spot" stays clean. An earlier answer's taint carries over only to a short "yes, do it". A job becomes clean again when you edit the dog yourself.
+
 ## How a tool call is decided
 
 `apps/desktop/src/main/pack/gate.ts`:

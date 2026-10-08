@@ -117,6 +117,12 @@ export interface Dog {
   enabled: boolean;
   createdBy: 'you' | 'lead';
   createdAt: number;
+  /**
+   * The job could hold someone else's text: the Lead dog's change that wrote
+   * it read outside text. Cleared only when the person edits the dog
+   * themselves. A pack dog saved before this was recorded counts as tainted.
+   */
+  jobTainted?: boolean;
   lastReport?: DogReport;
 }
 
@@ -274,6 +280,12 @@ export interface MemoryEntry {
   /** The chat message it came from. */
   source?: string;
   added: number;
+  /**
+   * It could hold someone else's text: it came from an answer that read a
+   * tool's output or a dog's report, even if the person then said yes to it.
+   * Entries saved before this was recorded count as tainted.
+   */
+  tainted?: boolean;
 }
 
 /**
@@ -294,6 +306,8 @@ export interface MemoryChange {
   replaces?: string;
   status: 'pending' | 'done' | 'declined' | 'failed';
   note?: string;
+  /** The answer that asked for it read outside text; the fact stays tainted if kept. */
+  tainted?: boolean;
 }
 
 export const MemoryInput = z.object({ fact: MemoryFact, topic: MemoryTopic });

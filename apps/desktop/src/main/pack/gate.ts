@@ -62,11 +62,13 @@ export function afterJudge(
 
 /**
  * A change the Lead dog wants to make to the pack. An answer whose input
- * could hold someone else's text (it used a tool, or read a dog's report or
- * an earlier answer that did) only proposes; so does any change that hands a
- * dog a tool that can change things. Both hold in every mode. Otherwise: Ask
- * for approval: every change waits. Full access: all go ahead. Let AI
- * decide: adding, changing or running a dog goes ahead; retiring one waits.
+ * held someone else's text (it used a tool, or its prompt carried a dog's
+ * report, a job, a memory fact or a connector's tool text that came from
+ * outside the person) only proposes, in every mode. Otherwise: Ask for
+ * approval: every change waits. Full access: all go ahead, a tool that can
+ * change things included, since the person typed it. Let AI decide: adding,
+ * changing or running a dog goes ahead, unless it hands a dog a tool that
+ * can change things; retiring one waits.
  */
 export function gateAction(
   mode: PermissionMode,
@@ -74,9 +76,9 @@ export function gateAction(
   grantsWriteTool: boolean,
   tainted: boolean,
 ): 'apply' | 'ask' {
-  if (tainted || grantsWriteTool) return 'ask';
+  if (tainted) return 'ask';
   if (mode === 'full') return 'apply';
   if (mode === 'ask') return 'ask';
-  if (kind === 'retire') return 'ask';
+  if (grantsWriteTool || kind === 'retire') return 'ask';
   return 'apply';
 }
