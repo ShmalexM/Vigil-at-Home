@@ -22,9 +22,9 @@ const PORT = '[0-9]{2,5}';
 /** JSON keys the real lines read. */
 const KEY = '(?:token|state|models|name|id)';
 /** The harness's shell snapshot and its cwd record file. */
-const SNAPSHOT =
+export const SNAPSHOT =
   '(?:/Users|/home)/[A-Za-z0-9._-]+/\\.claude/shell-snapshots/snapshot-(?:zsh|bash)-[0-9]+-[a-z0-9]+\\.sh';
-const CWD_FILE = '(?:/private)?(?:/var/folders/[A-Za-z0-9_+/-]+|/tmp)/claude-[0-9a-f]+-cwd';
+export const CWD_FILE = '(?:/private)?(?:/var/folders/[A-Za-z0-9_+/-]+|/tmp)/claude-[0-9a-f]+-cwd';
 
 /** The real lines, with {HOST}, {PORT} and {KEY} marking the free slots. */
 const LINES = [

