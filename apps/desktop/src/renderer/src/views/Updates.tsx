@@ -1,6 +1,7 @@
 import { Download, RefreshCw } from 'lucide-react';
 import { useLive, vigil } from '../api';
 import { Button, Segmented } from '../components/ui';
+import { computer } from '../platform';
 
 /**
  * Settings › About › Updates. Vigil isn't signed yet, so it can't install
@@ -57,8 +58,8 @@ export function UpdatesRow() {
         />
       </div>
       <span className="small muted">
-        Vigil downloads the installer for your Mac from GitHub; you open it to update. Automatic
-        installs come once Vigil is signed by Apple.
+        Vigil downloads the installer for your {computer} from GitHub; you open it to update.
+        Automatic installs come once Vigil is signed by Apple.
       </span>
     </div>
   );

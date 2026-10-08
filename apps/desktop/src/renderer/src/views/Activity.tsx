@@ -28,6 +28,7 @@ import { matchText } from '../rule-modes';
 import { parseActivityParam, VIGIL_CONNECTOR, VIGIL_SELF } from './agents-format';
 import { PageHead } from './AppShell';
 import { onRovingKeyDown } from '../components/roving';
+import { computer, onLinux } from '../platform';
 
 const UNDOABLE = new Set([
   'process.suspend',
@@ -83,7 +84,7 @@ export function ActivityView({
     <div className="page">
       <PageHead
         title="Activity"
-        purpose="Everything Vigil looks at on this Mac, what its rules made of it, and every action it took."
+        purpose={`Everything Vigil looks at on this ${computer}, what its rules made of it, and every action it took.`}
       />
       <div className="tabs" role="tablist" onKeyDown={onRovingKeyDown}>
         <button
@@ -277,8 +278,9 @@ function EventFeed({
             </span>
             <span className="t-h3">Nothing to show yet</span>
             <span className="t-small" style={{ maxWidth: 440 }}>
-              Vigil sees programs starting, network connections and new startup items once Santa and
-              osquery are installed. Everything it sees will show up here as it happens.
+              Vigil sees programs starting, network connections and new startup items once{' '}
+              {onLinux ? 'osquery and the Vigil helper are' : 'Santa and osquery are'} installed.
+              Everything it sees will show up here as it happens.
             </span>
           </div>
         ) : rows && rows.length === 0 && !canSearchBack ? (
@@ -309,9 +311,9 @@ function EventFeed({
       </Card>
 
       <span className="t-small">
-        Events stay on this Mac for {stats?.retentionDays ?? 30} days, except ones an alert points
-        to. When you use the AI, it gets a summary with your name and home folder removed, never
-        this raw feed.
+        Events stay on this {computer} for {stats?.retentionDays ?? 30} days, except ones an alert
+        points to. When you use the AI, it gets a summary with your name and home folder removed,
+        never this raw feed.
       </span>
     </div>
   );

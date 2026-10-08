@@ -14,6 +14,7 @@ import { diaryLines, pileWords, SCOUT_PILE_MIN, type PackView } from '../../../s
 import { leadChat } from '../lead-chat';
 import { PageHead } from './AppShell';
 import { usePack } from './Pack';
+import { computer } from '../platform';
 
 const levelSentence = {
   good: 'Protection is on.',
@@ -44,7 +45,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
     <div className="page">
       <PageHead
         title="Home"
-        purpose="How your Mac is doing, and anything that needs your decision."
+        purpose={`How your ${computer} is doing, and anything that needs your decision.`}
       />
 
       {status && (
@@ -92,8 +93,9 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               ))}
             </ul>
             <p className="t-small">
-              The level is only about protection: Santa, osquery and the Vigil helper. Alerts
-              waiting on you are counted separately, so they never make protection look broken.
+              The level is only about protection: {listWords(status.sensors.map((s) => s.name))}.
+              Alerts waiting on you are counted separately, so they never make protection look
+              broken.
             </p>
           </details>
           {status.dryRun && (
@@ -348,4 +350,11 @@ function PackDiary({ pack }: { pack: PackView }) {
       )}
     </div>
   );
+}
+
+/** "a, b and c". */
+function listWords(items: string[]): string {
+  return items.length > 1
+    ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`
+    : (items[0] ?? '');
 }

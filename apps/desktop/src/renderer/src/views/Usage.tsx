@@ -31,6 +31,7 @@ import {
   remainingPercent,
   type LimitPace,
 } from './usage-format';
+import { computer } from '../platform';
 
 type Metric = 'cost' | 'tokens' | 'limits';
 type Breakdown = 'model' | 'time' | 'task';
@@ -208,7 +209,7 @@ function CostSection({
                             'Jev, cloud API keys and Codex on an OpenAI key show what you were billed.',
                           ]
                         : []),
-                      'Models on this Mac are free.',
+                      `Models on this ${computer} are free.`,
                       ...(totals.unpricedRuns > 0
                         ? [
                             `Leaves out ${formatPercent(totals.unpricedShare)} of runs with no price (Codex on a ChatGPT plan).`,

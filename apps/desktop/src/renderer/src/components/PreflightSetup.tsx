@@ -6,6 +6,7 @@ import { timeAgo } from '../format';
 import { plural } from '../views/agents-format';
 import { useToast } from './Toasts';
 import { Button, Segmented, StatusMark, type MarkState } from './ui';
+import { computer } from '../platform';
 
 type HookState = 'off' | 'error' | 'connected' | 'waiting';
 
@@ -107,9 +108,9 @@ export function PreflightSetup({ compact }: { compact?: boolean }) {
               <li>
                 Add these hooks to your Claude Code settings: <code>~/.claude/settings.json</code>{' '}
                 for every project, or a project’s <code>.claude/settings.local.json</code>, which
-                stays out of git, since the hooks hold paths on this Mac. If the file already has
-                settings, add the <code>hooks</code> section to them. If it already has hooks, add
-                the <code>PreToolUse</code> and <code>SessionStart</code> entries next to yours.
+                stays out of git, since the hooks hold paths on this {computer}. If the file already
+                has settings, add the <code>hooks</code> section to them. If it already has hooks,
+                add the <code>PreToolUse</code> and <code>SessionStart</code> entries next to yours.
                 Vigil never opens that file.
               </li>
               <li>Restart your Claude Code sessions so they load the hooks.</li>

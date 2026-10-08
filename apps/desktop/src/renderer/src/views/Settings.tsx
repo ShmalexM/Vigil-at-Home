@@ -9,6 +9,7 @@ import { AppearanceSection } from './Appearance';
 import { UpdatesRow } from './Updates';
 import { ADVANCED_NAV, PageHead } from './AppShell';
 import { SetupPanel } from './onboarding/SetupPanel';
+import { computer } from '../platform';
 
 export function SettingsView({ go }: { go: (r: string) => void }) {
   const [settings, reload] = useLive(() => vigil.getSettings());
@@ -20,7 +21,7 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
 
   return (
     <div className="page">
-      <PageHead title="Settings" purpose="How Vigil looks and behaves on this Mac." />
+      <PageHead title="Settings" purpose={`How Vigil looks and behaves on this ${computer}.`} />
       <Card>
         <AppearanceSection
           theme={settings.theme}
