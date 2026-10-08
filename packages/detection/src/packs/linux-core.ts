@@ -1,5 +1,5 @@
 import type { DetectionRuleInput } from '../types.js';
-import { PIPE_TO_RUN_RES, SHELLS, UNTRUSTED_SIGNING } from './macos-core.js';
+import { RUNS_DOWNLOAD, SHELLS, UNTRUSTED_SIGNING } from './macos-core.js';
 
 /**
  * Built-in Linux rules.
@@ -150,10 +150,7 @@ export const linuxCoreRules: DetectionRuleInput[] = [
     fidelity: 'medium',
     eventKinds: ['process.exec'],
     condition: {
-      all: [
-        { field: 'process.name', op: 'in', value: SHELLS },
-        { field: 'process.commandLine', op: 'regex', value: PIPE_TO_RUN_RES },
-      ],
+      all: [{ field: 'process.name', op: 'in', value: SHELLS }, RUNS_DOWNLOAD],
     },
     response: [SUSPEND],
     reasons: [

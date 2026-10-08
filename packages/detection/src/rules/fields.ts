@@ -1,4 +1,5 @@
 import type { DetectionEvent } from '../types.js';
+import { pipesDownloadIntoCode } from './inline-code.js';
 
 export type FieldValue = string | number | boolean | string[] | undefined;
 export type FieldGetter = (e: DetectionEvent) => FieldValue;
@@ -23,6 +24,19 @@ const COMPUTED: Record<string, FieldGetter> = {
   'process.parentName': (e) =>
     'process' in e ? (basename(e.process?.parentPath) ?? e.process?.ancestors?.[0]) : undefined,
   'process.commandLine': (e) => ('process' in e ? e.process?.args?.join(' ') : undefined),
+  /**
+   * The command pipes curl or wget into python, perl, ruby or node, and that
+   * interpreter runs what it reads: anything but an inline program on a short
+   * data-reading allowlist (see rules/inline-code.ts). A shell's `-c` command
+   * is read as the shell would; any other process's arguments are joined.
+   */
+  'process.pipesDownloadIntoCode': (e) => {
+    const args = 'process' in e ? e.process?.args : undefined;
+    if (!args?.length) return undefined;
+    const c = args.findIndex((a, i) => i > 0 && i < 4 && /^-[A-Za-z]*c[A-Za-z]*$/.test(a));
+    const src = c > 0 && args[c + 1] !== undefined ? args.slice(c + 1).join(' ') : args.join(' ');
+    return pipesDownloadIntoCode(src);
+  },
   /**
    * The download a process comes from: the nearest downloaded ancestor, or the
    * process itself when it carries the quarantine flag. Chain rules key on it.

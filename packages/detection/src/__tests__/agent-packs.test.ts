@@ -692,9 +692,9 @@ describe('agent rule packs', () => {
         // Vigil's own helper runs Claude Code too; that is still Claude Code signing in.
         expect(fired(security(helper, own(service)))).not.toContain('agent-keychain-secret');
       }
-      expect(fired(security(claude, ['-s', '"Claude Code-credentials"', '-w']))).not.toContain(
-        'agent-keychain-secret',
-      );
+      expect(
+        fired(security(claude, ['-a', "'alex.m_2'", '-w', '-s', '"Claude Code-credentials"'])),
+      ).not.toContain('agent-keychain-secret');
       // Through a bare `sh -c` (macOS's sh re-runs itself as bash with the same arguments),
       // with or without the parent's path: short-lived shells often arrive without it.
       for (const [path, extra] of [
@@ -723,6 +723,18 @@ describe('agent rule packs', () => {
         security(claude, [...own('Claude Code-credentials'), '-l', 'Chrome']),
         security(claude, ['-a', 'alexmargaris', '-w']),
         security(claude, own('Claude Code-credentials-xyz')),
+        // Not exactly the read Claude Code's code runs: another order, -g, another
+        // option, no -a, a user that is not one plain word, or mismatched quotes.
+        security(claude, ['-s', 'Claude Code-credentials', '-a', 'alexmargaris', '-w']),
+        security(claude, ['-w', '-a', 'alexmargaris', '-s', 'Claude Code-credentials']),
+        security(claude, ['-s', '"Claude Code-credentials"', '-w']),
+        security(claude, ['-a', 'alexmargaris', '-g', '-s', 'Claude Code-credentials']),
+        security(claude, ['-a', 'alexmargaris', '-w', '-g', '-s', 'Claude Code-credentials']),
+        security(claude, ['-a', 'alexmargaris', '-w', '-s', 'Claude Code-credentials', '-g']),
+        security(claude, ['-a', 'alexmargaris', '-w', '-s', 'Claude Code', '-l', 'x']),
+        security(claude, ['-a', 'alex margaris', '-w', '-s', 'Claude Code']),
+        security(claude, ['-a', 'alexmargaris', '-w', '-s', '"Claude Code\'']),
+        security(claude, ['-a', 'alexmargaris', '-w', '-s', 'Claude Code-1234567']),
         // Asked for from a tool step, in the wrappers Claude Code's Bash tool used on a
         // real Mac, or from an MCP server.
         sh(

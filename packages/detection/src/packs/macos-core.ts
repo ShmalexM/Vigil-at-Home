@@ -1,4 +1,4 @@
-import type { DetectionRuleInput } from '../types.js';
+import type { Condition, DetectionRuleInput } from '../types.js';
 
 /**
  * Built-in macOS rules.
@@ -54,29 +54,18 @@ const SANTA_BLOCK_BINARY = {
   policy: 'block',
 } as const;
 
-/** Words that make an interpreter's inline program run what it reads. */
-const RUNS_INPUT = String.raw`\b(exec|eval|system|spawn|popen|subprocess)\b`;
-/** One option word (`-u`, `-MJSON`), never `-` alone or a script name; at most two go before -c/-e. */
-const OPT = String.raw`(\s+-[A-Za-z][A-Za-z0-9]*)`;
 /** curl or wget, piped on (optionally to sudo). */
 const DOWNLOAD_PIPED = String.raw`(curl|wget)\s[^|]*\|\s*(sudo\s+)?`;
 
 /**
- * A download piped straight into a shell or a script interpreter: `curl … |
- * sh`, `wget … | sudo bash`, `curl … | bash -s`, `curl … | python3`. Where
- * it downloads from does not matter: a loopback URL on the command line can
- * still reach the internet (a proxy in ~/.curlrc or set earlier on the line,
- * a redirect), so `curl http://127.0.0.1/… | sh` counts too.
- *
- * One thing is left out, seen in Claude Code's own steps on a real Mac
- * (2026-10-08): an interpreter given its program inline (`python3 -c
- * "…json.load(sys.stdin)…"`, `node -e`, `perl -ne`), which reads the download
- * as data. Only up to two options may come before that -c/-e (`python3 - -c
- * x` runs what it reads), and anything later on the command that execs, evals, spawns or
- * shells out still counts, quoted or not.
+ * A download piped straight into a shell: `curl … | sh`, `wget … | sudo
+ * bash`, `curl … | bash -s`. Where it downloads from does not matter: a
+ * loopback URL on the command line can still reach the internet (a proxy in
+ * ~/.curlrc or set earlier on the line, a redirect), so `curl
+ * http://127.0.0.1/… | sh` counts too. A pipe into python, perl, ruby or node
+ * is process.pipesDownloadIntoCode (rules/inline-code.ts).
  */
 export const PIPE_TO_SHELL_RE = String.raw`${DOWNLOAD_PIPED}(ba|z|da)?sh\b`;
-export const PIPE_TO_INTERPRETER_RE = String.raw`${DOWNLOAD_PIPED}(python[0-9.]*|perl|ruby|node)\b(?!${OPT}?${OPT}?\s+-[A-Za-z]*[ce]\s(?![\s\S]*${RUNS_INPUT}))`;
 /**
  * A download run through command or process substitution: `sh -c "$(curl
  * …)"`, `python3 -c "$(curl …)"`, `eval "$(curl …)"`, `bash <(curl …)`.
@@ -89,7 +78,19 @@ export const SUBST_TO_RUN_RES = [
   String.raw`(\b(ba|z|da)?sh|\bsource|(^|[\s;&|])\.)\s+<\(\s*(curl|wget)\s`,
 ];
 /** Every way above of running a download, for a rule's regex list. */
-export const PIPE_TO_RUN_RES = [PIPE_TO_SHELL_RE, PIPE_TO_INTERPRETER_RE, ...SUBST_TO_RUN_RES];
+export const PIPE_TO_RUN_RES = [PIPE_TO_SHELL_RE, ...SUBST_TO_RUN_RES];
+
+/**
+ * Running a download: piped into a shell, run through substitution, or piped
+ * into an interpreter that runs it (Claude Code's own `curl … | python3 -c
+ * "…json.load(sys.stdin)…"` reads it as data and is left out).
+ */
+export const RUNS_DOWNLOAD: Condition = {
+  any: [
+    { field: 'process.commandLine', op: 'regex', value: PIPE_TO_RUN_RES },
+    { field: 'process.pipesDownloadIntoCode', op: 'eq', value: true },
+  ],
+};
 
 /** Developer tools (Homebrew Python, Ansible, git helpers) read these every day. */
 const SSH_KEY_GLOBS = ['~/.ssh/id_*'];
@@ -450,10 +451,7 @@ export const macosCoreRules: DetectionRuleInput[] = [
     fidelity: 'medium',
     eventKinds: ['process.exec'],
     condition: {
-      all: [
-        { field: 'process.name', op: 'in', value: SHELLS },
-        { field: 'process.commandLine', op: 'regex', value: PIPE_TO_RUN_RES },
-      ],
+      all: [{ field: 'process.name', op: 'in', value: SHELLS }, RUNS_DOWNLOAD],
     },
     response: [SUSPEND],
     reasons: [
