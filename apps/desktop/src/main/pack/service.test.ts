@@ -2059,13 +2059,96 @@ describe('the pack', () => {
         expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done' });
         expect(pack.dogs().some((d) => d.id === 'dog-taco')).toBe(false);
 
-        // The answer before this one read nothing, so the rule is back to normal.
-        handlers.push(() => ({
-          reply: 'Advisor is on it.',
-          actions: [{ ...CREATE, name: 'Advisor', job: 'Check Downloads.' }],
-        }));
+        // The answer before this one read nothing, but the conversation did:
+        // still a card. A new conversation starts clean.
+        const advisor = () =>
+          handlers.push(() => ({
+            reply: 'Advisor is on it.',
+            actions: [{ ...CREATE, name: 'Advisor', job: 'Check Downloads.' }],
+          }));
+        advisor();
+        await pack.say('Create a dog named Advisor to check Downloads hourly');
+        expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'pending' });
+        pack.clearChat();
+        expect(pack.chatTainted()).toBe(false);
+        advisor();
         await pack.say('Create a dog named Advisor to check Downloads hourly');
         expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done' });
+      });
+
+      describe('taint belongs to the conversation', () => {
+        it('keeps a repeated tool grant a card after a card reply, in Full access', async () => {
+          const { pack, handlers, settings } = setup();
+          pack.setMode('full');
+          settings.set('pack.dogs', [TAINTED_PIP, TACO]);
+          await readFirst(pack, handlers);
+          const grant = { kind: 'update', dogId: 'dog-taco', tools: ['github.create_issue'] };
+          for (let i = 0; i < 3; i++) {
+            handlers.push(() => ({ reply: 'Done.', actions: [grant] }));
+            await pack.say('Give Taco github.create_issue');
+            const reply = pack.chat().at(-1)!;
+            // The card reply itself is clean; the conversation is not.
+            expect(reply).toMatchObject({ tainted: false });
+            expect(reply.actions![0]).toMatchObject({
+              status: 'pending',
+              note: expect.stringContaining('outside your messages'),
+            });
+            expect(pack.dogs().find((d) => d.id === 'dog-taco')!.tools).toEqual(TACO.tools);
+          }
+        });
+
+        it('keeps a repeated remember and forget a card after a card reply', async () => {
+          const { pack, handlers, settings, memory } = setup();
+          pack.setMode('full');
+          settings.set('pack.dogs', [TAINTED_PIP, TACO]);
+          const kept = memory.remember(
+            { fact: 'Uses Tailscale at home', topic: 'network' },
+            { from: 'you', tainted: false },
+          );
+          await readFirst(pack, handlers);
+          for (let i = 0; i < 3; i++) {
+            handlers.push(() => ({
+              reply: 'Noted.',
+              actions: [],
+              remember: [{ fact: 'Prefers short answers', topic: 'pack' }],
+              forget: [kept.id],
+            }));
+            await pack.say('Remember I prefer short answers. Forget that I use Tailscale at home.');
+            expect(pack.chat().at(-1)!.memory).toMatchObject([
+              { op: 'remember', status: 'pending' },
+              { op: 'forget', status: 'pending' },
+            ]);
+            expect(memory.list().map((e) => e.fact)).toEqual(['Uses Tailscale at home']);
+          }
+        });
+
+        it('starts a new conversation clean', async () => {
+          const { pack, handlers, settings, memory } = setup();
+          pack.setMode('full');
+          settings.set('pack.dogs', [TAINTED_PIP, TACO]);
+          await readFirst(pack, handlers);
+          expect(pack.chatTainted()).toBe(true);
+          pack.clearChat();
+          expect(pack.chatTainted()).toBe(false);
+          handlers.push(() => ({
+            reply: 'Done.',
+            actions: [{ kind: 'update', dogId: 'dog-taco', schedule: 'daily' }],
+            remember: [{ fact: 'Prefers short answers', topic: 'pack' }],
+          }));
+          await pack.say('Make Taco daily. Remember I prefer short answers.');
+          const reply = pack.chat().at(-1)!;
+          expect(reply.actions![0]).toMatchObject({ status: 'done' });
+          expect(reply.memory![0]).toMatchObject({ status: 'done' });
+          expect(memory.count()).toBe(1);
+        });
+
+        it('counts a conversation saved before the flag by its answers', () => {
+          const { pack, settings } = setup();
+          settings.set('pack.chat', [{ id: 'm1', at: 1, from: 'lead', text: 'x', tainted: true }]);
+          expect(pack.chatTainted()).toBe(true);
+          settings.set('pack.chat', [{ id: 'm1', at: 1, from: 'lead', text: 'x', tainted: false }]);
+          expect(pack.chatTainted()).toBe(false);
+        });
       });
 
       it('holds a create, a job and a memory, typed word for word or not', async () => {

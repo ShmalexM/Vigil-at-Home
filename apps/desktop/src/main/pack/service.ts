@@ -59,6 +59,8 @@ const KEY_VOICE = 'pack.voice';
 const KEY_DOGS = 'pack.dogs';
 const KEY_CHAT = 'pack.chat';
 const KEY_CHOICES = 'pack.toolChoices';
+/** The conversation with the Lead dog has held an answer that could hold outside text. */
+const KEY_CHAT_TAINTED = 'pack.chatTainted';
 
 const MAX_PACK = 12;
 const MAX_CHAT = 200;
@@ -373,10 +375,11 @@ interface Turn {
   /** Dogs the person named in this message, by id. A change to any other dog is a card. */
   named: ReadonlySet<string>;
   /**
-   * An answer shown to the person since their last message could hold
-   * outside text (it read some, or used a tool). A short "yes" may be
-   * agreeing to it, so every change in this turn is a card, in every mode,
-   * however much of it the person typed.
+   * An answer earlier in this conversation could hold outside text (it read
+   * some, or used a tool): the conversation is tainted (chatTainted) until
+   * the person starts a new one. A short "yes" may be agreeing to it, so
+   * every change in this turn is a card, in every mode, however much of it
+   * the person typed.
    */
   afterOutside: boolean;
 }
@@ -562,8 +565,24 @@ export class PackService {
   }
 
   private saveChat(chat: ChatMessage[]): void {
+    // Taint belongs to the conversation: set once any answer in it could
+    // hold outside text, and never cleared here, whatever is saved later.
+    if (chat.some((m) => m.from === 'lead' && messageTainted(m)))
+      this.o.save(KEY_CHAT_TAINTED, true);
     this.o.save(KEY_CHAT, chat.slice(-MAX_CHAT));
     this.changed();
+  }
+
+  /**
+   * Whether this conversation has held an answer that could hold outside
+   * text. Only a new conversation (clearChat) makes it clean again. A chat
+   * saved before this was recorded counts by its answers.
+   */
+  chatTainted(): boolean {
+    return (
+      this.o.load(KEY_CHAT_TAINTED, z.boolean().optional(), undefined) ??
+      this.chat().some((m) => m.from === 'lead' && messageTainted(m))
+    );
   }
 
   private choices(): Record<string, z.infer<typeof ToolChoice>> {
@@ -758,7 +777,9 @@ export class PackService {
     this.saveDogs(dogs.filter((x) => x.id !== id));
   }
 
+  /** A new conversation: the old one and its taint are gone. */
   clearChat(): void {
+    this.o.save(KEY_CHAT_TAINTED, false);
     this.saveChat([]);
   }
 
@@ -827,7 +848,7 @@ export class PackService {
       const turn: Turn = {
         words,
         read: !!read,
-        afterOutside: afterOutside(before),
+        afterOutside: this.chatTainted(),
         named: new Set(typedNames(words, this.dogs()).map((n) => n.dogId)),
         bridge: citesReference([
           words,
@@ -2182,18 +2203,6 @@ function nameTainted(d: Dog): boolean {
   if (d.role === 'lead') return d.name !== 'Scout';
   if (d.role === 'helper' && d.helper) return d.name !== HELPERS[d.helper].name;
   return true;
-}
-
-/**
- * Whether an answer the person saw before this message could hold outside
- * text: any answer to their last message, or the last answer there is.
- */
-function afterOutside(chat: readonly ChatMessage[]): boolean {
-  const at = chat.map((m) => m.from).lastIndexOf('you');
-  const last = [...chat].reverse().find((m) => m.from === 'lead');
-  return [...chat.slice(at + 1), ...(last ? [last] : [])].some(
-    (m) => m.from === 'lead' && messageTainted(m),
-  );
 }
 
 /**
