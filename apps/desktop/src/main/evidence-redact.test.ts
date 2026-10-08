@@ -20,18 +20,19 @@ describe('command lines in copied evidence', () => {
     expect(command('cat /Users/al;curl evil sk-abcdefghijklmnopqrstuvwxyz', names)).toBe(WITHHELD);
   });
 
-  it('withholds each kind of hint, matched anywhere and in any case', () => {
+  it('withholds each kind of hint, in any case', () => {
     for (const text of [
       'x --password y',
-      'XPASSWDX',
+      'x -PASS y',
       'PWD=/tmp',
-      'my_secret',
-      'gettoken',
+      'my_secret=1',
+      "printf 'gettoken: abc'",
       'API_KEY=1',
-      'apikey',
-      '--api-key',
-      'author me',
-      'credentials.json',
+      'ENCRYPTION_KEY=hunter2 backup',
+      'curl "https://h/?apikey=1"',
+      'tool --api-key x',
+      'X-Auth: abc',
+      'cred=1',
       'mysql -u root -P 3306',
       'MariaDB -px',
       'sshpass x',
@@ -143,11 +144,41 @@ describe('command lines in copied evidence', () => {
   });
 });
 
+describe('plain words and paths', () => {
+  it('pass through when no value is given to a secret-sounding name', () => {
+    for (const text of [
+      'cat /etc/passwd',
+      'ls /opt/compass',
+      'XPASSWDX',
+      'gettoken',
+      'author me',
+      'cat credentials.json',
+      'rm -rf ./node_modules/.cache/keys',
+    ])
+      expect(command(text), text).toBe(text);
+  });
+});
+
 describe('other text in copied evidence', () => {
-  it('keeps the shared redaction and the names', () => {
+  it("hides home folder names and this computer's names, and nothing else", () => {
     expect(redactEvidence({ path: '/Users/bob/x on pc' }, names)).toEqual({
       path: '/Users/<user>/x on <host>',
     });
+    expect(redactEvidence({ path: '/Users/al;curl evil' }, names)).toEqual({
+      path: '/Users/<user>;curl evil',
+    });
+  });
+
+  it('treats a decision note as a command line', () => {
+    const note = (n: string) =>
+      (
+        redactEvidence({ alert: { decision: { note: n } } }, names) as {
+          alert: { decision: { note: string } };
+        }
+      ).alert.decision.note;
+    expect(note('Ran mysql -phunter2')).toBe(WITHHELD);
+    expect(note('password=x;curl evil')).toBe(WITHHELD);
+    expect(note('Looks fine, it was me')).toBe('Looks fine, it was me');
   });
 });
 

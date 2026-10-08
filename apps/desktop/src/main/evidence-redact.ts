@@ -1,13 +1,14 @@
-import { redactString } from '@vigil/ai/redact';
-
 /**
  * Redaction for copied evidence. Command lines get no piecemeal redaction:
  * secrets hide in them in too many shapes (`mysql -phunter2`, quoted
  * `PGPASSWORD=…`, a value after `;` or a newline) for a pattern to cut out
  * the secret and nothing else. A command-line field that might hold one is
  * withheld whole, and otherwise only this computer's user and host names are
- * replaced. Every other string goes through the shared redaction
- * (@vigil/ai/redact) after the same name pass.
+ * replaced. Every other string, a decision note or an error included, is
+ * treated the same way, since any of them can quote a command. Only titles
+ * and subject labels, which are rule text or names, skip the scan. The
+ * shared redaction (@vigil/ai/redact) is not used here: its home-path rule
+ * can eat text after a path (`/Users/al;curl` loses `;curl`).
  *
  * This is a best-effort safety net, not a guarantee. A secret written so no
  * pattern can see it gets through: split by quotes (`PGPASS""WORD=…`),
@@ -25,37 +26,36 @@ export interface EvidenceNames {
 export const WITHHELD = '[withheld: may contain a secret]';
 
 /**
- * The fields that carry a command line, by key, wherever they appear:
- * - lists: a process's argv (`args`) and a persistence item's `programArgs`;
- * - strings: a tool request's `command`, a persistence item's `program` (a
- *   cron job's whole command line), and the text rules or the AI fill from
- *   commands: `summary`, an AI read's `details`, an action's `reason` and a
- *   proposal's `rationale`. Titles and subject labels are fixed rule text
- *   or names, so they are not scanned (a rule titled "Credentials file
- *   read" stays readable); they are withheld only when they repeat a
- *   withheld command (see `redactEvidence`);
- * - URLs (`url`, `originUrl`), which can carry `user:password@`, and are
- *   withheld if they hold a newline or other control character.
+ * Every string is read as a possible command line, since a note, an error or
+ * a summary can quote one as easily as `args` can. Argv lists (a process's
+ * `args`, a persistence item's `programArgs`) are withheld as one list. URLs
+ * (`url`, `originUrl`) can carry `user:password@` and are also withheld when
+ * they hold a newline or other control character. Titles and subject labels
+ * are rule text or names: they are not scanned (a rule titled "Credentials
+ * file read" stays readable) and are withheld only when they repeat a
+ * withheld command (see `redactEvidence`).
  */
 const COMMAND_LISTS = new Set(['args', 'programArgs']);
-const COMMAND_STRINGS = new Set([
-  'command',
-  'commandLine',
-  'program',
-  'summary',
-  'details',
-  'reason',
-  'rationale',
-]);
 const URL_FIELDS = new Set(['url', 'originUrl']);
+/** Rule text and names: only the names change, unless they repeat a withheld command. */
+const FIXED_TEXT = new Set(['title', 'label']);
+
+/** A name that may label a secret, as in `PGPASSWORD`, `api_key` or `x-auth`. */
+const SECRET_NAME = '[A-Za-z0-9_.-]*(?:pass|pwd|secret|token|key|auth|cred)[A-Za-z0-9_.-]*';
 
 /**
- * Anything that might be a secret, matched anywhere: no word boundaries and
- * any case, so it over-withholds (`PWD=`, "author") rather than miss one.
- * The value shapes follow @vigil/ai/redact's SECRET_PATTERNS, loosened.
+ * What a secret looks like in a command line: an assignment or flag whose
+ * name says so, a tool's own password flag, or a value shaped like a known
+ * kind of key. Plain words and paths (`cat /etc/passwd`, `ls /opt/compass`)
+ * pass, since a name only counts when a value is given to it. The value
+ * shapes follow @vigil/ai/redact's SECRET_PATTERNS, loosened.
  */
 const SECRET_HINTS: readonly RegExp[] = [
-  /pass|pwd|secret|token|api_key|apikey|api-key|auth|credential|--key/i,
+  // NAME=value or NAME: value, also inside quotes, `$(…)` or a URL query.
+  new RegExp(`(?:^|[^A-Za-z0-9_])${SECRET_NAME}\\s*[=:]\\s*[^\\s=:]`, 'i'),
+  // --password hunter2, -pass x, --token=x (the = form is caught above).
+  new RegExp(`(?:^|\\s)--?${SECRET_NAME}\\s+[^\\s-]`, 'i'),
+  /\bpass:\S/i,
   /sshpass/i,
   /-----BEGIN/i,
   /AKIA[0-9A-Z]{16}/i,
@@ -71,7 +71,7 @@ const SECRET_HINTS: readonly RegExp[] = [
 function mightHoldSecret(text: string): boolean {
   if (SECRET_HINTS.some((p) => p.test(text))) return true;
   if (/mysql|mariadb/i.test(text) && /-p/i.test(text)) return true;
-  if (/redis-cli/i.test(text) && /-a/i.test(text)) return true;
+  if (/redis-cli/i.test(text) && /-a|\bauth\b/i.test(text)) return true;
   if (/curl/i.test(text) && /\s-[a-z]*[uK]|--user|--config/.test(text)) return true;
   if (/unzip/i.test(text) && /-P/.test(text)) return true;
   if (/7z|7za|rar/i.test(text) && /-p\S/.test(text)) return true;
@@ -83,11 +83,14 @@ function escapeRegExp(text: string): string {
 }
 
 /**
- * This computer's names as whole tokens: any character other than a letter
+ * Home folder names (`/Users/<name>/`, whoever's), then this computer's
+ * names as whole tokens: any character other than a letter
  * or digit ends one, so `al_backup`, `my-pc` and `<al;` give the name away
  * and `alpha` doesn't. One pass, and only the name's own characters change.
  */
 function redactNames(text: string, names: EvidenceNames): string {
+  // Any user's home folder name, up to the next / or the end of the path.
+  text = text.replace(/(\/(?:Users|home)\/)[A-Za-z0-9._-]+(?=\/|$|\s|['"])/g, '$1<user>');
   const host = names.hostname?.replace(/\.local$/i, '');
   const words = [host && `${host}.local`, host, names.username].filter((w): w is string => !!w);
   if (words.length === 0) return text;
@@ -111,14 +114,6 @@ function commandList(args: string[], names: EvidenceNames): string[] {
   return args.map((a) => redactNames(a, names));
 }
 
-/** Any other string: the names, then the shared redaction. */
-function freeText(text: string, names: EvidenceNames): string {
-  return redactString(redactNames(text, names), {
-    ...(names.username ? { username: names.username } : {}),
-    ...(names.hostname ? { hostname: names.hostname } : {}),
-  });
-}
-
 /** A URL: like a command string, and withheld if it holds a newline or control character. */
 function urlString(text: string, names: EvidenceNames): string {
   // eslint-disable-next-line no-control-regex
@@ -130,12 +125,11 @@ type Withheld = string[];
 
 function walk(value: unknown, names: EvidenceNames, withheld: Withheld, key?: string): unknown {
   if (typeof value === 'string') {
-    if (key === undefined) return freeText(value, names);
-    const out = URL_FIELDS.has(key)
-      ? urlString(value, names)
-      : COMMAND_STRINGS.has(key)
-        ? commandString(value, names)
-        : freeText(value, names);
+    if (key !== undefined && FIXED_TEXT.has(key)) return redactNames(value, names);
+    const out =
+      key !== undefined && URL_FIELDS.has(key)
+        ? urlString(value, names)
+        : commandString(value, names);
     if (out === WITHHELD) withheld.push(value);
     return out;
   }
