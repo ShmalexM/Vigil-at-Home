@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import {
@@ -142,7 +143,10 @@ export class Detector {
   private changing: Promise<unknown> = Promise.resolve();
   private waiting = 0;
   /** The last quiet of each rule: what undoing it puts back, and the state it left. */
-  private readonly quieted = new Map<string, { token: string; prior: RuleMode | null }>();
+  private readonly quieted = new Map<
+    string,
+    { token: string; stamp: string; prior: RuleMode | null }
+  >();
 
   constructor(
     private readonly db: DatabaseSync,
@@ -469,8 +473,9 @@ export class Detector {
       if (mode !== 'alert') return { ok: false, mode };
       const prior = this.engine.modeOverride(id) ?? null;
       this.feedback.setMode(id, 'shadow', userOrigin('alert'));
-      const token = this.stamp(id);
-      this.quieted.set(id, { token, prior });
+      // Bound to this rule and this one quiet, so it undoes nothing else.
+      const token = `${id}:${randomUUID()}`;
+      this.quieted.set(id, { token, stamp: this.stamp(id), prior });
       return { ok: true, prior, token };
     });
   }
@@ -489,7 +494,7 @@ export class Detector {
       const rule = this.engine.getRule(id);
       if (!rule) throw new Error(`No rule ${id}`);
       const done = this.quieted.get(id);
-      if (!done || done.token !== token || this.stamp(id) !== token) {
+      if (!done || done.token !== token || done.stamp !== this.stamp(id)) {
         return { ok: false, mode: this.engine.modeOf(rule) };
       }
       this.quieted.delete(id);

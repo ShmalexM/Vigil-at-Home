@@ -6,6 +6,7 @@ import {
   type Alert,
 } from '@vigil/core';
 import type { AlertDetail } from '../shared/ipc.js';
+import { WITHHELD } from './evidence-redact.js';
 
 /**
  * What Copy as JSON exports, field by field. Each field is picked on purpose,
@@ -66,17 +67,51 @@ function alertFields(a: Alert) {
 }
 
 /**
+ * The keys each kind of system alert carries in its free-form `details`, as
+ * the Santa log parser writes them (packages/sensors santa/logParser.ts).
+ * Any other key is dropped.
+ */
+const DETAIL_KEYS: Record<
+  Extract<SensorEvent, { kind: 'system.alert' }>['subtype'],
+  readonly string[]
+> = {
+  xprotect_detected: ['malware', 'signatureVersion', 'incident'],
+  tcc_modified: ['eventType', 'service', 'identity', 'identityType', 'authRight', 'authReason'],
+  gatekeeper_override: [],
+};
+
+/** A key that may name a credential: its value is withheld even when the key is known. */
+const CREDENTIAL_KEY = /password|passwd|pwd|secret|token|key|auth|cookie|session/i;
+
+/**
+ * A free-form string map, cut to the keys picked for it, with the value of
+ * any key that looks like a credential withheld. Every map an exported
+ * record carries goes through this.
+ */
+function mapFields(map: Record<string, string>, keys: readonly string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of keys) {
+    const v = map[k];
+    if (v !== undefined) out[k] = CREDENTIAL_KEY.test(k) ? WITHHELD : v;
+  }
+  return out;
+}
+
+/**
  * An event as its schema defines it, which drops any field the schema
  * doesn't name, without the raw sensor record the redaction can't vouch for.
+ * The schema's one free-form map, a system alert's details, is cut to the
+ * keys its subtype writes.
  */
 function eventFields(e: SensorEvent) {
   const { raw: _raw, ...rest } = e;
   const parsed = SensorEvent.safeParse(rest);
-  if (parsed.success) {
-    const { raw: _r, ...event } = parsed.data;
-    return event;
+  if (!parsed.success) return { id: e.id, ts: e.ts, source: e.source, kind: e.kind };
+  const { raw: _r, ...event } = parsed.data;
+  if (event.kind === 'system.alert') {
+    return { ...event, details: mapFields(event.details, DETAIL_KEYS[event.subtype] ?? []) };
   }
-  return { id: e.id, ts: e.ts, source: e.source, kind: e.kind };
+  return event;
 }
 
 /** An action, checked against its schema the same way. */

@@ -638,6 +638,19 @@ describe('Only log this rule', () => {
     expect(engine.modeOverride(ID)).toBe('shadow');
   });
 
+  it("undo can't use another rule's token", async () => {
+    const { core } = setup();
+    const OTHER = 'agent-secret-upload';
+    await core.setRuleMode(OTHER, 'alert');
+    const a = await core.quietRule(ID);
+    const b = await core.quietRule(OTHER);
+    expect(a.ok && b.ok).toBe(true);
+    expect(tokenOf(a)).not.toBe(tokenOf(b));
+    expect(await core.undoQuietRule(OTHER, tokenOf(a))).toEqual({ ok: false, mode: 'shadow' });
+    expect(await core.undoQuietRule(ID, tokenOf(b))).toEqual({ ok: false, mode: 'shadow' });
+    expect(await core.undoQuietRule(OTHER, tokenOf(b))).toMatchObject({ ok: true });
+  });
+
   it('undo takes only the token its quiet gave', async () => {
     const { core } = setup();
     const quiet = await core.quietRule(ID);
@@ -721,6 +734,38 @@ describe('alert detail', () => {
       action: { kind: 'process.kill' },
     });
   });
+  it("copies a system alert's details only under the keys its subtype writes", async () => {
+    const { core } = setup();
+    core.evidenceRedaction = () => ({});
+    const rule = makeRule({ id: 'download-pipe-to-shell', mode: 'alert', severity: 'medium' });
+    const xprotect: SensorEvent = {
+      id: 'ev-xp',
+      ts: Date.now(),
+      source: 'santa',
+      kind: 'system.alert',
+      subtype: 'xprotect_detected',
+      details: { malware: 'MACOS.ADLOAD', password: 'hunter2', internal: 'x' },
+    };
+    const tcc: SensorEvent = {
+      ...xprotect,
+      id: 'ev-tcc',
+      subtype: 'tcc_modified',
+      details: { service: 'kTCCServiceCamera', authRight: 'allowed', sessionToken: 'hunter2' },
+    };
+    const alert = await core.alerts.raise({ rule, events: [xprotect, tcc], actions: [] });
+    const json = core.alertEvidence(alert.id)!;
+    expect(json).not.toContain('hunter2');
+    expect(json).not.toContain('internal');
+    const events: Array<{ id: string; details: unknown }> = JSON.parse(json).events;
+    const a = events.find((e) => e.id === 'ev-xp')!;
+    const b = events.find((e) => e.id === 'ev-tcc')!;
+    expect(a.details).toEqual({ malware: 'MACOS.ADLOAD' });
+    // A known key that looks like a credential is still withheld.
+    expect(b.details).toEqual({
+      service: 'kTCCServiceCamera',
+      authRight: '[withheld: may contain a secret]',
+    });
+  });
   it('copies the evidence without a secret passed as its own arg, or short names', async () => {
     const { core } = setup();
     core.evidenceRedaction = () => ({ username: 'al', hostname: 'pc.local' });
@@ -733,6 +778,7 @@ describe('alert detail', () => {
         'secret123456',
         'al@pc',
         'sh -c "x --password pw99"',
+        'x --password pw99',
       ];
     }
     const alert = await core.alerts.raise({ rule, events: [event], actions: [] });
@@ -742,7 +788,9 @@ describe('alert detail', () => {
       '--token',
       '<redacted>',
       '<user>@<host>',
-      'sh -c "x --password <redacted>"',
+      // Quotes make it shell syntax: withheld whole rather than cut up.
+      '[withheld: may contain a secret]',
+      'x --password <redacted>',
     ]);
   });
 });

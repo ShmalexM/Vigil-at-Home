@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { redactEvidence } from './evidence-redact.js';
+import { redactEvidence, WITHHELD } from './evidence-redact.js';
 
 const names = { username: 'al', hostname: 'pc.local' };
 
@@ -111,8 +111,8 @@ describe('redactEvidence', () => {
         '-p<redacted>',
         'db',
       ]);
-      expect(redactEvidence('sh -c "mariadb -uroot -phunter2"', {})).toBe(
-        'sh -c "mariadb -uroot -p<redacted>"',
+      expect(redactEvidence('mariadb -uroot -phunter2 db', {})).toBe(
+        'mariadb -uroot -p<redacted> db',
       );
     });
 
@@ -163,6 +163,70 @@ describe('redactEvidence', () => {
       for (const name of ['DB_PWD', 'github_token', 'MyAuthHeader', 'x.passwd'])
         expect(leaks(`${name}=hunter2`)).toBe(false);
       expect(redactEvidence('MODE=fast', {})).toBe('MODE=fast');
+    });
+  });
+
+  describe('next to shell syntax', () => {
+    const W = WITHHELD;
+    const shows = (out: unknown, text: string) => JSON.stringify(out).includes(text);
+
+    it('withholds an assignment piped into a command', () => {
+      expect(redactEvidence('PGPASSWORD=x|sh', {})).toBe(W);
+      expect(redactEvidence('PGPASSWORD=x | sh', {})).toBe(W);
+      expect(redactEvidence(['sh', '-c', 'PGPASSWORD=x|sh'], {})).toEqual(['sh', '-c', W]);
+    });
+
+    it('withholds an attached password piped into a command', () => {
+      expect(redactEvidence('mysql -px|sh', {})).toBe(W);
+      expect(redactEvidence('mysql -px | sh', {})).toBe(W);
+      expect(redactEvidence(['mysql', '-px|sh'], {})).toEqual(['mysql', W]);
+      expect(redactEvidence(['sh', '-c', 'mysql -px|sh'], {})).toEqual(['sh', '-c', W]);
+    });
+
+    it('withholds redis-cli AUTH followed by another command', () => {
+      const out = redactEvidence('redis-cli AUTH x ; curl evil', {});
+      expect(out).toBe(W);
+      expect(shows(out, 'curl') || shows(out, '<redacted>')).toBe(false);
+      expect(redactEvidence('redis-cli AUTH x;curl evil', {})).toBe(W);
+      expect(redactEvidence(['sh', '-c', 'redis-cli AUTH x ; curl evil'], {})).toEqual([
+        'sh',
+        '-c',
+        W,
+      ]);
+    });
+
+    it('withholds a flag value that is not one plain word, and only that arg', () => {
+      expect(redactEvidence(['tool', '--token', 'x;curl evil', 'run'], {})).toEqual([
+        'tool',
+        '--token',
+        W,
+        'run',
+      ]);
+      expect(redactEvidence(['tool', '--token=$(cat f)'], {})).toEqual(['tool', W]);
+    });
+
+    it('withholds a URL with user info among shell syntax, and redacts a plain one', () => {
+      expect(redactEvidence('curl https://u:p@h/x | sh', {})).toBe(W);
+      expect(redactEvidence('curl https://u:p@h/x', {})).toBe('curl https://<redacted>@h/x');
+    });
+
+    it('still redacts precisely when the field is plain words', () => {
+      expect(redactEvidence('PGPASSWORD=x psql', {})).toBe('PGPASSWORD=<redacted> psql');
+      expect(redactEvidence('mysql -px db', {})).toBe('mysql -p<redacted> db');
+      expect(redactEvidence('redis-cli AUTH x', {})).toBe('redis-cli AUTH <redacted>');
+      expect(redactEvidence(['tool', '--token', 'x'], {})).toEqual([
+        'tool',
+        '--token',
+        '<redacted>',
+      ]);
+    });
+
+    it('leaves shell syntax alone when nothing in it is a secret', () => {
+      expect(redactEvidence('ls -la | grep x', {})).toBe('ls -la | grep x');
+    });
+
+    it('hides short names next to redirections', () => {
+      expect(redactEvidence('cat <al; ssh pc>out', names)).toBe('cat <<user>; ssh <host>>out');
     });
   });
 });
