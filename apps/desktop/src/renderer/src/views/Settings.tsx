@@ -10,6 +10,9 @@ import { AppearanceSection } from './Appearance';
 import { UpdatesRow } from './Updates';
 import { ADVANCED_NAV, PageHead } from './AppShell';
 import { SetupPanel } from './onboarding/SetupPanel';
+import { computer, onLinux } from '../platform';
+
+const bar = onLinux ? 'tray' : 'menu bar';
 
 export function SettingsView({ go }: { go: (r: string) => void }) {
   const [settings, reload] = useLive(() => vigil.getSettings());
@@ -21,7 +24,7 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
 
   return (
     <div className="page">
-      <PageHead title="Settings" purpose="How Vigil looks and behaves on this computer." />
+      <PageHead title="Settings" purpose={`How Vigil looks and behaves on this ${computer}.`} />
       <Card>
         <AppearanceSection
           theme={settings.theme}
@@ -36,7 +39,7 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
         <Card>
           <SectionHead
             title="Alerts"
-            sub="Show me less keeps Home and the menu bar to what needs your decision, with everything Vigil only noticed in History. Show me more lists those on Home too and counts them on the menu-bar icon. What Vigil blocks is the same either way."
+            sub={`Show me less keeps Home and the ${bar} to what needs your decision, with everything Vigil only noticed in History. Show me more lists those on Home too and counts them on the ${bar} icon. What Vigil blocks is the same either way.`}
           />
           <div className="row spread">
             <span>How much to show</span>

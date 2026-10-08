@@ -6,6 +6,7 @@ import { timeAgo } from '../format';
 import { plural } from '../views/agents-format';
 import { useToast } from './Toasts';
 import { Button, Segmented, StatusMark, type MarkState } from './ui';
+import { computer } from '../platform';
 
 type HookState = 'off' | 'error' | 'connected' | 'waiting';
 
@@ -113,7 +114,7 @@ export function PreflightSetup({ compact }: { compact?: boolean }) {
                   have hooks, add the <code>PreToolUse</code> and <code>SessionStart</code> entries
                   next to yours. For one project only, use its{' '}
                   <code>.claude/settings.local.json</code>, which stays out of git (the hooks hold
-                  paths on this computer).
+                  paths on this {computer}).
                 </details>
               </li>
               <li>Restart your Claude Code sessions so they load the hooks.</li>

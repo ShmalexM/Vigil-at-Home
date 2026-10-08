@@ -53,7 +53,7 @@ export const ApiKeyInput = z.object({
 export type ApiKeyInput = z.input<typeof ApiKeyInput>;
 
 /** A one-click fix a step offers besides its commands. */
-export const SetupAction = z.enum(['codex-share']);
+export const SetupAction = z.enum(['codex-share', 'helper-install']);
 export type SetupAction = z.infer<typeof SetupAction>;
 
 export interface SetupStepView {

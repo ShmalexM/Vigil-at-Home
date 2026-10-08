@@ -1,6 +1,7 @@
 import { Download, ExternalLink, RefreshCw } from 'lucide-react';
 import { useLive, vigil } from '../api';
 import { Button, Segmented } from '../components/ui';
+import { computer } from '../platform';
 import { checkedAt } from './updates-format';
 
 /**
@@ -73,8 +74,9 @@ export function UpdatesRow() {
         />
       </div>
       <span className="small muted">
-        Vigil only looks at GitHub’s public list of releases and sends nothing about you. You run
-        the installer yourself to update; automatic installs come once Vigil is signed.
+        Vigil only looks at GitHub’s public list of releases and sends nothing about you. You
+        download the installer for your {computer} and open it to update; automatic installs come
+        once Vigil is signed.
       </span>
     </div>
   );

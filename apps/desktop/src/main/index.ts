@@ -22,6 +22,7 @@ import {
   helperInstallCommand,
   helperMatch,
   runHelperScript,
+  unlessDemo,
 } from './helper-install.js';
 import { HelperLink } from './helper.js';
 import { registerIpc } from './ipc.js';
@@ -36,7 +37,13 @@ import { PackMemory } from './pack/memory.js';
 import { PackService } from './pack/service.js';
 import { seedPackDemo } from './pack/demo.js';
 import { PowerPolicy } from './power.js';
-import { HEALTH_CHECK_MS, macProbe, reportHealth, type HelperSensors } from './sensor-health.js';
+import {
+  AwakeClock,
+  HEALTH_CHECK_MS,
+  macProbe,
+  reportHealth,
+  type HelperSensors,
+} from './sensor-health.js';
 import { VigilCore } from './service.js';
 import { UpdateChecker } from './updates.js';
 import { wantsX11 } from './display.js';
@@ -134,15 +141,25 @@ function start(): void {
     ...(demo ? { readPs: async () => [], statInstall: demoInstalled } : {}),
   });
   const windows = new Windows();
-  const probe = macProbe(
-    (source) => store.lastEventAt(source),
-    () => helper.state,
-    async () => (await helper.query<{ sensors?: HelperSensors }>('helper.status'))?.sensors ?? null,
-  );
+  // Sensors can't report while Vigil is closed or the computer sleeps, so a
+  // gap from then is not a quiet sensor.
+  const awake = new AwakeClock(Date.now());
+  powerMonitor.on('suspend', () => awake.suspend());
+  powerMonitor.on('resume', () => awake.resume());
+  const probe = {
+    ...macProbe(
+      (source) => store.lastEventAt(source),
+      () => helper.state,
+      async () =>
+        (await helper.query<{ sensors?: HelperSensors }>('helper.status'))?.sensors ?? null,
+    ),
+    awakeMs: (since: number) => awake.awakeMs(since),
+  };
 
   // A development build installs the helper that `pnpm build:helper` made.
   const helperDir = () => helperBundleDir(process.resourcesPath, devHelperDir);
-  core.helperInstallable = HELPER_PLATFORMS.has(process.platform) && helperDir() !== null;
+  // The demo offers no helper buttons (see unlessDemo).
+  core.helperInstallable = !demo && HELPER_PLATFORMS.has(process.platform) && helperDir() !== null;
   // Santa's configuration profile comes from the helper, which holds the sync
   // server's certificate. Setup offers it once it has been written here.
   const santaProfilePath = join(dataDir, 'Vigil Santa.mobileconfig');
@@ -177,6 +194,12 @@ function start(): void {
     return r;
   };
 
+  const installHelper = unlessDemo(demo, async () =>
+    afterHelperScript(
+      await runHelperScript(core.helperOutdated ? 'update' : 'install', helperDir()),
+    ),
+  );
+
   const keys = new KeyStore(join(dataDir, 'api-keys.json'), {
     available: () => safeStorage.isEncryptionAvailable(),
     encrypt: (s) => safeStorage.encryptString(s),
@@ -210,6 +233,8 @@ function start(): void {
     ...(demo
       ? {}
       : { codex: { status: () => ai.codexStatus(), share: () => ai.shareCodexSignIn() } }),
+    // The helper step's button: the same password dialog as Home's. None in the demo.
+    ...(demo ? {} : { installHelper }),
     // The wizard's helper and Santa steps, once this build can install them.
     plan: () => {
       const command = helperInstallCommand(helperDir());
@@ -323,11 +348,10 @@ function start(): void {
     agents,
     { service: pack, connectors },
     {
-      install: async () =>
-        afterHelperScript(
-          await runHelperScript(core.helperOutdated ? 'update' : 'install', helperDir()),
-        ),
-      uninstall: async () => afterHelperScript(await runHelperScript('uninstall', helperDir())),
+      install: installHelper,
+      uninstall: unlessDemo(demo, async () =>
+        afterHelperScript(await runHelperScript('uninstall', helperDir())),
+      ),
     },
   );
   windows.createTray();

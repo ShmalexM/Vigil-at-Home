@@ -18,6 +18,7 @@ import { vigil } from '../api';
 import { useToast } from '../components/Toasts';
 import { Button, SectionHead, Segmented } from '../components/ui';
 import '../styles/appearance.css';
+import { computer } from '../platform';
 
 const COLOR_FIELDS: { key: keyof ThemeColors; label: string }[] = [
   { key: 'accent', label: 'Accent' },
@@ -115,7 +116,7 @@ export function AppearanceSection({
               onCopy={async () => {
                 await navigator.clipboard.writeText(shareCodexTheme(a, v));
                 toast({
-                  text: `Copied your ${v} theme. Paste it into Codex, or into Vigil on another Mac.`,
+                  text: `Copied your ${v} theme. Paste it into Codex, or into Vigil on another ${computer}.`,
                 });
               }}
             />
