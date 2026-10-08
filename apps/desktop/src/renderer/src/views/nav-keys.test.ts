@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 vi.stubGlobal('navigator', { platform: 'MacIntel' });
-const { isTyping, navKey, navKeys, navShortcut } = await import('./nav-keys');
+const { isAskKey, isTyping, navKey, navKeys, navShortcut } = await import('./nav-keys');
 
 const keys = navKeys(['home', 'history', 'settings', 'alerts', 'rules']);
 const key = (k: string, o: Partial<KeyboardEvent> = {}) => ({
@@ -48,5 +48,16 @@ describe('isTyping', () => {
     expect(isTyping(el('INPUT', { type: 'range' }))).toBe(false);
     expect(isTyping(el('BUTTON'))).toBe(false);
     expect(isTyping(null)).toBe(false);
+  });
+});
+
+describe('isAskKey', () => {
+  it('opens Ask on ⌘K, never while typing in a field', () => {
+    expect(isAskKey(key('k', { metaKey: true }), true, false)).toBe(true);
+    expect(isAskKey(key('K', { ctrlKey: true }), false, false)).toBe(true);
+    expect(isAskKey(key('k', { metaKey: true }), true, true)).toBe(false);
+    expect(isAskKey(key('k', { ctrlKey: true }), false, true)).toBe(false);
+    expect(isAskKey(key('k', { metaKey: true, altKey: true }), true, false)).toBe(false);
+    expect(isAskKey(key('k'), true, false)).toBe(false);
   });
 });

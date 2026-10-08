@@ -220,9 +220,10 @@ export class Store {
       this.db.exec(`RELEASE ${name}`);
       return out;
     } catch (err) {
+      // Alerts saved inside may be rolled back, by us below or by SQLite itself
+      // (SQLITE_FULL and the like end the whole transaction); count them afresh next time.
+      this.attention = undefined;
       if (this.db.isTransaction) {
-        // Alerts saved inside may be rolled back; count them afresh next time.
-        this.attention = undefined;
         this.db.exec(`ROLLBACK TO ${name}`);
         this.db.exec(`RELEASE ${name}`);
       }
@@ -593,7 +594,16 @@ export class Store {
   openAlertCounts(): { needsYou: number; noticed: number; noticedClearable: number } {
     if (!this.attention) {
       this.attention = new Map();
-      for (const a of this.listAlerts({ status: 'open', limit: -1 })) this.track(a);
+      const suggested = new Set(
+        (
+          this.stmt(
+            "SELECT DISTINCT alert_id AS id FROM proposals WHERE status = 'pending' AND alert_id IS NOT NULL",
+          ).all() as { id: string }[]
+        ).map((r) => r.id),
+      );
+      for (const a of this.listAlerts({ status: 'open', limit: -1 })) {
+        this.track(a, suggested.has(a.id));
+      }
     }
     let needsYou = 0;
     let noticed = 0;
@@ -609,12 +619,17 @@ export class Store {
     return { needsYou: needsYou + piles.size, noticed, noticedClearable };
   }
 
-  private track(a: Alert): void {
+  /**
+   * `suggested`: a suggestion still waits on this alert in the proposals
+   * table, so "Those were me" leaves it (VigilCore.clearNoticed).
+   */
+  private track(a: Alert, suggested = this.hasPendingProposal(a.id)): void {
     if (!this.attention) return;
     if (needsDecision(a)) {
       this.attention.set(a.id, { needs: true, pile: pileKey(a), clearable: false });
     } else if (isNoticed(a)) {
-      this.attention.set(a.id, { needs: false, pile: undefined, clearable: untouched(a) });
+      const clearable = untouched(a) && !suggested;
+      this.attention.set(a.id, { needs: false, pile: undefined, clearable });
     } else this.attention.delete(a.id);
   }
 
@@ -684,7 +699,17 @@ export class Store {
       `INSERT INTO proposals (id, created_at, status, alert_id, body) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET status = excluded.status, body = excluded.body`,
     ).run(p.id, p.createdAt, p.status, p.alertId ?? null, JSON.stringify(p));
+    // A suggestion arriving or settled changes whether its alert can be cleared in bulk.
+    const alert = this.attention && p.alertId ? this.getAlert(p.alertId) : undefined;
+    if (alert) this.track(alert);
     return p;
+  }
+
+  /** Whether a suggestion still waits on this alert. */
+  hasPendingProposal(alertId: string): boolean {
+    return !!this.stmt(
+      "SELECT 1 FROM proposals WHERE alert_id = ? AND status = 'pending' LIMIT 1",
+    ).get(alertId);
   }
 
   listProposals(

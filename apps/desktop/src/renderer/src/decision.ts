@@ -99,20 +99,46 @@ export function containLabel(pending: readonly ActionProposal[]): string {
   }
 }
 
+/**
+ * Whether an action really changed something: `real` ran through the helper,
+ * `simulated` was only logged (the helper wasn't connected), and `unknown`
+ * was recorded by an older build that didn't say. Those builds left one
+ * sign, the dry run's `dry-` quarantine id; anything else stays unknown,
+ * never real.
+ */
+export type Provenance = 'real' | 'simulated' | 'unknown';
+
+export function provenance(r: ActionRecord): Provenance {
+  const s = r.result?.simulated;
+  if (s === true) return 'simulated';
+  if (s === false) return 'real';
+  return r.result?.quarantineId?.startsWith('dry-') ? 'simulated' : 'unknown';
+}
+
 /** This action only ran as a simulation: the helper wasn't connected at the time. */
 export function isSimulated(r: ActionRecord): boolean {
-  return r.result?.simulated === true;
+  return provenance(r) === 'simulated';
 }
 
 /**
- * Whether what holds this alert was only simulated: every containment still
- * in force ran without the helper. Decided from the alert's own records, so
- * a real block stays "blocked" through a dropped connection, and a simulated
- * one doesn't turn real when the helper is installed later.
+ * What Vigil's own response to an alert really did, over every action that
+ * went through (one with no undo, like a kill, included): all `real`, all
+ * `simulated`, a `mixed` bag, or `unknown` when any of them doesn't say.
+ * Undefined when nothing went through. Decided from the alert's own records,
+ * so a real block stays "blocked" through a dropped connection, and a
+ * simulated one doesn't turn real when the helper is installed later.
  */
-export function containmentSimulated(alert: Alert, actions: readonly ActionRecord[]): boolean {
-  const active = activeContainment(actions);
-  return alert.containment === 'active' && active.length > 0 && active.every(isSimulated);
+export type ResponseProvenance = Provenance | 'mixed';
+
+export function responseProvenance(
+  actions: readonly ActionRecord[],
+): ResponseProvenance | undefined {
+  const done = actions.filter((r) => r.status === 'done' && !r.undoes).map(provenance);
+  if (done.length === 0) return undefined;
+  if (done.includes('unknown')) return 'unknown';
+  if (done.every((p) => p === 'real')) return 'real';
+  if (done.every((p) => p === 'simulated')) return 'simulated';
+  return 'mixed';
 }
 
 /**

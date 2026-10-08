@@ -220,9 +220,10 @@ export class VigilCore {
     let cleared = 0;
     for (const id of new Set(ids)) {
       const alert = this.store.getAlert(id);
-      // One with an action taken or an AI suggestion waiting stays for a look of its own,
-      // so a bulk tap never quietly expires a suggestion.
+      // One with an action taken or a suggestion waiting (the AI's or a rule's) stays
+      // for a look of its own, so a bulk tap never quietly expires a suggestion.
       if (!alert || !isNoticed(alert) || !untouched(alert)) continue;
+      if (this.store.hasPendingProposal(id)) continue;
       await this.alerts.decide(id, {
         verdict: 'expected',
         release: false,
@@ -235,13 +236,14 @@ export class VigilCore {
 
   /**
    * "Those were me" for every Noticed alert, not only the newest the lists
-   * loaded. Only alerts raised by `at`, when the user opened the confirm,
-   * are cleared, so anything that turned up while they read it stays.
+   * loaded. Only alerts last seen by `at`, when the user opened the confirm,
+   * are cleared, so anything that turned up while they read it stays, a
+   * repeat folded into an older alert included.
    */
   async clearNoticedUpTo(at: number): Promise<number> {
     const ids = this.store
       .listAlerts({ status: 'open', limit: -1 })
-      .filter((a) => isNoticed(a) && untouched(a) && a.createdAt <= at)
+      .filter((a) => isNoticed(a) && untouched(a) && (a.repeats?.lastAt ?? a.createdAt) <= at)
       .map((a) => a.id);
     return this.clearNoticed(ids);
   }

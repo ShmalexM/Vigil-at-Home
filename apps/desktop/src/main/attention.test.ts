@@ -108,6 +108,48 @@ describe('VigilCore', () => {
     expect(core.status()).toMatchObject({ noticed: 2, noticedClearable: 0 });
   });
 
+  it("leaves a Noticed alert with a rule's pending suggestion out of the bulk clear", async () => {
+    const { core, store } = setup();
+    const rule = makeRule({
+      id: 'download-pipe-to-shell',
+      mode: 'alert',
+      severity: 'medium',
+      fidelity: 'medium',
+    });
+    // A suggested suspend and no AI assessment: only the proposals table knows.
+    const suggested = await core.alerts.raise({ rule, events: [makeExec()], actions: [suspend] });
+    expect(suggested.ai).toBeUndefined();
+    store.saveAlert(alert({ id: 'plain', createdAt: 1 }));
+    expect(core.status()).toMatchObject({ noticed: 2, noticedClearable: 1 });
+    expect(await core.clearNoticedUpTo(at)).toBe(1);
+    expect(await core.clearNoticed([suggested.id])).toBe(0);
+    expect(store.getAlert(suggested.id)?.decision).toBeUndefined();
+    expect(store.listProposals({ alertId: suggested.id }).map((p) => p.status)).toEqual([
+      'pending',
+    ]);
+    // Once the suggestion is settled, it can go in bulk again.
+    const [p] = store.listProposals({ alertId: suggested.id });
+    store.saveProposal({ ...p!, status: 'rejected', decidedAt: at });
+    expect(core.status()).toMatchObject({ noticed: 1, noticedClearable: 1 });
+  });
+
+  it('leaves an alert whose repeat arrived after the confirm opened', async () => {
+    let now = at;
+    const store = new Store(new DatabaseSync(':memory:'));
+    const core = new VigilCore(store, new DryRunExecutor(), true, () => now);
+    const rule = makeRule({ mode: 'alert', severity: 'medium', fidelity: 'medium' });
+    const first = await core.alerts.raise({ rule, events: [makeExec()], actions: [] });
+    const opened = now;
+    now += 60_000;
+    // The repeat folds into the alert raised before the confirm.
+    const again = await core.alerts.raise({ rule, events: [makeExec()], actions: [] });
+    expect(again.id).toBe(first.id);
+    expect(again.createdAt).toBe(opened);
+    expect(await core.clearNoticedUpTo(opened)).toBe(0);
+    expect(store.getAlert(first.id)?.decision).toBeUndefined();
+    expect(await core.clearNoticedUpTo(now)).toBe(1);
+  });
+
   it('counts exactly as needsDecision and piles do', () => {
     const { store } = setup();
     const pile = (key: string) => ({ key, who: 'claude' });
@@ -146,6 +188,35 @@ describe('VigilCore', () => {
       }),
     ).toThrow();
     expect(store.openAlertCounts()).toEqual(alertCounts(open));
+  });
+
+  it('counts afresh when SQLite has already ended the transaction itself', () => {
+    const db = new DatabaseSync(':memory:');
+    const store = new Store(db);
+    expect(store.openAlertCounts()).toMatchObject({ needsYou: 0 });
+    // SQLITE_FULL and the like roll the whole transaction back before the error reaches tx.
+    expect(() =>
+      store.tx(() => {
+        store.saveAlert(alert({ id: 'gone', severity: 'critical' }));
+        db.exec('ROLLBACK');
+        throw new Error('database or disk is full');
+      }),
+    ).toThrow('full');
+    expect(store.getAlert('gone')).toBeUndefined();
+    expect(store.openAlertCounts()).toMatchObject({ needsYou: 0 });
+    // The same from a nested tx: the outer one finds no transaction left either.
+    expect(() =>
+      store.tx(() => {
+        store.saveAlert(alert({ id: 'outer', severity: 'critical' }));
+        store.tx(() => {
+          store.saveAlert(alert({ id: 'inner', severity: 'critical' }));
+          db.exec('ROLLBACK');
+          throw new Error('database or disk is full');
+        });
+      }),
+    ).toThrow('full');
+    expect(store.listAlerts()).toEqual([]);
+    expect(store.openAlertCounts()).toMatchObject({ needsYou: 0 });
   });
 
   it('clears only Noticed alerts and never releases a block', async () => {

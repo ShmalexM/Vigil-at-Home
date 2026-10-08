@@ -81,6 +81,8 @@ describe('HelperLink', () => {
 
     const r = await link.execute({ kind: 'file.quarantine', path: '/tmp/x' });
     expect(r.quarantineId).toBe('q1');
+    // Recorded as real, so older rows without the field can read as unknown.
+    expect(r.simulated).toBe(false);
     expect(link.dryRun.log).toHaveLength(0);
     // Reconnecting asks only for what came after the last event.
     const subscribed: (string | undefined)[] = [];
@@ -123,7 +125,7 @@ describe('HelperLink', () => {
       ],
     );
     // The helper's own finish time, so time-to-block stays honest.
-    expect(await link.execute(kill)).toEqual({ at: 1 });
+    expect(await link.execute(kill)).toEqual({ at: 1, simulated: false });
     expect(await link.execute({ kind: 'network.block', address: '203.0.113.9' })).toMatchObject({
       error: 'pf is off',
     });

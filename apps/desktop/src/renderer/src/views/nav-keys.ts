@@ -51,6 +51,15 @@ export function navKey(
   return keys[e.key];
 }
 
+/** Whether a key press is ⌘K (Ctrl+K elsewhere), which opens Ask. Typing in a field never does. */
+export function isAskKey(
+  e: Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'altKey'>,
+  isMac: boolean,
+  typing: boolean,
+): boolean {
+  return !typing && e.key.toLowerCase() === 'k' && (isMac ? e.metaKey : e.ctrlKey) && !e.altKey;
+}
+
 /** The first key that opens a page, for its tooltip and aria-keyshortcuts. */
 export function navShortcut(
   route: string,

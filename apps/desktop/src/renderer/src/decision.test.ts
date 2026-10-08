@@ -3,12 +3,13 @@ import { describe, expect, it } from 'vitest';
 import {
   activeContainment,
   containLabel,
-  containmentSimulated,
   isSimulated,
   keepLabel,
   othersNeedingYou,
+  provenance,
   releaseLabel,
   releaseStep,
+  responseProvenance,
 } from './decision';
 
 let n = 0;
@@ -91,14 +92,40 @@ describe('simulated containment', () => {
   const suspend: Action = { kind: 'process.suspend', pid: 1 };
 
   it('follows the records, not whether the helper is connected now', () => {
-    const real = rec(suspend);
+    const real = rec(suspend, { result: { at: 1, simulated: false } });
     const dry = rec(suspend, { result: { at: 1, simulated: true } });
     expect(isSimulated(dry)).toBe(true);
-    expect(containmentSimulated(alert(), [dry])).toBe(true);
-    expect(containmentSimulated(alert(), [real])).toBe(false);
-    // A mix holds something real, so it isn't "would have".
-    expect(containmentSimulated(alert(), [real, dry])).toBe(false);
-    expect(containmentSimulated(alert({ containment: 'none' }), [dry])).toBe(false);
+    expect(responseProvenance([dry])).toBe('simulated');
+    expect(responseProvenance([real])).toBe('real');
+    expect(responseProvenance([real, dry])).toBe('mixed');
+    expect(responseProvenance([])).toBeUndefined();
+  });
+
+  it('counts actions with no undo, like a kill', () => {
+    const kill: Action = { kind: 'process.kill', pid: 1 };
+    const dryKill = rec(kill, { result: { at: 1, simulated: true } });
+    const realKill = rec(kill, { result: { at: 1, simulated: false } });
+    expect(responseProvenance([dryKill])).toBe('simulated');
+    expect(
+      responseProvenance([realKill, rec(suspend, { result: { at: 1, simulated: true } })]),
+    ).toBe('mixed');
+    // Undoes and actions that didn't go through say nothing about the response.
+    expect(responseProvenance([realKill, rec(suspend, { status: 'failed' })])).toBe('real');
+  });
+
+  it('never reads a row from an older build as real', () => {
+    // Older builds saved simulations without the field; only a dry-run quarantine id tells.
+    const old = rec(suspend, { result: { at: 1 } });
+    const oldDryQuarantine = rec(
+      { kind: 'file.quarantine', path: '/tmp/x' },
+      { result: { at: 1, quarantineId: 'dry-1' } },
+    );
+    expect(provenance(old)).toBe('unknown');
+    expect(provenance(oldDryQuarantine)).toBe('simulated');
+    expect(responseProvenance([old])).toBe('unknown');
+    expect(responseProvenance([old, rec(suspend, { result: { at: 1, simulated: false } })])).toBe(
+      'unknown',
+    );
   });
 
   it('counts the other decisions, keeping a pile this alert sits in', () => {

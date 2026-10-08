@@ -5,7 +5,7 @@ import { DecisionControls } from '../components/Decision';
 import { Shield } from '../components/Shield';
 import { Button, Chip, IconButton, SeverityMark, StatusMark } from '../components/ui';
 import { describeAction, headline, timeAgo } from '../format';
-import { containmentSimulated, isSimulated, othersNeedingYou } from '../decision';
+import { isSimulated, othersNeedingYou, provenance, responseProvenance } from '../decision';
 
 /**
  * The always-on-top detection popup. It appears without taking focus, says
@@ -40,7 +40,8 @@ export function Popup({ initialId }: { initialId: string }) {
   const contained = alert.containment === 'active';
   // The same count as Needs you everywhere else: decisions only, a pile once.
   const others = othersNeedingYou(alert, status?.needsYou ?? 0, open ?? []);
-  const simulated = containmentSimulated(alert, actions);
+  // Worded from what every action really did, not whether the helper is connected now.
+  const response = contained ? responseProvenance(actions) : undefined;
   const shown = actions.filter((r) => !r.undoes);
   const allSimulated = shown.length > 0 && shown.every(isSimulated);
   const decided = !!alert.decision;
@@ -55,7 +56,7 @@ export function Popup({ initialId }: { initialId: string }) {
       <div className="row spread">
         <div className="row">
           <Shield height={20} />
-          <span className="t-h3">{headline(alert, simulated)}</span>
+          <span className="t-h3">{headline(alert, response)}</span>
           <span className="t-small">· {timeAgo(alert.createdAt)}</span>
         </div>
         <IconButton
@@ -70,12 +71,25 @@ export function Popup({ initialId }: { initialId: string }) {
       <div className="col" style={{ gap: 6 }}>
         <div className="row">
           <SeverityMark severity={alert.severity} />
-          {simulated && (
+          {response === 'simulated' && (
             <Chip
               tone="fair"
               title="The Vigil helper wasn’t connected when this ran, so nothing was actually changed"
             >
               Simulated
+            </Chip>
+          )}
+          {response === 'mixed' && (
+            <Chip tone="fair" title="Some of this ran while the Vigil helper wasn’t connected">
+              Partly simulated
+            </Chip>
+          )}
+          {response === 'unknown' && (
+            <Chip
+              tone="fair"
+              title="An older Vigil recorded this without noting whether the helper was connected"
+            >
+              May be simulated
             </Chip>
           )}
         </div>
@@ -102,7 +116,7 @@ export function Popup({ initialId }: { initialId: string }) {
               <StatusMark
                 state={
                   r.status === 'done'
-                    ? isSimulated(r)
+                    ? provenance(r) !== 'real'
                       ? 'warn'
                       : 'done'
                     : r.status === 'pending'
@@ -111,7 +125,13 @@ export function Popup({ initialId }: { initialId: string }) {
                         ? 'warn'
                         : 'failed'
                 }
-                label={r.status === 'done' && isSimulated(r) ? 'Simulated' : r.status}
+                label={
+                  r.status !== 'done'
+                    ? r.status
+                    : { real: r.status, simulated: 'Simulated', unknown: 'Maybe simulated' }[
+                        provenance(r)
+                      ]
+                }
               />
               <span className="grow ellipsis">
                 {describeAction(r.action)}
