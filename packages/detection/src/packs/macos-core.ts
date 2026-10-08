@@ -54,21 +54,18 @@ const SANTA_BLOCK_BINARY = {
   policy: 'block',
 } as const;
 
-/** Text up to the next pipe holding no `://`, so the URL it holds is the only one. */
-const NO_URL = String.raw`((?!://)[^|])*`;
-/** A URL on this Mac itself: 127.x.x.x, localhost or [::1]. */
-const LOOPBACK_URL = String.raw`://(127(\.\d+){3}|localhost|\[::1\])[:/'"\s]`;
 /** Words that make an interpreter's inline program run what it reads. */
 const RUNS_INPUT = String.raw`\b(exec|eval|system|spawn|popen|subprocess)\b`;
-/** curl or wget, unless the only URL it fetches is this Mac's own, piped on (optionally to sudo). */
-const DOWNLOAD_PIPED = String.raw`(curl|wget)\s(?!${NO_URL}${LOOPBACK_URL}${NO_URL}(\||$))[^|]*\|\s*(sudo\s+)?`;
+/** curl or wget, piped on (optionally to sudo). */
+const DOWNLOAD_PIPED = String.raw`(curl|wget)\s[^|]*\|\s*(sudo\s+)?`;
 
 /**
  * A download piped straight into a shell or a script interpreter: `curl … |
  * sh`, `wget … | sudo bash`, `curl … | bash -s`, `curl … | python3`. Two
  * things are left out, both seen in Claude Code's own steps on a real Mac
- * (2026-10-08): a download whose only URL is this Mac itself (`curl
- * http://127.0.0.1:11434/…`, a local server answering), and an interpreter
+ * (2026-10-08): a call that fetches only from this Mac itself (`curl
+ * http://127.0.0.1:11434/…`, a local server answering; matched against
+ * process.commandLineRemote, which renames those calls), and an interpreter
  * given its program inline (`python3 -c "…json.load(sys.stdin)…"`, `node -e`),
  * which reads the download as data, unless that program execs or evals it.
  */
@@ -449,7 +446,7 @@ export const macosCoreRules: DetectionRuleInput[] = [
     condition: {
       all: [
         { field: 'process.name', op: 'in', value: SHELLS },
-        { field: 'process.commandLine', op: 'regex', value: PIPE_TO_RUN_RES },
+        { field: 'process.commandLineRemote', op: 'regex', value: PIPE_TO_RUN_RES },
       ],
     },
     response: [SUSPEND],

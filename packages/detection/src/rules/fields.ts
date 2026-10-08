@@ -1,4 +1,5 @@
 import type { DetectionEvent } from '../types.js';
+import { blankLoopbackFetches } from './fetch.js';
 
 export type FieldValue = string | number | boolean | string[] | undefined;
 export type FieldGetter = (e: DetectionEvent) => FieldValue;
@@ -23,6 +24,15 @@ const COMPUTED: Record<string, FieldGetter> = {
   'process.parentName': (e) =>
     'process' in e ? (basename(e.process?.parentPath) ?? e.process?.ancestors?.[0]) : undefined,
   'process.commandLine': (e) => ('process' in e ? e.process?.args?.join(' ') : undefined),
+  /**
+   * The command line with each curl or wget call that fetches only from this
+   * Mac (every target 127.x, localhost or [::1], and no proxy) renamed
+   * `local-fetch`. For rules about running a download (see rules/fetch.ts).
+   */
+  'process.commandLineRemote': (e) => {
+    const cmd = 'process' in e ? e.process?.args?.join(' ') : undefined;
+    return cmd === undefined ? undefined : blankLoopbackFetches(cmd);
+  },
   /**
    * The download a process comes from: the nearest downloaded ancestor, or the
    * process itself when it carries the quarantine flag. Chain rules key on it.
