@@ -29,6 +29,7 @@ import { matchText } from '../rule-modes';
 import { parseActivityParam, VIGIL_CONNECTOR, VIGIL_SELF } from './agents-format';
 import { PageHead } from './AppShell';
 import { onRovingKeyDown } from '../components/roving';
+import { computer, onLinux } from '../platform';
 
 const UNDOABLE = new Set([
   'process.suspend',
@@ -84,7 +85,7 @@ export function ActivityView({
     <div className="page">
       <PageHead
         title="Activity"
-        purpose="Everything Vigil looks at on this Mac, what its rules made of it, and every action it took."
+        purpose={`Everything Vigil looks at on this ${computer}, what its rules made of it, and every action it took.`}
       />
       <div className="tabs" role="tablist" onKeyDown={onRovingKeyDown}>
         <button
@@ -119,7 +120,7 @@ const GROUPS: { value: EventGroup | 'all'; label: string }[] = [
   { value: 'network', label: 'Network' },
   { value: 'files', label: 'Files' },
   { value: 'startup', label: 'Startup & extensions' },
-  { value: 'system', label: 'macOS alerts' },
+  { value: 'system', label: onLinux ? 'System alerts' : 'macOS alerts' },
   { value: 'agents', label: 'Agent requests' },
 ];
 
@@ -326,9 +327,9 @@ function EventFeed({
       </Card>
 
       <span className="t-small">
-        Events stay on this Mac for {stats?.retentionDays ?? 30} days, except ones an alert points
-        to. When you use the AI, it gets a summary with your name and home folder removed, never
-        this raw feed.
+        Events stay on this {computer} for {stats?.retentionDays ?? 30} days, except ones an alert
+        points to. When you use the AI, it gets a summary with your name and home folder removed,
+        never this raw feed.
       </span>
     </div>
   );
