@@ -191,6 +191,12 @@ export interface VigilToolInfo {
   description: string;
   /** Its arguments, as the agent sees them (`?` marks optional ones). */
   args: string;
+  /**
+   * Only for Vigil's own pack, never for the agents it watches: which rules
+   * are off or only log, and where exceptions are, would show an agent where
+   * to look for a way around them.
+   */
+  packOnly?: true;
 }
 
 /**
@@ -225,18 +231,21 @@ export const VIGIL_TOOLS: readonly VigilToolInfo[] = [
     name: 'list_rules',
     description: 'The rules, busiest first: name, mode, severity and matches in the last 7 days.',
     args: 'mode?, limit?',
+    packOnly: true,
   },
   {
     name: 'get_rule',
     description:
       'One rule: what it looks for in words, its mode, matches in the last 7 days and how many exclusions it has.',
     args: 'id',
+    packOnly: true,
   },
   {
     name: 'list_actions',
     description:
       'What Vigil did, newest first: blocks, quarantines, releases and undos, with who asked and how it went.',
     args: 'since?, limit?',
+    packOnly: true,
   },
   {
     name: 'list_agents',
