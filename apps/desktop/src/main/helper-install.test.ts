@@ -10,6 +10,7 @@ import {
   installedHelperFiles,
   runHelperScript,
   shellQuote,
+  unlessDemo,
   type RunFile,
 } from './helper-install.js';
 
@@ -185,6 +186,15 @@ describe('helper install', () => {
       error: 'Boom.',
       command: `sudo ${shellQuote(join(dir, 'install.sh'))}`,
     });
+  });
+
+  it('never runs the real script from the demo', async () => {
+    let ran = 0;
+    const real = async () => (ran++, { ok: true });
+    expect(await unlessDemo(true, real)()).toMatchObject({ ok: false });
+    expect(ran).toBe(0);
+    expect(await unlessDemo(false, real)()).toEqual({ ok: true });
+    expect(ran).toBe(1);
   });
 
   it('runs install.sh for an update, with a dialog that says why', async () => {

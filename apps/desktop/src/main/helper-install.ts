@@ -269,3 +269,16 @@ async function viaOsascript(
     .trim();
   return { ok: false, error: msg || `The ${script} script failed` };
 }
+
+/**
+ * The demo (VIGIL_DEMO) shows made-up data on a real computer: its helper
+ * buttons must never run the real install or uninstall script as root.
+ */
+export function unlessDemo(
+  demo: boolean,
+  run: () => Promise<HelperInstallResult>,
+): () => Promise<HelperInstallResult> {
+  return demo
+    ? async () => ({ ok: false, error: 'The demo doesn’t install or remove the helper' })
+    : run;
+}
