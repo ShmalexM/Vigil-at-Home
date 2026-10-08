@@ -28,6 +28,18 @@ import { FEED_CHECK_MS, type Detector } from './detection.js';
 import { RuleEditing } from './rule-editing.js';
 import type { ActionExecutor } from './executor.js';
 import { Scheduler } from './scheduler.js';
+
+/** Scheduled jobs as people know them, for a stuck-work note in the status. */
+const JOB_NAMES: Record<string, string> = {
+  'pack-dogs': 'pack dogs',
+  'label-events': 'AI labels',
+  'rule-review': 'rule reviews',
+  'threat-feeds': 'threat feeds',
+  'prune-events': 'clean-up',
+  'cap-disk': 'clean-up',
+  'sensor-health': 'sensor checks',
+  'agent-discovery': 'finding AI agents',
+};
 import { SensorRegistry } from './sensors.js';
 import { computeStatus } from './status.js';
 import { TEST_RULE } from './test-alert.js';
@@ -241,8 +253,17 @@ export class VigilCore {
     const s = computeStatus(this.store.listAlerts({ status: 'open' }), this.sensors.list());
     const today = startOfDay(this.now());
     const alertView = this.alertView();
+    const stuck = this.scheduler
+      .status()
+      .filter((j) => j.stuck)
+      .map((j) => JOB_NAMES[j.name] ?? j.name);
     return {
       ...s,
+      // Work that stopped is said plainly; it doesn't lower the level.
+      reasons: stuck.length
+        ? [...s.reasons, `Background work stuck: ${stuck.join(', ')}`]
+        : s.reasons,
+      stuckJobs: stuck,
       alertView,
       badge: s.needsYou + (alertView === 'more' ? s.noticed : 0),
       watch: {

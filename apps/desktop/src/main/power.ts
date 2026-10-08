@@ -42,8 +42,12 @@ export const BATTERY_SLOWDOWN = 4;
  */
 export const WAKE_RECHECK_MS = 2 * 60_000;
 export const AWAKE_UNBROKEN_MS = 10 * 60_000;
-/** A check this much later than due means the Mac slept in between. */
-const LATE_MS = 5_000;
+/**
+ * A check this much later than due means the Mac slept in between. App Nap
+ * can hold a background app's timers back by several seconds, so only a
+ * long delay counts.
+ */
+const LATE_MS = 60_000;
 
 /** Wall-clock time and the monotonic clock; both keep counting during sleep. */
 export interface PowerClocks {
@@ -129,7 +133,11 @@ export class PowerPolicy extends EventEmitter<{ change: [PowerMode] }> {
     } else {
       this.unbroken += ran;
     }
+    // Sleep and dark wakes that both fall between two checks still count as
+    // running; that takes a dark wake every two minutes, which macOS doesn't do.
     const idle = this.source.getSystemIdleTime?.();
+    // Someone used it since the last check: it is awake, however late the check.
+    if (idle !== undefined && idle * 1000 < ran) return this.reread();
     const used = idle === undefined || idle * 1000 < now.monotonic - this.awakeSince;
     if (used || this.unbroken >= AWAKE_UNBROKEN_MS) this.reread();
     else this.checkWakeLater();

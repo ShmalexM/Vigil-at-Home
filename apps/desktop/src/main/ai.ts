@@ -138,6 +138,8 @@ export class AiBridge extends EventEmitter<{
   private queuedBackground = 0;
   /** Events waiting for a label, oldest first. */
   private labelQueue: SensorEvent[] = [];
+  /** Events a run gave back to the queue (see labelBatch); the cap keeps them. */
+  private readonly retrying = new Set<string>();
   private worthALook: WorthALook | undefined;
   private cachedPrefs: AiPrefs | undefined;
   /** When each program or destination was last queued, so repeats aren't sent again. */
@@ -438,8 +440,8 @@ export class AiBridge extends EventEmitter<{
     const detector = core.detector;
     if (!detector) return;
     detector.attachReviewer(() => this.ruleReviewRunner(), this.o.isBusy);
-    core.scheduler.every('rule-review', REVIEW_CHECK_MS, async () => {
-      const out = await detector.reviewRules();
+    core.scheduler.every('rule-review', REVIEW_CHECK_MS, async (signal) => {
+      const out = await detector.reviewRules({ signal });
       if (out.ran) this.emit('changed');
     });
   }
@@ -493,31 +495,34 @@ export class AiBridge extends EventEmitter<{
     if (this.lastQueued.size > MAX_REMEMBERED)
       this.lastQueued.delete(this.lastQueued.keys().next().value!);
     this.labelQueue.push(event);
-    if (this.labelQueue.length > MAX_LABEL_QUEUE) this.labelQueue.shift();
+    this.trimLabelQueue();
   }
 
   /**
    * Sends one batch to the classifier and stores what comes back. The batch
    * is on loan while the classifier works: if the run fails, or the
    * scheduler gives up on it (`signal`), its events go back to the front of
-   * the queue at once, and a late answer writes nothing. Newer events make
-   * room for them, never the other way round.
+   * the queue at once, and a late answer writes nothing. The queue's cap
+   * drops newer events to make room for them, never the other way round.
    */
   async labelBatch(store: Pick<Store, 'setEventLabels'>, signal?: AbortSignal): Promise<number> {
     if (this.labelQueue.length === 0 || signal?.aborted) return 0;
     const classifier = this.ai().classifier;
     if (!classifier) {
       this.labelQueue = [];
+      this.retrying.clear();
       return 0;
     }
     const batch = this.labelQueue;
     this.labelQueue = [];
+    this.retrying.clear();
     let onLoan = true;
     const giveBack = (events: readonly SensorEvent[]): void => {
       if (!onLoan) return;
       onLoan = false;
-      const room = Math.max(0, MAX_LABEL_QUEUE - events.length);
-      this.labelQueue = [...events, ...(room ? this.labelQueue.slice(-room) : [])];
+      for (const e of events) this.retrying.add(e.id);
+      this.labelQueue = [...events, ...this.labelQueue];
+      this.trimLabelQueue();
     };
     const onAbort = (): void => giveBack(batch);
     signal?.addEventListener('abort', onAbort, { once: true });
@@ -562,6 +567,19 @@ export class AiBridge extends EventEmitter<{
       }
     }
     return result.labels.length;
+  }
+
+  /**
+   * Keep the label queue within its cap by dropping the newest events, never
+   * ones a run gave back: those already waited longest.
+   */
+  private trimLabelQueue(): void {
+    for (
+      let i = this.labelQueue.length - 1;
+      this.labelQueue.length > MAX_LABEL_QUEUE && i >= 0;
+      i--
+    )
+      if (!this.retrying.has(this.labelQueue[i]!.id)) this.labelQueue.splice(i, 1);
   }
 
   private async busyWhile<T>(helper: HelperId, work: () => Promise<T>): Promise<T> {

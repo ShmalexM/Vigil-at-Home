@@ -402,7 +402,7 @@ describe('the pack', () => {
     expect(pack.dogs().find((d) => d.id === dog.id)?.lastReport?.ok).toBe(true);
   });
 
-  it('starts no more dogs once the scheduler gives up on a cycle, and skips one that just ran', async () => {
+  it('starts no more dogs once the scheduler gives up on a cycle', async () => {
     const { pack, handlers, runs } = setup();
     const a = pack.adopt(CREATE as never);
     const b = pack.adopt(CREATE as never);
@@ -416,10 +416,12 @@ describe('the pack', () => {
       });
       await pack.runDue(abort.signal);
       expect(runs).toHaveLength(1);
-      // The next cycle runs only the dog still due.
+      expect(pack.dogs().filter((d) => d.lastReport)).toEqual([]);
+      // The next cycle runs both: the first one's late answer wasn't kept.
+      handlers.push(() => ({ summary: 'ok', findings: [] }));
       handlers.push(() => ({ summary: 'ok', findings: [] }));
       await pack.runDue();
-      expect(runs).toHaveLength(2);
+      expect(runs).toHaveLength(3);
       const ids = pack
         .dogs()
         .filter((d) => d.lastReport)
@@ -428,6 +430,31 @@ describe('the pack', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('keeps nothing from a run the scheduler gave up on', async () => {
+    const { pack, handlers, notebook } = setup();
+    const dog = pack.adopt(CREATE as never);
+    const abort = new AbortController();
+    handlers.push(() => {
+      abort.abort(); // the deadline passes while the dog works
+      return { summary: 'late', findings: [] };
+    });
+    expect(await pack.runDog(dog.id, 'background', abort.signal)).toBeUndefined();
+    expect(pack.dogs().find((d) => d.id === dog.id)?.lastReport).toBeUndefined();
+    expect(notebook.list({ dog: dog.id })).toEqual([]);
+  });
+
+  it('keeps nothing from a run whose job the user changed meanwhile', async () => {
+    const { pack, handlers, notebook } = setup();
+    const dog = pack.adopt(CREATE as never);
+    handlers.push(() => {
+      pack.updateDog(dog.id, { job: 'Watch for new login items instead' });
+      return { summary: 'old job', findings: [] };
+    });
+    expect(await pack.runDog(dog.id)).toBeUndefined();
+    expect(pack.dogs().find((d) => d.id === dog.id)?.lastReport).toBeUndefined();
+    expect(notebook.list({ dog: dog.id })).toEqual([]);
   });
 
   it('talks plainly when the person turns on Plain wording', async () => {

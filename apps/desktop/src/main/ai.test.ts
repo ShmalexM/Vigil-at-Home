@@ -493,6 +493,30 @@ describe('AiBridge event labels', () => {
     expect(sent[1]!.length).toBeLessThanOrEqual(200);
   });
 
+  it('never lets new events push out a batch that was given back', async () => {
+    let release!: () => void;
+    let round = 0;
+    const { core, ai, sent } = labelling((ids) =>
+      round++ === 0
+        ? new Promise((r) => (release = () => r({ labels: [], deferred: [] })))
+        : { labels: ids, deferred: [] },
+    );
+    ai.labelEventsFrom(core);
+    const firsts = Array.from({ length: 200 }, (_, i) => makeExec(`/tmp/first-${i}`));
+    for (const e of firsts) core.ingest(e, unmatched);
+    core.events.flush();
+    const given = new AbortController();
+    const hung = ai.labelBatch(core.store, given.signal);
+    await new Promise((r) => setImmediate(r));
+    given.abort(); // all 200 go back to the queue, which is now full
+    for (let i = 0; i < 50; i++) core.ingest(makeExec(`/tmp/newer-${i}`), unmatched);
+    core.events.flush();
+    release();
+    await hung;
+    await ai.labelBatch(core.store);
+    expect(sent[1]).toEqual(firsts.map((e) => e.id));
+  });
+
   it('puts events the model skipped back in the queue', async () => {
     let round = 0;
     const { core, ai, sent } = labelling((ids) =>

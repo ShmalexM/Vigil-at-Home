@@ -94,8 +94,11 @@ export class RuleReviewer {
     return s.lastRunAt + (failed ? this.o.retryMs : this.o.intervalMs);
   }
 
-  /** Run a review if one is due. The scheduler calls this often; it decides. */
-  async maybeRun(opts: { force?: boolean } = {}): Promise<ReviewOutcome> {
+  /**
+   * Run a review if one is due. The scheduler calls this often; it decides.
+   * A run the scheduler gave up on (`signal`) records nothing about itself.
+   */
+  async maybeRun(opts: { force?: boolean; signal?: AbortSignal } = {}): Promise<ReviewOutcome> {
     if (this.running) return { ran: false, reason: 'running' };
     const now = this.o.now();
     const s = this.state.get() ?? {};
@@ -131,7 +134,7 @@ export class RuleReviewer {
       else if (s.lastOkAt !== undefined) next.lastOkAt = s.lastOkAt;
       if (res.summary !== undefined) next.lastSummary = res.summary;
       if (res.error !== undefined) next.lastError = res.error;
-      this.state.put(next);
+      if (!opts.signal?.aborted) this.state.put(next);
       const out: ReviewOutcome = { ran: true, ok: res.ok, queued, refused };
       if (res.summary !== undefined) out.summary = res.summary;
       if (res.error !== undefined) out.error = res.error;
@@ -139,7 +142,7 @@ export class RuleReviewer {
     } catch (err) {
       const next: ReviewState = { lastRunAt: now, lastError: (err as Error).message };
       if (s.lastOkAt !== undefined) next.lastOkAt = s.lastOkAt;
-      this.state.put(next);
+      if (!opts.signal?.aborted) this.state.put(next);
       return { ran: true, ok: false, queued: 0, refused: 0, error: (err as Error).message };
     } finally {
       this.running = false;

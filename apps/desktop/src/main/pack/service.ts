@@ -918,7 +918,16 @@ export class PackService {
 
   // ---------------------------------------------------------------- pack jobs
 
-  async runDog(id: string, urgency: 'now' | 'background' = 'now'): Promise<DogReport | undefined> {
+  /**
+   * Run a dog's job. A run the scheduler gave up on (`signal`), or one whose
+   * job the user changed meanwhile, writes no report or notebook entry: it
+   * would describe work the dog is no longer doing.
+   */
+  async runDog(
+    id: string,
+    urgency: 'now' | 'background' = 'now',
+    signal?: AbortSignal,
+  ): Promise<DogReport | undefined> {
     const dog = this.dogs().find((d) => d.id === id);
     if (!dog || dog.role !== 'pack') throw new Error('Only pack dogs run jobs');
     if (!dog.enabled) throw new Error(`${dog.name} is switched off`);
@@ -950,6 +959,11 @@ export class PackService {
         deadlineMs: JOB_DEADLINE_MS,
         providers: [...JOB_PROVIDERS],
       });
+      const now = this.dogs().find((d) => d.id === id);
+      if (signal?.aborted || !now || now.job !== dog.job) {
+        this.setMood(id, 'idle');
+        return undefined;
+      }
       const report: DogReport = result.ok
         ? {
             at: this.now(),
@@ -992,11 +1006,12 @@ export class PackService {
     }
   }
 
-  /** Scheduled jobs that are due. Skipped while the Mac is busy or on low battery. */
   /**
-   * Run the scheduled dogs that are due, one after another. Each dog is
-   * read afresh just before it runs, since an earlier one may have taken a
-   * while; a cycle the scheduler gave up on (`signal`) starts no more dogs.
+   * Run the scheduled dogs that are due, one after another; skipped while the
+   * Mac is busy or on low battery. Each dog is read afresh just before it
+   * runs, since an earlier one may have taken a while. Once the scheduler
+   * gives up on the cycle (`signal`) it starts no more dogs, and the one
+   * running keeps nothing it finds.
    */
   async runDue(signal?: AbortSignal): Promise<void> {
     if (this.o.isBusy?.()) return;
@@ -1013,7 +1028,7 @@ export class PackService {
           : d.schedule === 'daily'
             ? at - last >= 24 * HOUR
             : at - last >= 20 * HOUR && hour >= 1 && hour < 5;
-      if (due) await this.runDog(d.id, 'background').catch(() => undefined);
+      if (due) await this.runDog(d.id, 'background', signal).catch(() => undefined);
     }
   }
 

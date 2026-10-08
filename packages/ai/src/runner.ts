@@ -79,7 +79,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
   const now = deps.now ?? Date.now;
   const quota = deps.quota ?? new QuotaTracker(deps.settings.quota.backgroundSharePercent, now);
   const adapters = new Map(deps.adapters.map((a) => [a.id, a]));
-  const statusCache = new Map<ProviderId, { status: ProviderStatus; at: number }>();
+  const statusCache = new Map<ProviderId, { status: ProviderStatus; at: number; seq: number }>();
   const redaction = deps.settings.redaction;
   const planNames = new Map<ProviderId, string>();
   let planUsageAt = -Infinity;
@@ -128,9 +128,14 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
     return (await deps.spentThisMonthUsd()) >= cap;
   }
 
+  let probeSeq = 0;
+
   async function statusOf(adapter: ProviderAdapter, fresh = false): Promise<ProviderStatus> {
     const cached = statusCache.get(adapter.id);
     if (!fresh && cached && now() - cached.at < STATUS_TTL_MS) return cached.status;
+    // A check started earlier that answers later (one a run gave up on)
+    // doesn't replace a newer answer.
+    const seq = ++probeSeq;
     let status: ProviderStatus;
     try {
       status = await adapter.probe();
@@ -138,7 +143,9 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
       // e.g. codesign timing out: the provider isn't usable right now.
       status = { provider: adapter.id, state: 'error', detail: (err as Error).message };
     }
-    statusCache.set(adapter.id, { status, at: now() });
+    const latest = statusCache.get(adapter.id);
+    if (latest && latest.seq > seq) return latest.status;
+    statusCache.set(adapter.id, { status, at: now(), seq });
     return status;
   }
 

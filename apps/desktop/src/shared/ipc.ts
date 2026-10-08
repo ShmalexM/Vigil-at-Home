@@ -344,6 +344,8 @@ export interface StatusView {
   helperInstallable: boolean;
   /** True when the installed helper is older than (or not) the one this build ships. */
   helperOutdated: boolean;
+  /** Background jobs whose latest run was given up on and none has finished since. */
+  stuckJobs: string[];
 }
 
 export interface HelperInstallResult {

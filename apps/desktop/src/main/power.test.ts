@@ -122,7 +122,7 @@ describe('PowerPolicy', () => {
       expect(vi.getTimerCount()).toBe(0);
     });
 
-    function sleepyMac(idle: () => number = () => 3_600) {
+    function sleepyMac(idle: () => number = () => 30 * 86_400) {
       const em = new EventEmitter();
       const source = {
         isOnBatteryPower: () => false,
@@ -193,19 +193,42 @@ describe('PowerPolicy', () => {
       expect(p.mode).toBe('normal');
     });
 
-    it('counts only use of the Mac after it woke', () => {
+    it('takes use of the Mac since the last check as awake, even when the check ran late', () => {
       vi.useFakeTimers();
-      let idle = 3_600;
+      let idle = 30 * 86_400; // a long weekend away
       const { p, clock, emit } = sleepyMac(() => idle);
       emit('suspend');
       clock.slept += 3_600_000;
-      idle = 10; // a dark wake seconds after the lid closed; no one is there
       vi.advanceTimersByTime(WAKE_RECHECK_MS);
       expect(p.mode).toBe('constrained');
-      idle = 3_600;
+      clock.slept += 3_600_000;
+      idle = 10; // someone opened it; the check fired late
+      vi.advanceTimersByTime(WAKE_RECHECK_MS);
+      expect(p.mode).toBe('normal');
+    });
+
+    it('is not held asleep by checks that App Nap delays a little', () => {
+      vi.useFakeTimers();
+      const { p, clock, emit } = sleepyMac();
+      emit('suspend');
+      // Awake all along, nobody at the keyboard, each check 6 s late.
+      for (let i = 0; i < 5; i++) {
+        clock.slept += 6_000; // the clocks run on while the timer waits
+        vi.advanceTimersByTime(WAKE_RECHECK_MS);
+      }
+      expect(p.mode).toBe('normal');
+    });
+
+    it('wakes on use even when every check is delayed', () => {
+      vi.useFakeTimers();
+      let idle = 30 * 86_400; // a long weekend away
+      const { p, clock, emit } = sleepyMac(() => idle);
+      emit('suspend');
+      clock.slept += 6_000;
       vi.advanceTimersByTime(WAKE_RECHECK_MS);
       expect(p.mode).toBe('constrained');
-      idle = 5; // someone opened it
+      idle = 20;
+      clock.slept += 6_000;
       vi.advanceTimersByTime(WAKE_RECHECK_MS);
       expect(p.mode).toBe('normal');
     });

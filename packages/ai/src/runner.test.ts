@@ -197,6 +197,28 @@ describe('runner', () => {
     expect(log).toHaveLength(logged);
   });
 
+  it('keeps a newer provider check over an older one that answers late', async () => {
+    const claude = fake('claude', () => ({
+      kind: 'ok',
+      json: { verdict: 'benign', summary: 'ok' },
+      audit: audit(),
+    }));
+    let releaseOld!: () => void;
+    let calls = 0;
+    claude.probe = () =>
+      calls++ === 0
+        ? new Promise(
+            (r) => (releaseOld = () => r({ provider: 'claude', state: 'error', detail: 'old' })),
+          )
+        : Promise.resolve({ provider: 'claude', state: 'ready' });
+    const { runner } = setup([claude]);
+    expect(await runner.run({ ...request, deadlineMs: 50 })).toMatchObject({ reason: 'timeout' });
+    expect(await runner.status()).toEqual([expect.objectContaining({ state: 'ready' })]);
+    releaseOld();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(await runner.run(request)).toMatchObject({ ok: true });
+  });
+
   it('treats a provider whose check fails as not usable', async () => {
     const claude = fake('claude', () => ({
       kind: 'ok',

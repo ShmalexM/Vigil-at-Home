@@ -11,10 +11,10 @@
  *
  * - A task still running after its time limit (`taskTimeoutMs`, or the
  *   task's own) gives its slot back, so one call that never returns can't
- *   stall every other job behind it. Its signal is aborted so it can stop
- *   early; its result, if it ever comes, is ignored and doesn't count as a
- *   run. A periodic job doesn't start again until that run has really
- *   ended, so a slow run's writes never interleave with a newer run's.
+ *   stall every other job behind it, and its job may run again. Its signal
+ *   is aborted: that is the fence. Work that writes checks the signal before
+ *   writing, so a run given up on keeps nothing, even if it finishes after
+ *   a newer run. Its result is ignored and doesn't count as a run.
  *
  * Blocking never goes through here. Blocks run inline in the alert path.
  */
@@ -30,6 +30,8 @@ export interface JobStatus {
   busy: boolean;
   /** Runs given up on after `taskTimeoutMs`. */
   timeouts: number;
+  /** The latest run was given up on, and no run has finished since: the job's work has stopped. */
+  stuck: boolean;
 }
 
 /** A task's work. `signal` is aborted when the task is given up on. */
@@ -128,7 +130,7 @@ export class Scheduler {
     opts: TaskOptions = {},
   ): void {
     if (this.jobs.has(name)) throw new Error(`Job already registered: ${name}`);
-    const job: Job = { name, everyMs, fn, runs: 0, busy: false, timeouts: 0 };
+    const job: Job = { name, everyMs, fn, runs: 0, busy: false, timeouts: 0, stuck: false };
     if (opts.timeoutMs !== undefined) job.timeoutMs = opts.timeoutMs;
     this.jobs.set(name, job);
     job.timer = setInterval(() => this.tick(job), everyMs);
@@ -144,14 +146,9 @@ export class Scheduler {
       return;
     job.busy = true;
     const opts = job.timeoutMs === undefined ? {} : { timeoutMs: job.timeoutMs };
-    // The job is free again once its run has ended, not when it timed out.
-    let started = false;
-    let ended = false;
-    let settled = false;
     this.enqueue(
       job.name,
       async (signal) => {
-        started = true;
         job.lastStart = this.now();
         try {
           await job.fn(signal);
@@ -164,9 +161,8 @@ export class Scheduler {
           if (!signal.aborted) {
             job.lastEnd = this.now();
             job.runs++;
+            job.stuck = false;
           }
-          ended = true;
-          if (settled) job.busy = false;
         }
       },
       'routine',
@@ -175,12 +171,12 @@ export class Scheduler {
       .catch((err: unknown) => {
         if (err instanceof TaskTimeoutError) {
           job.timeouts++;
+          job.stuck = true;
           job.lastError = err.message;
         }
       })
       .finally(() => {
-        settled = true;
-        if (!started || ended) job.busy = false;
+        job.busy = false;
       });
   }
 
