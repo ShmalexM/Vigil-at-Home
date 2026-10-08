@@ -29,6 +29,7 @@ import {
   DetectionEngine,
   DetectionRule,
   memoryStores,
+  selfKey,
   underSelfRoot,
   type RuleException,
   type Stores,
@@ -155,9 +156,9 @@ export class FastPath {
     // A path inside one the helper already never blocked loosens nothing. The
     // old paths aren't filtered here, so an install that was sent `/` (Linux
     // before 0.1.0-alpha.5) moves to its real folder without asking.
-    const own = this.state.selfPaths.map((p) => p.toLowerCase().replace(/\/+$/, ''));
+    const own = this.state.selfPaths.map(selfKey);
     for (const p of cmd.selfPaths) {
-      if (!underSelfRoot(own, p.toLowerCase().replace(/\/+$/, ''))) out.push(`never block ${p}`);
+      if (!underSelfRoot(own, selfKey(p))) out.push(`never block ${p}`);
     }
     return out;
   }

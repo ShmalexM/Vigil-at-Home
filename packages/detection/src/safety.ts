@@ -25,10 +25,17 @@ export interface SafetyConfig {
  */
 export function selfRoots(paths: readonly string[]): string[] {
   return paths
-    .map((p) => p.toLowerCase().replace(/\/+$/, ''))
+    .map(selfKey)
     .filter(
       (p) => p.split('/').filter((part) => part && part !== '.' && part !== '..').length >= 2,
     );
+}
+
+/** A path lower-cased without trailing slashes, for comparing against {@link selfRoots}. */
+export function selfKey(path: string): string {
+  let end = path.length;
+  while (end > 0 && path[end - 1] === '/') end--;
+  return path.slice(0, end).toLowerCase();
 }
 
 /** Whether `path` is one of `roots` (from {@link selfRoots}) or inside one. */

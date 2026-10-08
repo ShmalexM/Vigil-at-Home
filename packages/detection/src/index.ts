@@ -5,6 +5,7 @@ export { KNOWN_FIELDS, COMPUTED_FIELDS } from './rules/fields.js';
 export { DetectionEngine, compileRule, RuleCompileError, type EngineConfig } from './engine.js';
 export {
   SafetyFloor,
+  selfKey,
   selfRoots,
   underSelfRoot,
   DEFAULT_PROTECTED_PATH_GLOBS,
