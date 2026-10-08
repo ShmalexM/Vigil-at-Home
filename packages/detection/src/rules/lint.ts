@@ -1,7 +1,7 @@
 import type { ActionKind } from '@vigil/core';
 import { isIP } from 'node:net';
 import type { Condition, DetectionRule, FieldTest } from '../types.js';
-import { regexProblem, TEMPLATE_RE, templateFields } from './compile.js';
+import { globProblem, regexProblem, TEMPLATE_RE, templateFields } from './compile.js';
 import { KNOWN_FIELDS } from './fields.js';
 
 export interface LintResult {
@@ -168,7 +168,11 @@ function checkMatch(c: FieldTest, errors: string[]): number {
     }
   }
   if (c.op === 'glob') {
-    for (const v of values) if (String(v).length > 512) errors.push(`${c.field}: glob too long`);
+    for (const v of values) {
+      if (String(v).length > 512) errors.push(`${c.field}: glob too long`);
+      const p = globProblem(String(v));
+      if (p) errors.push(`${c.field}: ${p}`);
+    }
   }
   if (c.op === 'cidr') {
     for (const v of values) {
