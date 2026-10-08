@@ -39,6 +39,11 @@ export const CLEAN_SYNC_SENTINEL: StoredRule = {
 
 export interface SyncServerOptions {
   store: RuleStore;
+  /**
+   * Gets the events uploaded to /eventupload. Nothing proves Santa sent them:
+   * any local account can post here, so they must never drive a response.
+   * The helper leaves this unset and reads the same events from santa.log.
+   */
   onEvent?: SensorEventSink;
   /** Default MONITOR: only explicit block rules are enforced; unknown programs still run. */
   clientMode?: ClientMode;
@@ -50,6 +55,8 @@ export interface SyncServerOptions {
   pageSize?: number;
   maxBodyBytes?: number;
   log?: (msg: string) => void;
+  /** For tests. */
+  now?: () => number;
 }
 
 interface SyncSession {
@@ -59,6 +66,11 @@ interface SyncSession {
   snapshotRev: number;
   startedAt: number;
 }
+
+// Any local account can reach the port, and each machine id holds a copy of
+// the rules until postflight, so only a few unfinished syncs are kept, briefly.
+export const MAX_SYNC_SESSIONS = 4;
+export const SYNC_SESSION_TTL_MS = 10 * 60 * 1000;
 
 const ROUTE_RE = /^\/(preflight|eventupload|ruledownload|postflight)\/([^/?#]{1,128})\/?$/;
 
@@ -84,6 +96,7 @@ export class SantaSyncServer {
       fullSyncIntervalSeconds: 600,
       pageSize: 500,
       maxBodyBytes: 16 * 1024 * 1024,
+      now: Date.now,
       ...options,
     };
   }
@@ -158,7 +171,7 @@ export class SantaSyncServer {
     // an empty clean sync would leave whatever Santa already had. A REMOVE for
     // a hash no program has makes the wipe happen and changes nothing else.
     if (clean && rules.length === 0) rules = [CLEAN_SYNC_SENTINEL];
-    this.sessions.set(machineId, { clean, rules, snapshotRev, startedAt: Date.now() });
+    this.startSession(machineId, { clean, rules, snapshotRev, startedAt: this.opts.now() });
 
     const resp: PreflightResponse = {
       client_mode: this.opts.clientMode,
@@ -176,6 +189,28 @@ export class SantaSyncServer {
     return resp;
   }
 
+  private startSession(machineId: string, session: SyncSession): void {
+    this.dropExpired();
+    // Re-inserting keeps the map in start order, oldest first.
+    this.sessions.delete(machineId);
+    while (this.sessions.size >= MAX_SYNC_SESSIONS) {
+      const oldest = this.sessions.keys().next().value;
+      if (oldest === undefined) break;
+      this.sessions.delete(oldest);
+    }
+    this.sessions.set(machineId, session);
+  }
+
+  private session(machineId: string): SyncSession | undefined {
+    this.dropExpired();
+    return this.sessions.get(machineId);
+  }
+
+  private dropExpired(): void {
+    const cutoff = this.opts.now() - SYNC_SESSION_TTL_MS;
+    for (const [id, s] of this.sessions) if (s.startedAt < cutoff) this.sessions.delete(id);
+  }
+
   private eventUpload(machineId: string, body: unknown): Record<string, never> {
     const events = pick<unknown[]>(body, 'events') ?? [];
     const faa = pick<unknown[]>(body, 'file_access_events') ?? [];
@@ -190,7 +225,7 @@ export class SantaSyncServer {
   }
 
   private ruleDownload(machineId: string, body: unknown): RuleDownloadResponse {
-    const session = this.sessions.get(machineId);
+    const session = this.session(machineId);
     if (!session) throw new HttpError(409, 'ruledownload without preflight');
     const cursor = pick<string>(body, 'cursor') ?? '';
     const offset = cursor === '' ? 0 : Number.parseInt(cursor, 10);
@@ -208,8 +243,8 @@ export class SantaSyncServer {
   lastSyncAt: number | null = null;
 
   private postflight(machineId: string, body: unknown): Record<string, never> {
-    this.lastSyncAt = Date.now();
-    const session = this.sessions.get(machineId);
+    this.lastSyncAt = this.opts.now();
+    const session = this.session(machineId);
     this.sessions.delete(machineId);
     if (!session) return {};
     const received = Number(pick(body, 'rules_received') ?? NaN);

@@ -6,7 +6,12 @@ import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import type { AddressInfo } from 'node:net';
 import { RuleStore } from './santa/ruleStore.js';
-import { SantaSyncServer } from './santa/syncServer.js';
+import {
+  HttpError,
+  MAX_SYNC_SESSIONS,
+  SantaSyncServer,
+  SYNC_SESSION_TTL_MS,
+} from './santa/syncServer.js';
 import { ensureSyncTls, serverCertNeedsRenewal, syncTlsPaths } from './santa/tls.js';
 import { SensorEvent } from '@vigil/core';
 
@@ -285,5 +290,35 @@ describe('Santa sync server over pinned TLS', () => {
         policy: 'BLOCKLIST',
       }),
     ).toThrow();
+  });
+});
+
+describe('unfinished syncs', () => {
+  const statusOf = (fn: () => unknown): number | undefined => {
+    try {
+      fn();
+      return undefined;
+    } catch (err) {
+      return err instanceof HttpError ? err.status : -1;
+    }
+  };
+
+  it('keeps only a few, and only for a while', () => {
+    let clock = 1_000_000;
+    const s = new SantaSyncServer({
+      store: new RuleStore(join(dir, 'sessions-rules.json')),
+      now: () => clock,
+    });
+    const download = (m: string) => () => s.dispatch('ruledownload', m, { cursor: '' });
+    for (let i = 0; i <= MAX_SYNC_SESSIONS; i++) s.dispatch('preflight', `m${i}`, {});
+    // The oldest made room for the newest.
+    expect(statusOf(download('m0'))).toBe(409);
+    for (let i = 1; i <= MAX_SYNC_SESSIONS; i++)
+      expect(statusOf(download(`m${i}`))).toBeUndefined();
+
+    clock += SYNC_SESSION_TTL_MS + 1;
+    expect(statusOf(download('m1'))).toBe(409);
+    s.dispatch('preflight', 'm1', {});
+    expect(statusOf(download('m1'))).toBeUndefined();
   });
 });
