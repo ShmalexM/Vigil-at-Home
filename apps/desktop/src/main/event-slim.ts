@@ -46,12 +46,11 @@ export function slimForStorage(e: SensorEvent, matched: boolean): SensorEvent {
 
 /** An argument longer than this keeps its first and last characters only. */
 export const MAX_STORED_ARG = 1024;
-/** Arguments after this many characters in all are left out. */
+/** Arguments past this many bytes of stored JSON in all are left out. */
 export const MAX_STORED_ARGS = 4096;
 const ARG_HEAD = 768;
 const ARG_TAIL = 192;
 
-/** The arguments as stored: the same array when nothing is long. */
 const isHighSurrogate = (c: number) => c >= 0xd800 && c <= 0xdbff;
 
 /** Keep the start and end of a long argument, never splitting an emoji's surrogate pair. */
@@ -63,25 +62,41 @@ function trimArg(a: string): string {
   return `${a.slice(0, head)}…[${tail - head} characters not stored]…${a.slice(tail)}`;
 }
 
+/** Bytes an argument takes in the stored JSON: its escaped UTF-8, quotes and comma. */
+const storedSize = (a: string) => Buffer.byteLength(JSON.stringify(a)) + 1;
+
+/**
+ * The arguments as stored: the same array when nothing is long. The budget
+ * counts stored bytes, so many short, empty or non-ASCII arguments are
+ * bounded too.
+ */
 export function storedArgs(args: string[]): string[] {
-  let total = 0;
+  // A JSON string takes at most 6 bytes a character (\u escapes), so most
+  // command lines are known to fit without encoding them.
+  let worst = 0;
   let long = false;
   for (const a of args) {
-    total += a.length;
+    worst += a.length * 6 + 3;
     if (a.length > MAX_STORED_ARG) long = true;
   }
-  if (!long && total <= MAX_STORED_ARGS) return args;
+  if (!long && worst <= MAX_STORED_ARGS) return args;
+  if (!long) {
+    let size = 0;
+    for (const a of args) if ((size += storedSize(a)) > MAX_STORED_ARGS) break;
+    if (size <= MAX_STORED_ARGS) return args;
+  }
   const out: string[] = [];
   let used = 0;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     const kept = a.length > MAX_STORED_ARG ? trimArg(a) : a;
-    if (used + kept.length > MAX_STORED_ARGS && out.length > 0) {
+    const size = storedSize(kept);
+    if (used + size > MAX_STORED_ARGS && out.length > 0) {
       out.push(`…[${args.length - i} more arguments not stored]`);
       break;
     }
     out.push(kept);
-    used += kept.length;
+    used += size;
   }
   return out;
 }

@@ -3,11 +3,11 @@ import { describe, expect, it } from 'vitest';
 import { conditionUsesAgentFields, exclusionHidesAgent, isAgentField } from '../agents/fields.js';
 import { toolRequestEvent } from '../agents/preflight.js';
 import { ruleLanguageGuide } from '../proposals/tools.js';
-import { replayRule } from '../proposals/replay.js';
-import { MemoryExceptionStore } from '../state/stores.js';
+import { replayRule, STORED_ARGS_MARK } from '../proposals/replay.js';
+import { MemoryEventHistory, MemoryExceptionStore, MemoryListStore } from '../state/stores.js';
 import { DetectionRule } from '../types.js';
 import { userOrigin } from '../user.js';
-import { DAY, HOUR, proc, T0, testRule } from './fixtures.js';
+import { DAY, exec, HOUR, proc, T0, testRule } from './fixtures.js';
 import { NOW, twoWeeks } from './history.js';
 
 const pasteRule = {
@@ -570,5 +570,52 @@ describe('replaying rules on parent names', () => {
     );
     expect(res.ok).toBe(true);
     expect(res.warnings.join(' ')).toMatch(/undercounts a rule on parent names/);
+  });
+});
+
+describe('replaying rules on command lines stored trimmed', () => {
+  const trimmed = `…[5000 characters not stored]…`;
+  const history = () => {
+    const h = new MemoryEventHistory();
+    // A long agent script stored trimmed; what it did in the middle is gone.
+    h.append(
+      exec(proc({ path: '/bin/sh', args: ['/bin/sh', '-c', `echo start ${trimmed} echo end`] })),
+    );
+    h.append(exec(proc({ path: '/bin/sh', args: ['/bin/sh', '-c', 'echo short'] })));
+    return { history: h, lists: new MemoryListStore(), userExceptions: new MemoryExceptionStore() };
+  };
+  const window = { from: T0, to: T0 + DAY };
+
+  it('counts a trimmed launch as a possible hit, so a noisy rule can’t pass on a zero', () => {
+    const rule = DetectionRule.parse(
+      testRule({
+        id: 'curl-in-sh',
+        condition: { field: 'process.commandLine', op: 'contains', value: 'curl' },
+      }),
+    );
+    const { report } = replayRule(rule, history(), window);
+    expect(report.hits).toBe(1);
+    expect(report.notes.join(' ')).toMatch(/stored trimmed/);
+  });
+
+  it('doesn’t let an exclusion on the command line hide a trimmed launch', () => {
+    const rule = DetectionRule.parse(
+      testRule({
+        id: 'sh-not-curl',
+        condition: { field: 'process.name', op: 'eq', value: 'sh' },
+        exclusions: [{ field: 'process.args', op: 'contains', value: 'start' }],
+      }),
+    );
+    expect(replayRule(rule, history(), window).report.hits).toBe(2);
+  });
+
+  it('replays rules that don’t read command lines exactly as before', () => {
+    const rule = DetectionRule.parse(
+      testRule({ id: 'sh', condition: { field: 'process.name', op: 'eq', value: 'sh' } }),
+    );
+    const { report } = replayRule(rule, history(), window);
+    expect(report.hits).toBe(2);
+    expect(report.notes.join(' ')).not.toMatch(/stored trimmed/);
+    expect(trimmed).toContain(STORED_ARGS_MARK);
   });
 });

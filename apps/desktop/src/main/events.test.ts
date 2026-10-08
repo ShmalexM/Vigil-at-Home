@@ -55,6 +55,27 @@ describe('EventLog', () => {
     expect(still?.kind === 'process.exec' && still.process.args?.[2]).toBe(script);
   });
 
+  it('keeps the whole event even when its trimmed copy is longer', () => {
+    // Four 1 KB arguments then a short one: the markers make the trimmed copy
+    // the longer of the two.
+    const base = makeExec();
+    const args = [...Array.from({ length: 4 }, (_, i) => String(i).repeat(1024)), 'secret'];
+    const e = { ...base, process: { ...base.process, args } };
+    const argsOf = (store: ReturnType<typeof memoryStore>) => {
+      const got = store.getEvent(e.id);
+      return got?.kind === 'process.exec' ? got.process.args : undefined;
+    };
+    for (const alertFirst of [false, true]) {
+      const store = memoryStore();
+      const log = new EventLog(store);
+      if (alertFirst) store.insertEvent(e);
+      log.add(e, { checked: 3, matches: [] });
+      log.flush();
+      if (!alertFirst) store.insertEvent(e);
+      expect(argsOf(store)).toEqual(args);
+    }
+  });
+
   it('skips invalid events without losing the rest of the batch', () => {
     const store = memoryStore();
     const log = new EventLog(store);

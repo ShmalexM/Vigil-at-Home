@@ -9,6 +9,7 @@ import {
 } from '@vigil/detection';
 import { ProcessEnricher } from '@vigil/sensors';
 import { describe, expect, it } from 'vitest';
+import { STORED_ARGS_MARK } from '@vigil/detection';
 import { MAX_STORED_ARG, MAX_STORED_ARGS, slimForStorage, storedArgs } from './event-slim.js';
 
 const bytes = (e: SensorEvent) => Buffer.byteLength(JSON.stringify(e));
@@ -265,5 +266,25 @@ describe('storedArgs', () => {
       const n = Number(/\[(\d+) characters/.exec(kept!)![1]);
       expect(kept!.length - kept!.indexOf(']…') - 2 + kept!.indexOf('…[') + n).toBe(a.length);
     }
+  });
+
+  it('bounds the stored bytes, however many, empty or wide the arguments', () => {
+    const bytes = (a: string[]) => Buffer.byteLength(JSON.stringify(a));
+    for (const args of [
+      Array.from({ length: 10_000 }, () => ''),
+      Array.from({ length: 4_096 }, () => 'x'),
+      Array.from({ length: 4_096 }, () => '漢'),
+      Array.from({ length: 2_000 }, () => '\u0001'),
+    ]) {
+      const kept = storedArgs(args);
+      expect(bytes(kept)).toBeLessThan(MAX_STORED_ARGS + 100);
+      expect(kept.at(-1)).toContain(STORED_ARGS_MARK);
+    }
+    const ordinary = ['git', 'commit', '-m', 'é'.repeat(300)];
+    expect(storedArgs(ordinary)).toBe(ordinary);
+  });
+
+  it('marks every cut the way replay looks for it', () => {
+    expect(storedArgs(['x'.repeat(MAX_STORED_ARG + 1)])[0]).toContain(STORED_ARGS_MARK);
   });
 });

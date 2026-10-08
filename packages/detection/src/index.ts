@@ -62,6 +62,7 @@ export {
 } from './packs/agent-preflight.js';
 export {
   replayRule,
+  STORED_ARGS_MARK,
   type ReplayReport,
   type ReplayOptions,
   type ReplayContext,

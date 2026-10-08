@@ -96,6 +96,60 @@ export function replayMissesParents(rule: DetectionRule): boolean {
   return [rule.condition, ...rule.exclusions].some(readsParent) && !agentScoped(rule.condition);
 }
 
+/**
+ * Text in every marker the app leaves where it stored a long command line
+ * trimmed (`…[N characters not stored]…`, `…[N more arguments not stored]`).
+ */
+export const STORED_ARGS_MARK = 'not stored]';
+
+const ARG_FIELDS = new Set(['process.args', 'process.commandLine']);
+const readsArgs = (c: Condition) => conditionUsesFields(c, (f) => ARG_FIELDS.has(f));
+const TRIMMED: Condition = { field: 'process.args', op: 'contains', value: STORED_ARGS_MARK };
+
+/**
+ * The condition with every command-line test given the benefit of the doubt
+ * on a launch stored trimmed: what was left out might have matched (or, under
+ * a "not" or in an exclusion, might not have). Unchanged on whole events.
+ */
+function assumeTrimmedMatches(c: Condition, positive = true): Condition {
+  if ('all' in c) return { all: c.all.map((x) => assumeTrimmedMatches(x, positive)) };
+  if ('any' in c) return { any: c.any.map((x) => assumeTrimmedMatches(x, positive)) };
+  if ('not' in c) return { not: assumeTrimmedMatches(c.not, !positive) };
+  if ('firstSeen' in c || !readsArgs(c)) return c;
+  return positive ? { any: [c, TRIMMED] } : { all: [c, { not: TRIMMED }] };
+}
+
+/** The rule tests command lines somewhere. */
+function readsCommandLine(rule: DetectionRule): boolean {
+  return [
+    rule.condition,
+    ...rule.exclusions,
+    ...(rule.sequence?.steps ?? []).map((s) => s.condition),
+  ].some(readsArgs);
+}
+
+/** The rule as replay runs it on stored history, where long command lines are trimmed. */
+function forStoredHistory(rule: DetectionRule): DetectionRule {
+  if (!readsCommandLine(rule)) return rule;
+  return {
+    ...rule,
+    condition: assumeTrimmedMatches(rule.condition),
+    exclusions: rule.exclusions.map((x) => assumeTrimmedMatches(x, false)),
+    ...(rule.sequence && {
+      sequence: {
+        ...rule.sequence,
+        steps: rule.sequence.steps.map((st) => ({
+          ...st,
+          condition: assumeTrimmedMatches(st.condition),
+        })),
+      },
+    }),
+  };
+}
+
+const trimmedLaunch = (e: DetectionEvent) =>
+  'process' in e && !!e.process?.args?.some((a) => a.includes(STORED_ARGS_MARK));
+
 export const PARENT_REPLAY_NOTE =
   "Vigil stores a program's parents only when it runs under an agent or a rule matched it, so this replay undercounts a rule on parent names. Watch it in shadow first.";
 
@@ -150,7 +204,8 @@ export function replayRule(
     opts.warmupUntil ?? (uses ? opts.from + Math.min(3 * DAY, Math.floor(span / 4)) : opts.from);
   const maxSamples = opts.maxSamples ?? 10;
 
-  const probe: DetectionRule = { ...candidate, mode: 'block' };
+  const probe: DetectionRule = { ...forStoredHistory(candidate), mode: 'block' };
+  const argBlind = readsCommandLine(candidate);
   const others = (ctx.existingRules ?? []).filter((r) => r.id !== candidate.id);
   const engine = new DetectionEngine(
     [probe, ...others.map((r) => ({ ...r, mode: 'shadow' as const }))],
@@ -171,6 +226,7 @@ export function replayRule(
   let onAllowed = 0;
   let onApple = 0;
   let overlap = 0;
+  let onTrimmed = 0;
   const programs = new Map<string, number>();
   const samples: ReplaySample[] = [];
   const hitEventIds = new Set<string>();
@@ -189,6 +245,7 @@ export function replayRule(
     if (matchesAnyException(e, ctx.userExceptions)) onAllowed++;
     if ('process' in e && e.process?.signing === 'apple') onApple++;
     if (ds.some((d) => d.match.ruleId !== candidate.id)) overlap++;
+    if (argBlind && trimmedLaunch(e)) onTrimmed++;
     const prog = programOf(e);
     if (prog) programs.set(prog, (programs.get(prog) ?? 0) + 1);
     if (samples.length < maxSamples) {
@@ -209,6 +266,10 @@ export function replayRule(
   const notes: string[] = [];
   const parentBlind = replayMissesParents(candidate);
   if (parentBlind) notes.push(PARENT_REPLAY_NOTE);
+  if (onTrimmed > 0)
+    notes.push(
+      `${onTrimmed} of these hits are launches whose long command lines Vigil stored trimmed. They count as hits because the part left out might have matched, so this may overstate how often it fires.`,
+    );
   let verdict: ReplayReport['verdict'];
   if (hits === 0 && parentBlind) {
     // Not "never fired": the history it would fire on was not kept.

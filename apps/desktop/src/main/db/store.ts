@@ -10,6 +10,7 @@ import {
   type RuleMode,
 } from '@vigil/core';
 import { z } from 'zod';
+import { STORED_ARGS_MARK } from '@vigil/detection';
 import {
   EVENT_GROUPS,
   EventLabel,
@@ -265,8 +266,10 @@ export class Store {
   /**
    * An event may already be stored (an alert saves its events at once, with
    * the sensor's raw record); then only its outcome is filled in. The fuller
-   * of the two copies is kept: the event log stores a trimmed copy, and an
-   * alert raised later (worth a look) brings the whole event.
+   * of the two copies is kept: a copy with its command line whole beats one
+   * the event log stored trimmed (an alert raised later, as worth a look
+   * does, brings the whole event), else the longer one, which carries the
+   * raw record.
    */
   private writeEvent(e: SensorEvent, outcome?: EventOutcome): void {
     // The agent session and agent the event belongs to: the tracker's tag on a
@@ -280,7 +283,13 @@ export class Store {
       `INSERT INTO events (id, ts, kind, source, body, outcome, matched, agent_session, agent_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
-         body = CASE WHEN length(excluded.body) > length(body) THEN excluded.body ELSE body END,
+         body = CASE
+           WHEN instr(excluded.body, '${STORED_ARGS_MARK}') = 0
+             THEN CASE WHEN instr(body, '${STORED_ARGS_MARK}') > 0
+               OR length(excluded.body) > length(body) THEN excluded.body ELSE body END
+           WHEN instr(body, '${STORED_ARGS_MARK}') > 0
+             AND length(excluded.body) > length(body) THEN excluded.body
+           ELSE body END,
          outcome = COALESCE(excluded.outcome, outcome),
          matched = CASE WHEN excluded.outcome IS NULL THEN matched ELSE excluded.matched END,
          agent_session = COALESCE(agent_session, excluded.agent_session),
