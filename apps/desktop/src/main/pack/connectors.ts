@@ -31,7 +31,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { newId } from '@vigil/core';
 import { selfRoots, underSelfRoot } from '@vigil/detection';
 import { z } from 'zod';
-import { ConnectorInput, type ConnectorView } from '../../shared/pack.js';
+import { ConnectorInput, isSafeConnectorUrl, type ConnectorView } from '../../shared/pack.js';
 import type { Cipher } from '../onboarding/keys.js';
 
 /** A connection with no calls for this long is closed; the next call reopens it. */
@@ -256,6 +256,10 @@ export class Connectors implements ConnectorHub {
       this.o.onChange();
       try {
         if (record.kind === 'stdio') this.assertNotVigil(record.command!);
+        // A connector saved before the https rule is still listed, but never
+        // reached over plain http on the network.
+        if (record.kind === 'http' && !isSafeConnectorUrl(record.url ?? ''))
+          throw new Error('Use https, or http only for a server on this computer');
         const secrets = this.secretsFor(id);
         const onPid = (pid: number) => {
           live.pid = pid;
