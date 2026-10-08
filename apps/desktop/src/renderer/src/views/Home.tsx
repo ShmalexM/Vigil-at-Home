@@ -207,6 +207,14 @@ export function HomeView({ go }: { go: (r: string) => void }) {
                       {s.note}
                     </span>
                   )}
+                  {s.lastRefusal && (
+                    <span className="t-small" style={{ color: 'var(--tx3)', textAlign: 'right' }}>
+                      {s.lastRefusal.reason === 'handshake_failed'
+                        ? 'A secure connection to Santa’s sync port failed'
+                        : 'A connection without Vigil’s certificate was refused'}{' '}
+                      at {new Date(s.lastRefusal.at).toLocaleTimeString()}
+                    </span>
+                  )}
                   {s.repair === 'santa-sync' && <RepairSantaSync go={go} />}
                   {s.id === 'helper' &&
                     (s.state !== 'ok' || status.helperOutdated) &&

@@ -15,6 +15,14 @@ export interface SensorHealth {
   note?: string;
   /** A fix Vigil can offer on the spot: santa-sync issues Santa a new sync certificate. */
   repair?: 'santa-sync';
+  /**
+   * Santa: the last connection the sync port turned away. A detail only,
+   * never a reason for the level: any local program can open the port.
+   */
+  lastRefusal?: {
+    at: number;
+    reason: 'no_certificate' | 'wrong_certificate' | 'handshake_failed';
+  };
 }
 
 export interface Status {

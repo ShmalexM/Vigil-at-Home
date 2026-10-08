@@ -143,22 +143,32 @@ describe("Santa's syncs with the helper", () => {
     expect(santaSyncProblem(undefined, NOW)).toBeUndefined();
   });
 
-  it('says so when a Santa without its certificate is refused', () => {
-    const refused = {
-      ...required,
-      lastRefusal: { at: NOW - MIN, reason: 'no_certificate' as const },
-    };
-    expect(santaSyncProblem(refused, NOW)).toMatch(/refused: it came without its certificate/);
-    // A refusal before Santa's last good sync is over.
-    expect(
-      santaSyncProblem({ ...refused, clientCertSeenAt: NOW - 10_000, lastSyncAt: null }, NOW),
-    ).toBeUndefined();
+  it('never treats a refused connection alone as Santa failing', () => {
+    // Any local program can open the port; a probe must not lower the level.
+    for (const reason of ['no_certificate', 'wrong_certificate', 'handshake_failed'] as const) {
+      expect(
+        santaSyncProblem({ ...required, lastRefusal: { at: NOW - MIN, reason } }, NOW),
+      ).toBeUndefined();
+    }
+  });
+
+  it('names a refusal that came before missed syncs', () => {
+    const stale = { ...required, lastSyncAt: null, clientCertSeenAt: NOW - 40 * MIN };
     expect(
       santaSyncProblem(
-        { ...required, lastRefusal: { at: NOW - MIN, reason: 'handshake_failed' } },
+        { ...stale, lastRefusal: { at: NOW - 35 * MIN, reason: 'no_certificate' } },
         NOW,
       ),
-    ).toMatch(/secure connection failed/);
+    ).toBe(
+      'Santa hasn’t synced with Vigil for 40 minutes; since then a connection without Vigil’s certificate was refused',
+    );
+    // One from before the last good sync explains nothing.
+    expect(
+      santaSyncProblem(
+        { ...stale, lastRefusal: { at: NOW - 50 * MIN, reason: 'no_certificate' } },
+        NOW,
+      ),
+    ).toBe('Santa hasn’t synced with Vigil for 40 minutes');
   });
 
   it('flags Santa missing three syncs, counted from waking', () => {
@@ -179,23 +189,28 @@ describe("Santa's syncs with the helper", () => {
     ).toMatch(/expires in 3 days/);
   });
 
-  it('shows on the Santa layer as needing a repair, which lowers the level', async () => {
-    const h = await byId(
-      probe({
-        installed: ['/Applications/Santa.app'],
-        procs: ['com.northpolesec.santa.daemon'],
-        helper: () => 'connected' as const,
-        lastEventAt: () => NOW - MIN,
-        helperSensors: async () => ({
-          santa: {
-            installed: true,
-            lastEventAt: NOW - MIN,
-            ...required,
-            lastRefusal: { at: NOW - MIN, reason: 'no_certificate' },
-          },
-        }),
-      }),
-    );
-    expect(h['santa']).toMatchObject({ state: 'degraded', repair: 'santa-sync' });
+  it('shows a refusal as a detail on a healthy Santa, and a stale Santa as needing repair', async () => {
+    const layer = async (santa: HelperSantaSync) =>
+      (
+        await byId(
+          probe({
+            installed: ['/Applications/Santa.app'],
+            procs: ['com.northpolesec.santa.daemon'],
+            helper: () => 'connected' as const,
+            lastEventAt: () => NOW - MIN,
+            now: () => NOW,
+            helperSensors: async () => ({
+              santa: { installed: true, lastEventAt: NOW - MIN, ...santa },
+            }),
+          }),
+        )
+      )['santa'];
+    const lastRefusal = { at: NOW - MIN, reason: 'no_certificate' as const };
+    const probed = await layer({ ...required, lastRefusal });
+    expect(probed).toMatchObject({ state: 'ok', lastRefusal });
+    expect(probed?.repair).toBeUndefined();
+    expect(
+      await layer({ ...required, lastSyncAt: null, clientCertSeenAt: NOW - 40 * MIN }),
+    ).toMatchObject({ state: 'degraded', repair: 'santa-sync' });
   });
 });

@@ -319,6 +319,14 @@ export interface SensorView {
   note?: string;
   /** A fix offered on the layer's row (main/sensor-health.ts). */
   repair?: 'santa-sync';
+  /**
+   * Santa: the last connection the sync port turned away. A detail only,
+   * never a reason for the level: any local program can open the port.
+   */
+  lastRefusal?: {
+    at: number;
+    reason: 'no_certificate' | 'wrong_certificate' | 'handshake_failed';
+  };
 }
 
 /** Proof that Vigil is running, for the "it's working" line. Today is since local midnight. */

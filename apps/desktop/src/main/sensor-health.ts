@@ -66,17 +66,18 @@ const MISSED_SYNCS = 3;
 const CERT_EXPIRY_WARN_MS = 7 * 86_400_000;
 
 const REFUSAL_WORDS: Record<NonNullable<HelperSantaSync['lastRefusal']>['reason'], string> = {
-  no_certificate: 'it came without its certificate',
-  wrong_certificate: 'it presented a certificate Vigil didn’t make for it',
-  handshake_failed: 'the secure connection failed',
+  no_certificate: 'a connection without Vigil’s certificate was refused',
+  wrong_certificate: 'a connection with a certificate Vigil didn’t make was refused',
+  handshake_failed: 'a secure connection to the sync port failed',
 };
 
 /**
  * Why rule updates aren't reaching Santa, or undefined when its syncs are
  * fine. Once Santa's certificate is required, a Santa that can't present it
  * stops getting rules without any other sign, so every failure shows here:
- * the port not listening, a refused connection since the last good sync,
- * no sync for three intervals, or a certificate about to lapse.
+ * the port not listening, no sync for three intervals, or a certificate
+ * about to lapse. A refused connection alone is not one: any local program
+ * can open the port. It only explains missed syncs that follow it.
  * `since` is when the app could first expect a sync (start, or wake from sleep).
  */
 export function santaSyncProblem(
@@ -91,17 +92,14 @@ export function santaSyncProblem(
     (t): t is number => typeof t === 'number',
   );
   const lastGood = times.length ? Math.max(...times) : null;
-  const refusal = s.lastRefusal;
-  // Before the certificate is required, only Santa presenting a bad one, or
-  // a failed handshake, can be refused; a Santa without one is served.
-  if (refusal && (lastGood === null || refusal.at > lastGood)) {
-    return `Santa’s last sync was refused: ${REFUSAL_WORDS[refusal.reason]}`;
-  }
   if (s.clientCertRequired && lastGood !== null) {
     const intervalMs = (s.syncIntervalSeconds ?? 600) * 1000;
     const quiet = now - Math.max(lastGood, since);
     if (quiet > MISSED_SYNCS * intervalMs) {
-      return `Santa hasn’t synced with Vigil for ${minutes(now - lastGood)} minutes`;
+      const refusal = s.lastRefusal;
+      const why =
+        refusal && refusal.at > lastGood ? `; since then ${REFUSAL_WORDS[refusal.reason]}` : '';
+      return `Santa hasn’t synced with Vigil for ${minutes(now - lastGood)} minutes${why}`;
     }
   }
   if (s.clientCertRequired && s.clientCertExpiresAt != null) {
@@ -202,16 +200,19 @@ export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
     if (syncProblem) {
       return { ...base, state: 'degraded', note: syncProblem, repair: 'santa-sync' };
     }
+    // Shown on the row for reference only: a port probe can cause one too.
+    const refusal = id === 'santa' ? fromHelper?.santa?.lastRefusal : undefined;
+    const shown = { ...base, ...(refusal ? { lastRefusal: refusal } : {}) };
     const times = [p.lastEventAt(id), reported?.lastEventAt ?? null].filter(
       (t): t is number => t !== null,
     );
     const last = times.length ? Math.max(...times) : null;
-    if (last === null) return { ...base, state: 'ok', note: 'Starting; no events yet' };
+    if (last === null) return { ...shown, state: 'ok', note: 'Starting; no events yet' };
     const quiet = p.now() - last;
     if (quiet > QUIET_AFTER_MS[id]) {
-      return { ...base, state: 'degraded', note: `No events for ${minutes(quiet)} minutes` };
+      return { ...shown, state: 'degraded', note: `No events for ${minutes(quiet)} minutes` };
     }
-    return { ...base, state: 'ok' };
+    return { ...shown, state: 'ok' };
   };
 
   if (p.platform === 'linux') {
@@ -256,6 +257,11 @@ async function fapolicyd(p: HealthProbe, helperState: HelperState): Promise<Sens
 export async function reportHealth(registry: SensorRegistry, probe: HealthProbe): Promise<void> {
   for (const h of await checkHealth(probe)) {
     const prev = registry.get(h.id);
-    if (prev?.state !== h.state || prev?.note !== h.note) registry.report(h);
+    if (
+      prev?.state !== h.state ||
+      prev?.note !== h.note ||
+      prev?.lastRefusal?.at !== h.lastRefusal?.at
+    )
+      registry.report(h);
   }
 }
