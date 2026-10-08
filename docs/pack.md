@@ -68,7 +68,7 @@ Vigil's rules come first in every mode, Full access included. Connector calls ar
 The Pack page sits under Advanced. Two parts of it reach the rest of the app:
 
 - **Scout on Home.** The Lead dog sits next to Home's status line and acts it out: relaxed when nothing needs you, ears up (the waiting pose) when something needs your decision (the Needs you count) or a protection layer has stopped, and busy while a dog's AI job runs. The status words don't change; the dog only shows them. Clicking it opens Ask.
-- **Today the pack.** Under the status line, one line per dog that did something since midnight ("Biscuit sniffed through new events 5 times"), counted from the notebooks. The wording is fixed, never written by an AI; runs that didn't finish are counted separately, and background runs that never reached an AI aren't noted. Each line opens that dog's notebook.
+- **Today the pack.** Under the status line, one line per dog that did something since midnight ("Biscuit sniffed through new events 5 times"), counted from the notebooks. The wording is fixed, never written by an AI; runs that didn't finish are counted separately, and background runs that never reached an AI aren't noted. When a pack dog's latest run today found something of medium or high severity, one more line says so ("Pip found 2 things worth a look"); info and low findings add nothing. That line is not an alert: no notification, nothing in Needs you. Each line opens that dog's notebook.
 - **Scout on a pile.** When Needs you holds a pile of three or more alerts (the alerts' own grouping: same rule, same agent run or program), the biggest one shows as Scout's card instead of a row: who set it off, how many times, and one button to look at them all, where "That was me, all N" and "Looks fine, all N" decide them together. Scout adds no grouping of its own and the wording is fixed.
 - **Ask.** A bar at the bottom of every page (except Pack and setup) opens a chat drawer with the Lead dog. It is closed until you open it (click the bar or press ⌘K; Esc closes it). It is the same conversation as the Pack page, sent as your own chat, so the same rules apply: a Claude plan only if you turned it on, and no dog blocks, allows or changes a rule. The drawer tells the Lead dog which page you're on and what you have selected there (an alert, a rule, an agent or one of its sessions, or Activity's filter to one agent or session), so "what's this?" works; the Lead dog reads the details with its read-only tools. Its tools are the ones listed in [agents.md](agents.md#the-tools): status, alerts, events (by agent, rule matches or Biscuit's labels), rules, what Vigil did, and agents. When you ask how to stop an alert repeating, it points you to "Stop alerting on this" on the alert or to the rule on Rules; it can't change either itself.
 
@@ -125,8 +125,23 @@ flowchart LR
   `thinking` field is filled only from a reasoning summary an official API
   returns, and today none of the runners return one, so it stays empty.
 - Notes stay on the Mac in Vigil's database, in a table the notebook creates
-  itself (no migration), for 30 days and at most 2,000 notes per dog.
+  itself (no migration), for 30 days and at most 2,000 notes per dog. Each
+  write trims that dog's notes and every start trims them all, so a dog that
+  went quiet doesn't keep old ones. Retiring a dog deletes its notebook; the
+  Lead dog's and the helpers' are never touched by that.
 - Nothing reads notes back to decide anything. They are for the person.
+
+**Details**, closed until you open it, is for digging deeper. It lists each
+tool call the run made: the tool, its arguments, whether it ran, didn't run
+(and why: the gate, you, a scheduled run that can't ask, or the run ending)
+or failed, and the first 800 characters of what it returned. Arguments and
+results go through the same redaction as an approval card before they are
+stored. It also shows the model and, from the Usage page's ledger, the tokens
+and estimated cost of the attempt that answered. Notes from before this was
+added simply have no Details.
+
+**Copy as Markdown** and **Copy JSON** at the bottom of the sheet copy up to
+the 200 newest notes in it to the clipboard, for an issue or a file.
 
 ## Memory
 
@@ -184,6 +199,11 @@ Connectors are your own MCP servers, added on the Pack page under Tools and conn
 Each connector tool gets the same four choices as Vigil's own: Follow mode, Always ask, Always allow, Off. A connector tool never counts as read-only, even when its server marks it so: MCP treats those hints as untrusted, and Vigil can't check them. The page shows the server's claim ("Server says it only reads"), but the tool still follows your permission mode, and in Let AI decide a dog given one waits for your OK. Set a tool you trust to Always allow and it is treated as read-only from then on.
 
 Connections close after five idle minutes.
+
+What a connector returns is redacted before anything else sees it (the
+notebook, the risk judge, a cloud model): keys, tokens, passwords, email
+addresses and home folder names are replaced, as in the data Vigil sends any
+model. The AI runner redacts tool results again on their way out.
 
 A connector runs your program, not Vigil's. Vigil tells Agent watch the server's process id as soon as it starts, so the server and everything it runs are tagged `vigil-connector` in a session of their own (shown as "A pack connector" in Activity), and every Agent watch rule applies to them. They never share the `vigil-self` tag of Vigil's own AI helpers. A command inside Vigil's own app is refused, because Vigil never blocks its own binaries.
 

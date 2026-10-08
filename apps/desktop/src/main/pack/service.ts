@@ -16,18 +16,20 @@
 
 import { newId, type PreflightReply, type PreflightRequest, type ToolsReply } from '@vigil/core';
 import type { ReadTool, RunRequest, RunResult } from '@vigil/ai';
-import { redactValue } from '@vigil/ai/redact';
+import { redactString, redactValue } from '@vigil/ai/redact';
 import { z } from 'zod';
 import {
   Breed,
   ChatContext,
   DogInput,
   DogPatch,
+  jobDue,
   MemoryInput,
   MemoryTopic,
   PackVoice,
   PermissionMode,
   Schedule,
+  SCHEDULE_CHECK_MS,
   ToolChoice,
   ToolDecision,
   type ChatMessage,
@@ -41,6 +43,8 @@ import {
   type LeadAction,
   type MemoryChange,
   type MemoryEntry,
+  type NoteToolCall,
+  type NoteUsage,
   type PackView,
   type ToolApproval,
   type ToolView,
@@ -67,12 +71,12 @@ const CONTEXT_MESSAGES = 20;
 const CHAT_DEADLINE_MS = 10 * 60_000;
 const JOB_DEADLINE_MS = 15 * 60_000;
 const JUDGE_DEADLINE_MS = 60_000;
+/** Tool calls kept per notebook entry. */
+const MAX_CALLS_NOTED = 24;
 /** A tool call waits this long for the user before it's refused. */
 const APPROVAL_WAIT_MS = 10 * 60_000;
 /** How long a dog shows it finished before it settles. */
 const DONE_MS = 8_000;
-const CHECK_SCHEDULES_MS = 5 * 60_000;
-const HOUR = 60 * 60_000;
 /** Pack jobs need a model that can use tools: never Jev, which only picks labels. */
 const JOB_PROVIDERS = ['claude', 'codex', 'api', 'ollama'] as const;
 
@@ -87,6 +91,8 @@ export interface PackAi {
   status(): Promise<PackAiStatus>;
   /** The model behind a run, when the provider said. */
   modelOf?(logId: string): string | undefined;
+  /** Tokens and cost of a run, as the Usage page recorded it. */
+  usageOf?(logId: string): NoteUsage | undefined;
 }
 
 export interface PackDeps {
@@ -303,6 +309,8 @@ interface RunCtx {
   /** A scheduled run nobody is watching: it never waits on the person. */
   background: boolean;
   used: string[];
+  /** Every call it made or tried, for the notebook's Details. */
+  calls: NoteToolCall[];
   /** Set when the run has ended, so a late tool call or answer goes nowhere. */
   over: boolean;
   approvals: Set<string>;
@@ -341,7 +349,7 @@ export class PackService {
   }
 
   start(): void {
-    this.o.scheduler?.every('pack-dogs', CHECK_SCHEDULES_MS, () => this.runDue());
+    this.o.scheduler?.every('pack-dogs', SCHEDULE_CHECK_MS, () => this.runDue());
   }
 
   // ---------------------------------------------------------------- state
@@ -523,8 +531,9 @@ export class PackService {
   private note(input: DogNoteInput, logId?: string): void {
     if (!this.o.notebook) return;
     const model = input.model ?? (logId ? this.o.ai.modelOf?.(logId) : undefined);
+    const usage = input.usage ?? (logId ? this.o.ai.usageOf?.(logId) : undefined);
     try {
-      this.o.notebook.write({ ...input, ...(model ? { model } : {}) });
+      this.o.notebook.write({ ...input, ...(model ? { model } : {}), ...(usage ? { usage } : {}) });
     } catch (err) {
       // A notebook that can't be written never stops the dog's work.
       console.warn('[pack] could not write a notebook entry:', err);
@@ -602,6 +611,8 @@ export class PackService {
     if (!d || d.role !== 'pack') throw new Error('Only pack dogs can be retired');
     this.runtime.delete(id);
     this.saveDogs(dogs.filter((x) => x.id !== id));
+    // Its notebook goes with it; the Lead dog's and the helpers' stay.
+    this.o.notebook?.clear(id);
   }
 
   clearChat(): void {
@@ -688,6 +699,7 @@ export class PackService {
           ok: false,
           ask: words,
           lookedAt: used,
+          calls: ctx.calls,
           answer: failText(result.reason),
         });
         this.reply({
@@ -711,6 +723,7 @@ export class PackService {
           ask: words,
           ...(about ? { subject: about } : {}),
           lookedAt: used,
+          calls: ctx.calls,
           answer: result.value.reply,
           reasons: result.value.why ?? [],
           provider: result.provider,
@@ -738,7 +751,7 @@ export class PackService {
   }
 
   private newRun(o: { requestedByUser: boolean; background: boolean }): RunCtx {
-    return { ...o, used: [], over: false, approvals: new Set() };
+    return { ...o, used: [], calls: [], over: false, approvals: new Set() };
   }
 
   /** A run is over: tool calls still waiting on the person are refused, and their cards go. */
@@ -1032,7 +1045,9 @@ export class PackService {
       // A scheduled run that never reached an AI isn't a run: the card says
       // why, but the notebook and Today the pack don't count it.
       const reachedAi = result.ok || !['no_provider', 'quota'].includes(result.reason);
-      if (urgency === 'now' || reachedAi)
+      // Retired while it ran: its notebook is gone, so nothing is written back.
+      const stillHere = this.dogs().some((d) => d.id === id);
+      if (stillHere && (urgency === 'now' || reachedAi))
         this.note(
           {
             dog: id,
@@ -1040,6 +1055,7 @@ export class PackService {
             ok: report.ok,
             ask: dog.job,
             lookedAt: used,
+            calls: ctx.calls,
             answer: report.summary,
             reasons: [
               ...(result.ok ? (result.value.why ?? []) : []),
@@ -1049,9 +1065,8 @@ export class PackService {
           },
           result.logId,
         );
-      const dogs = this.dogs();
-      if (dogs.some((d) => d.id === id))
-        this.saveDogs(dogs.map((d) => (d.id === id ? { ...d, lastReport: report } : d)));
+      if (stillHere)
+        this.saveDogs(this.dogs().map((d) => (d.id === id ? { ...d, lastReport: report } : d)));
       if (report.ok)
         this.setMood(
           id,
@@ -1076,19 +1091,7 @@ export class PackService {
     const at = this.now();
     const hour = this.o.hour?.() ?? new Date(at).getHours();
     for (const d of this.dogs()) {
-      if (d.role !== 'pack' || !d.enabled || d.schedule === 'manual') continue;
-      const last = d.lastReport;
-      const night = hour >= 1 && hour < 5;
-      // A new dog's first night is its first nightly run, and a run that
-      // failed is tried again an hour later rather than a whole period on.
-      const since = at - (last?.at ?? d.createdAt);
-      const due =
-        d.schedule === 'hourly' || (last && !last.ok)
-          ? since >= HOUR && (d.schedule !== 'nightly' || night)
-          : d.schedule === 'daily'
-            ? since >= 24 * HOUR
-            : night && (!last || since >= 20 * HOUR);
-      if (due) await this.runDog(d.id, 'background').catch(() => undefined);
+      if (jobDue(d, at, hour)) await this.runDog(d.id, 'background').catch(() => undefined);
     }
   }
 
@@ -1195,8 +1198,24 @@ export class PackService {
     args: Record<string, unknown>,
     ctx: RunCtx,
   ): Promise<unknown> {
-    if (ctx.over) return 'Not run: this run has ended.';
     const argText = clip(JSON.stringify(redactValue(args, {})), 4000);
+    // What the notebook keeps of this call: redacted like an approval card.
+    const record = (outcome: NoteToolCall['outcome'], reason?: string, result?: unknown) => {
+      if (ctx.calls.length >= MAX_CALLS_NOTED) return;
+      ctx.calls.push({
+        tool: t.key,
+        title: `${t.sourceName} › ${t.title}`,
+        args: clip(argText, 600),
+        outcome,
+        ...(reason ? { reason: clip(reason, 300) } : {}),
+        ...(result !== undefined ? { result: preview(result) } : {}),
+      });
+    };
+    const notRun = (reason: string, toModel = `Not run: ${reason}`) => {
+      record('not-run', reason);
+      return toModel;
+    };
+    if (ctx.over) return notRun('this run has ended.');
     const gate = () =>
       gateTool({
         mode: this.mode(),
@@ -1213,22 +1232,28 @@ export class PackService {
       const now = gate();
       if (decision.kind === 'run' && now.kind !== 'judge') decision = now;
     }
-    if (decision.kind === 'deny') return `Not run: ${decision.reason}`;
+    if (decision.kind === 'deny') return notRun(decision.reason);
     if (decision.kind === 'ask') {
       // Nobody is watching a scheduled run: it never stops to ask, so the
       // pack adds nothing to what needs the person.
       if (ctx.background)
-        return 'Not run: this call needs the person’s OK, and this is a scheduled run, so it was skipped. Carry on without it and say in a finding what you would have done.';
+        return notRun(
+          'it needed your OK, and this was a scheduled run, so it was skipped.',
+          'Not run: this call needs the person’s OK, and this is a scheduled run, so it was skipped. Carry on without it and say in a finding what you would have done.',
+        );
       const answer = await this.askUser(dog, t, argText, decision.why, decision.reason, ctx);
       if (answer === 'deny' || ctx.over) {
         if (!ctx.over) this.setMood(dog.id, 'thinking', 'Carrying on without it');
-        return 'Not run: the person said no to this call. Carry on without it.';
+        return notRun(
+          'you said no, or nobody answered in time.',
+          'Not run: the person said no to this call. Carry on without it.',
+        );
       }
     }
     // A wait for the user or the judge can be long: check again right before
     // the call that nothing has since switched it off or a rule now stops it.
     const stop = ctx.over ? 'this run has ended.' : this.recheck(dog, t, args);
-    if (stop) return `Not run: ${stop}`;
+    if (stop) return notRun(stop);
     ctx.used.push(t.key);
     const vigil = t.source === 'vigil';
     this.setMood(
@@ -1239,11 +1264,17 @@ export class PackService {
     try {
       if (vigil) {
         const r = this.o.vigilTools.call(t.name, args);
+        if (r.ok) record('ran', undefined, r.result);
+        else record('failed', r.error);
         return r.ok ? r.result : `Vigil couldn’t answer: ${r.error}`;
       }
-      return await this.o.connectors.call(t.source, t.name, args);
+      const out = await this.o.connectors.call(t.source, t.name, args);
+      record('ran', undefined, out);
+      return out;
     } catch (err) {
-      return `The tool failed: ${err instanceof Error ? err.message.slice(0, 300) : String(err)}`;
+      const why = err instanceof Error ? err.message.slice(0, 300) : String(err);
+      record('failed', why);
+      return `The tool failed: ${why}`;
     } finally {
       if (!ctx.over) this.setMood(dog.id, 'thinking', 'Thinking');
     }
@@ -1464,6 +1495,60 @@ export class PackService {
     ]);
   }
 
+  /** A finished job with its tool calls, for the notebook's Details and Home's diary. */
+  demoJob(dogId: string, now: number): void {
+    const dog = this.dogs().find((d) => d.id === dogId);
+    if (!dog) return;
+    const report: DogReport = {
+      at: now - 12 * 60_000,
+      ok: true,
+      summary: 'Two new programs ran from Downloads; one isn’t signed.',
+      findings: [
+        {
+          title: 'invoice-viewer ran unsigned from Downloads',
+          detail: 'Vigil already paused it.',
+          severity: 'high',
+        },
+        { title: 'Zoom installer ran', detail: 'Signed by Zoom.', severity: 'info' },
+      ],
+      provider: 'codex',
+    };
+    this.note({
+      dog: dogId,
+      kind: 'job',
+      ok: true,
+      ask: dog.job,
+      lookedAt: ['vigil.search_events', 'vigil.list_alerts'],
+      calls: [
+        {
+          tool: 'vigil.search_events',
+          title: 'Vigil › Search events',
+          args: '{"path":"/Users/<user>/Downloads","kind":"exec","sinceHours":1}',
+          outcome: 'ran',
+          result:
+            '{"rows":[{"program":"invoice-viewer","signed":false,"path":"/Users/<user>/Downloads/invoice-viewer.app"},{"program":"zoom.us","signed":true,"team":"BJ4HAAB9B3"}]}',
+        },
+        {
+          tool: 'vigil.list_alerts',
+          title: 'Vigil › List alerts',
+          args: '{"since":"1h"}',
+          outcome: 'ran',
+          result:
+            '{"alerts":[{"id":"a-17","title":"Unsigned program from Downloads","state":"paused"}]}',
+        },
+      ],
+      answer: report.summary,
+      reasons: [
+        'search_events showed two programs started from Downloads in the last hour',
+        ...report.findings.map((f) => `${f.severity}: ${f.title}`),
+      ],
+      provider: 'codex',
+      model: 'gpt-5.5',
+      usage: { inputTokens: 8412, cachedInputTokens: 3072, outputTokens: 506, costUsd: 0.0143 },
+    });
+    this.saveDogs(this.dogs().map((d) => (d.id === dogId ? { ...d, lastReport: report } : d)));
+  }
+
   demoMoods(): void {
     const dogs = this.dogs();
     const by = (n: string) => dogs.find((d) => d.name === n)?.id;
@@ -1539,6 +1624,12 @@ function failText(reason: string): string {
 
 function clip(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}…` : s;
+}
+
+/** The start of a tool's result for the notebook, redacted like the arguments. */
+function preview(result: unknown): string {
+  const text = typeof result === 'string' ? result : (JSON.stringify(result) ?? '');
+  return clip(redactString(text.slice(0, 64_000), {}), 800);
 }
 
 /**

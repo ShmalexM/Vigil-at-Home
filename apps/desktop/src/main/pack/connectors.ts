@@ -28,6 +28,7 @@ import {
 } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
+import { redactString } from '@vigil/ai/redact';
 import { newId } from '@vigil/core';
 import { z } from 'zod';
 import { ConnectorInput, type ConnectorView } from '../../shared/pack.js';
@@ -228,7 +229,12 @@ export class Connectors implements ConnectorHub {
       )
       .join('\n');
     const body = text || JSON.stringify(result.structuredContent ?? {});
-    const clipped = body.length > MAX_RESULT_CHARS ? `${body.slice(0, MAX_RESULT_CHARS)}…` : body;
+    // Secrets in a response (keys, tokens, emails, home paths) are hidden
+    // before anything else sees it: the notebook, the risk judge, a cloud
+    // model. The AI runner redacts tool results again on their way out.
+    const clean = redactString(body.slice(0, MAX_RESULT_CHARS * 2), {});
+    const clipped =
+      clean.length > MAX_RESULT_CHARS ? `${clean.slice(0, MAX_RESULT_CHARS)}…` : clean;
     return result.isError ? `The tool reported an error: ${clipped}` : clipped;
   }
 

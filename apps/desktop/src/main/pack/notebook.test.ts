@@ -65,4 +65,82 @@ describe('Notebook', () => {
     book.clear();
     expect(book.list()).toHaveLength(0);
   });
+
+  it('keeps tool calls and usage in shape, and reads notes written before they existed', () => {
+    const db = new DatabaseSync(':memory:');
+    const book = new Notebook(db, { now: () => Date.UTC(2026, 9, 5, 12) });
+    const n = book.write({
+      ...NOTE,
+      calls: Array.from({ length: 30 }, (_, i) => ({
+        tool: 'vigil.search_events',
+        title: 'Vigil › Search events',
+        args: 'a'.repeat(900),
+        outcome: i % 2 ? ('not-run' as const) : ('ran' as const),
+        ...(i % 2 ? { reason: 'r'.repeat(500) } : { result: 'z'.repeat(1200) }),
+      })),
+      usage: { inputTokens: 10.4, cachedInputTokens: -1, outputTokens: 5, costUsd: -2 },
+    });
+    expect(n.calls).toHaveLength(24);
+    expect(n.calls![0]!.args).toHaveLength(600);
+    expect(n.calls![0]!.result).toHaveLength(800);
+    expect(n.calls![1]!.reason).toHaveLength(300);
+    expect(n.usage).toEqual({
+      inputTokens: 10,
+      cachedInputTokens: 0,
+      outputTokens: 5,
+      costUsd: null,
+    });
+    expect(book.list()[0]).toEqual(n);
+
+    // A note from an older Vigil: no calls, no usage. It reads back as it was.
+    const old = {
+      id: 'old-1',
+      at: Date.UTC(2026, 9, 5, 11),
+      dog: 'pip',
+      kind: 'job',
+      ok: true,
+      ask: 'look',
+      lookedAt: ['vigil.search_events'],
+      answer: 'fine',
+      reasons: [],
+    };
+    db.prepare('INSERT INTO pack_notes (id, ts, dog, subject, body) VALUES (?, ?, ?, ?, ?)').run(
+      old.id,
+      old.at,
+      old.dog,
+      null,
+      JSON.stringify(old),
+    );
+    expect(book.list({ dog: 'pip' })).toEqual([old]);
+    // A note without calls stores none.
+    expect(book.write(NOTE)).not.toHaveProperty('calls');
+  });
+
+  it('trims old notes and over-full notebooks when it opens', () => {
+    const db = new DatabaseSync(':memory:');
+    let at = Date.UTC(2026, 9, 5, 12);
+    const book = new Notebook(db, { now: () => at });
+    book.write({ ...NOTE, dog: 'quiet' });
+    at += (NOTE_DAYS + 1) * DAY;
+    // Rows from before the cap, or written by an older build.
+    const insert = db.prepare(
+      'INSERT INTO pack_notes (id, ts, dog, subject, body) VALUES (?, ?, ?, ?, ?)',
+    );
+    for (let i = 0; i < 2005; i++)
+      insert.run(
+        `n${i}`,
+        at - i,
+        'busy',
+        null,
+        JSON.stringify({ ...NOTE, dog: 'busy', id: `n${i}` }),
+      );
+    const count = () =>
+      db.prepare('SELECT dog, COUNT(*) AS n FROM pack_notes GROUP BY dog ORDER BY dog').all();
+    expect(count()).toEqual([
+      { dog: 'busy', n: 2005 },
+      { dog: 'quiet', n: 1 },
+    ]);
+    new Notebook(db, { now: () => at });
+    expect(count()).toEqual([{ dog: 'busy', n: 2000 }]);
+  });
 });

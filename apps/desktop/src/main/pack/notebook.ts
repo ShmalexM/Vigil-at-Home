@@ -1,6 +1,13 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { newId } from '@vigil/core';
-import type { DiaryTally, DogNote, DogNoteInput, NotesFilter } from '../../shared/pack.js';
+import type {
+  DiaryTally,
+  DogNote,
+  DogNoteInput,
+  NotesFilter,
+  NoteToolCall,
+  NoteUsage,
+} from '../../shared/pack.js';
 
 /** Notes older than this are dropped. */
 export const NOTE_DAYS = 30;
@@ -9,6 +16,8 @@ const DAY = 24 * 60 * 60_000;
 const MAX_PER_DOG = 2000;
 const TEXT = 2000;
 const LIST = 12;
+/** Tool calls kept per note. */
+const CALLS = 24;
 
 /**
  * Each dog's notebook: what an AI run was asked, what it looked at, what it
@@ -38,6 +47,8 @@ export class Notebook {
       CREATE INDEX IF NOT EXISTS pack_notes_dog_ts ON pack_notes (dog, ts);
       CREATE INDEX IF NOT EXISTS pack_notes_subject ON pack_notes (subject);
     `);
+    // Writes trim the dog that wrote; this catches dogs that went quiet.
+    this.prune();
   }
 
   write(input: DogNoteInput): DogNote {
@@ -59,6 +70,8 @@ export class Notebook {
       ...(input.thinking ? { thinking: clip(input.thinking, 4000) } : {}),
       ...(input.provider ? { provider: input.provider } : {}),
       ...(input.model ? { model: input.model } : {}),
+      ...(input.calls?.length ? { calls: input.calls.slice(0, CALLS).map(call) } : {}),
+      ...(input.usage ? { usage: usage(input.usage) } : {}),
     };
     this.db
       .prepare('INSERT INTO pack_notes (id, ts, dog, subject, body) VALUES (?, ?, ?, ?, ?)')
@@ -120,6 +133,12 @@ export class Notebook {
     this.onChange();
   }
 
+  /** Drops notes past the age limit, and each dog's beyond its cap. Run at startup. */
+  prune(): void {
+    const dogs = this.db.prepare('SELECT DISTINCT dog FROM pack_notes').all() as { dog: string }[];
+    for (const { dog } of dogs) this.trim(dog);
+  }
+
   private trim(dog: string): void {
     this.db.prepare('DELETE FROM pack_notes WHERE ts < ?').run(this.now() - NOTE_DAYS * DAY);
     this.db
@@ -133,6 +152,28 @@ export class Notebook {
 
 function subjectKey(s: DogNote['subject']): string | null {
   return s ? `${s.kind}:${s.id}` : null;
+}
+
+/** Callers redact; this only keeps a stored call to its shape and size. */
+function call(c: NoteToolCall): NoteToolCall {
+  return {
+    tool: clip(c.tool, 120),
+    title: clip(c.title, 200),
+    args: clip(c.args, 600),
+    outcome: c.outcome,
+    ...(c.reason ? { reason: clip(c.reason, 300) } : {}),
+    ...(c.result !== undefined ? { result: clip(c.result, 800) } : {}),
+  };
+}
+
+function usage(u: NoteUsage): NoteUsage {
+  const whole = (n: number) => (Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0);
+  return {
+    inputTokens: whole(u.inputTokens),
+    cachedInputTokens: whole(u.cachedInputTokens),
+    outputTokens: whole(u.outputTokens),
+    costUsd: typeof u.costUsd === 'number' && u.costUsd >= 0 ? u.costUsd : null,
+  };
 }
 
 function clip(s: string, n = TEXT): string {

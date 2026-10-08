@@ -9,7 +9,13 @@ import { Card, Chip, LevelPill, SectionHead, SeverityMark, StatusMark } from '..
 import { timeAgo } from '../format';
 import { isNoticed, needsDecision } from '../../../shared/attention';
 import { LEVEL_RULES } from '../../../shared/levels';
-import { diaryLines, pileWords, SCOUT_PILE_MIN, type PackView } from '../../../shared/pack';
+import {
+  diaryLines,
+  foundLines,
+  pileWords,
+  SCOUT_PILE_MIN,
+  type PackView,
+} from '../../../shared/pack';
 import { leadChat } from '../lead-chat';
 import { PageHead } from './AppShell';
 import { usePack } from './Pack';
@@ -291,7 +297,9 @@ function InstallHelper({ kind }: { kind: 'install' | 'reinstall' | 'update' }) {
 function PackDiary({ pack }: { pack: PackView }) {
   const [open, setOpen] = useState<string | undefined>();
   const lines = diaryLines(pack.dogs, pack.today, pack.voice);
-  if (lines.length === 0) return null;
+  // A pack dog's medium or high findings today: one quiet line, never an alert.
+  const found = foundLines(pack.dogs, startOfToday(), pack.voice);
+  if (lines.length === 0 && found.length === 0) return null;
   const dog = (id: string) => pack.dogs.find((d) => d.id === id);
   const shown = open ? dog(open) : undefined;
   return (
@@ -317,6 +325,22 @@ function PackDiary({ pack }: { pack: PackView }) {
             </li>
           );
         })}
+        {found.map((l) => {
+          const d = dog(l.dog)!;
+          return (
+            <li key={`found-${l.dog}`}>
+              <button
+                type="button"
+                className="pack-diary-line"
+                title={`Open ${d.name}’s notebook`}
+                onClick={() => setOpen(l.dog)}
+              >
+                <Dog breed={d.breed} mood="idle" size={28} className="still" />
+                <span className="t-small">{l.text}</span>
+              </button>
+            </li>
+          );
+        })}
       </ul>
       {shown && (
         <NotebookSheet
@@ -327,4 +351,10 @@ function PackDiary({ pack }: { pack: PackView }) {
       )}
     </div>
   );
+}
+
+function startOfToday(): number {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
 }

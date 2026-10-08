@@ -51,6 +51,8 @@ function setup(
     /** Vigil's own tools; push to it to add one later. */
     vigil?: string[];
     hour?: number;
+    /** What every connector call answers. */
+    connectorReply?: string;
   } = {},
 ) {
   const vigil = opts.vigil ?? ['list_alerts', 'search_events'];
@@ -68,7 +70,7 @@ function setup(
     knownTools: () => REMOTE,
     call: async (id, tool, args) => {
       connectorCalls.push([id, tool, args]);
-      return 'ok';
+      return opts.connectorReply ?? 'ok';
     },
   };
   const pack = new PackService({
@@ -84,6 +86,12 @@ function setup(
         return { ok: true, value: req.output.parse(value), provider: 'codex', logId: 'x' };
       },
       modelOf: () => 'gpt-5.5',
+      usageOf: () => ({
+        inputTokens: 1200,
+        cachedInputTokens: 200,
+        outputTokens: 300,
+        costUsd: 0.004,
+      }),
       status: async () => ({
         anyReady: true,
         judge: { ready: true, detail: 'Codex checks risky calls' },
@@ -615,6 +623,81 @@ describe('the pack', () => {
         reasons: ['files one issue, easy to close'],
         subject: { kind: 'tool', id: 'github.create_issue' },
       });
+    });
+
+    it('keeps each tool call with redacted arguments, its outcome and a short result', async () => {
+      const { pack, handlers } = setup({
+        connectorReply: `issue opened by someone@example.com ${'x'.repeat(2000)}`,
+      });
+      pack.setToolChoice('github.list_issues', 'allow');
+      const dog = pack.adopt({
+        ...CREATE,
+        tools: ['vigil.search_events', 'github.list_issues', 'github.create_issue'],
+      } as never);
+      handlers.push(async (req) => {
+        await tool(req, 'search_events').run({ limit: 5 });
+        await tool(req, 'github_list_issues').run({ q: 'token=hunter2-secret' });
+        // A scheduled run never asks, so this one is not run.
+        await tool(req, 'github_create_issue').run({ title: 'x' });
+        return { summary: 'ok', findings: [] };
+      });
+      await pack.runDog(dog.id, 'background');
+      const [note] = pack.notes({ dog: dog.id });
+      expect(note!.calls).toEqual([
+        {
+          tool: 'vigil.search_events',
+          title: 'Vigil › search events',
+          args: '{"limit":5}',
+          outcome: 'ran',
+          result: '{"rows":[]}',
+        },
+        expect.objectContaining({ tool: 'github.list_issues', outcome: 'ran' }),
+        expect.objectContaining({
+          tool: 'github.create_issue',
+          outcome: 'not-run',
+          reason: expect.stringContaining('scheduled run'),
+        }),
+      ]);
+      const listed = note!.calls![1]!;
+      expect(listed.args).not.toContain('hunter2');
+      expect(listed.result).toMatch(/^issue opened by <email> x+…$/);
+      expect(listed.result!.length).toBeLessThanOrEqual(801);
+      // What the run cost, from the Usage ledger.
+      expect(note).toMatchObject({
+        model: 'gpt-5.5',
+        usage: { inputTokens: 1200, cachedInputTokens: 200, outputTokens: 300, costUsd: 0.004 },
+      });
+    });
+
+    it('notes a tool that failed, and keeps calls from a chat too', async () => {
+      const { pack, handlers } = setup();
+      handlers.push(async (req) => {
+        await tool(req, 'list_alerts').run({});
+        return { reply: 'Nothing new.', actions: [] };
+      });
+      await pack.say('anything new?');
+      expect(pack.notes({ dog: 'lead' })[0]!.calls).toEqual([
+        expect.objectContaining({ tool: 'vigil.list_alerts', outcome: 'ran' }),
+      ]);
+    });
+
+    it('throws a retired dog’s notebook away, and leaves the others', async () => {
+      const { pack, handlers } = setup();
+      const dog = pack.adopt(CREATE as never);
+      handlers.push(() => ({ summary: 'ok', findings: [] }));
+      await pack.runDog(dog.id);
+      handlers.push(() => ({ reply: 'Hi', actions: [] }));
+      await pack.say('hi');
+      pack.helperNote('explainer', { kind: 'explain', ok: true, ask: 'Explain', answer: 'Fine' });
+      expect(pack.notes({ dog: dog.id })).toHaveLength(1);
+      pack.retire(dog.id);
+      expect(pack.notes({ dog: dog.id })).toHaveLength(0);
+      expect(
+        pack
+          .notes()
+          .map((n) => n.kind)
+          .sort(),
+      ).toEqual(['chat', 'explain']);
     });
 
     it('files a built-in helper’s note under that helper', () => {

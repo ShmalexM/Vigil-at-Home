@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { diaryLines, pileWords } from './pack';
+import { diaryLines, foundLines, pileWords } from './pack';
 
 const DOGS = [
   { id: 'lead', name: 'Scout' },
@@ -38,6 +38,36 @@ describe('the pack diary', () => {
     expect(
       diaryLines(DOGS, [{ dog: 'helper-labeller', kind: 'label', n: 2, failed: 0 }], 'plain'),
     ).toEqual([{ dog: 'helper-labeller', text: 'Biscuit labelled new events twice', failed: 0 }]);
+  });
+});
+
+describe('findings in the diary', () => {
+  const SINCE = 1_000;
+  const report = (at: number, severities: string[], ok = true) => ({
+    at,
+    ok,
+    summary: 's',
+    findings: severities.map((severity, i) => ({ title: `f${i}`, severity })),
+  });
+  const pip = (lastReport?: ReturnType<typeof report>) =>
+    ({ id: 'pip', name: 'Pip', role: 'pack', ...(lastReport ? { lastReport } : {}) }) as never;
+
+  it('adds one line for a pack dog whose run today found medium or high things', () => {
+    expect(foundLines([pip(report(2_000, ['high', 'medium', 'low', 'info']))], SINCE)).toEqual([
+      { dog: 'pip', text: 'Pip sniffed out 2 things worth a look', found: 2 },
+    ]);
+    expect(foundLines([pip(report(2_000, ['medium']))], SINCE, 'plain')).toEqual([
+      { dog: 'pip', text: 'Pip found 1 thing worth a look', found: 1 },
+    ]);
+  });
+
+  it('says nothing for info or low findings, yesterday’s run, a failed run or a helper', () => {
+    expect(foundLines([pip(report(2_000, ['info', 'low']))], SINCE)).toEqual([]);
+    expect(foundLines([pip(report(500, ['high']))], SINCE)).toEqual([]);
+    expect(foundLines([pip(report(2_000, ['high'], false))], SINCE)).toEqual([]);
+    expect(foundLines([pip()], SINCE)).toEqual([]);
+    const helper = { id: 'h', name: 'Sunny', role: 'helper', lastReport: report(2_000, ['high']) };
+    expect(foundLines([helper as never], SINCE)).toEqual([]);
   });
 });
 

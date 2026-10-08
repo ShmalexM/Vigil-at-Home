@@ -80,7 +80,7 @@ describe('connectors', () => {
     expect(c.view()[0]).toMatchObject({ state: 'connected', tools: 2 });
     // The server got its token through the environment.
     expect(await c.call('demo-issues', 'create_issue', { repo: 'a/b', title: 'Hi' })).toBe(
-      'created a/b#2 "Hi" token=set',
+      'created a/b#2 "Hi" (token set)',
     );
 
     // The tracker hears the server's pid once, and again when it is closed.
@@ -94,6 +94,29 @@ describe('connectors', () => {
       [pid, false],
     ]);
   }, 20_000);
+
+  it('hides secrets in what a connector returns before any model sees it', async () => {
+    const reply = [
+      'api_key=sk-ant-abcdefghijklmnopqrstuvwxyz0123',
+      'Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345',
+      'owner: someone@example.com',
+      'file: /Users/alex/notes.txt',
+    ].join('\n');
+    const { c } = hub({
+      connect: async () =>
+        ({
+          callTool: async () => ({ content: [{ type: 'text', text: reply }] }),
+          close: async () => undefined,
+        }) as never,
+    });
+    open.push(c);
+    c.add({ kind: 'http', name: 'Leaky', url: 'https://mcp.example.test/mcp' });
+    const out = await c.call('leaky', 'read', {});
+    expect(out).not.toMatch(/sk-ant-|abcdefghijklmnop|someone@|alex/);
+    expect(out).toContain('Bearer <token>');
+    expect(out).toContain('<email>');
+    expect(out).toContain('/Users/<user>/notes.txt');
+  });
 
   it('refuses a command inside Vigil’s own app, even through a link', () => {
     const { c, dir } = hub({ selfPaths: [process.execPath] });
