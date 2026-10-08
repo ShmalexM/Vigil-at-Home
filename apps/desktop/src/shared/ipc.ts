@@ -203,7 +203,7 @@ export const calls = {
   listRules: z.tuple([]),
   setRuleMode: z.tuple([z.string(), RuleMode]),
   quietRule: z.tuple([z.string()]),
-  undoQuietRule: z.tuple([z.string(), RuleMode.nullable()]),
+  undoQuietRule: z.tuple([z.string(), z.string().min(1).max(200)]),
   getRuleEditor: z.tuple([RuleId]),
   previewRule: z.tuple([RuleJson]),
   saveRule: z.tuple([RuleJson]),
@@ -389,13 +389,17 @@ export interface RuleModeResult {
 }
 
 /**
- * "Only log this rule" or its undo: done, with the override the change
- * replaced (null: the rule ran in its own mode), or refused, with the mode
- * it is in, because that changed since the screen drew it.
+ * "Only log this rule": done, with the override it replaced (null: the rule
+ * ran in its own mode) and a token for its undo, or refused, with the mode the
+ * rule is in, because that changed since the screen drew it.
  */
 export type QuietRuleResult =
-  | { ok: true; prior: RuleMode | null; rule: Rule; helper: HelperOutcome }
+  | { ok: true; prior: RuleMode | null; token: string; rule: Rule; helper: HelperOutcome }
   | { ok: false; mode: RuleMode };
+
+/** Its undo: done, or refused because the rule changed since (the mode it is in now). */
+export type UndoQuietRuleResult =
+  { ok: true; rule: Rule; helper: HelperOutcome } | { ok: false; mode: RuleMode };
 
 export interface RuleView {
   rule: Rule;
@@ -605,7 +609,7 @@ export interface CallResults {
   listRules: RuleView[];
   setRuleMode: RuleModeResult;
   quietRule: QuietRuleResult;
-  undoQuietRule: QuietRuleResult;
+  undoQuietRule: UndoQuietRuleResult;
   getRuleEditor: RuleEditorView | null;
   previewRule: RuleCheck;
   saveRule: RuleCheck;

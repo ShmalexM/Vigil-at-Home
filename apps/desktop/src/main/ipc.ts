@@ -82,8 +82,8 @@ export function registerIpc(
       windows.broadcast('changed');
       return result;
     },
-    undoQuietRule: async (id, prior) => {
-      const result = await core.undoQuietRule(id, prior);
+    undoQuietRule: async (id, token) => {
+      const result = await core.undoQuietRule(id, token);
       windows.broadcast('changed');
       return result;
     },

@@ -428,7 +428,7 @@ function RuleCard({
     toast({
       text: `${rule.name}: ${modeLabel(rule, quieter)}. It stops alerting and keeps logging matches in Activity.${helperNote(result.helper)}`,
       undo: () =>
-        void vigil.undoQuietRule(rule.id, result.prior).then((undone) => {
+        void vigil.undoQuietRule(rule.id, result.token).then((undone) => {
           if (!undone.ok) refused(undone.mode);
         }),
     });

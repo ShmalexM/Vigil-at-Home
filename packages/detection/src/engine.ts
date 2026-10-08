@@ -173,6 +173,7 @@ function notifyFor(rule: DetectionRule, mode: RuleMode): NotifyLevel {
 export class DetectionEngine {
   private byKind = new Map<DetectionEventKind, CompiledRule[]>();
   private byId = new Map<string, CompiledRule>();
+  private readonly revisions = new Map<string, number>();
   /** Baseline scopes to learn per event kind. */
   private learnByKind = new Map<DetectionEventKind, FirstSeenSpec[]>();
   private readonly safety: SafetyFloor;
@@ -213,18 +214,35 @@ export class DetectionEngine {
     }
     this.byId = new Map(compiled.map((c) => [c.rule.id, c]));
     this.reindex();
+    for (const id of ids) this.bump(id);
   }
 
   upsertRule(rule: DetectionRuleInput | DetectionRule): DetectionRule {
     const c = compileRule(rule, this.defaultDedupeWindowSec);
     this.byId.set(c.rule.id, c);
     this.reindex();
+    this.bump(c.rule.id);
     return c.rule;
   }
 
   removeRule(ruleId: string): void {
     this.byId.delete(ruleId);
     this.reindex();
+    this.bump(ruleId);
+  }
+
+  /**
+   * How many times a rule or its mode has changed in this engine: any save,
+   * removal, mode change or cleared override counts, even one to the same
+   * value. An undo compares it to tell "nothing changed since" from "changed
+   * and changed back".
+   */
+  revision(ruleId: string): number {
+    return this.revisions.get(ruleId) ?? 0;
+  }
+
+  private bump(ruleId: string): void {
+    this.revisions.set(ruleId, this.revision(ruleId) + 1);
   }
 
   getRule(ruleId: string): DetectionRule | undefined {
@@ -262,6 +280,7 @@ export class DetectionEngine {
   _setMode(ruleId: string, mode: RuleMode): void {
     const prev = this.stores.ruleState.get(ruleId) ?? { ruleId, fired: 0 };
     this.stores.ruleState.put({ ...prev, mode });
+    this.bump(ruleId);
   }
 
   /** The user's override of a rule's mode, or undefined when it runs in its own mode. */
@@ -278,6 +297,7 @@ export class DetectionEngine {
     if (prev?.mode === undefined) return;
     const { mode: _mode, ...rest } = prev;
     this.stores.ruleState.put(rest);
+    this.bump(ruleId);
   }
 
   private reindex(): void {

@@ -1,9 +1,11 @@
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { hostname, userInfo } from 'node:os';
 import { z } from 'zod';
 import {
   canChangeMode,
   type Alert,
+  type Rule,
   type RuleMode,
   type SensorEvent,
   type UserDecision,
@@ -15,8 +17,8 @@ import {
   type AlertDetail,
   type EventOutcome,
   type EventStats,
-  type HelperOutcome,
   type QuietRuleResult,
+  type UndoQuietRuleResult,
   type RuleModeResult,
   type RuleView,
   type StatusView,
@@ -25,11 +27,12 @@ import { isNoticed } from '../shared/attention.js';
 import { untouched } from '../shared/piles.js';
 import { DEFAULT_APPEARANCE, type AppearanceSettings } from '../shared/themes.js';
 import { AlertService, type DecisionInput } from './alerts.js';
+import { evidenceOf } from './evidence-export.js';
 import { redactEvidence } from './evidence-redact.js';
 import { EventLog } from './events.js';
 import { BATTERY_SLOWDOWN, type PowerMode } from './power.js';
 import type { Store } from './db/store.js';
-import { FEED_CHECK_MS, type Detector, type QuietOutcome } from './detection.js';
+import { FEED_CHECK_MS, type Detector } from './detection.js';
 import { RuleEditing } from './rule-editing.js';
 import type { ActionExecutor } from './executor.js';
 import { Scheduler } from './scheduler.js';
@@ -381,24 +384,14 @@ export class VigilCore {
    * The alert as JSON for a bug report, a note or another tool. It goes
    * through the same redaction as data sent to a model (home folders, keys,
    * tokens, emails), plus the value after a secret flag such as `--token` and
-   * this computer's user and host names at any length (evidence-redact.ts),
-   * and leaves out each event's raw sensor record, which the redaction can't
-   * vouch for.
+   * this computer's user and host names at any length (evidence-redact.ts).
+   * It exports only the fields evidence-export.ts picks, so neither an event's
+   * raw sensor record nor an internal key such as a repeat's goes out.
    */
   alertEvidence(id: string): string | null {
     const d = this.alertDetail(id);
     if (!d) return null;
-    const { alert, events, actions, proposals, rule } = d;
-    const evidence = {
-      alert,
-      rule: rule
-        ? { id: rule.id, name: rule.name, version: rule.version, mode: rule.mode }
-        : undefined,
-      events: events.map(({ raw: _raw, ...e }) => e),
-      actions,
-      proposals,
-    };
-    return JSON.stringify(redactEvidence(evidence, this.evidenceRedaction()), null, 2);
+    return JSON.stringify(redactEvidence(evidenceOf(d), this.evidenceRedaction()), null, 2);
   }
 
   /** Whose names the copied evidence hides. Overridable for tests. */
@@ -449,6 +442,7 @@ export class VigilCore {
     const rule = this.store.getRule(id);
     if (!rule) throw new Error(`No rule ${id}`);
     if (!canChangeMode('user', rule.mode, mode)) throw new Error('Not allowed');
+    this.ownQuieted.delete(id);
     const next = { ...rule, mode, updatedAt: this.now() };
     this.store.upsertRule(next);
     return { rule: next, helper: 'applied' };
@@ -458,39 +452,51 @@ export class VigilCore {
    * "Only log this rule" from an alert: Alert to Shadow, only if the rule is
    * in Alert when the change applies. Refused, with the mode, in any other
    * mode (another change may have made it block since the card drew). The
-   * result carries the override it replaced, for `undoQuietRule`.
+   * result carries the override it replaced and a token for `undoQuietRule`.
    */
   async quietRule(id: string): Promise<QuietRuleResult> {
     if (this.detector?.hasRule(id)) {
       const { value, helper } = await this.detector.quiet(id);
-      return this.quietResult(id, value, helper);
+      if (!value.ok) return value;
+      return { ok: true, prior: value.prior, token: value.token, rule: this.ruleNow(id), helper };
     }
     const rule = this.store.getRule(id);
     if (!rule) throw new Error(`No rule ${id}`);
     if (rule.mode !== 'alert') return { ok: false, mode: rule.mode };
     this.store.upsertRule({ ...rule, mode: 'shadow', updatedAt: this.now() });
-    return { ok: true, prior: 'alert', rule: this.store.getRule(id)!, helper: 'applied' };
+    const after = this.store.getRule(id)!;
+    const token = randomUUID();
+    this.ownQuieted.set(id, { token, after: JSON.stringify(after) });
+    return { ok: true, prior: 'alert', token, rule: after, helper: 'applied' };
   }
 
-  /** Undo `quietRule`, only while the rule is still in the Shadow it set. */
-  async undoQuietRule(id: string, prior: RuleMode | null): Promise<QuietRuleResult> {
+  /** Undo `quietRule`, only while nothing about the rule has changed since. */
+  async undoQuietRule(id: string, token: string): Promise<UndoQuietRuleResult> {
     if (this.detector?.hasRule(id)) {
-      const { value, helper } = await this.detector.undoQuiet(id, prior);
-      return this.quietResult(id, value, helper);
+      const { value, helper } = await this.detector.undoQuiet(id, token);
+      if (!value.ok) return value;
+      return { ok: true, rule: this.ruleNow(id), helper };
     }
     const rule = this.store.getRule(id);
     if (!rule) throw new Error(`No rule ${id}`);
-    if (rule.mode !== 'shadow') return { ok: false, mode: rule.mode };
-    // A rule of the user's own has no override: its mode is the rule's.
-    this.store.upsertRule({ ...rule, mode: prior ?? 'alert', updatedAt: this.now() });
-    return { ok: true, prior: 'shadow', rule: this.store.getRule(id)!, helper: 'applied' };
+    const done = this.ownQuieted.get(id);
+    if (!done || done.token !== token || done.after !== JSON.stringify(rule)) {
+      return { ok: false, mode: rule.mode };
+    }
+    this.ownQuieted.delete(id);
+    // A rule of the user's own has no override: its mode is the rule's, and it was Alert.
+    this.store.upsertRule({ ...rule, mode: 'alert', updatedAt: this.now() });
+    return { ok: true, rule: this.store.getRule(id)!, helper: 'applied' };
   }
 
-  private quietResult(id: string, value: QuietOutcome, helper: HelperOutcome): QuietRuleResult {
-    if (!value.ok) return value;
+  /** The user's own rules' last quiet: its token and the rule as it left it. */
+  private readonly ownQuieted = new Map<string, { token: string; after: string }>();
+
+  /** An engine rule in the mode it runs in. */
+  private ruleNow(id: string): Rule {
     const view = this.detector?.rules().find((r) => r.rule.id === id);
     if (!view) throw new Error(`No rule ${id}`);
-    return { ok: true, prior: value.prior, rule: { ...view.rule, mode: view.mode }, helper };
+    return { ...view.rule, mode: view.mode };
   }
 
   /** First launch on this Mac, recorded once. "First seen" rules learn for a week after it. */
