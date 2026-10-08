@@ -56,7 +56,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
     <div className="page">
       <PageHead
         title="Home"
-        purpose="How your Mac is doing, and anything that needs your decision."
+        purpose="How this computer is doing, and anything that needs your decision."
       />
 
       {status && (

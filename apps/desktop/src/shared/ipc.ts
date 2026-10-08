@@ -548,6 +548,9 @@ export interface SettingsView {
   commit: string;
   /** The sidebar's Advanced group was left open. */
   showAdvanced: boolean;
+  /** process.platform and process.arch, for About and bug reports. */
+  platform: string;
+  arch: string;
 }
 
 /** Return types, one per call. */

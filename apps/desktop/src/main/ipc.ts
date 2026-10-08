@@ -96,6 +96,8 @@ export function registerIpc(
       version: app.getVersion(),
       commit: typeof __VIGIL_COMMIT__ === 'string' ? __VIGIL_COMMIT__ : '',
       showAdvanced: core.showAdvanced(),
+      platform: process.platform,
+      arch: process.arch,
     }),
     setTheme: (theme) => {
       core.setTheme(theme);
