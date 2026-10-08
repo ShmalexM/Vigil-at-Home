@@ -133,6 +133,60 @@ describe('helper install', () => {
     expect(await runHelperScript('install', dir, answer(0), 'win32')).toMatchObject({ ok: false });
   });
 
+  it('explains a password dialog that could not open, and offers the terminal command', async () => {
+    const { dir } = bundle();
+    const fails =
+      (r: Awaited<ReturnType<RunFile>>): RunFile =>
+      async () =>
+        r;
+    const noPkexec = await runHelperScript(
+      'install',
+      dir,
+      fails({ code: 1, stdout: '', stderr: '', missing: true }),
+      'linux',
+    );
+    expect(noPkexec.error).toMatch(/no pkexec/);
+    expect(noPkexec.command).toContain('sudo sh "$d/linux/install.sh"');
+
+    const noAgent = await runHelperScript(
+      'update',
+      dir,
+      fails({
+        code: 127,
+        stdout: '',
+        stderr: 'Error executing command as another user: No authentication agent found.',
+      }),
+      'linux',
+    );
+    expect(noAgent.error).toMatch(/No password dialog could open/);
+    expect(noAgent.command).toBeDefined();
+
+    expect(
+      await runHelperScript(
+        'install',
+        dir,
+        fails({ code: 127, stdout: '', stderr: 'Not authorized' }),
+        'linux',
+      ),
+    ).toMatchObject({ error: 'Your account isn’t allowed to do this' });
+
+    // A cancelled dialog is the user's answer: nothing to fall back to.
+    expect(
+      await runHelperScript('install', dir, fails({ code: 126, stdout: '', stderr: '' }), 'linux'),
+    ).toEqual({ ok: false, error: 'cancelled' });
+    const mac = await runHelperScript(
+      'install',
+      dir,
+      fails({ code: 1, stdout: '', stderr: '0:1: execution error: Boom. (1)' }),
+      'darwin',
+    );
+    expect(mac).toEqual({
+      ok: false,
+      error: 'Boom.',
+      command: `sudo ${shellQuote(join(dir, 'install.sh'))}`,
+    });
+  });
+
   it('runs install.sh for an update, with a dialog that says why', async () => {
     const { dir } = bundle();
     const seen: string[][] = [];

@@ -350,6 +350,8 @@ export interface HelperInstallResult {
   ok: boolean;
   /** Set when it failed; "cancelled" when the user closed the password dialog. */
   error?: string;
+  /** A failed install: the command that does the same from a terminal. */
+  command?: string;
 }
 
 export interface AlertDetail {

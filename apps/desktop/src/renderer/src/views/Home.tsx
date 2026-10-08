@@ -1,10 +1,11 @@
-import { CircleCheck, Eye, TriangleAlert } from 'lucide-react';
+import { CircleCheck, Copy, Eye, TriangleAlert } from 'lucide-react';
 import { useState } from 'react';
 import { useLive, vigil } from '../api';
 import { homeMood } from '../components/AskScout';
 import { NeedsYouLine, needsRows, NoticedList, pileLine, WatchLine } from '../components/Attention';
 import { Dog } from '../components/Dog';
 import { NotebookSheet } from '../components/Notebook';
+import { useToast } from '../components/Toasts';
 import { Card, Chip, LevelPill, SectionHead, SeverityMark, StatusMark } from '../components/ui';
 import { timeAgo } from '../format';
 import { isNoticed, needsDecision } from '../../../shared/attention';
@@ -246,13 +247,16 @@ export function HomeView({ go }: { go: (r: string) => void }) {
 /** Installs or updates the helper through the system's own password dialog. */
 function InstallHelper({ kind }: { kind: 'install' | 'reinstall' | 'update' }) {
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ text: string; command?: string } | null>(null);
+  const toast = useToast();
   const run = async () => {
     setBusy(true);
     setError(null);
     const r = await vigil.installHelper();
     setBusy(false);
-    if (!r.ok && r.error !== 'cancelled') setError(r.error ?? 'Install failed');
+    if (!r.ok && r.error !== 'cancelled') {
+      setError({ text: r.error ?? 'Install failed', ...(r.command ? { command: r.command } : {}) });
+    }
   };
   return (
     <>
@@ -276,9 +280,26 @@ function InstallHelper({ kind }: { kind: 'install' | 'reinstall' | 'update' }) {
             ]}
       </button>
       {error && (
-        <span className="t-small" style={{ color: 'var(--poor)', textAlign: 'right' }}>
-          {error}
+        <span
+          className="t-small"
+          role="alert"
+          style={{ color: 'var(--poor)', textAlign: 'right', maxWidth: 360 }}
+        >
+          {error.text}
         </span>
+      )}
+      {error?.command && (
+        <button
+          type="button"
+          className="btn sm ghost"
+          title={error.command}
+          onClick={async () => {
+            await navigator.clipboard.writeText(error.command!);
+            toast({ text: 'Copied. Paste it into a terminal; it asks for your password.' });
+          }}
+        >
+          <Copy size={14} /> Copy terminal command
+        </button>
       )}
     </>
   );
