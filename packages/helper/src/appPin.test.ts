@@ -212,6 +212,22 @@ describe('the app pinned at install (macOS)', () => {
       ).rejects.toMatchObject({ code: 'refused' });
     });
 
+    it('treats a process that exec’d the pinned code as the app (accepted)', async () => {
+      // pid 900 ran another program, then exec'd the pinned one: same pid and
+      // start time, now running the pinned code. It is spared from then on;
+      // the real app (pid 501) is a separate process either way.
+      sys.processes.set(900, { path: '/tmp/evil', started: STARTED });
+      sys.code.set('900', ['d'.repeat(40), '/tmp/evil']);
+      const ex = new Executor(executorDeps(sys));
+      await ex.execute({ kind: 'process.suspend', pid: 900, path: '/tmp/evil' });
+      sys.processes.set(900, { path: EXE, started: STARTED });
+      sys.code.set('900', [CDHASH, EXE]);
+      await expect(ex.execute({ kind: 'process.kill', pid: 900, path: EXE })).rejects.toMatchObject(
+        { code: 'refused' },
+      );
+      expect(sys.signals).toEqual([{ pid: 900, signal: 'SIGSTOP' }]);
+    });
+
     it('stops a different program as before', async () => {
       sys.processes.set(777, { path: '/tmp/evil', started: STARTED });
       sys.code.set('777', ['d'.repeat(40), '/tmp/evil']);

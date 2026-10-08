@@ -21,6 +21,13 @@ export interface ProcessIdentity {
  * Identify a running process from kernel data: the executable path from its
  * text mapping (lsof "txt" on macOS, /proc/<pid>/exe on Linux, neither of
  * which argv tricks can fake) and its start time.
+ *
+ * exec keeps the pid and start time, so a process that execs another
+ * program is still "the same process" here, now running that program. For
+ * the app pin that is accepted (see appPin.ts runsPinnedApp): a process that
+ * execs the pinned app's code is the app from then on, and only a process
+ * whose code is already someone's choosing can do it, so nothing the real
+ * app depends on changes.
  */
 export async function identifyProcess(
   sys: System,

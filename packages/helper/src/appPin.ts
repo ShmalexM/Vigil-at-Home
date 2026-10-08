@@ -269,6 +269,14 @@ export function pinnedHashes(pinFile: string): string[] {
  * pinned it hasn't been written to; once they changed, the image the process
  * runs (through /proc, so whatever its name now) must hash to the pinned
  * sha256, or there is no exemption.
+ *
+ * Accepted: a process that execs the pinned program keeps its pid and start
+ * time, so it is identified as the same process and from then on runs the
+ * pinned code, which is all this check asks. Only a process that can already
+ * run code of its choosing can make that exec, so sparing it spares a
+ * program its author already controls; the real app, a separate process,
+ * is untouched either way, and stopping that process was never what keeps
+ * the app safe.
  */
 export async function runsPinnedApp(
   sys: System,
