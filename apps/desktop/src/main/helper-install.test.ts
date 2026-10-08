@@ -21,50 +21,71 @@ import {
   helperInstallCommand,
   helperManifest,
   helperMatch,
+  helperScriptFiles,
   helperPayloadDir,
   installedHelperFiles,
+  ROOT_SHELL,
   runHelperScript,
   shellQuote,
   type RunFile,
 } from './helper-install.js';
 
 /**
- * A helper folder like the app's. Each script records where it ran from and
- * the lib.sh beside it in $OUT, so a test can tell what root would have run.
+ * A helper folder like the app's. Each script records where it ran from, the
+ * lib.sh beside it and whether $VH_LEAK reached it in `out`, a path written
+ * into the script since root starts it with an empty environment, so a test
+ * can tell what root would have run.
  */
 function bundle() {
   const res = mkdtempSync(join(tmpdir(), "Vigil at Home's Resources-"));
   const dir = join(res, 'helper');
+  const out = join(mkdtempSync(join(tmpdir(), 'out-')), 'out');
   mkdirSync(dir);
   const script = (rel: string) =>
-    `#!/bin/sh\nset -eu\nh=$(dirname "$0")\n. "$h/${rel}lib.sh"\necho "ran $0 with $LIB" >"$OUT"\n`;
+    `#!/bin/sh\nset -eu\nh=$(dirname "$0")\n. "$h/${rel}lib.sh"\n` +
+    `echo "ran $0 with $LIB leak=\${VH_LEAK:-}" >${shellQuote(out)}\n`;
   writeFileSync(join(dir, 'node'), 'node');
   writeFileSync(join(dir, 'lib.sh'), 'LIB=shipped\n');
   for (const f of ['install.sh', 'uninstall.sh']) writeFileSync(join(dir, f), script(''));
+  for (const f of ['helper.mjs', 'vigil-helper', 'com.vigilathome.helper.plist'])
+    writeFileSync(join(dir, f), f);
   mkdirSync(join(dir, 'linux'));
   for (const f of ['install.sh', 'uninstall.sh'])
     writeFileSync(join(dir, 'linux', f), script('../'));
-  return { res, dir };
+  for (const f of ['vigil-helper', 'vigil-helper.service', 'com.vigilathome.helper.policy'])
+    writeFileSync(join(dir, 'linux', f), f);
+  return { res, dir, out };
 }
 
 /** The folder the entry copies from: after $0 for pkexec, right after the entry for osascript. */
 const srcOf = (file: string, args: string[]) =>
   args[args.indexOf(ELEVATED_ENTRY) + (file === '/usr/bin/pkexec' ? 2 : 1)]!;
 
-/** Run what pkexec or osascript would run as root, here as this user. */
-function asRoot(file: string, args: string[], env: Record<string, string>) {
+/**
+ * Run what pkexec or osascript would run as root, here as this user, from the
+ * caller's environment plus `env`. ROOT_SHELL empties it before the entry.
+ */
+function asRoot(file: string, args: string[], env: Record<string, string> = {}) {
   let argv: string[];
   if (file === '/usr/bin/pkexec') {
-    expect(args.slice(0, 4)).toEqual(['/bin/sh', '-c', ELEVATED_ENTRY, 'vigil-helper']);
-    argv = args.slice(2);
+    expect(args.slice(0, ROOT_SHELL.length + 2)).toEqual([
+      ...ROOT_SHELL,
+      ELEVATED_ENTRY,
+      'vigil-helper',
+    ]);
+    argv = args;
   } else {
     expect(file).toBe('/usr/bin/osascript');
+    // The AppleScript starts the entry through ROOT_SHELL.
+    expect(args.join(' ')).toContain(
+      `"${ROOT_SHELL.join(' ')} " & quoted form of (item 1 of argv)`,
+    );
     // After the AppleScript: the entry, then its arguments.
     const at = args.indexOf(ELEVATED_ENTRY);
     expect(at).toBeGreaterThan(0);
-    argv = [ELEVATED_ENTRY, 'vigil-helper', ...args.slice(at + 1)];
+    argv = [...ROOT_SHELL, ELEVATED_ENTRY, 'vigil-helper', ...args.slice(at + 1)];
   }
-  const r = spawnSync('/bin/sh', ['-c', ...argv], {
+  const r = spawnSync(argv[0]!, argv.slice(1), {
     encoding: 'utf8',
     env: { ...process.env, ...env },
   });
@@ -94,7 +115,7 @@ describe('helper install', () => {
       .flat()
       .map((a) => shellQuote(a))
       .join(' ');
-    const entry = `sudo /bin/sh -c ${shellQuote(ELEVATED_ENTRY)} vigil-helper`;
+    const entry = `sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/sh -c ${shellQuote(ELEVATED_ENTRY)} vigil-helper`;
     expect(helperInstallCommand(dir, 'darwin')).toBe(
       `${entry} ${shellQuote(dir)} install.sh ${checks}`,
     );
@@ -106,21 +127,26 @@ describe('helper install', () => {
     // A folder the entry would refuse gets no command at all.
     symlinkSync(join(dir, 'node'), join(dir, 'link'));
     expect(helperInstallCommand(dir, 'darwin')).toBeUndefined();
+    rmSync(join(dir, 'link'));
+    // Nor does a build missing a file the script needs.
+    expect(helperInstallCommand(dir, 'darwin')).toBeDefined();
+    rmSync(join(dir, 'node'));
+    expect(helperInstallCommand(dir, 'darwin')).toBeUndefined();
+    expect(helperInstallCommand(dir, 'linux')).toBeUndefined();
   });
 
-  it('runs the Terminal command from a checked copy', () => {
-    const { dir } = bundle();
-    const out = join(mkdtempSync(join(tmpdir(), 'out-')), 'out');
+  it('runs the Terminal command from a checked copy, with an empty environment', () => {
+    const { dir, out } = bundle();
     for (const platform of ['darwin', 'linux'] as const) {
       // As the user would paste it, minus sudo.
       const cmd = helperInstallCommand(dir, platform)!.replace('sudo ', '');
       const r = spawnSync('/bin/sh', ['-c', cmd], {
         encoding: 'utf8',
-        env: { ...process.env, OUT: out },
+        env: { ...process.env, VH_LEAK: 'yes', TMPDIR: dirname(out) },
       });
       expect(r.status, r.stderr).toBe(0);
       expect(readFileSync(out, 'utf8')).toMatch(
-        /^ran \/tmp\/vigil-helper\.[^/]+\/.*install\.sh with shipped/,
+        /^ran \/tmp\/vigil-helper\.[^/]+\/.*install\.sh with shipped leak=$/m,
       );
     }
   });
@@ -139,16 +165,34 @@ describe('helper install', () => {
     const { dir } = bundle();
     const m = helperManifest(dir);
     expect(m.map(([f]) => f)).toEqual([
+      'com.vigilathome.helper.plist',
+      'helper.mjs',
       'install.sh',
       'lib.sh',
+      'linux/com.vigilathome.helper.policy',
       'linux/install.sh',
       'linux/uninstall.sh',
+      'linux/vigil-helper',
+      'linux/vigil-helper.service',
       'node',
       'uninstall.sh',
+      'vigil-helper',
     ]);
+    // Every file a script needs is among them.
+    for (const platform of ['darwin', 'linux'] as const)
+      for (const kind of ['install', 'uninstall'] as const)
+        for (const f of helperScriptFiles(kind, platform)) expect(m.map(([g]) => g)).toContain(f);
     expect(m.find(([f]) => f === 'node')![1]).toBe(
       createHash('sha256').update('node').digest('hex'),
     );
+    // Each file has its own hash, so moving bytes from one file into the next
+    // changes both, though the files together hold the same bytes.
+    writeFileSync(join(dir, 'helper.mjs'), 'helper');
+    writeFileSync(join(dir, 'node'), '.mjsnode');
+    const moved = new Map(helperManifest(dir));
+    const was = new Map(m);
+    expect(moved.get('helper.mjs')).not.toBe(was.get('helper.mjs'));
+    expect(moved.get('node')).not.toBe(was.get('node'));
     symlinkSync('/etc/passwd', join(dir, 'linux', 'lib.sh'));
     expect(() => helperManifest(dir)).toThrow(/not a regular file/);
   });
@@ -161,28 +205,35 @@ describe('helper install', () => {
     const script = args.slice(0, -5).join(' ');
     expect(script).not.toContain('rm -rf');
     expect(script).toContain('quoted form of (item 1 of argv)');
+    // Root's shell starts with an empty environment.
+    expect(script).toContain(
+      `"/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/sh -c " & quoted form of (item 1 of argv)`,
+    );
     expect(script).toContain('quoted form of (a as text)');
     expect(script).toContain('with administrator privileges');
   });
 
   for (const platform of ['darwin', 'linux'] as const) {
     it(`runs the script as root only from a checked, private copy (${platform})`, async () => {
-      const { dir } = bundle();
-      const out = join(mkdtempSync(join(tmpdir(), 'out-')), 'out');
+      const { dir, out } = bundle();
       let src = '';
       const run: RunFile = async (file, args) => {
         src = srcOf(file, args);
-        return asRoot(file, args, { OUT: out });
+        // Root ignores the caller's TMPDIR and every other variable.
+        return asRoot(file, args, { VH_LEAK: 'yes', TMPDIR: dirname(out) });
       };
       expect(await runHelperScript('install', dir, run, platform)).toEqual({ ok: true });
       const ran = readFileSync(out, 'utf8');
       const script = platform === 'linux' ? 'linux/install.sh' : 'install.sh';
       // From the copy root made, not from the app or the user's staging folder.
-      expect(ran).toMatch(new RegExp(`^ran /tmp/vigil-helper\\.[^/]+/${script} with shipped`));
+      expect(ran).toMatch(
+        new RegExp(`^ran /tmp/vigil-helper\\.[^/]+/${script} with shipped leak=$`, 'm'),
+      );
       expect(ran).not.toContain(src);
       expect(ran).not.toContain(dir);
       // And that copy is gone afterwards.
       const copy = ran.split(' ')[1]!.replace(`/${script}`, '');
+      expect(copy.startsWith(dirname(out))).toBe(false);
       expect(existsSync(copy)).toBe(false);
       if (platform === 'linux') {
         expect(src.startsWith(dir)).toBe(false);
@@ -194,8 +245,7 @@ describe('helper install', () => {
 
     it(`refuses, and runs nothing, when a file is swapped after the app checked it (${platform})`, async () => {
       for (const swap of ['content', 'symlink', 'script'] as const) {
-        const { dir } = bundle();
-        const out = join(mkdtempSync(join(tmpdir(), 'out-')), 'out');
+        const { dir, out } = bundle();
         const evil = join(mkdtempSync(join(tmpdir(), 'evil-')), 'lib.sh');
         writeFileSync(evil, 'LIB=swapped\n');
         const run: RunFile = async (file, args) => {
@@ -211,9 +261,9 @@ describe('helper install', () => {
           } else {
             writeFileSync(lib, 'LIB=shipped\n');
             const s = join(src, platform === 'linux' ? 'linux/install.sh' : 'install.sh');
-            writeFileSync(s, `#!/bin/sh\necho "ran swapped" >"$OUT"\n`);
+            writeFileSync(s, `#!/bin/sh\necho "ran swapped" >${shellQuote(out)}\n`);
           }
-          return asRoot(file, args, { OUT: out });
+          return asRoot(file, args);
         };
         const r = await runHelperScript('install', dir, run, platform);
         expect(r.ok, swap).toBe(false);
@@ -266,6 +316,20 @@ describe('helper install', () => {
     });
     expect(await runHelperScript('install', dir, answer(0), 'linux')).toMatchObject({ ok: false });
     expect(seen.length).toBe(before);
+    // A build missing a file the script needs: refused the same way.
+    rmSync(join(dir, 'extra'));
+    rmSync(join(dir, 'lib.sh'));
+    for (const platform of ['darwin', 'linux'] as const) {
+      expect(await runHelperScript('install', dir, answer(0), platform)).toEqual({
+        ok: false,
+        error: 'This build of Vigil is missing some of the helper’s files',
+      });
+      expect(await runHelperScript('uninstall', dir, answer(0), platform)).toMatchObject({
+        ok: false,
+        error: expect.stringMatching(/missing/),
+      });
+    }
+    expect(seen.length).toBe(before);
   });
 
   it('on Linux, runs the entry through pkexec on a private copy of the files', async () => {
@@ -276,23 +340,26 @@ describe('helper install', () => {
       (code: number, stderr = ''): RunFile =>
       async (file, args) => {
         seen.push([file, ...args]);
-        staged = args[4]!;
+        staged = args[7]!;
         // The copy is there while pkexec runs, with the files the app checked.
-        expect(readFileSync(join(staged, args[5]!), 'utf8')).toBe(
-          readFileSync(join(dir, args[5]!), 'utf8'),
+        expect(readFileSync(join(staged, args[8]!), 'utf8')).toBe(
+          readFileSync(join(dir, args[8]!), 'utf8'),
         );
         return { code, stdout: '', stderr };
       };
     expect(await runHelperScript('install', dir, answer(0), 'linux')).toEqual({ ok: true });
-    expect(seen[0]?.slice(0, 5)).toEqual([
+    expect(seen[0]?.slice(0, 8)).toEqual([
       '/usr/bin/pkexec',
+      '/usr/bin/env',
+      '-i',
+      'PATH=/usr/bin:/bin:/usr/sbin:/sbin',
       '/bin/sh',
       '-c',
       ELEVATED_ENTRY,
       'vigil-helper',
     ]);
-    expect(seen[0]?.[6]).toBe('linux/install.sh');
-    expect(seen[0]?.slice(7)).toEqual(helperManifest(dir).flat());
+    expect(seen[0]?.[9]).toBe('linux/install.sh');
+    expect(seen[0]?.slice(10)).toEqual(helperManifest(dir).flat());
     expect(staged).toMatch(/vigil-helper-[^/]+$/);
     expect(staged.startsWith(dir)).toBe(false);
     // And it is gone afterwards.
@@ -310,7 +377,7 @@ describe('helper install', () => {
         'linux',
       ),
     ).toEqual({ ok: false, error: 'The helper needs systemd.' });
-    expect(seen.at(-1)?.[6]).toBe('linux/uninstall.sh');
+    expect(seen.at(-1)?.[9]).toBe('linux/uninstall.sh');
     expect(await runHelperScript('install', dir, answer(0), 'win32')).toMatchObject({ ok: false });
   });
 

@@ -149,7 +149,12 @@ export function helperMatch(
  * listed file into a new root-owned folder (mktemp -d, mode 700), refusing
  * symlinks and anything but regular files, and checks each copy against the
  * SHA-256 the app computed beforehand. Only then does it run the copied
- * script, which sources lib.sh from beside itself, inside that folder.
+ * script, which sources lib.sh from beside itself, inside that folder. The
+ * folder is made under the fixed, root-owned and sticky /tmp, never the
+ * user's TMPDIR, where its owner could rename it away and put another in its
+ * place. `cat` copies the data only, never a link, and on macOS no extended
+ * attributes. Root starts it through {@link ROOT_SHELL}, with an empty
+ * environment.
  *
  * Arguments: the folder to copy from, the script to run (relative to it),
  * then pairs of a file (relative) and its SHA-256.
@@ -177,6 +182,7 @@ export const ELEVATED_ENTRY = [
   'if [ -L "$src/$f" ] || [ ! -f "$src/$f" ]; then vh_refuse "$f is not a regular file"; fi;',
   'case $f in */*) mkdir -p "$d/${f%/*}" ;; esac;',
   'cat <"$src/$f" >"$d/$f";',
+  'if [ -L "$d/$f" ] || [ ! -f "$d/$f" ]; then vh_refuse "$f did not copy as a regular file"; fi;',
   'got=$(vh_sha <"$d/$f"); got=${got%% *};',
   '[ "$got" = "$want" ] || vh_refuse "$f changed after Vigil checked it";',
   '[ "$f" != "$script" ] || found=1;',
@@ -184,6 +190,52 @@ export const ELEVATED_ENTRY = [
   'if [ "$#" -ne 0 ] || [ -z "$found" ]; then vh_refuse "$script was not among the files checked"; fi;',
   'status=0; /bin/sh "$d/$script" || status=$?; exit "$status"',
 ].join(' ');
+
+const ROOT_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
+
+/**
+ * How root starts {@link ELEVATED_ENTRY}: with an empty environment, so
+ * nothing the user set (PATH, TMPDIR, ENV, NODE_OPTIONS, PERL5OPT…) reaches
+ * the entry or the programs the copied script runs. Followed by the entry,
+ * then `$0`, then {@link elevatedArgs}.
+ */
+export const ROOT_SHELL = ['/usr/bin/env', '-i', `PATH=${ROOT_PATH}`, '/bin/sh', '-c'] as const;
+
+/**
+ * The files each script needs, the script first, relative to the helper
+ * folder. A build missing any of them gets no password dialog and no
+ * Terminal command; the entry checks each one along with the rest.
+ */
+export function helperScriptFiles(
+  kind: 'install' | 'uninstall',
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  if (platform === 'linux') {
+    return kind === 'uninstall'
+      ? ['linux/uninstall.sh', 'lib.sh']
+      : [
+          'linux/install.sh',
+          'lib.sh',
+          'node',
+          'helper.mjs',
+          'linux/vigil-helper',
+          'linux/vigil-helper.service',
+          'linux/com.vigilathome.helper.policy',
+        ];
+  }
+  return kind === 'uninstall'
+    ? ['uninstall.sh', 'lib.sh']
+    : [
+        'install.sh',
+        'lib.sh',
+        'node',
+        'helper.mjs',
+        'vigil-helper',
+        'com.vigilathome.helper.plist',
+      ];
+}
+
+const MISSING = 'This build of Vigil is missing some of the helper’s files';
 
 const hashCache = new Map<string, string>();
 
@@ -221,7 +273,19 @@ export function helperManifest(dir: string): [string, string][] {
 
 /** The script for this OS, relative to the helper folder. */
 function scriptFor(kind: 'install' | 'uninstall', platform: NodeJS.Platform): string {
-  return platform === 'linux' ? `linux/${kind}.sh` : `${kind}.sh`;
+  return helperScriptFiles(kind, platform)[0]!;
+}
+
+/** {@link helperManifest}, or an error when a file `kind` needs is missing. */
+function checkedManifest(
+  dir: string,
+  kind: 'install' | 'uninstall',
+  platform: NodeJS.Platform,
+): [string, string][] {
+  const manifest = helperManifest(dir);
+  const have = new Set(manifest.map(([f]) => f));
+  if (!helperScriptFiles(kind, platform).every((f) => have.has(f))) throw new Error(MISSING);
+  return manifest;
 }
 
 /** ELEVATED_ENTRY's arguments: copy from `src`, run `script`, check these files. */
@@ -237,16 +301,16 @@ export function helperInstallCommand(
   if (!dir) return undefined;
   let manifest: [string, string][];
   try {
-    manifest = helperManifest(dir);
+    manifest = checkedManifest(dir, 'install', platform);
   } catch {
-    return undefined;
+    return undefined; // a link in the folder, or a file the script needs is missing
   }
   const script = scriptFor('install', platform);
   const checks = manifest
     .flat()
     .map((a) => shellQuote(a))
     .join(' ');
-  const entry = `sudo /bin/sh -c ${shellQuote(ELEVATED_ENTRY)} vigil-helper`;
+  const entry = `sudo ${ROOT_SHELL.join(' ')} ${shellQuote(ELEVATED_ENTRY)} vigil-helper`;
   // Linux: root can't read an AppImage's mount, so copy the helper out first,
   // as runWithPkexec does. The entry checks the copy before root runs any of it.
   if (platform === 'linux')
@@ -263,17 +327,17 @@ const PROMPTS = {
 } as const;
 
 /**
- * The osascript arguments that run ELEVATED_ENTRY as root with `args`. macOS
- * shows its own password dialog. The entry and every argument go in as
- * arguments and through AppleScript's `quoted form of`, so no path can break
- * out of them.
+ * The osascript arguments that run ELEVATED_ENTRY as root with `args`, through
+ * {@link ROOT_SHELL}. macOS shows its own password dialog. The entry and every
+ * argument go in as arguments and through AppleScript's `quoted form of`, so
+ * no path can break out of them.
  */
 export function adminScriptArgs(args: string[], kind: keyof typeof PROMPTS): string[] {
   return [
     '-e',
     'on run argv',
     '-e',
-    'set cmd to "/bin/sh -c " & quoted form of (item 1 of argv) & " vigil-helper"',
+    `set cmd to "${ROOT_SHELL.join(' ')} " & quoted form of (item 1 of argv) & " vigil-helper"`,
     '-e',
     'repeat with a in rest of argv',
     '-e',
@@ -296,7 +360,8 @@ export type RunFile = (
 
 const runFile: RunFile = (file, args) =>
   new Promise((resolve) =>
-    execFile(file, args, { timeout: 3 * 60_000 }, (err, stdout, stderr) =>
+    // An empty environment: macOS's admin dialog hands it to root's shell.
+    execFile(file, args, { timeout: 3 * 60_000, env: { PATH: ROOT_PATH } }, (err, stdout, stderr) =>
       resolve({
         code: err ? (typeof err.code === 'number' ? err.code : 1) : 0,
         stdout: String(stdout),
@@ -318,13 +383,12 @@ async function runWithPkexec(
   dir: string,
   run: RunFile,
 ): Promise<HelperInstallResult> {
-  const manifest = helperManifest(dir);
+  const manifest = checkedManifest(dir, kind, 'linux');
   const stage = mkdtempSync(join(tmpdir(), 'vigil-helper-'));
   try {
     cpSync(dir, stage, { recursive: true });
     const out = await run(PKEXEC, [
-      '/bin/sh',
-      '-c',
+      ...ROOT_SHELL,
       ELEVATED_ENTRY,
       'vigil-helper',
       ...elevatedArgs(stage, scriptFor(kind, 'linux'), manifest),
@@ -358,7 +422,7 @@ export async function runHelperScript(
   let manifest: [string, string][];
   try {
     if (platform === 'linux') return await runWithPkexec(script, dir, run);
-    manifest = helperManifest(dir);
+    manifest = checkedManifest(dir, script, 'darwin');
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }

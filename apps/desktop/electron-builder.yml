@@ -12,6 +12,8 @@ files:
   # Tray icons, loaded from out/main through `?asset` imports (../../resources/...).
   - resources/tray*.png
 asar: true
+# Turns off Electron's run-as-Node, NODE_OPTIONS and --inspect in the packaged app.
+afterPack: scripts/fuses.mjs
 mac:
   category: public.app-category.utilities
   icon: resources/icon.png
