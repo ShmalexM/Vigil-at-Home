@@ -40,8 +40,10 @@ mac:
       to: licenses
     # electron-builder drops Electron's and Chromium's licenses from mac builds
     # (Linux keeps them); build-helper.mjs copies them here.
-    - from: build/electron-licenses
-      to: .
+    - from: build/electron-licenses/LICENSE.electron.txt
+      to: LICENSE.electron.txt
+    - from: build/electron-licenses/LICENSES.chromium.html
+      to: LICENSES.chromium.html
     - from: ../../LICENSE
       to: LICENSE
     - from: ../../NOTICE

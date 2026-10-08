@@ -165,10 +165,15 @@ function devDir(arch) {
  * fail loudly instead. electron-builder.yml ships build/electron-licenses.
  */
 function electronLicenses() {
-  const dist = join(
-    dirname(createRequire(join(app, 'package.json')).resolve('electron/package.json')),
-    'dist',
+  const electron = dirname(
+    createRequire(join(app, 'package.json')).resolve('electron/package.json'),
   );
+  const dist = join(electron, 'dist');
+  // CI installs can skip Electron's own download (electron-builder fetches its
+  // own copy), so fetch it the way Electron's postinstall does.
+  if (!existsSync(join(dist, 'LICENSES.chromium.html'))) {
+    execFileSync(process.execPath, [join(electron, 'install.js')], { stdio: 'inherit' });
+  }
   const dir = join(app, 'build', 'electron-licenses');
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
