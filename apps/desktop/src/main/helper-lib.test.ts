@@ -389,6 +389,22 @@ echo "$a $b"
     expect(versions(w)).not.toContain(ids['v0']);
   });
 
+  it('keeps a version another run just switched away from, for an hour', () => {
+    const w = world();
+    for (const t of ['o', 'x']) expect(install(w, t).status).toBe(0);
+    const ids = built(w);
+    // O is current and old, X a complete leftover.
+    switchTo(w, ids['o']!);
+    for (const v of versions(w)) age(versionDir(w, v));
+    // A switches O to A and keeps O; B, overlapping, switches A to B and only
+    // knows it replaced A. O must still survive B's prune.
+    expect(install(w, 'a').status).toBe(0);
+    const r = install(w, 'b');
+    expect(r.status, r.stderr).toBe(0);
+    expect(current(w)).toBe('b');
+    expect(versions(w)).toContain(ids['o']);
+  });
+
   it('reads current again right before each removal', () => {
     const w = world();
     for (const t of ['a', 'b', 'c', 'd', 'e']) expect(install(w, t).status).toBe(0);

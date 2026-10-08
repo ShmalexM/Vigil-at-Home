@@ -137,11 +137,17 @@ vh_switch() {
   # Note what `current` names now: a launcher may have just read it and be
   # about to run that version, so vh_finish keeps it.
   vh_current
-  [ -z "$VH_CURRENT" ] || VH_REPLACED="$VH_REPLACED $VH_CURRENT"
+  _was=$VH_CURRENT
+  [ -z "$_was" ] || VH_REPLACED="$VH_REPLACED $_was"
   _tmp=$DEST/.current.tmp.$$
   vh_remove "$_tmp"
   ln -s "versions/$1" "$_tmp"
   vh_mv_replace "$_tmp" "$DEST/current"
+  # Start the replaced version's grace period now, so every run, not only
+  # this one, keeps it for an hour after it stopped being current.
+  if [ -n "$_was" ] && [ -d "$DEST/versions/$_was" ] && [ ! -L "$DEST/versions/$_was" ]; then
+    touch -c "$DEST/versions/$_was"
+  fi
   vh_current
   if [ -z "$VH_CURRENT" ] || ! vh_complete "$DEST/versions/$VH_CURRENT"; then
     vh_die "Couldn't switch $DEST/current."
@@ -157,7 +163,9 @@ vh_switch() {
 #   - `current` doesn't point to it, read again right before each removal,
 #     since another run may have switched it meanwhile;
 #   - this run's switch didn't move `current` away from it (VH_REPLACED): a
-#     launcher that read `current` just before the switch runs it.
+#     launcher that read `current` just before the switch runs it. Every
+#     switch also touches the version it replaced, so the grace period above
+#     counts from when it stopped being current, for overlapping runs too.
 # Anything else in versions/ (a symlink or a file) is never made by an
 # install, so it goes whatever its age, unless `current` points to it.
 # Symlinks are removed, never followed.
