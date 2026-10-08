@@ -157,6 +157,18 @@ export const REAL_LOCAL_READS = [
   `curl -s -m 3 http://localhost:11434/api/tags | python3 -c "import sys,json; print(json.load(sys.stdin))"`,
 ];
 
+/** A system shell started as Claude Code's Bash tool starts it: argv[0] is the full path. */
+export const agentShell = (cmd: string, path = '/bin/zsh', flags: string[] = ['-c']) =>
+  proc({
+    path,
+    args: [path, ...flags, cmd],
+    signing: 'apple',
+    parentPath: '/Users/alex/.local/share/claude/versions/2.1.0',
+  });
+
+/** The cwd file Claude Code's harness writes, in the macOS per-user temp folder. */
+export const HARNESS_CWD = '/var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/T/claude-ab12-cwd';
+
 /**
  * Download-and-run shapes main's download-pipe-to-shell rule misses (an
  * adversarial review's round 4). The shadow rule download-then-run records them.

@@ -5,16 +5,23 @@ import { macosCoreRules } from '../packs/macos-core.js';
 import { deobfuscate, downloadsAndRuns, unwrapHarness } from '../rules/download-run.js';
 import { memoryStores } from '../state/stores.js';
 import type { DetectionRuleInput } from '../types.js';
-import { DOWNLOAD_RUN_GAPS, exec, proc, REAL_LOCAL_READS, shell } from './fixtures.js';
+import {
+  agentShell,
+  DOWNLOAD_RUN_GAPS,
+  exec,
+  HARNESS_CWD,
+  proc,
+  REAL_LOCAL_READS,
+} from './fixtures.js';
 
 const RULE = 'download-then-run';
 const MAIN = 'download-pipe-to-shell';
 const wrapped = (c: string) =>
-  `source /Users/alex/.claude/shell-snapshots/snapshot-zsh-1759-ab12.sh && eval '${c.replace(/'/g, "'\\''")}' < /dev/null && pwd -P >| /var/folders/x/T/claude-ab12-cwd`;
+  `source /Users/alex/.claude/shell-snapshots/snapshot-zsh-1759-ab12.sh && eval '${c.replace(/'/g, "'\\''")}' < /dev/null && pwd -P >| ${HARNESS_CWD}`;
 const evald = (c: string) => `eval '${c.replace(/'/g, "'\\''")}'`;
 
 const run = (rules: DetectionRuleInput[], c: string, name = 'zsh') =>
-  new DetectionEngine(rules, memoryStores()).evaluate(exec(shell(c, name)));
+  new DetectionEngine(rules, memoryStores()).evaluate(exec(agentShell(c, `/bin/${name}`)));
 const records = (c: string) => {
   const mac = run(macosCoreRules, c).find((d) => d.match.ruleId === RULE);
   const linux = run(linuxCoreRules, c, 'bash').find((d) => d.match.ruleId === RULE);
@@ -109,6 +116,15 @@ describe('download-then-run (shadow)', () => {
     // Two quoted arguments are not the wrapper: eval stays a vector.
     expect(unwrapHarness("eval 'curl u |' 'x'")).toBe("eval 'curl u |' 'x'");
     expect(downloadsAndRuns("eval 'curl u -o f' 'x'")).toBe(true);
+    // The same pinned paths as the quiet lines: a loose cwd file is not the wrapper.
+    const loose = wrapped('curl -s u -o f').replace(
+      HARNESS_CWD,
+      '/var/folders/x/T/claude-ab12-cwd',
+    );
+    expect(unwrapHarness(loose)).toBe(loose);
+    expect(downloadsAndRuns(loose)).toBe(true);
+    const home = wrapped('curl -s u -o f').replace('/Users/alex', '/Users/a b');
+    expect(unwrapHarness(home)).toBe(home);
   });
 
   it('stays quiet on the real Claude Code lines, bare and wrapped', () => {

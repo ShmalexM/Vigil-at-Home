@@ -29,7 +29,8 @@ const COMPUTED: Record<string, FieldGetter> = {
    * A shell running exactly one of Claude Code's real local-service reads
    * (see rules/quiet-lines.ts). The download-run rule stays quiet on these.
    */
-  'process.quietDownloadLine': (e) => ('process' in e ? runsQuietLine(e.process?.args) : undefined),
+  'process.quietDownloadLine': (e) =>
+    'process' in e ? runsQuietLine(e.process?.path, e.process?.args) : undefined,
   /**
    * The process's arguments (after its own name) download something and have
    * any way to run code (see rules/download-run.ts). Meant for shells; the

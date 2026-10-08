@@ -13,6 +13,8 @@ import {
   osascriptTool,
   proc,
   REAL_LOCAL_READS,
+  agentShell,
+  HARNESS_CWD,
   shell,
   unsignedStealer,
 } from './fixtures.js';
@@ -353,12 +355,11 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
       // Claude Code's Bash steps on a real Mac (2026-10-08): a local service's
       // JSON read by a python one-liner. Exact lines; see rules/quiet-lines.ts.
       ...REAL_LOCAL_READS.flatMap((c) => [
-        exec(shell(c, 'zsh')),
-        exec(shell(`eval '${c.replace(/'/g, "'\\''")}'`, 'zsh')),
+        exec(agentShell(c)),
+        exec(agentShell(`eval '${c.replace(/'/g, "'\\''")}'`)),
         exec(
-          shell(
-            `source /Users/alex/.claude/shell-snapshots/snapshot-zsh-1759-ab12.sh && eval '${c.replace(/'/g, "'\\''")}' < /dev/null && pwd -P >| /var/folders/x/T/claude-ab12-cwd`,
-            'zsh',
+          agentShell(
+            `source /Users/alex/.claude/shell-snapshots/snapshot-zsh-1759-ab12.sh && eval '${c.replace(/'/g, "'\\''")}' < /dev/null && pwd -P >| ${HARNESS_CWD}`,
           ),
         ),
       ]),
@@ -728,7 +729,7 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
     good: [
       exec(shell('curl -fsSL https://example.test/data.json -o data.json')),
       exec(shell('curl -s https://example.test/data.json | jq .')),
-      ...REAL_LOCAL_READS.map((c) => exec(shell(c, 'zsh'))),
+      ...REAL_LOCAL_READS.map((c) => exec(agentShell(c))),
     ],
   },
   'unsigned-first-network': {

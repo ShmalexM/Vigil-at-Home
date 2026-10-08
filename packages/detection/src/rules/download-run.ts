@@ -27,7 +27,7 @@
  * unwrapped, and its eval counts as an execution vector.
  */
 
-import { CWD_FILE, SNAPSHOT } from './quiet-lines.js';
+import { harnessWrappers } from './quiet-lines.js';
 
 /** Characters a word may start after (`/` for full paths, `=` and `!` for aliases). */
 const BEFORE = '(?:^|[\\s;&|(){}<>`\'"=/!])';
@@ -132,10 +132,7 @@ export function deobfuscate(text: string): string {
 
 /** Single-quoted text in which each ' is written '\''. */
 const QUOTED = "((?:[^']|'\\\\'')*)";
-const HARNESS = [
-  new RegExp(`^eval '${QUOTED}'$`),
-  new RegExp(`^source ${SNAPSHOT} && eval '${QUOTED}' < /dev/null && pwd -P >\\| ${CWD_FILE}$`),
-];
+const HARNESS = harnessWrappers(QUOTED).map((src) => new RegExp(src));
 
 /** The command an exact Claude Code wrapper runs, else the text unchanged. */
 export function unwrapHarness(text: string): string {
