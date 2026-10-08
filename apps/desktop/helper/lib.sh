@@ -24,6 +24,7 @@ VH_CHOWN=1          # 0 only in tests, which don't run as root
 VH_OS=$(uname -s)
 VH_VERSION=
 VH_CURRENT=
+VH_REPLACED= # the versions this run's switches moved `current` away from
 
 vh_die() {
   echo "$*" >&2
@@ -133,6 +134,10 @@ vh_current() {
 vh_switch() {
   case $1 in '' | */* | .*) vh_die "Bad helper version: $1" ;; esac
   vh_complete "$DEST/versions/$1" || vh_die "$DEST/versions/$1 is not a complete helper."
+  # Note what `current` names now: a launcher may have just read it and be
+  # about to run that version, so vh_finish keeps it.
+  vh_current
+  [ -z "$VH_CURRENT" ] || VH_REPLACED="$VH_REPLACED $VH_CURRENT"
   _tmp=$DEST/.current.tmp.$$
   vh_remove "$_tmp"
   ln -s "versions/$1" "$_tmp"
@@ -150,10 +155,19 @@ vh_switch() {
 #   - it isn't one of the two newest complete versions (the running one and
 #     the one before it, kept so there is something to go back to);
 #   - `current` doesn't point to it, read again right before each removal,
-#     since another run may have switched it meanwhile.
+#     since another run may have switched it meanwhile;
+#   - this run's switch didn't move `current` away from it (VH_REPLACED): a
+#     launcher that read `current` just before the switch runs it.
 # Anything else in versions/ (a symlink or a file) is never made by an
 # install, so it goes whatever its age, unless `current` points to it.
 # Symlinks are removed, never followed.
+#
+# Known limit, not guarded against: an install suspended for more than
+# VH_GRACE_MINUTES after building its version and before switching to it
+# (stopped with SIGSTOP, say) can have that version pruned by another run.
+# Its switch then fails, or, if the prune lands right after vh_switch's
+# completeness check, points `current` at a removed version. That needs an
+# installer frozen for over an hour mid-run.
 vh_finish() {
   for _p in "$DEST/node" "$DEST/helper.mjs" "$DEST.new" "$DEST".old*; do
     vh_remove "$_p"
@@ -184,6 +198,7 @@ $_name
 "*) continue ;;
       esac
       vh_is_old "$_p" || continue
+      case " $VH_REPLACED " in *" $_name "*) continue ;; esac
     fi
     vh_current
     [ -n "$VH_CURRENT" ] || vh_die "$DEST/current is missing; not removing anything more."

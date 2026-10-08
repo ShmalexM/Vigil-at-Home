@@ -7,7 +7,6 @@
 
 import {
   chmodSync,
-  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -26,6 +25,7 @@ import {
   osqueryLinuxConfig,
   osqueryLinuxFlags,
 } from '@vigil/sensors';
+import { backUpOnce } from './backup.js';
 import type { OsqueryState } from './osquery.js';
 import type { System } from './system.js';
 
@@ -74,8 +74,9 @@ export async function ensureLinuxOsquery(
   mkdirSync(dirname(p.config), { recursive: true, mode: 0o755 });
   mkdirSync(p.logDir, { recursive: true, mode: 0o755 });
   if (!isVigils(read(p.config))) {
-    for (const f of [p.config, p.flags])
-      if (existsSync(f) && !existsSync(f + BACKUP)) copyFileSync(f, f + BACKUP);
+    // First writer wins, so an install running at the same time can't
+    // replace the original with Vigil's config (see backUpOnce).
+    for (const f of [p.config, p.flags]) backUpOnce(f, f + BACKUP);
   }
   let changed = put(p.config, osqueryLinuxConfig());
   changed = put(p.flags, osqueryLinuxFlags()) || changed;
@@ -96,7 +97,14 @@ export async function ensureLinuxOsquery(
   return 'unchanged';
 }
 
-/** Stop osquery if Vigil set it up, and put back what it had before. Keeps the logs. */
+/**
+ * Stop osquery if Vigil set it up, and put back what it had before. Keeps the logs.
+ *
+ * Known limit: a removal overlapping an install can lose the original config
+ * (the removal renames the backup back while the install writes Vigil's file
+ * over it). Not guarded against, since it takes two password-approved
+ * operations running at once.
+ */
 export async function removeLinuxOsquery(
   sys: System,
   p: LinuxOsqueryPaths = defaultLinuxOsqueryPaths(),

@@ -23,6 +23,9 @@ VH_GROUP=wheel
 for f in node helper.mjs vigil-helper "$LABEL.plist" lib.sh; do
   [ -f "$SRC/$f" ] || { echo "Missing $f next to install.sh" >&2; exit 1; }
 done
+# Run as root, this sources lib.sh from beside itself, so it must not sit in
+# a folder the user can write. The app runs it from a root-owned, checked
+# copy (ELEVATED_ENTRY in helper-install.ts).
 # shellcheck source=SCRIPTDIR/lib.sh
 . "$SRC/lib.sh"
 
@@ -56,7 +59,9 @@ vh_switch "$VH_VERSION"
 
 install -d -o root -g wheel -m 755 /Library/Logs/Vigil
 
-# Point osquery at Vigil's queries, keeping any config it had before.
+# Point osquery at Vigil's queries, keeping any config it had before. Known
+# limit: an install overlapping an uninstall can lose the original config;
+# that takes two password-approved operations at once, so it isn't guarded.
 if [ -d /var/osquery ]; then
   for f in conf flags; do
     target=/var/osquery/osquery.$f

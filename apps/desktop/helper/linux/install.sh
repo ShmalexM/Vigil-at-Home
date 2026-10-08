@@ -26,6 +26,9 @@ for f in "$SRC/node" "$SRC/helper.mjs" "$SRC/lib.sh" "$HERE/vigil-helper" \
   [ -f "$f" ] || { echo "Missing $f" >&2; exit 1; }
 done
 command -v systemctl >/dev/null || { echo "The helper needs systemd." >&2; exit 1; }
+# Run as root, this sources lib.sh from beside itself, so it must not sit in
+# a folder the user can write. The app runs it from a root-owned, checked
+# copy (ELEVATED_ENTRY in helper-install.ts).
 # shellcheck source=SCRIPTDIR/../lib.sh
 . "$SRC/lib.sh"
 

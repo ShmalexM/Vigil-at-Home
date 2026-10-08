@@ -369,6 +369,26 @@ echo "$a $b"
     expect(tagOf(w, v0!)).toBe(current(w));
   });
 
+  it('keeps the version current named just before this run switched away from it', () => {
+    const w = world();
+    for (const t of ['v0', 'v1']) expect(install(w, t).status).toBe(0);
+    const ids = built(w);
+    // V0 is current and old (as after going back to it), V1 a complete leftover.
+    switchTo(w, ids['v0']!);
+    for (const v of versions(w)) age(versionDir(w, v));
+    // V2 installs: V1 and V2 are the newest two, and V0 is neither young nor
+    // current any more, but a launcher may have read current=V0 just before
+    // the switch and be about to run it.
+    const r = install(w, 'v2');
+    expect(r.status, r.stderr).toBe(0);
+    expect(current(w)).toBe('v2');
+    expect(versions(w)).toEqual([ids['v0'], ids['v1'], built(w)['v2']].sort());
+    // The next run, which switched away from V2 instead, lets V0 go.
+    for (const v of versions(w)) age(versionDir(w, v));
+    expect(install(w, 'v3').status).toBe(0);
+    expect(versions(w)).not.toContain(ids['v0']);
+  });
+
   it('reads current again right before each removal', () => {
     const w = world();
     for (const t of ['a', 'b', 'c', 'd', 'e']) expect(install(w, t).status).toBe(0);

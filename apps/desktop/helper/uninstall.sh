@@ -17,6 +17,9 @@ DEST=$TOOLS/vigil-helper.d
 LABEL=com.vigilathome.helper
 VH_GROUP=wheel
 [ -f "$SRC/lib.sh" ] || { echo "Missing lib.sh next to uninstall.sh" >&2; exit 1; }
+# Run as root, this sources lib.sh from beside itself, so it must not sit in
+# a folder the user can write. The app runs it from a root-owned, checked
+# copy (ELEVATED_ENTRY in helper-install.ts).
 # shellcheck source=SCRIPTDIR/lib.sh
 . "$SRC/lib.sh"
 

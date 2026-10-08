@@ -1,8 +1,17 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import type { HelperInstallResult } from '../shared/ipc.js';
 
 const hasHelper = (dir: string) =>
@@ -26,15 +35,6 @@ export function helperBundleDir(
 /** Shell-quote one argument for a command the user pastes into Terminal. */
 export function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
-}
-
-/** The script that installs or removes the helper on this OS. */
-export function helperScript(
-  dir: string,
-  kind: 'install' | 'uninstall',
-  platform: NodeJS.Platform = process.platform,
-): string {
-  return platform === 'linux' ? join(dir, 'linux', `${kind}.sh`) : join(dir, `${kind}.sh`);
 }
 
 /** The root-owned folder install.sh keeps the helper's versions in. */
@@ -139,17 +139,119 @@ export function helperMatch(
   return { installed: same ? 'current' : 'outdated', bundle };
 }
 
+/**
+ * The first command that runs as root, for every way the helper is installed
+ * or removed. The helper files sit in a folder the user can write (the app,
+ * or on Linux a copy of it, since root can't read an AppImage's mount), and a
+ * process running as the user could swap one (lib.sh for a symlink, say)
+ * while the password dialog is up. So nothing elevated runs from there: this
+ * fixed snippet, passed inline rather than read from any file, copies each
+ * listed file into a new root-owned folder (mktemp -d, mode 700), refusing
+ * symlinks and anything but regular files, and checks each copy against the
+ * SHA-256 the app computed beforehand. Only then does it run the copied
+ * script, which sources lib.sh from beside itself, inside that folder.
+ *
+ * Arguments: the folder to copy from, the script to run (relative to it),
+ * then pairs of a file (relative) and its SHA-256.
+ *
+ * The remaining limit: a process running as the user that can already change
+ * the app itself can change what the app hashes and passes here. That is out
+ * of scope; this guards the files between the app checking them and root
+ * running them.
+ *
+ * One line per statement, each ending in `;` or a keyword, so it is joined
+ * into a single line that also pastes into Terminal.
+ */
+export const ELEVATED_ENTRY = [
+  'set -eu;',
+  'PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; umask 077;',
+  'src=$1; script=$2; shift 2;',
+  'vh_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; };',
+  'vh_refuse() { echo "Not running the helper script: $*" >&2; exit 1; };',
+  'd=$(mktemp -d /tmp/vigil-helper.XXXXXX);',
+  `trap 'rm -rf "$d"' EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM;`,
+  'found=;',
+  'while [ "$#" -ge 2 ]; do',
+  'f=$1; want=$2; shift 2;',
+  'case $f in "" | /* | -* | *..* | *[!A-Za-z0-9._/-]*) vh_refuse "bad file name $f" ;; esac;',
+  'if [ -L "$src/$f" ] || [ ! -f "$src/$f" ]; then vh_refuse "$f is not a regular file"; fi;',
+  'case $f in */*) mkdir -p "$d/${f%/*}" ;; esac;',
+  'cat <"$src/$f" >"$d/$f";',
+  'got=$(vh_sha <"$d/$f"); got=${got%% *};',
+  '[ "$got" = "$want" ] || vh_refuse "$f changed after Vigil checked it";',
+  '[ "$f" != "$script" ] || found=1;',
+  'done;',
+  'if [ "$#" -ne 0 ] || [ -z "$found" ]; then vh_refuse "$script was not among the files checked"; fi;',
+  'status=0; /bin/sh "$d/$script" || status=$?; exit "$status"',
+].join(' ');
+
+const hashCache = new Map<string, string>();
+
+/** SHA-256 of a file, remembered while its size and time stay the same (node is large). */
+function sha256(path: string): string {
+  const st = statSync(path);
+  const key = `${path}\0${st.ino}\0${st.size}\0${st.mtimeMs}`;
+  let h = hashCache.get(key);
+  if (!h) {
+    h = createHash('sha256').update(readFileSync(path)).digest('hex');
+    hashCache.set(key, h);
+  }
+  return h;
+}
+
+/**
+ * Every file in the helper folder, relative to it, with its SHA-256, for
+ * ELEVATED_ENTRY. A symlink or anything but a regular file or folder there is
+ * an error: the entry would refuse it anyway.
+ */
+export function helperManifest(dir: string): [string, string][] {
+  const out: [string, string][] = [];
+  const walk = (d: string) => {
+    for (const name of readdirSync(d).sort()) {
+      const path = join(d, name);
+      const st = lstatSync(path);
+      if (st.isDirectory()) walk(path);
+      else if (st.isFile()) out.push([relative(dir, path), sha256(path)]);
+      else throw new Error(`${path} in the helper folder is not a regular file`);
+    }
+  };
+  walk(dir);
+  return out;
+}
+
+/** The script for this OS, relative to the helper folder. */
+function scriptFor(kind: 'install' | 'uninstall', platform: NodeJS.Platform): string {
+  return platform === 'linux' ? `linux/${kind}.sh` : `${kind}.sh`;
+}
+
+/** ELEVATED_ENTRY's arguments: copy from `src`, run `script`, check these files. */
+export function elevatedArgs(src: string, script: string, manifest: [string, string][]): string[] {
+  return [src, script, ...manifest.flat()];
+}
+
 /** The Terminal command that installs the helper, for the setup wizard. */
 export function helperInstallCommand(
   dir = helperBundleDir(),
   platform: NodeJS.Platform = process.platform,
 ): string | undefined {
   if (!dir) return undefined;
+  let manifest: [string, string][];
+  try {
+    manifest = helperManifest(dir);
+  } catch {
+    return undefined;
+  }
+  const script = scriptFor('install', platform);
+  const checks = manifest
+    .flat()
+    .map((a) => shellQuote(a))
+    .join(' ');
+  const entry = `sudo /bin/sh -c ${shellQuote(ELEVATED_ENTRY)} vigil-helper`;
   // Linux: root can't read an AppImage's mount, so copy the helper out first,
-  // as runWithPkexec does; `sh` runs the script whatever its permissions.
+  // as runWithPkexec does. The entry checks the copy before root runs any of it.
   if (platform === 'linux')
-    return `d=$(mktemp -d) && cp -R ${shellQuote(dir)}/. "$d" && sudo sh "$d/linux/install.sh"`;
-  return `sudo ${shellQuote(helperScript(dir, 'install', platform))}`;
+    return `d=$(mktemp -d) && cp -R ${shellQuote(dir)}/. "$d" && ${entry} "$d" ${script} ${checks}`;
+  return `${entry} ${shellQuote(dir)} ${script} ${checks}`;
 }
 
 const PROMPTS = {
@@ -161,19 +263,29 @@ const PROMPTS = {
 } as const;
 
 /**
- * The osascript arguments that run one of the bundled scripts as root. macOS
- * shows its own password dialog. The script path goes in as an argument and
- * through AppleScript's `quoted form of`, so no path can break out of it.
+ * The osascript arguments that run ELEVATED_ENTRY as root with `args`. macOS
+ * shows its own password dialog. The entry and every argument go in as
+ * arguments and through AppleScript's `quoted form of`, so no path can break
+ * out of them.
  */
-export function adminScriptArgs(script: string, kind: keyof typeof PROMPTS): string[] {
+export function adminScriptArgs(args: string[], kind: keyof typeof PROMPTS): string[] {
   return [
     '-e',
     'on run argv',
     '-e',
-    `do shell script (quoted form of item 1 of argv) with prompt ${JSON.stringify(PROMPTS[kind])} with administrator privileges`,
+    'set cmd to "/bin/sh -c " & quoted form of (item 1 of argv) & " vigil-helper"',
+    '-e',
+    'repeat with a in rest of argv',
+    '-e',
+    'set cmd to cmd & " " & quoted form of (a as text)',
+    '-e',
+    'end repeat',
+    '-e',
+    `do shell script cmd with prompt ${JSON.stringify(PROMPTS[kind])} with administrator privileges`,
     '-e',
     'end run',
-    script,
+    ELEVATED_ENTRY,
+    ...args,
   ];
 }
 
@@ -198,17 +310,25 @@ export const PKEXEC = '/usr/bin/pkexec';
 /**
  * Linux: run the script as root through pkexec, which shows the desktop's own
  * password dialog. An AppImage's files sit on a FUSE mount that root can't
- * read, so the helper files are copied to a private temporary folder first.
+ * read, so the helper files are copied to a private temporary folder first;
+ * ELEVATED_ENTRY checks them against hashes taken from the app's own files.
  */
 async function runWithPkexec(
   kind: 'install' | 'uninstall',
   dir: string,
   run: RunFile,
 ): Promise<HelperInstallResult> {
+  const manifest = helperManifest(dir);
   const stage = mkdtempSync(join(tmpdir(), 'vigil-helper-'));
   try {
     cpSync(dir, stage, { recursive: true });
-    const out = await run(PKEXEC, ['/bin/sh', helperScript(stage, kind, 'linux')]);
+    const out = await run(PKEXEC, [
+      '/bin/sh',
+      '-c',
+      ELEVATED_ENTRY,
+      'vigil-helper',
+      ...elevatedArgs(stage, scriptFor(kind, 'linux'), manifest),
+    ]);
     if (out.code === 0) return { ok: true };
     // pkexec exits 126 when the password dialog is closed, 127 when not allowed.
     if (out.code === 126) return { ok: false, error: 'cancelled' };
@@ -235,8 +355,17 @@ export async function runHelperScript(
   }
   if (!dir) return { ok: false, error: 'This build of Vigil does not include the helper' };
   const script = kind === 'uninstall' ? 'uninstall' : 'install';
-  if (platform === 'linux') return runWithPkexec(script, dir, run);
-  const out = await run('/usr/bin/osascript', adminScriptArgs(join(dir, `${script}.sh`), kind));
+  let manifest: [string, string][];
+  try {
+    if (platform === 'linux') return await runWithPkexec(script, dir, run);
+    manifest = helperManifest(dir);
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+  const out = await run(
+    '/usr/bin/osascript',
+    adminScriptArgs(elevatedArgs(dir, scriptFor(script, 'darwin'), manifest), kind),
+  );
   if (out.code === 0) return { ok: true };
   // osascript reports a closed password dialog as error -128.
   if (/-128/.test(out.stderr)) return { ok: false, error: 'cancelled' };
