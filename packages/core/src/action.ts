@@ -197,6 +197,12 @@ export const ActionRecord = z.object({
       at: Timestamp,
       error: z.string().optional(),
       quarantineId: Id.optional(),
+      /**
+       * Nothing was changed: the helper wasn't connected when this ran, so it
+       * was only logged. Recorded per action, so what the app says later
+       * follows what happened then, not whether the helper is connected now.
+       */
+      simulated: z.literal(true).optional(),
     })
     .optional(),
   /** Set when this record undoes an earlier one. */

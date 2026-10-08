@@ -1,4 +1,6 @@
-import type { Action, ActionRecord, ActionProposal } from '@vigil/core';
+import type { Action, ActionRecord, ActionProposal, Alert } from '@vigil/core';
+import { needsDecision } from '../../shared/attention';
+import { pileMates } from '../../shared/piles';
 
 /**
  * Words for the decision buttons, so each one says what it does ("Resume
@@ -95,4 +97,35 @@ export function containLabel(pending: readonly ActionProposal[]): string {
     default:
       return 'Block it';
   }
+}
+
+/** This action only ran as a simulation: the helper wasn't connected at the time. */
+export function isSimulated(r: ActionRecord): boolean {
+  return r.result?.simulated === true;
+}
+
+/**
+ * Whether what holds this alert was only simulated: every containment still
+ * in force ran without the helper. Decided from the alert's own records, so
+ * a real block stays "blocked" through a dropped connection, and a simulated
+ * one doesn't turn real when the helper is installed later.
+ */
+export function containmentSimulated(alert: Alert, actions: readonly ActionRecord[]): boolean {
+  const active = activeContainment(actions);
+  return alert.containment === 'active' && active.length > 0 && active.every(isSimulated);
+}
+
+/**
+ * How many other decisions wait besides this alert, counted like Needs you
+ * (a pile is one). When this alert is in a pile, its siblings stay a row of
+ * their own after it's decided, so the pile still counts.
+ */
+export function othersNeedingYou(
+  alert: Alert,
+  needsYou: number,
+  openAlerts: readonly Alert[],
+): number {
+  if (!needsDecision(alert)) return needsYou;
+  const inPile = pileMates(alert, openAlerts.filter(needsDecision)).length > 1;
+  return Math.max(0, inPile ? needsYou : needsYou - 1);
 }

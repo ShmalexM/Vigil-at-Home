@@ -5,7 +5,7 @@ import { DecisionControls } from '../components/Decision';
 import { Shield } from '../components/Shield';
 import { Button, Chip, IconButton, SeverityMark, StatusMark } from '../components/ui';
 import { describeAction, headline, timeAgo } from '../format';
-import { needsDecision } from '../../../shared/attention';
+import { containmentSimulated, isSimulated, othersNeedingYou } from '../decision';
 
 /**
  * The always-on-top detection popup. It appears without taking focus, says
@@ -32,14 +32,17 @@ export function Popup({ initialId }: { initialId: string }) {
 
   const [detail] = useLive(() => vigil.getAlertDetail(id), id);
   const [status] = useLive(() => vigil.getStatus());
+  const [open] = useLive(() => vigil.listAlerts('open'));
 
   if (!detail) return null;
   const { alert, actions, proposals } = detail;
   const pending = proposals.filter((p) => p.status === 'pending');
   const contained = alert.containment === 'active';
   // The same count as Needs you everywhere else: decisions only, a pile once.
-  const others = Math.max(0, (status?.needsYou ?? 0) - (needsDecision(alert) ? 1 : 0));
-  const simulated = !!status?.dryRun && contained;
+  const others = othersNeedingYou(alert, status?.needsYou ?? 0, open ?? []);
+  const simulated = containmentSimulated(alert, actions);
+  const shown = actions.filter((r) => !r.undoes);
+  const allSimulated = shown.length > 0 && shown.every(isSimulated);
   const decided = !!alert.decision;
 
   return (
@@ -70,7 +73,7 @@ export function Popup({ initialId }: { initialId: string }) {
           {simulated && (
             <Chip
               tone="fair"
-              title="The Vigil helper is not installed, so nothing was actually changed"
+              title="The Vigil helper wasn’t connected when this ran, so nothing was actually changed"
             >
               Simulated
             </Chip>
@@ -90,29 +93,32 @@ export function Popup({ initialId }: { initialId: string }) {
           <span className="t-label">
             {actions.length === 0
               ? 'Vigil suggests'
-              : status?.dryRun
+              : allSimulated
                 ? 'What Vigil would have done'
                 : 'What Vigil did'}
           </span>
-          {actions
-            .filter((r) => !r.undoes)
-            .map((r) => (
-              <div key={r.id} className="row">
-                <StatusMark
-                  state={
-                    r.status === 'done'
-                      ? 'done'
-                      : r.status === 'pending'
-                        ? 'running'
-                        : r.status === 'undone'
-                          ? 'warn'
-                          : 'failed'
-                  }
-                  label={r.status}
-                />
-                <span className="grow ellipsis">{describeAction(r.action)}</span>
-              </div>
-            ))}
+          {shown.map((r) => (
+            <div key={r.id} className="row">
+              <StatusMark
+                state={
+                  r.status === 'done'
+                    ? isSimulated(r)
+                      ? 'warn'
+                      : 'done'
+                    : r.status === 'pending'
+                      ? 'running'
+                      : r.status === 'undone'
+                        ? 'warn'
+                        : 'failed'
+                }
+                label={r.status === 'done' && isSimulated(r) ? 'Simulated' : r.status}
+              />
+              <span className="grow ellipsis">
+                {describeAction(r.action)}
+                {isSimulated(r) && !allSimulated && <span className="muted"> (simulated)</span>}
+              </span>
+            </div>
+          ))}
           {actions.length === 0 &&
             pending.map((p) => (
               <div key={p.id} className="row">
