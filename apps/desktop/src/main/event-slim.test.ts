@@ -9,7 +9,7 @@ import {
 } from '@vigil/detection';
 import { ProcessEnricher } from '@vigil/sensors';
 import { describe, expect, it } from 'vitest';
-import { slimForStorage } from './event-slim.js';
+import { MAX_STORED_ARG, MAX_STORED_ARGS, slimForStorage, storedArgs } from './event-slim.js';
 
 const bytes = (e: SensorEvent) => Buffer.byteLength(JSON.stringify(e));
 const ancestors = ['zsh', 'claude', 'zsh', 'Terminal'];
@@ -204,6 +204,33 @@ describe('slimForStorage', () => {
     const treeBytes = Buffer.byteLength(JSON.stringify({ ancestors })) - 1;
     expect(bytes(matched) - bytes(plain)).toBe(treeBytes);
     expect(bytes(tagged) - bytes(plain)).toBeLessThan(treeBytes + 80);
+  });
+
+  it('stores a long command line trimmed, and a matched one whole', () => {
+    const script = 'cat > notes.md <<EOF\n' + 'line of a heredoc\n'.repeat(400) + 'EOF';
+    const wrapper = ['/bin/zsh', '-c', '-l', `source snapshot.sh && eval '${script}'`];
+    const stored = slimForStorage(git({ args: wrapper, agent: tag }), false);
+    const args = (stored as ReturnType<typeof git>).process.args!;
+    expect(args.slice(0, 3)).toEqual(['/bin/zsh', '-c', '-l']);
+    expect(args[3]!.length).toBeLessThan(MAX_STORED_ARG + 60);
+    expect(args[3]).toMatch(/^source snapshot\.sh && eval 'cat > notes\.md <<EOF/);
+    expect(args[3]).toMatch(/…\[\d+ characters not stored\]…/);
+    expect(args[3]!.endsWith("EOF'")).toBe(true);
+    expect(bytes(stored)).toBeLessThan(1500);
+    // A rule matched it: kept whole, as an alert's evidence would be.
+    expect(slimForStorage(git({ args: wrapper }), true)).toEqual(git({ args: wrapper }));
+  });
+
+  it('keeps short command lines as they are, and leaves out arguments past the budget', () => {
+    const short = ['git', 'commit', '-m', 'x'.repeat(MAX_STORED_ARG)];
+    expect(storedArgs(short)).toBe(short);
+    const many = Array.from({ length: 500 }, (_, i) => `/Users/you/src/file-${i}.ts`);
+    const kept = storedArgs(['eslint', ...many]);
+    expect(kept.slice(0, 3)).toEqual(['eslint', many[0], many[1]]);
+    expect(kept.at(-1)).toMatch(/^…\[\d+ more arguments not stored\]$/);
+    expect(kept.join('').length).toBeLessThanOrEqual(MAX_STORED_ARGS + 40);
+    const n = Number(/\d+/.exec(kept.at(-1)!)![0]);
+    expect(kept.length - 1 + n).toBe(501);
   });
 
   it('leaves events without a process alone', () => {
