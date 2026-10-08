@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 // Fails if the former company name appears anywhere in tracked files or file
-// paths. The product is Vigil / Vigil at Home; the shield mark may be used,
-// but the old name must never ship. The pattern is assembled from pieces so
+// paths. The product is Vigil / Vigil at Home, and the old name must never
+// ship. The pattern is assembled from pieces so
 // this script does not flag itself.
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
 const parts = ['deep', 'tempo'];
 const banned = new RegExp(`${parts[0]}[\\s_-]?${parts[1]}`, 'i');
-// Upstream leftovers that carried the name in short form.
+// Short-form tokens derived from the name.
 const bannedTokens = [/--dt-[a-z]/, /\bdt_[a-z]+_/];
 
 const files = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], {
