@@ -189,6 +189,8 @@ export const calls = {
   decide: z.tuple([Id, DecisionInput]),
   reopen: z.tuple([Id]),
   clearNoticed: z.tuple([z.array(Id).min(1).max(500)]),
+  /** Every Noticed alert raised up to this time (when the user opened the confirm). */
+  clearNoticedUpTo: z.tuple([z.number().int().nonnegative()]),
   undoAction: z.tuple([Id]),
   approveProposal: z.tuple([Id]),
   rejectProposal: z.tuple([Id]),
@@ -562,6 +564,7 @@ export interface CallResults {
   reopen: Alert;
   /** How many of the given alerts were cleared. */
   clearNoticed: number;
+  clearNoticedUpTo: number;
   undoAction: ActionRecord;
   approveProposal: ActionRecord;
   rejectProposal: void;

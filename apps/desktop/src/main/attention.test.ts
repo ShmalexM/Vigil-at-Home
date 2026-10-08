@@ -76,6 +76,17 @@ describe('VigilCore', () => {
     expect(core.status()).toMatchObject({ needsYou: 250, noticed: 249 });
   });
 
+  it('clears every Noticed alert up to the moment the confirm opened', async () => {
+    const { core, store } = setup();
+    for (let i = 0; i < 230; i++) store.saveAlert(alert({ id: `n${i}`, createdAt: i }));
+    store.saveAlert(alert({ id: 'later', createdAt: 500 }));
+    store.saveAlert(alert({ id: 'serious', createdAt: 5, severity: 'high' }));
+    expect(await core.clearNoticedUpTo(300)).toBe(230);
+    expect(core.status()).toMatchObject({ noticed: 1, needsYou: 1 });
+    expect(store.getAlert('later')?.decision).toBeUndefined();
+    expect(store.getAlert('serious')?.decision).toBeUndefined();
+  });
+
   it('counts exactly as needsDecision and piles do', () => {
     const { store } = setup();
     const pile = (key: string) => ({ key, who: 'claude' });

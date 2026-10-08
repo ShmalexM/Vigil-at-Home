@@ -1,6 +1,6 @@
 import type { Alert } from '@vigil/core';
 import { CircleCheck, Eye } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { vigil } from '../api';
 import { seenTimes, timeAgo } from '../format';
 import type { AlertView, WatchSummary } from '../../../shared/ipc';
@@ -83,22 +83,36 @@ export function NoticedList({
   total?: number | undefined;
 }) {
   const [busy, setBusy] = useState(false);
-  const [confirming, setConfirming] = useState(false);
+  // When the confirm opened, and how many it offered: only those are cleared.
+  const [confirm, setConfirm] = useState<{ at: number; count: number }>();
   const [cleared, setCleared] = useState<number>();
+  // The "Marked N as you" note fades after a few seconds.
+  useEffect(() => {
+    if (cleared === undefined) return;
+    const t = setTimeout(() => setCleared(undefined), 6000);
+    return () => clearTimeout(t);
+  }, [cleared]);
   if (alerts.length === 0) return null;
   const more = view === 'more';
   const shown = limit ? alerts.slice(0, limit) : alerts;
   const count = Math.max(total ?? 0, alerts.length);
+  const confirming = confirm !== undefined;
+  const ask = () => {
+    setCleared(undefined);
+    setConfirm({ at: Date.now(), count });
+  };
   const clear = async () => {
+    if (!confirm) return;
     setBusy(true);
     try {
-      setCleared(await vigil.clearNoticed(alerts.map((a) => a.id)));
+      setCleared(await vigil.clearNoticedUpTo(confirm.at));
     } finally {
       setBusy(false);
-      setConfirming(false);
+      setConfirm(undefined);
     }
   };
-  const these = alerts.length === 1 ? 'this one' : `these ${alerts.length}`;
+  const offered = confirm?.count ?? count;
+  const these = offered === 1 ? 'this one' : `all ${offered}`;
   return (
     <section className="col noticed" style={{ gap: 6 }}>
       <div className="row spread">
@@ -123,9 +137,9 @@ export function NoticedList({
               className="btn sm ghost"
               disabled={busy}
               title="Marks these as expected. Rules and blocks stay as they are."
-              onClick={() => setConfirming(true)}
+              onClick={ask}
             >
-              {alerts.length === 1 ? 'That was me' : `Those were me (${alerts.length})`}
+              {count === 1 ? 'That was me' : `Those were me (${count})`}
             </button>
           )}
         </span>
@@ -136,7 +150,7 @@ export function NoticedList({
             Mark {these} as you? They move to History as expected. Rules and blocks stay as they
             are.
           </span>
-          <button type="button" className="btn sm ghost" onClick={() => setConfirming(false)}>
+          <button type="button" className="btn sm ghost" onClick={() => setConfirm(undefined)}>
             Cancel
           </button>
           <button
@@ -146,7 +160,7 @@ export function NoticedList({
             autoFocus
             onClick={() => void clear()}
           >
-            {alerts.length === 1 ? 'Yes, that was me' : `Yes, all ${alerts.length}`}
+            {offered === 1 ? 'Yes, that was me' : `Yes, all ${offered}`}
           </button>
         </div>
       )}

@@ -230,6 +230,19 @@ export class VigilCore {
     return cleared;
   }
 
+  /**
+   * "Those were me" for every Noticed alert, not only the newest the lists
+   * loaded. Only alerts raised by `at`, when the user opened the confirm,
+   * are cleared, so anything that turned up while they read it stays.
+   */
+  async clearNoticedUpTo(at: number): Promise<number> {
+    const ids = this.store
+      .listAlerts({ status: 'open', limit: -1 })
+      .filter((a) => isNoticed(a) && a.createdAt <= at)
+      .map((a) => a.id);
+    return this.clearNoticed(ids);
+  }
+
   eventStats(): EventStats {
     return {
       ...this.store.eventStats(this.now() - HOUR),
