@@ -24,12 +24,15 @@ const PORT = '[0-9]{2,5}';
 const KEY = '(?:token|state|models|name|id)';
 /**
  * The harness's shell snapshot: `~/.claude/shell-snapshots/snapshot-<shell>-<digits>-<id>.sh`
- * in a user's home. This does not vouch for the snapshot's contents. Whoever
- * can write that file can already run code through any line main never
- * alerts on, so accepting the wrapper opens no new path.
+ * in the home of the user the shell runs as (checked in `isQuietLine`). This
+ * does not vouch for the snapshot's contents, and the path is matched as
+ * spelled, so a symlink there could point anywhere. Whoever can write that
+ * file or link can already run code through any line main never alerts on,
+ * and the cwd write is the harness's own, so accepting the wrapper opens no
+ * new path.
  */
 const SNAPSHOT =
-  '/(?:Users|home)/[A-Za-z0-9_-][A-Za-z0-9._-]*/\\.claude/shell-snapshots/snapshot-(?:zsh|bash)-[0-9]+-[a-z0-9]+\\.sh';
+  '/(?:Users|home)/(?<home>[A-Za-z0-9_-][A-Za-z0-9._-]*)/\\.claude/shell-snapshots/snapshot-(?:zsh|bash)-[0-9]+-[a-z0-9]+\\.sh';
 /** Where the harness records the cwd: the macOS per-user temp folder, or /tmp. */
 const CWD_FILE = '(?:/var/folders/[A-Za-z0-9_+-]{2}/[A-Za-z0-9_+-]+/T|/tmp)/claude-[0-9a-f]+-cwd';
 
@@ -64,9 +67,18 @@ const TEMPLATES: RegExp[] = LINES.flatMap((line) => {
   ].map((src) => new RegExp(src));
 });
 
-/** The whole string is one of the quiet templates. */
-export function isQuietLine(cmd: string): boolean {
-  return TEMPLATES.some((re) => re.test(cmd));
+/**
+ * The whole string is one of the quiet templates. The snapshot form also
+ * needs the shell's user, and its snapshot must be in that user's own home
+ * (never /Users/Shared); without a user it is not quiet.
+ */
+export function isQuietLine(cmd: string, user?: string): boolean {
+  return TEMPLATES.some((re) => {
+    const m = re.exec(cmd);
+    if (!m) return false;
+    const home = m.groups?.home;
+    return home === undefined || (home === user && home !== 'Shared');
+  });
 }
 
 /** System shells only: no Homebrew or home-folder copies. */
@@ -82,12 +94,13 @@ const SYSTEM_SHELLS = new Set([
 /**
  * The process is a system shell, with argv[0] the same path as the program,
  * started with exactly one of `-c <line>`, `-lc <line>` or `-l -c <line>`,
- * and <line> is a quiet template. Arguments are compared one by one, never
+ * and <line> is a quiet template for the shell's user. Arguments are compared one by one, never
  * joined, and any extra argument fails.
  */
 export function runsQuietLine(
   path: string | undefined,
   args: readonly string[] | undefined,
+  user?: string,
 ): boolean {
   if (!path || !args || !SYSTEM_SHELLS.has(path) || args[0] !== path) return false;
   const line =
@@ -96,5 +109,5 @@ export function runsQuietLine(
       : args.length === 4 && args[1] === '-l' && args[2] === '-c'
         ? args[3]
         : undefined;
-  return line !== undefined && isQuietLine(line);
+  return line !== undefined && isQuietLine(line, user);
 }
