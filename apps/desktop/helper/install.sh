@@ -5,6 +5,7 @@
 # Everything it installs is root-owned, so nothing running as you can change
 # what runs as root. uninstall.sh (next to this file) reverses it.
 set -eu
+umask 022
 
 if [ "$(id -u)" != 0 ]; then
   echo "Run this with sudo." >&2
@@ -17,27 +18,43 @@ DEST=$TOOLS/vigil-helper.d
 LABEL=com.vigilathome.helper
 PLIST=/Library/LaunchDaemons/$LABEL.plist
 SOCKET=/var/run/vigil-helper.sock
+VH_GROUP=wheel
 
-for f in node helper.mjs vigil-helper "$LABEL.plist"; do
+for f in node helper.mjs vigil-helper "$LABEL.plist" lib.sh; do
   [ -f "$SRC/$f" ] || { echo "Missing $f next to install.sh" >&2; exit 1; }
 done
+# shellcheck source=SCRIPTDIR/lib.sh
+. "$SRC/lib.sh"
 
-# Copy the new files first, then stop the running copy, if any, and swap them
-# in, so an update leaves the helper stopped for as short a time as possible.
-# Santa keeps enforcing the rules it already has while the helper restarts.
 install -d -o root -g wheel -m 755 "$TOOLS"
-rm -rf "$DEST.new"
-install -d -o root -g wheel -m 755 "$DEST.new"
-install -o root -g wheel -m 755 "$SRC/node" "$DEST.new/node"
-install -o root -g wheel -m 644 "$SRC/helper.mjs" "$DEST.new/helper.mjs"
-launchctl bootout "system/$LABEL" 2>/dev/null || true
-rm -rf "$DEST"
-mv "$DEST.new" "$DEST"
-install -o root -g wheel -m 755 "$SRC/vigil-helper" "$TOOLS/vigil-helper"
-install -o root -g wheel -m 644 "$SRC/$LABEL.plist" "$PLIST"
-install -d -o root -g wheel -m 755 /Library/Logs/Vigil
+# One install or removal at a time; the lock goes when this script ends.
+vh_lock_acquire
+
+# Each install adds a complete new version, DEST/versions/<id>, and then
+# points DEST/current at it in one rename. The running helper keeps its own
+# version until launchd restarts it, and no version changes once written.
+# Santa keeps enforcing the rules it already has while the helper restarts.
+vh_prepare
+vh_build "$SRC/node" "$SRC/helper.mjs"
 # A downloaded app's files carry the quarantine flag; the copies don't need it.
-xattr -cr "$DEST" "$TOOLS/vigil-helper" "$PLIST" 2>/dev/null || true
+xattr -cr "$DEST/versions/$VH_VERSION" 2>/dev/null || true
+vh_current
+PREVIOUS=$VH_CURRENT
+# Nothing uses DEST/current before the new launcher, so a first install, or
+# one over the layout from before versions, can point it at the new version now.
+[ -n "$PREVIOUS" ] || vh_switch "$VH_VERSION"
+
+# The launcher and launchd job run the helper through DEST/current, the same
+# for every version. Write them first, so the switch is the one step that
+# changes which helper runs.
+vh_lock_check
+vh_put 755 "$SRC/vigil-helper" "$TOOLS/vigil-helper"
+vh_put 644 "$SRC/$LABEL.plist" "$PLIST"
+xattr -c "$TOOLS/vigil-helper" "$PLIST" 2>/dev/null || true
+vh_switch "$VH_VERSION"
+
+launchctl bootout "system/$LABEL" 2>/dev/null || true
+install -d -o root -g wheel -m 755 /Library/Logs/Vigil
 
 # Point osquery at Vigil's queries, keeping any config it had before.
 if [ -d /var/osquery ]; then
@@ -63,4 +80,7 @@ if [ ! -S "$SOCKET" ]; then
   echo "The helper did not start. See /Library/Logs/Vigil/helper.log" >&2
   exit 1
 fi
+# Now the old files can go: those from before versions, and every version
+# but this one and the one before it.
+vh_finish "$PREVIOUS"
 echo "Vigil helper installed and running."

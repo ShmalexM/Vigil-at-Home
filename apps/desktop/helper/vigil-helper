@@ -1,3 +1,13 @@
 #!/bin/sh
-# The Vigil helper: Node and the bundled helper, both root-owned.
-exec /Library/PrivilegedHelperTools/vigil-helper.d/node /Library/PrivilegedHelperTools/vigil-helper.d/helper.mjs "$@"
+# The Vigil helper: Node and the bundled helper, both root-owned. install.sh
+# keeps each version in vigil-helper.d/versions/<id> and points
+# vigil-helper.d/current at one. Read the link once, so node and helper.mjs
+# always come from the same version.
+D=/Library/PrivilegedHelperTools/vigil-helper.d
+V=$(readlink "$D/current") || { echo "The Vigil helper isn't installed: $D/current is missing." >&2; exit 1; }
+case $V in
+  versions/*/* | versions/.* | versions/) echo "Unexpected $D/current: $V" >&2; exit 1 ;;
+  versions/*) ;;
+  *) echo "Unexpected $D/current: $V" >&2; exit 1 ;;
+esac
+exec "$D/$V/node" "$D/$V/helper.mjs" "$@"
