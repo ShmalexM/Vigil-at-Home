@@ -65,6 +65,26 @@ describe('checkHealth', () => {
     expect(starting['osquery']).toMatchObject({ state: 'ok', note: 'Starting; no events yet' });
   });
 
+  it('counts quiet only from when Vigil started or the computer woke', async () => {
+    const now = 1_000_000_000;
+    const base = {
+      installed: ['/usr/local/bin/osqueryd'],
+      procs: ['osqueryd'],
+      helper: () => 'connected' as const,
+      // Last event before a night asleep.
+      lastEventAt: () => now - 8 * 60 * 60_000,
+    };
+    const justWoke = await byId(probe({ ...base, awakeSince: () => now - 60_000 }));
+    expect(justWoke['osquery']?.state).toBe('ok');
+    const awakeAWhile = await byId(
+      probe({ ...base, awakeSince: () => now - QUIET_AFTER_MS.osquery - 60_000 }),
+    );
+    expect(awakeAWhile['osquery']).toMatchObject({
+      state: 'degraded',
+      note: 'No events for 31 minutes',
+    });
+  });
+
   it("uses the helper's own report of installs and last events", async () => {
     const now = 1_000_000_000;
     const h = await byId(

@@ -134,11 +134,19 @@ function start(): void {
     ...(demo ? { readPs: async () => [], statInstall: demoInstalled } : {}),
   });
   const windows = new Windows();
-  const probe = macProbe(
-    (source) => store.lastEventAt(source),
-    () => helper.state,
-    async () => (await helper.query<{ sensors?: HelperSensors }>('helper.status'))?.sensors ?? null,
-  );
+  // Sensors can't report while Vigil is closed or the computer sleeps, so a
+  // gap from then is not a quiet sensor.
+  let awakeSince = Date.now();
+  powerMonitor.on('resume', () => (awakeSince = Date.now()));
+  const probe = {
+    ...macProbe(
+      (source) => store.lastEventAt(source),
+      () => helper.state,
+      async () =>
+        (await helper.query<{ sensors?: HelperSensors }>('helper.status'))?.sensors ?? null,
+    ),
+    awakeSince: () => awakeSince,
+  };
 
   // A development build installs the helper that `pnpm build:helper` made.
   const helperDir = () => helperBundleDir(process.resourcesPath, devHelperDir);

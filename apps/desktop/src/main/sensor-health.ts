@@ -45,6 +45,12 @@ export interface HealthProbe {
   /** The helper's own view; it can see files and logs the app can't. */
   helperSensors?(): Promise<HelperSensors | null>;
   now(): number;
+  /**
+   * Since when Vigil has been running and the computer awake. A sensor can't
+   * send anything while the app is closed or the computer sleeps, so quiet is
+   * only counted from here.
+   */
+  awakeSince?(): number;
   /** Which OS's layers to check; defaults to macOS. */
   platform?: NodeJS.Platform;
 }
@@ -118,7 +124,7 @@ export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
     );
     const last = times.length ? Math.max(...times) : null;
     if (last === null) return { ...base, state: 'ok', note: 'Starting; no events yet' };
-    const quiet = p.now() - last;
+    const quiet = p.now() - Math.max(last, p.awakeSince?.() ?? 0);
     if (quiet > QUIET_AFTER_MS[id]) {
       return { ...base, state: 'degraded', note: `No events for ${minutes(quiet)} minutes` };
     }
