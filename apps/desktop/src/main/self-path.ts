@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 /** Where Vigil's own programs live, for the safety floor. */
@@ -19,6 +20,7 @@ export function selfPaths(
   platform: NodeJS.Platform,
   packaged: boolean,
   env: NodeJS.ProcessEnv = {},
+  realpath: (p: string) => string = realpathSync,
 ): SelfPaths {
   if (!packaged) return { app: [execPath], helper: [execPath] };
   if (platform === 'darwin') {
@@ -26,7 +28,16 @@ export function selfPaths(
     return { app: [bundle], helper: [bundle] };
   }
   const dir = dirname(execPath);
-  const image = env['APPIMAGE'];
+  // The kernel names the running image by its real path, which is what the
+  // helper compares against.
+  let image = env['APPIMAGE'];
+  if (image) {
+    try {
+      image = realpath(image);
+    } catch {
+      // Gone or unreadable: keep the name the runtime gave.
+    }
+  }
   if (image) return { app: [dir, image], helper: [image] };
   return { app: [dir], helper: [dir] };
 }

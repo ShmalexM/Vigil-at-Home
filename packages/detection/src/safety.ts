@@ -19,28 +19,40 @@ export interface SafetyConfig {
 }
 
 /**
- * Vigil's own paths, lower-cased without a trailing slash. A path with fewer
- * than two parts (`/`, `/opt`) is dropped: it would cover every program on the
- * machine, so nothing could ever be paused, killed or quarantined.
+ * macOS disks ignore case by default, so `/Applications/vigil at home.app` is
+ * Vigil too. Linux paths that differ only in case are different files.
  */
-export function selfRoots(paths: readonly string[]): string[] {
+const CASELESS = process.platform === 'darwin';
+
+/**
+ * Vigil's own paths without a trailing slash (lower-cased on macOS). A path
+ * with fewer than two parts (`/`, `/opt`) is dropped: it would cover every
+ * program on the machine, so nothing could ever be paused, killed or
+ * quarantined.
+ */
+export function selfRoots(paths: readonly string[], caseless = CASELESS): string[] {
   return paths
-    .map(selfKey)
+    .map((p) => selfKey(p, caseless))
     .filter(
       (p) => p.split('/').filter((part) => part && part !== '.' && part !== '..').length >= 2,
     );
 }
 
-/** A path lower-cased without trailing slashes, for comparing against {@link selfRoots}. */
-export function selfKey(path: string): string {
+/** A path without trailing slashes (lower-cased on macOS), for comparing against {@link selfRoots}. */
+export function selfKey(path: string, caseless = CASELESS): string {
   let end = path.length;
   while (end > 0 && path[end - 1] === '/') end--;
-  return path.slice(0, end).toLowerCase();
+  const p = path.slice(0, end);
+  return caseless ? p.toLowerCase() : p;
 }
 
 /** Whether `path` is one of `roots` (from {@link selfRoots}) or inside one. */
-export function underSelfRoot(roots: readonly string[], path: string): boolean {
-  const p = path.toLowerCase();
+export function underSelfRoot(
+  roots: readonly string[],
+  path: string,
+  caseless = CASELESS,
+): boolean {
+  const p = caseless ? path.toLowerCase() : path;
   return roots.some((s) => p === s || p.startsWith(`${s}/`));
 }
 

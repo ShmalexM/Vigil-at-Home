@@ -345,6 +345,23 @@ describe('executor on Linux', () => {
     ).rejects.toMatchObject({ code: 'refused' });
     await suspendProcess(sys, 82, { path: '/tmp/.mount_Other/app', self: [image] });
     expect(sys.signals).toEqual([{ pid: 82, signal: 'SIGSTOP' }]);
+    // Vigil's own helper processes run from the same mount.
+    sys.processes.set(83, { path: '/tmp/.mount_VigilX/vigil-at-home', started: STARTED });
+    sys.parents.set(83, 81);
+    await expect(suspendProcess(sys, 83, { self: [image] })).rejects.toMatchObject({
+      code: 'refused',
+    });
+    // A connector Vigil started, and anything it starts, can still be contained.
+    sys.processes.set(84, { path: '/usr/bin/node', started: STARTED });
+    sys.parents.set(84, 81);
+    sys.processes.set(85, { path: '/tmp/.mount_VigilX/vigil-at-home', started: STARTED });
+    sys.parents.set(85, 84);
+    await suspendProcess(sys, 84, { self: [image] });
+    await suspendProcess(sys, 85, { self: [image] });
+    // Linux paths are case-sensitive: a look-alike image is not Vigil.
+    sys.processes.set(86, { path: '/home/alex/Apps/vigil.appimage', started: STARTED });
+    await suspendProcess(sys, 86, { self: [image] });
+    expect(sys.signals.map((s) => s.pid)).toEqual([82, 84, 85, 86]);
   });
 
   it('quarantines with the Linux protected list', async () => {

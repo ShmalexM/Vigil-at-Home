@@ -27,6 +27,15 @@ describe('selfPaths', () => {
     });
     expect(p.app).toEqual(['/tmp/.mount_VigilAbc', '/home/alex/Apps/Vigil.AppImage']);
     expect(p.helper).toEqual(['/home/alex/Apps/Vigil.AppImage']);
+    // A symlinked image is named by its real path, as the kernel names it.
+    const linked = selfPaths(
+      '/tmp/.mount_VigilAbc/vigil-at-home',
+      'linux',
+      true,
+      { APPIMAGE: '/home/alex/Desktop/Vigil' },
+      () => '/home/alex/Apps/Vigil.AppImage',
+    );
+    expect(linked.helper).toEqual(['/home/alex/Apps/Vigil.AppImage']);
   });
 
   it('leaves other programs actionable on Linux', () => {

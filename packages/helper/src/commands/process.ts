@@ -63,13 +63,30 @@ export function parseLstart(lstart: string): number {
   return Date.parse(lstart.replace(/\s+/g, ' ').trim());
 }
 
-/** Linux: whether the pid or one of its ancestors runs one of Vigil's own program files. */
+/** The AppImage mount a program runs from (`/tmp/.mount_VigilXyz/`), if any. */
+function appImageMount(exe: string): string | undefined {
+  return /^(.*\/\.mount_[^/]+\/)/.exec(exe)?.[1];
+}
+
+/**
+ * Linux: whether the pid is Vigil. That is a process running one of Vigil's
+ * own program files, or one the AppImage started from its own mount (an
+ * AppImage runs Vigil from a fresh mount under /tmp on every launch). Programs
+ * Vigil starts from anywhere else, such as connectors, are not Vigil.
+ */
 function startedBySelf(sys: System, pid: number, self: readonly string[]): boolean {
   if (sys.platform !== 'linux' || !sys.procExe || !sys.procPpid || self.length === 0) return false;
+  const below: string[] = [];
   let at: number | undefined = pid;
   for (let hop = 0; hop < 16 && at !== undefined && at > 1; hop++) {
     const exe = sys.procExe(at);
-    if (exe && self.includes(exe)) return true;
+    if (!exe) return false;
+    if (self.includes(exe)) {
+      if (below.length === 0) return true;
+      const mount = appImageMount(below.at(-1)!);
+      return mount !== undefined && below.every((e) => e.startsWith(mount));
+    }
+    below.push(exe);
     at = sys.procPpid(at);
   }
   return false;

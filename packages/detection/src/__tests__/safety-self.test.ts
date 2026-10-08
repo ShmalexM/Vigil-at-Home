@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SafetyFloor, selfRoots } from '../safety.js';
+import { SafetyFloor, selfKey, selfRoots, underSelfRoot } from '../safety.js';
 
 const proc = (path: string) => ({ pid: 4242, ppid: 900, path });
 
@@ -16,5 +16,15 @@ describe('safety floor: Vigil’s own paths', () => {
       'it is Vigil itself',
     );
     expect(floor.processProtection(proc('/opt/Vigil at Home2/x'))).toBeUndefined();
+  });
+
+  it('ignores case only where the disk does (macOS)', () => {
+    const roots = selfRoots(['/Applications/Vigil at Home.app'], true);
+    expect(underSelfRoot(roots, '/applications/vigil at home.app/x', true)).toBe(true);
+    const linux = selfRoots(['/home/alex/Apps/Vigil.AppImage'], false);
+    expect(underSelfRoot(linux, selfKey('/home/alex/Apps/vigil.appimage', false), false)).toBe(
+      false,
+    );
+    expect(underSelfRoot(linux, '/home/alex/Apps/Vigil.AppImage', false)).toBe(true);
   });
 });
