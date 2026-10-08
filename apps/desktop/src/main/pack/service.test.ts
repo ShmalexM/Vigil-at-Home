@@ -445,6 +445,11 @@ describe('the pack', () => {
       expect(note!.lookedAt).toHaveLength(1);
       // The same note answers "why?" about that alert.
       expect(pack.notes({ subject: { kind: 'alert', id: 'alert-123' } })).toHaveLength(1);
+
+      // Activity's selection is a filter on the feed, not an event to file the note under.
+      handlers.push(() => ({ reply: 'It ran npm.', actions: [] }));
+      await pack.say('what did it do?', { page: 'activity', selected: 'agent-claude-code' });
+      expect(pack.notes({ dog: 'lead' })[0]).not.toHaveProperty('subject');
     });
 
     it('notes a run that failed, and a job’s findings and risk checks', async () => {

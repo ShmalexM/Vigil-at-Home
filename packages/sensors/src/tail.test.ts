@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { appendFileSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { FileTailer } from './tail.js';
 
 const dirs: string[] = [];
@@ -154,6 +154,28 @@ describe('FileTailer', () => {
         await t.stop();
       }
     }, 60_000);
+
+    it('keeps up when its folder is removed and made again', async () => {
+      const { path, lines } = setup();
+      writeFileSync(path, '');
+      const t = new FileTailer({ path, intervalMs: 100, onLine: (l) => lines.push(l) });
+      await t.start();
+      try {
+        expect(await watchReady(path, lines)).toBe(true);
+        rmSync(dirname(path), { recursive: true });
+        await new Promise((r) => setTimeout(r, 50));
+        mkdirSync(dirname(path));
+        writeFileSync(path, 'x\n');
+        expect(await until(() => lines.includes('x'))).toBe(true);
+        // No dead watch left behind slowing the fallback poll to 500 ms.
+        const start = Date.now();
+        appendFileSync(path, 'y\n');
+        expect(await until(() => lines.includes('y'))).toBe(true);
+        expect(Date.now() - start).toBeLessThan(400);
+      } finally {
+        await t.stop();
+      }
+    });
 
     it('finds a file that appears later through the fallback poll', async () => {
       const { path, lines } = setup();

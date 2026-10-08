@@ -48,6 +48,8 @@ export function ruleKey(ruleType: RuleType, identifier: string): string {
 
 export class RuleStore {
   private state: RuleStoreFile;
+  /** The last save threw, so the file may be behind memory. */
+  private unsaved = false;
 
   constructor(
     private readonly filePath?: string,
@@ -82,10 +84,12 @@ export class RuleStore {
 
   private save(): void {
     if (!this.filePath) return;
+    this.unsaved = true;
     mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 });
     const tmp = `${this.filePath}.tmp-${process.pid}`;
     writeFileSync(tmp, JSON.stringify(this.state, null, 2), { mode: 0o600 });
     renameSync(tmp, this.filePath);
+    this.unsaved = false;
   }
 
   get rev(): number {
@@ -175,6 +179,15 @@ export class RuleStore {
 
   /** Called at postflight once Santa confirms it applied rules up to `rev`. */
   markSynced(rev: number, clean: boolean, machineId?: string): void {
+    // Most syncs change nothing; don't rewrite the file for those.
+    // A save that failed is retried, though memory already matches.
+    if (
+      !this.unsaved &&
+      this.state.syncedRev === rev &&
+      !(clean && this.state.cleanSyncPending) &&
+      (machineId === undefined || this.state.syncedMachineId === machineId)
+    )
+      return;
     this.state.syncedRev = rev;
     if (machineId !== undefined) this.state.syncedMachineId = machineId;
     if (clean) this.state.cleanSyncPending = false;
