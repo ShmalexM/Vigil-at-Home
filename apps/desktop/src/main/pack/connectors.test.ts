@@ -54,7 +54,11 @@ describe('connectors', () => {
     finish({ close: async () => void (closed = true) });
     await expect(listing).rejects.toThrow('switched off');
     expect(closed).toBe(true);
-    expect(spawned.at(-1)).toEqual([4242, false]);
+    // Tagged until it really closed, and untagged once.
+    expect(spawned).toEqual([
+      [4242, true],
+      [4242, false],
+    ]);
   });
 
   it('lists a stdio server’s tools, with its read-only hints, and calls them', async () => {

@@ -59,6 +59,15 @@ const KEY_CHAT = 'pack.chat';
 const KEY_CHOICES = 'pack.toolChoices';
 /** Vigil's own tools as of the last save, so the Lead dog gets ones added later. */
 const KEY_LEAD_SEEN = 'pack.leadToolsSeen';
+/** What a Lead dog saved before that key existed had to choose from. */
+const FIRST_VIGIL_TOOLS = [
+  'vigil_status',
+  'list_alerts',
+  'get_alert',
+  'search_events',
+  'list_agents',
+  'get_agent_session',
+].map((n) => `vigil.${n}`);
 
 const MAX_PACK = 12;
 const MAX_CHAT = 200;
@@ -127,6 +136,7 @@ const ReportSchema = z.object({
     }),
   ),
   provider: z.string().optional(),
+  retry: z.boolean().optional(),
 });
 
 const DogRecord = z.object({
@@ -420,13 +430,7 @@ export class PackService {
    * arrived since (they only read). One the person took away stays away.
    */
   private withNewVigilTools(lead: Dog): Dog {
-    const seen = new Set(
-      this.o.load(
-        KEY_LEAD_SEEN,
-        z.array(z.string()),
-        lead.tools.filter((k) => k.startsWith('vigil.')),
-      ),
-    );
+    const seen = new Set(this.o.load(KEY_LEAD_SEEN, z.array(z.string()), FIRST_VIGIL_TOOLS));
     const added = this.vigilEntries()
       .map((t) => t.key)
       .filter((k) => !seen.has(k) && !lead.tools.includes(k));
@@ -1026,7 +1030,13 @@ export class PackService {
             findings: result.value.findings,
             provider: result.provider,
           }
-        : { at: this.now(), ok: false, summary: failText(result.reason), findings: [] };
+        : {
+            at: this.now(),
+            ok: false,
+            summary: failText(result.reason),
+            findings: [],
+            ...(dog.lastReport && !dog.lastReport.ok ? { retry: true } : {}),
+          };
       // A scheduled run that never reached an AI isn't a run: the card says
       // why, but the notebook and Today the pack don't count it.
       const reachedAi = result.ok || !['no_provider', 'quota'].includes(result.reason);
@@ -1078,10 +1088,10 @@ export class PackService {
       const last = d.lastReport;
       const night = hour >= 1 && hour < 5;
       // A new dog's first night is its first nightly run, and a run that
-      // failed is tried again an hour later rather than a whole period on.
+      // failed is tried once more an hour later rather than a whole period on.
       const since = at - (last?.at ?? d.createdAt);
       const due =
-        d.schedule === 'hourly' || (last && !last.ok)
+        d.schedule === 'hourly' || (last && !last.ok && !last.retry)
           ? since >= HOUR && (d.schedule !== 'nightly' || night)
           : d.schedule === 'daily'
             ? since >= 24 * HOUR

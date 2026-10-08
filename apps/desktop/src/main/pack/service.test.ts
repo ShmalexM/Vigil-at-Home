@@ -105,7 +105,7 @@ function setup(
     onChange: () => undefined,
     ...(opts.hour !== undefined ? { hour: () => opts.hour! } : {}),
   });
-  return { pack, handlers, runs, connectorCalls, vigilCalls, notebook, memory };
+  return { pack, handlers, runs, connectorCalls, vigilCalls, notebook, memory, settings };
 }
 
 const tool = (req: RunRequest<unknown>, name: string) => {
@@ -509,6 +509,34 @@ describe('the pack', () => {
     pack.updateDog('lead', { name: 'Rex', tools: ['vigil.search_events'] });
     vigil.push('list_rules');
     expect(pack.dogs()[0]!.tools).toEqual(['vigil.search_events', 'vigil.list_rules']);
+  });
+
+  it('keeps a tool the person took from a Lead dog saved before Vigil tracked new tools', () => {
+    const { pack, settings } = setup({ vigil: ['list_alerts', 'search_events'] });
+    pack.updateDog('lead', { tools: ['vigil.list_alerts'] });
+    settings.delete('pack.leadToolsSeen');
+    expect(pack.dogs()[0]!.tools).toEqual(['vigil.list_alerts']);
+  });
+
+  it('tries a failed daily run once more an hour later, then waits a day', async () => {
+    const { pack, runs } = setup();
+    const dog = pack.adopt({ ...CREATE, schedule: 'daily' } as never);
+    const start = Date.now();
+    const at = async (hours: number) => {
+      vi.useFakeTimers({ now: start + hours * 60 * 60_000, toFake: ['Date'] });
+      try {
+        await pack.runDue();
+      } finally {
+        vi.useRealTimers();
+      }
+    };
+    await at(25); // first run, fails (no AI answers)
+    await at(26.1); // one retry
+    await at(27.2); // no more until a day has passed
+    expect(runs).toHaveLength(2);
+    await at(50.2);
+    expect(runs).toHaveLength(3);
+    expect(pack.dogs().find((d) => d.id === dog.id)?.lastReport?.ok).toBe(false);
   });
 
   it('Undo on a fact the person already had leaves their line alone', async () => {

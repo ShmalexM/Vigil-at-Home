@@ -317,7 +317,9 @@ export class Connectors implements ConnectorHub {
     } catch {
       // Already gone.
     }
-    this.stopped(l);
+    // Still starting: its process runs until the connect closes it, and
+    // that stops tagging it then.
+    if (!l.connecting) this.stopped(l);
   }
 
   private stopped(l: Live): void {
