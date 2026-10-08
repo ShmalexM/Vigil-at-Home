@@ -438,6 +438,8 @@ interface PendingApproval {
   view: ToolApproval;
   /** The same dog, tool and arguments: one card, however often it is asked. */
   key: string;
+  /** What the card was asked under (heldContext): a held card counts only while it holds. */
+  context: string;
   /** The calls waiting on this card. None once a scheduled run's wait ran out. */
   waiters: Set<(d: ToolDecision) => void>;
   /** A card with no waiters stays until then, for the next run's same ask. */
@@ -462,8 +464,14 @@ export class PackService {
   private readonly now: () => number;
   private readonly runtime = new Map<string, Runtime>();
   private readonly approvals = new Map<string, PendingApproval>();
-  /** Answers given on a held card, by its key, for the next run's same call. */
-  private readonly answered = new Map<string, { decision: ToolDecision; until: number }>();
+  /**
+   * Answers given on a held card, by its key, for the next run's same call,
+   * and only under the context the card was asked under (heldContext).
+   */
+  private readonly answered = new Map<
+    string,
+    { decision: ToolDecision; until: number; dogId: string; context: string }
+  >();
   private readonly running = new Set<string>();
   private aiStatus: { at: number; value: PackAiStatus } | undefined;
   private chatting = false;
@@ -483,7 +491,9 @@ export class PackService {
   }
 
   setMode(mode: PermissionMode): void {
-    this.o.save(KEY_MODE, PermissionMode.parse(mode));
+    const next = PermissionMode.parse(mode);
+    if (next !== this.mode()) this.dropHeld(() => true);
+    this.o.save(KEY_MODE, next);
     this.changed();
   }
 
@@ -557,6 +567,14 @@ export class PackService {
 
   setToolChoice(key: string, choice: z.infer<typeof ToolChoice>): void {
     const c = { ...this.choices(), [key]: ToolChoice.parse(choice) };
+    if (c[key] !== this.choiceOf(key))
+      this.dropHeld(
+        (dogId, tool) =>
+          tool === key ||
+          !!this.dogs()
+            .find((d) => d.id === dogId)
+            ?.tools.includes(key),
+      );
     if (c[key] === 'auto') delete c[key];
     this.o.save(KEY_CHOICES, c);
     this.changed();
@@ -722,6 +740,7 @@ export class PackService {
     }
     if (d.role !== 'helper' && patch.tools !== undefined)
       next.tools = this.knownToolKeys(patch.tools);
+    if (!sameKeys(d.tools, next.tools)) this.dropHeld((dogId) => dogId === id);
     this.saveDogs(dogs.map((x) => (x.id === id ? next : x)));
   }
 
@@ -730,6 +749,7 @@ export class PackService {
     const d = dogs.find((x) => x.id === id);
     if (!d || d.role !== 'pack') throw new Error('Only pack dogs can be retired');
     this.runtime.delete(id);
+    this.dropHeld((dogId) => dogId === id);
     this.saveDogs(dogs.filter((x) => x.id !== id));
   }
 
@@ -1626,6 +1646,20 @@ export class PackService {
     }));
   }
 
+  /**
+   * A connector was added, removed, switched on or off, or changed: the held
+   * cards and answers of every dog that uses it, or was asked about one of
+   * its tools, no longer count.
+   */
+  connectorChanged(id: string): void {
+    const uses = (dogId: string) =>
+      !!this.dogs()
+        .find((d) => d.id === dogId)
+        ?.tools.some((k) => k.startsWith(`${id}.`));
+    this.dropHeld((dogId, tool) => tool.startsWith(`${id}.`) || uses(dogId));
+    this.changed();
+  }
+
   /** Lists a connector's tools now, so they can be chosen for dogs. */
   async refreshConnector(id: string): Promise<void> {
     try {
@@ -1815,11 +1849,18 @@ export class PackService {
     hold: boolean,
   ): Promise<ToolDecision> {
     const key = approvalKey(dog.id, t.key, args);
+    const context = this.heldContext(dog.id, t);
     const given = this.answered.get(key);
     this.answered.delete(key);
-    if (given && given.until > this.now()) return Promise.resolve(given.decision);
+    if (given && given.until > this.now() && given.context === context)
+      return Promise.resolve(given.decision);
     this.setMood(dog.id, 'waiting', `Wants to use ${t.title}`);
     let card = this.liveApprovals().find((a) => a.key === key);
+    // A held card asked under another mode, grant or connector is gone.
+    if (card && !card.waiters.size && card.context !== context) {
+      this.approvals.delete(card.view.id);
+      card = undefined;
+    }
     const id = card?.view.id ?? newId(this.now());
     const view: ToolApproval = {
       id,
@@ -1833,9 +1874,10 @@ export class PackService {
     };
     if (card) {
       card.view = view;
+      card.context = context;
       delete card.heldUntil;
     } else {
-      card = { view, key, waiters: new Set() };
+      card = { view, key, context, waiters: new Set() };
       this.approvals.set(id, card);
     }
     const c = card;
@@ -1859,6 +1901,40 @@ export class PackService {
     });
   }
 
+  /**
+   * What a held card and its answer are bound to: the mode, the dog's tool
+   * grant, the person's choice for the tool, and the identity and settings
+   * of every connector the dog's tools or this tool come from. A backstop
+   * for dropHeld: anything that changes one of these drops them anyway.
+   */
+  private heldContext(dogId: string, t: ToolEntry): string {
+    const tools = [...(this.dogs().find((d) => d.id === dogId)?.tools ?? [])].sort();
+    const sources = new Set([t.source, ...tools.map((k) => k.slice(0, k.indexOf('.')))]);
+    sources.delete('vigil');
+    const records = this.o.connectors.list();
+    const connectors = [...sources].sort().map((id) => {
+      const c = records.find((r) => r.id === id);
+      return c
+        ? [c.id, c.kind, c.command ?? null, c.args ?? [], c.url ?? null, c.secrets, c.enabled]
+        : [id, null];
+    });
+    return JSON.stringify([this.mode(), tools, this.choiceOf(t.key), connectors]);
+  }
+
+  /**
+   * Drops held cards (no call waits on them) and held answers for the dogs
+   * and tools `which` picks. A card a call is waiting on stays: that call is
+   * checked again before it runs (recheck).
+   */
+  private dropHeld(which: (dogId: string, tool: string) => boolean): void {
+    for (const [key, a] of this.answered) {
+      const tool = (JSON.parse(key) as [string, string])[1];
+      if (which(a.dogId, tool)) this.answered.delete(key);
+    }
+    for (const [id, a] of this.approvals)
+      if (!a.waiters.size && which(a.view.dogId, a.view.tool)) this.approvals.delete(id);
+  }
+
   /** Cards still waiting on the person, without held ones that ran out. */
   private liveApprovals(): PendingApproval[] {
     const at = this.now();
@@ -1875,7 +1951,12 @@ export class PackService {
     this.approvals.delete(id);
     // A held card's answer goes to that dog's next same call.
     if (!p.waiters.size && p.heldUntil !== undefined)
-      this.answered.set(p.key, { decision: d, until: this.now() + HELD_MS });
+      this.answered.set(p.key, {
+        decision: d,
+        until: this.now() + HELD_MS,
+        dogId: p.view.dogId,
+        context: p.context,
+      });
     // Allowed once means one call: a second same call waiting on it is refused.
     let first = true;
     for (const w of p.waiters) {
@@ -2006,6 +2087,7 @@ export class PackService {
           why: 'mode',
         },
         key: id,
+        context: '',
         waiters: new Set(),
       });
     }
@@ -2114,6 +2196,11 @@ function approvalKey(dogId: string, tool: string, args: unknown): string {
           )
         : v;
   return JSON.stringify([dogId, tool, stable(args)]);
+}
+
+function sameKeys(a: readonly string[], b: readonly string[]): boolean {
+  const x = new Set(a);
+  return x.size === new Set(b).size && b.every((k) => x.has(k));
 }
 
 function clip(s: string, n: number): string {

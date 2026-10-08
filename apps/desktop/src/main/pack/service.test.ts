@@ -8,6 +8,7 @@ import type { ConnectorHub, ConnectorRecord, RemoteTool } from './connectors.js'
 import { PackMemory } from './memory.js';
 import { Notebook } from './notebook.js';
 import { PackService, type PackAiStatus } from './service.js';
+import type { ToolApproval, ToolDecision } from '../../shared/pack.js';
 
 type Handler = (req: RunRequest<unknown>) => Promise<unknown> | unknown;
 
@@ -60,8 +61,10 @@ function setup(
   const vigilCalls: string[] = [];
   const notebook = new Notebook(new DatabaseSync(':memory:'));
   const memory = new PackMemory(new DatabaseSync(':memory:'));
+  /** The saved connectors; a test may change them. */
+  const records: ConnectorRecord[] = [GITHUB];
   const connectors: ConnectorHub = {
-    list: () => [GITHUB],
+    list: () => records,
     view: () => [],
     tools: async () => remote,
     knownTools: () => remote,
@@ -104,7 +107,17 @@ function setup(
     onChange: () => undefined,
     ...(opts.now ? { now: opts.now } : {}),
   });
-  return { pack, handlers, runs, connectorCalls, vigilCalls, notebook, memory, settings };
+  return {
+    pack,
+    handlers,
+    runs,
+    connectorCalls,
+    vigilCalls,
+    notebook,
+    memory,
+    settings,
+    records,
+  };
 }
 
 const tool = (req: RunRequest<unknown>, name: string) => {
@@ -1623,6 +1636,136 @@ describe('the pack', () => {
           } finally {
             vi.useRealTimers();
           }
+        });
+
+        describe('a held card and its answer hold only for the context they were given in', () => {
+          type Setup = ReturnType<typeof setup>;
+          const JIRA = { ...GITHUB, id: 'jira', name: 'Jira' };
+          const changes: [string, (t: Setup) => void][] = [
+            ['the mode changes', (t) => t.pack.setMode('auto')],
+            [
+              'its tools change',
+              (t) =>
+                t.pack.updateDog('dog-pip', { tools: [...WRITER.tools, 'github.list_issues'] }),
+            ],
+            [
+              'the person’s choice for the tool changes',
+              (t) => t.pack.setToolChoice('github.create_issue', 'ask'),
+            ],
+            [
+              'a connector it uses is removed and added again with the same name and another endpoint',
+              (t) => {
+                t.records.splice(0);
+                t.pack.connectorChanged('github');
+                t.records.push({ ...GITHUB, command: 'another-server' });
+                t.pack.connectorChanged('github');
+              },
+            ],
+            [
+              'a connector it uses is switched off and on again',
+              (t) => {
+                t.records[0] = { ...GITHUB, enabled: false };
+                t.pack.connectorChanged('github');
+                t.records[0] = GITHUB;
+                t.pack.connectorChanged('github');
+              },
+            ],
+            [
+              'a connector it uses is added',
+              (t) => {
+                t.records.push(JIRA);
+                t.pack.connectorChanged('jira');
+              },
+            ],
+            [
+              'a connector’s endpoint changes without notice (the context check)',
+              (t) => {
+                t.records[0] = { ...GITHUB, command: 'another-server' };
+              },
+            ],
+          ];
+          /** Pip, with a tool from a connector that is not there yet. */
+          const PIP_JIRA = { ...WRITER, tools: [...WRITER.tools, 'jira.list_issues'] };
+
+          /** A scheduled run leaves a held card; `answer` answers it, then `change` happens. */
+          const heldThen = async (
+            answer: ToolDecision | undefined,
+            change: (t: Setup) => void,
+            next: (t: Setup, card: ToolApproval, answers: unknown[]) => Promise<void>,
+          ) => {
+            let clock = 10 * 24 * 60 * MIN;
+            const t = setup({ now: () => clock });
+            t.pack.setMode('full');
+            t.settings.set('pack.dogs', [PIP_JIRA]);
+            vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+            try {
+              const answers: unknown[] = [];
+              t.handlers.push(writeRun(answers));
+              const first = t.pack.runDue();
+              await vi.waitFor(async () => expect((await t.pack.view()).approvals).toHaveLength(1));
+              vi.advanceTimersByTime(10 * MIN);
+              await first;
+              const card = (await t.pack.view()).approvals[0]!;
+              if (answer) t.pack.decideTool(card.id, answer);
+              change(t);
+              clock += 61 * MIN;
+              await next(t, card, answers);
+            } finally {
+              vi.useRealTimers();
+            }
+          };
+
+          for (const [what, change] of changes) {
+            it(`drops an allow given on a held card when ${what}`, async () =>
+              heldThen('allow-once', change, async (t, card, answers) => {
+                t.handlers.push(writeRun(answers));
+                const second = t.pack.runDue();
+                // The same write asks again, on a new card, and nothing runs meanwhile.
+                await vi.waitFor(async () =>
+                  expect((await t.pack.view()).approvals).toHaveLength(1),
+                );
+                expect((await t.pack.view()).approvals[0]!.id).not.toBe(card.id);
+                vi.advanceTimersByTime(10 * MIN);
+                await second;
+                expect(answers).toEqual([
+                  expect.stringContaining('said no'),
+                  expect.stringContaining('said no'),
+                ]);
+                expect(t.connectorCalls).toEqual([]);
+              }));
+
+            if (!what.includes('without notice'))
+              it(`drops a held card nobody answered when ${what}`, async () =>
+                heldThen(undefined, change, async (t) => {
+                  expect((await t.pack.view()).approvals).toEqual([]);
+                }));
+          }
+
+          it('keeps an answer when nothing it was given under changed', async () =>
+            heldThen(
+              'allow-once',
+              (t) => t.pack.updateDog('dog-pip', { schedule: 'hourly', name: 'Pip' }),
+              async (t, _card, answers) => {
+                t.handlers.push(writeRun(answers));
+                await t.pack.runDue();
+                expect(answers.at(-1)).toBe('ok');
+                expect(t.connectorCalls).toEqual([
+                  ['github', 'create_issue', { title: 'from the report' }],
+                ]);
+              },
+            ));
+
+          it('keeps another dog’s held card when one dog’s tools change', async () =>
+            heldThen(
+              undefined,
+              (t) => {
+                t.settings.set('pack.dogs', [PIP_JIRA, { ...TACO, id: 'dog-other' }]);
+                t.pack.updateDog('dog-other', { tools: ['vigil.list_alerts'] });
+              },
+              async (t, card) => {
+                expect((await t.pack.view()).approvals.map((a) => a.id)).toEqual([card.id]);
+              },
+            ));
         });
 
         it('shows the same write asked twice in one run once, and runs it once', async () => {

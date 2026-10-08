@@ -62,6 +62,8 @@ flowchart TD
 
 Right before any call goes out, Vigil checks again that the tool is still on, the dog still has it and isn't napping, the connector is still on, and no rule stops it. Waiting for you or for the AI can take minutes, and a change you made meanwhile wins.
 
+A scheduled run's card stays for a day after the run stops waiting, so the same write asked on a later run lands on the card it already has, and an answer you give on it goes to that dog's next same call. Such a held card and its answer count only under what they were asked under: the permission mode, the dog's tools, your choice for the tool, and the connectors the dog's tools come from. Changing the mode, the dog's tools or that choice, or adding, removing, switching or changing one of those connectors drops them, and the next same call asks again.
+
 Vigil's rules come first in every mode, Full access included. Connector calls are checked as if a watched agent's hook had asked about an MCP tool (`mcp__<connector>__<tool>`, with the arguments as the command), so the agent pre-flight rules and your own tool rules from Agents › Tool policy apply. Nothing is recorded for these checks.
 
 ## On Home and every page
