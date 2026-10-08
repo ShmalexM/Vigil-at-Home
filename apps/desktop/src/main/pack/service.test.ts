@@ -53,6 +53,8 @@ function setup(
     hour?: number;
     /** Which AI answers every run. */
     provider?: 'codex' | 'claude';
+    /** What the runner says about the Claude plan; left out, it says nothing. */
+    viaPlan?: boolean;
     rules?: PackDeps['rules'];
   } = {},
 ) {
@@ -89,6 +91,7 @@ function setup(
           value: req.output.parse(value),
           provider: opts.provider ?? 'codex',
           logId: 'x',
+          ...(opts.viaPlan !== undefined ? { viaPlan: opts.viaPlan } : {}),
         };
       },
       modelOf: () => 'gpt-5.5',
@@ -762,17 +765,43 @@ describe('the pack', () => {
 
     it('never suggests a rule change from an answer the Claude plan wrote', async () => {
       const q = queue();
+      // The Pack page cached "no plan" before the user turned it on: the run's own word counts.
       const { pack, handlers } = setup({
         rules: q.rules,
         provider: 'claude',
-        status: { leadMayUsePlan: true },
+        viaPlan: true,
+        status: { leadMayUsePlan: false },
       });
+      await pack.view();
       handlers.push(() => ({ reply: 'Suggested.', actions: [], ruleChanges: [QUIET] }));
       await pack.say('make this stop alerting');
       expect(pack.chat().at(-1)!.rules).toMatchObject([
         { status: 'failed', note: expect.stringContaining('plan only explains') },
       ]);
       expect(q.calls).toEqual([]);
+    });
+
+    it('treats a Claude answer as the plan’s when the runner did not say', async () => {
+      const q = queue();
+      const { pack, handlers } = setup({ rules: q.rules, provider: 'claude' });
+      handlers.push(() => ({ reply: 'Suggested.', actions: [], ruleChanges: [QUIET] }));
+      await pack.say('make this stop alerting');
+      expect(pack.chat().at(-1)!.rules).toMatchObject([{ status: 'failed' }]);
+      expect(q.calls).toEqual([]);
+    });
+
+    it('drafts from a Claude answer the API key wrote', async () => {
+      const q = queue();
+      const { pack, handlers } = setup({
+        rules: q.rules,
+        provider: 'claude',
+        viaPlan: false,
+        status: { leadMayUsePlan: true },
+      });
+      handlers.push(() => ({ reply: 'Suggested.', actions: [], ruleChanges: [QUIET] }));
+      await pack.say('make this stop alerting');
+      expect(pack.chat().at(-1)!.rules).toMatchObject([{ status: 'waiting' }]);
+      expect(q.calls).toHaveLength(1);
     });
 
     it('says why a draft was refused, and when the same one is already waiting', async () => {

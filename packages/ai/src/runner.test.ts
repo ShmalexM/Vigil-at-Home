@@ -115,6 +115,37 @@ describe('runner', () => {
     expect(plan.inputs).toHaveLength(1);
   });
 
+  it('says whether an answer came from the Claude plan', async () => {
+    const answer = () => ({
+      kind: 'ok' as const,
+      json: { verdict: 'benign', summary: 'ok' },
+      audit: audit(),
+    });
+    const base = defaultAiSettings('/tmp/vigil-test');
+    const onPlan = setup([fake('claude', answer)], {
+      claude: { ...base.claude, allowPlan: true },
+    }).runner;
+    expect(await onPlan.run({ ...request, requestedByUser: true })).toMatchObject({
+      provider: 'claude',
+      viaPlan: true,
+    });
+    // A run that may not use the plan goes to the key.
+    expect(await onPlan.run(request)).toMatchObject({ provider: 'claude', viaPlan: false });
+    // A subscription login is the plan.
+    const sub = setup([fake('claude', answer)], {
+      claude: { enabled: true, mode: 'subscription' },
+    }).runner;
+    expect(await sub.run({ ...request, requestedByUser: true })).toMatchObject({ viaPlan: true });
+    // Plan not allowed: the key answers.
+    const key = setup([fake('claude', answer)]).runner;
+    expect(await key.run({ ...request, requestedByUser: true })).toMatchObject({ viaPlan: false });
+    const codex = setup([fake('codex', answer)]).runner;
+    expect(await codex.run({ ...request, requestedByUser: true })).toMatchObject({
+      provider: 'codex',
+      viaPlan: false,
+    });
+  });
+
   it('skips providers that are not ready, disabled or paused by Vigil', async () => {
     const claude = fake(
       'claude',

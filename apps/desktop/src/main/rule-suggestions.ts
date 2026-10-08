@@ -1,5 +1,11 @@
 import type { RuleMode } from '@vigil/core';
-import { exclusionFor, type Detection, type Proposal, type SubmitResult } from '@vigil/detection';
+import {
+  BLOCKED_EXCLUSION,
+  exclusionFor,
+  type Detection,
+  type Proposal,
+  type SubmitResult,
+} from '@vigil/detection';
 import type { ExcludeScope, RuleSuggestionView, RuleSuggestionsView } from '../shared/ipc.js';
 import type { RuleDraft } from '../shared/pack.js';
 import type { Detector, HelperSyncOutcome } from './detection.js';
@@ -97,6 +103,10 @@ export class RuleSuggestions {
     ];
     const base = { kind, ruleId, ruleName: rule.name };
     const { pipeline } = this.detector;
+    // An alert about a program the user blocked, or a feed lists as bad, is never quieted.
+    const sha = d && 'process' in d.event ? d.event.process?.sha256 : undefined;
+    if (sha && pipeline.isBlockedHash(sha))
+      return { ...base, status: 'failed', note: BLOCKED_EXCLUSION };
     let res: SubmitResult;
     let change: string;
     if (kind === 'exclude') {

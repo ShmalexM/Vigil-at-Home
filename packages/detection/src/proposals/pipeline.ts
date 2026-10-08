@@ -134,6 +134,9 @@ export interface PipelineOptions {
   repository?: { save(rule: DetectionRule, ts: number): void };
 }
 
+export const BLOCKED_EXCLUSION =
+  "That program is on your blocked list, so Vigil won't stop alerting on it.";
+
 /** Rules about watched agents and their tool requests. Only the user tunes or retires them. */
 const USER_TUNED_TAGS = ['agent-watch', 'agent-preflight'];
 export const USER_TUNED_ONLY = 'Agent rules are tuned only by you.';
@@ -318,10 +321,13 @@ export class RulePipeline {
       return { ok: false, errors: [USER_TUNED_ONLY], warnings: [], final: true };
     if (exclusionHidesAgent(input.addExclusion))
       return { ok: false, errors: [AGENT_EXCLUSION], warnings: [] };
+    if (this.excludesBlockedHash(input.addExclusion))
+      return { ok: false, errors: [BLOCKED_EXCLUSION], warnings: [], final: true };
     const same = this.waiting(
       (p) =>
         p.kind === 'tuning' &&
         p.baseRuleId === base.id &&
+        p.baseRuleVersion === base.version &&
         canonical(p.rule.exclusions.at(-1)) === canonical(input.addExclusion),
     );
     if (same) return same;
@@ -376,7 +382,13 @@ export class RulePipeline {
         warnings: [],
       };
     }
-    const same = this.waiting((p) => p.kind === 'retire' && p.baseRuleId === base.id);
+    const same = this.waiting(
+      (p) =>
+        p.kind === 'retire' &&
+        p.baseRuleId === base.id &&
+        p.baseRuleVersion === base.version &&
+        p.retireTo === input.toMode,
+    );
     if (same) return same;
     return this.queueRetirement(base, input.toMode, input.rationale, input.evidence, provider, by);
   }
@@ -563,15 +575,37 @@ export class RulePipeline {
     return result;
   }
 
+  /** True when a sha256 is on the user's blocked list or a known-bad feed. */
+  isBlockedHash(h: string): boolean {
+    const { lists } = this.engine.stores;
+    return [h, h.toLowerCase()].some(
+      (v) => lists.has(USER_BLOCKED_HASHES, v) || lists.has('known_bad_sha256', v),
+    );
+  }
+
+  /**
+   * An exclusion that names, by sha256, a program the user confirmed malicious
+   * or a feed lists as bad, so the rule would stop alerting on it. Looks inside
+   * all/any; a `not` never carves a single program out. There is no cdhash
+   * blocklist, so cdhash exclusions are not checked here.
+   */
+  private excludesBlockedHash(c: Condition): boolean {
+    if ('all' in c) return c.all.some((x) => this.excludesBlockedHash(x));
+    if ('any' in c) return c.any.some((x) => this.excludesBlockedHash(x));
+    if (!('field' in c) || c.field !== 'process.sha256') return false;
+    if (c.op !== 'eq' && c.op !== 'in') return false;
+    const values = Array.isArray(c.value) ? c.value : [c.value];
+    return values.some((v) => typeof v === 'string' && this.isBlockedHash(v));
+  }
+
   private countConfirmedThreats(eventIds: string[], from: number, to: number): number {
     if (eventIds.length === 0) return 0;
     const ids = new Set(eventIds);
-    const { lists } = this.engine.stores;
     let n = 0;
     for (const e of this.history.range(from, to)) {
       if (!ids.has(e.id)) continue;
       const h = 'process' in e ? e.process?.sha256 : undefined;
-      if (h && (lists.has(USER_BLOCKED_HASHES, h) || lists.has('known_bad_sha256', h))) n++;
+      if (h && this.isBlockedHash(h)) n++;
     }
     return n;
   }

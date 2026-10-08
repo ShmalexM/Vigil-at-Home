@@ -73,6 +73,7 @@ export {
   ProposeRuleInput,
   ProposeTuningInput,
   ProposeRetirementInput,
+  BLOCKED_EXCLUSION,
   type Proposal,
   type ProposalStatus,
   type ProposalStore,

@@ -121,6 +121,15 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
     }
   }
 
+  /**
+   * Whether a Claude run goes to the user's plan: the run may use it and the
+   * user allows it (a subscription login implies that, as in the adapter).
+   */
+  function usesPlan(planOk: boolean): boolean {
+    const c = deps.settings.claude;
+    return planOk && (c.allowPlan ?? c.mode === 'subscription');
+  }
+
   /** One cap for everything Vigil charges to the user's keys this month, all providers together. */
   async function overMonthlyCap(id: ProviderId, planOk: boolean): Promise<boolean> {
     const cap = deps.settings.quota.apiKeyMonthlyCapUsd;
@@ -300,7 +309,14 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
           const parsed = request.output.safeParse(out.json);
           if (parsed.success) {
             record(id, 'ok', out.audit, undefined, out.usage);
-            return { ok: true, value: parsed.data, provider: id, logId, audit: out.audit };
+            return {
+              ok: true,
+              value: parsed.data,
+              provider: id,
+              logId,
+              viaPlan: id === 'claude' && usesPlan(planOk),
+              audit: out.audit,
+            };
           }
           // A bare string is a reply that never became JSON, usually one cut off
           // at the output cap. Say so, with its end, instead of a schema error.

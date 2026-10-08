@@ -297,6 +297,77 @@ describe('AI tuning proposals', () => {
     pipeline.reject(first.proposalId!, userOrigin('rules-screen'));
     expect(pipeline.submitTuning({ ...tune, addExclusion: narrow }, 'claude').ok).toBe(true);
   });
+
+  it('takes a fresh change once the rule was edited under a waiting one', () => {
+    const { pipeline, engine } = twoWeeks();
+    engine.upsertRule(baseRule);
+    const tune = { ruleId: 'unsigned-net-alert', rationale: 'Your own builds are expected.' };
+    const first = pipeline.submitTuning({ ...tune, addExclusion: narrow }, 'claude');
+    expect(first.ok).toBe(true);
+    // The user edits the rule: the waiting proposal can no longer be accepted...
+    engine.upsertRule({ ...engine.getRule('unsigned-net-alert')!, version: 9 } as never);
+    expect(() => pipeline.approve(first.proposalId!, userOrigin('rules-screen'))).toThrow(
+      /changed/,
+    );
+    // ...so the same change against the edited rule is not a duplicate of it.
+    const fresh = pipeline.submitTuning({ ...tune, addExclusion: narrow }, 'codex', 'Scout');
+    expect(fresh.ok).toBe(true);
+    expect(fresh.duplicateOf).toBeUndefined();
+    expect(pipeline.get(fresh.proposalId!)).toMatchObject({ baseRuleVersion: 9 });
+  });
+
+  it('a waiting turn-down to one mode does not swallow a turn-down to another', () => {
+    const { pipeline, engine } = twoWeeks();
+    engine.upsertRule({ ...(baseRule as object), mode: 'block' } as never);
+    const vig = pipeline.suggestDemotion({
+      ruleId: 'unsigned-net-alert',
+      to: 'alert',
+      message: 'You keep marking these safe.',
+    })!;
+    expect(vig.ok).toBe(true);
+    const retire = { ruleId: 'unsigned-net-alert', rationale: 'Noisy.', evidence: ['chat'] };
+    const shadow = pipeline.submitRetirement({ ...retire, toMode: 'shadow' }, 'codex', 'Scout');
+    expect(shadow.ok).toBe(true);
+    expect(pipeline.get(shadow.proposalId!)!.retireTo).toBe('shadow');
+    // The same mode again is still a duplicate, of the Shadow request.
+    expect(pipeline.submitRetirement({ ...retire, toMode: 'shadow' }, 'claude')).toMatchObject({
+      ok: false,
+      duplicateOf: shadow.proposalId,
+    });
+  });
+
+  it('refuses to exclude a program on the blocked list, even with no events in the window', () => {
+    const { pipeline, engine, stores } = twoWeeks();
+    engine.upsertRule(baseRule);
+    const mine = 'f'.repeat(64);
+    const feed = 'e'.repeat(64);
+    stores.lists.add('user_blocked_sha256', mine, { source: 'user', updatedAt: 0 });
+    stores.lists.add('known_bad_sha256', feed, { source: 'feed', updatedAt: 0 });
+    const tune = { ruleId: 'unsigned-net-alert', rationale: 'It is fine.' };
+    const eq = pipeline.submitTuning(
+      { ...tune, addExclusion: { field: 'process.sha256', op: 'eq', value: mine } },
+      'codex',
+      'Scout',
+    );
+    expect(eq).toMatchObject({ ok: false, final: true });
+    expect(eq.errors.join(' ')).toMatch(/on your blocked list/);
+    const inList = pipeline.submitTuning(
+      {
+        ...tune,
+        addExclusion: {
+          any: [{ field: 'process.sha256', op: 'in', value: ['a'.repeat(64), feed] }],
+        },
+      },
+      'claude',
+    );
+    expect(inList.ok).toBe(false);
+    expect(inList.errors.join(' ')).toMatch(/on your blocked list/);
+    const fine = pipeline.submitTuning(
+      { ...tune, addExclusion: { field: 'process.sha256', op: 'eq', value: 'a'.repeat(64) } },
+      'claude',
+    );
+    expect(fine.errors.join(' ')).not.toMatch(/blocked list/);
+  });
 });
 
 describe('AI proposals about agent rules', () => {

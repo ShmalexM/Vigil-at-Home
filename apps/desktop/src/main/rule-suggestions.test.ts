@@ -147,11 +147,13 @@ describe('AI rule suggestions in the app', () => {
 
   describe('drafted by the Lead dog in chat', () => {
     const scout = { provider: 'codex', name: 'Scout' };
-    async function withAlert() {
+    async function withAlert(sha256?: string) {
       const t = setup(answer);
       await t.detector.reviewRules({ force: true });
       await t.ui.accept(t.ui.view().pending[0]!.id);
-      await t.core.handleEvent(connect('paste.ee'));
+      const e = connect('paste.ee');
+      if (sha256 && 'process' in e && e.process) e.process.sha256 = sha256;
+      await t.core.handleEvent(e);
       t.core.events.flush();
       const alert = t.store.listAlerts().find((a) => t.store.getAlertDetection(a.id));
       return { ...t, alertId: alert!.id };
@@ -224,6 +226,26 @@ describe('AI rule suggestions in the app', () => {
         status: 'failed',
         note: expect.stringMatching(/no rule/),
       });
+      expect(ui.view().pending).toHaveLength(0);
+    });
+
+    it('never quiets an alert about a program on the blocked list', async () => {
+      const bad = 'f'.repeat(64);
+      const { detector, ui, alertId } = await withAlert(bad);
+      detector.engine.stores.lists.add('user_blocked_sha256', bad, {
+        source: 'user',
+        updatedAt: 0,
+      });
+      for (const req of [
+        { kind: 'exclude' as const, alertId, scope: 'this_path' as const, why: 'It is mine.' },
+        { kind: 'exclude' as const, alertId, why: 'It is mine.' },
+        { kind: 'turn-down' as const, alertId, why: 'Too noisy for me.' },
+      ]) {
+        expect(ui.draft(req, scout)).toMatchObject({
+          status: 'failed',
+          note: expect.stringMatching(/on your blocked list/),
+        });
+      }
       expect(ui.view().pending).toHaveLength(0);
     });
   });

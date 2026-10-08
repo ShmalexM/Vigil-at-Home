@@ -67,7 +67,18 @@ export function mayUsePlan(
 export type RunFailureReason = 'quota' | 'timeout' | 'invalid_output' | 'no_provider' | 'error';
 
 export type RunResult<T> =
-  | { readonly ok: true; readonly value: T; readonly provider: ProviderId; readonly logId: string }
+  | {
+      readonly ok: true;
+      readonly value: T;
+      readonly provider: ProviderId;
+      readonly logId: string;
+      /**
+       * True when the answer came from the user's Claude plan rather than a
+       * key. The runner always sets it; a result without it (unknown) should
+       * be treated as from the plan when the provider is Claude.
+       */
+      readonly viaPlan?: boolean;
+    }
   | {
       readonly ok: false;
       readonly reason: RunFailureReason;

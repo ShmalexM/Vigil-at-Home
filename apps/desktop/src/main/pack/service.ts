@@ -771,7 +771,8 @@ export class PackService {
       const actions = result.value.actions.map((a) => this.consider(a, taint !== undefined));
       const memoryChanges = this.considerMemory(result.value, taint, mine.id);
       // The Claude plan only explains: an answer it wrote proposes no rule change.
-      const viaPlan = result.provider === 'claude' && (await this.status()).leadMayUsePlan;
+      // The runner says which login it used; when it didn't say, assume the plan.
+      const viaPlan = result.provider === 'claude' && result.viaPlan !== false;
       const rules = this.draftRules(result.value, result.provider, lead.name, viaPlan);
       const about = lookingAt && subjectOf(lookingAt);
       this.note(
