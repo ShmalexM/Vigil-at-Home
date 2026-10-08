@@ -215,7 +215,9 @@ jobs:
 
   release:
     needs: [mac, linux]
-    if: needs.mac.outputs.version != ''
+    # Only a hand-started run can draft a release; a pull request's build can
+    # never reach this job, whatever its steps print.
+    if: github.event_name == 'workflow_dispatch' && needs.mac.outputs.version != ''
     runs-on: ubuntu-latest
     permissions:
       contents: write

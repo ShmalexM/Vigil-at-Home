@@ -107,6 +107,10 @@ const LINUX_FILES = [
   'com.vigilathome.helper.policy',
 ];
 
+function sha256(data) {
+  return createHash('sha256').update(data).digest('hex');
+}
+
 async function fetchOk(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
@@ -118,13 +122,6 @@ async function node(arch) {
   const target = join(dir, 'node');
   const name = `node-${HELPER_NODE_VERSION}-${os}-${arch}`;
   const stamp = join(dir, 'VERSION');
-  if (existsSync(target) && existsSync(stamp) && readFileSync(stamp, 'utf8') === name) {
-    console.log(`${name} already present`);
-    return;
-  }
-  rmSync(dir, { recursive: true, force: true });
-  mkdirSync(dir, { recursive: true });
-
   const base = `https://nodejs.org/dist/${HELPER_NODE_VERSION}`;
   const file = `${name}.tar.gz`;
   const expected = HELPER_NODE_SHA256[file];
@@ -135,8 +132,20 @@ async function node(arch) {
         `(after checking its signature).`,
     );
   }
+  // Reuse a cached runtime only if it came from the pinned tarball and hasn't
+  // changed since it was unpacked; anything else is downloaded again.
+  if (
+    existsSync(target) &&
+    existsSync(stamp) &&
+    readFileSync(stamp, 'utf8') === `${name} ${expected} ${sha256(readFileSync(target))}`
+  ) {
+    console.log(`${name} already present`);
+    return;
+  }
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
   const tarball = await fetchOk(`${base}/${file}`);
-  const actual = createHash('sha256').update(tarball).digest('hex');
+  const actual = sha256(tarball);
   if (actual !== expected)
     throw new Error(`${file}: checksum ${actual}, expected the pinned ${expected}`);
 
@@ -145,7 +154,7 @@ async function node(arch) {
   execFileSync('tar', ['-xzf', tmp, '-C', dir, '--strip-components=2', `${name}/bin/node`]);
   rmSync(tmp);
   chmodSync(target, 0o755);
-  writeFileSync(stamp, name);
+  writeFileSync(stamp, `${name} ${expected} ${sha256(readFileSync(target))}`);
   console.log(`${name} verified and unpacked to ${dir}`);
 }
 
