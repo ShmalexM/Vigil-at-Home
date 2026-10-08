@@ -18,6 +18,14 @@ export type HelperState = 'not_installed' | 'not_running' | 'connected';
 
 /** How often to look for the helper while it isn't connected. */
 export const HELPER_RETRY_MS = 15_000;
+/** The longest wait between tries while the helper keeps failing. */
+export const HELPER_RETRY_MAX_MS = 2 * 60_000;
+/**
+ * A second drop this soon after the last one is a helper that keeps failing
+ * (crash-looping, or answering some calls and not others), not a blip: it
+ * shows as not running and is retried with backoff.
+ */
+export const HELPER_FLAP_WINDOW_MS = 3 * 60_000;
 const QUERY_TIMEOUT_MS = 5_000;
 const ACTION_TIMEOUT_MS = 15_000;
 const RELEASE_TIMEOUT_MS = 3 * 60_000;
@@ -39,9 +47,12 @@ export interface HelperRulesOutcome {
   preexec: PreexecOutcome | null;
 }
 
+/** The helper's socket is open but it didn't answer in time. */
+class HelperTimeout extends Error {}
+
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error('The Vigil helper did not answer')), ms);
+    const t = setTimeout(() => reject(new HelperTimeout('The Vigil helper did not answer')), ms);
     p.then(
       (v) => (clearTimeout(t), resolve(v)),
       (e: unknown) => (clearTimeout(t), reject(e instanceof Error ? e : new Error(String(e)))),
@@ -70,6 +81,9 @@ export class HelperLink
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
   private connecting = false;
+  /** When the connection last dropped, and how many drops came close together since. */
+  private lastDropAt = -Infinity;
+  private failures = 0;
   state: HelperState = 'not_installed';
   /** The last event received, so a reconnect only replays what was missed. */
   private lastEventId: string | undefined;
@@ -132,7 +146,7 @@ export class HelperLink
       return { at: Date.now(), ...(out.quarantineId ? { quarantineId: out.quarantineId } : {}) };
     } catch (err) {
       if (!(err instanceof HelperCallError) || /connection closed/.test(err.message)) {
-        this.dropped(client);
+        this.dropped(client, err);
       }
       const error =
         err instanceof HelperCallError && err.code === 'refused'
@@ -152,7 +166,7 @@ export class HelperLink
       return await withTimeout(client.call<T>({ kind }), QUERY_TIMEOUT_MS);
     } catch (err) {
       // A closed or hung connection: drop it and start reconnecting.
-      this.dropped(client);
+      this.dropped(client, err);
       throw err;
     }
   }
@@ -209,7 +223,7 @@ export class HelperLink
       }
       return out;
     } catch (err) {
-      if (!(err instanceof HelperCallError)) this.dropped(client);
+      if (!(err instanceof HelperCallError)) this.dropped(client, err);
       throw err;
     }
   }
@@ -244,7 +258,7 @@ export class HelperLink
     this.emit('state', s);
   }
 
-  /** Try once now; on failure, try again after HELPER_RETRY_MS. */
+  /** Try once now; on failure, try again after HELPER_RETRY_MS (longer while it keeps failing). */
   async tryConnect(): Promise<void> {
     if (this.stopped || this.client || this.connecting) return;
     clearTimeout(this.timer);
@@ -323,21 +337,38 @@ export class HelperLink
   }
 
   /**
-   * A dropped connection is tried again at once before anything changes on
-   * screen, so a blip (a timed-out query, a helper restart) never shows the
-   * helper as stopped. Only a failed reconnect changes the state.
+   * A connection that closed once is tried again at once before anything
+   * changes on screen, so a one-off blip (a helper restart) never shows the
+   * helper as stopped. A helper that didn't answer, or a second drop within
+   * HELPER_FLAP_WINDOW_MS, is not a blip: it shows as not running and is
+   * retried with backoff, so a wedged or crash-looping helper never reads as
+   * fine and isn't hammered with reconnects.
    */
-  private dropped(client: HelperClient): void {
+  private dropped(client: HelperClient, why?: unknown): void {
     if (this.client !== client) return;
     this.client = undefined;
     client.close();
-    void this.tryConnect();
+    const now = Date.now();
+    const again = now - this.lastDropAt < HELPER_FLAP_WINDOW_MS;
+    this.lastDropAt = now;
+    if (!again) this.failures = 0;
+    if (!again && !(why instanceof HelperTimeout)) {
+      void this.tryConnect();
+      return;
+    }
+    this.failures++;
+    this.setState(existsSync(this.socket) ? 'not_running' : 'not_installed');
+    this.retry();
   }
 
   private retry(): void {
     if (this.stopped) return;
     clearTimeout(this.timer);
-    this.timer = setTimeout(() => void this.tryConnect(), HELPER_RETRY_MS);
+    const wait = Math.min(
+      HELPER_RETRY_MS * 2 ** Math.max(0, this.failures - 1),
+      HELPER_RETRY_MAX_MS,
+    );
+    this.timer = setTimeout(() => void this.tryConnect(), wait);
     this.timer.unref?.();
   }
 }

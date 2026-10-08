@@ -229,4 +229,58 @@ describe('HelperLink', () => {
       vi.useRealTimers();
     }
   });
+  it('does not loop on a helper that subscribes but never answers a query', async () => {
+    vi.useFakeTimers();
+    try {
+      let connects = 0;
+      const link = new HelperLink(socket(), async () => {
+        connects++;
+        // Subscribes at once; helper.status (pfctl, nft) hangs.
+        return fakeClient(() => new Promise(() => {})).client;
+      });
+      const states: string[] = [];
+      // As the app does: each new connection is health-checked at once.
+      link.on('state', (st) => {
+        states.push(st);
+        if (st === 'connected') void link.query('helper.status').catch(() => {});
+      });
+      await link.tryConnect();
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(states).toContain('not_running');
+      // Backoff: a handful of tries in five minutes, not one every 5 s.
+      expect(connects).toBeLessThanOrEqual(6);
+      link.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows a crash-looping helper as not running, though each reconnect works', async () => {
+    vi.useFakeTimers();
+    try {
+      let connects = 0;
+      const link = new HelperLink(socket(), async () => {
+        connects++;
+        // Restarted by launchd or systemd, then gone again by the next check.
+        return fakeClient(() => {
+          throw new Error('connection closed');
+        }).client;
+      });
+      const states: string[] = [];
+      link.on('state', (st) => states.push(st));
+      await link.tryConnect();
+      // The health check pings once a minute.
+      await link.ping();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(link.state).toBe('connected');
+      await vi.advanceTimersByTimeAsync(60_000);
+      await link.ping();
+      expect(link.state).toBe('not_running');
+      expect(states).toContain('not_running');
+      expect(connects).toBe(2);
+      link.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
