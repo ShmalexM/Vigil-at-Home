@@ -42,7 +42,18 @@ is its sync server on the same Mac:
   before this certificate existed has no client keys: the helper serves a client
   without a certificate until Santa first presents the pinned one, then requires it
   for good (`SyncClientAuth` in the helper). Until the user reinstalls the profile,
-  `helper.status` reports `clientCertRequired: false`.
+  `helper.status` reports `clientCertRequired: false`; `clientCertSeenAt` is when Santa
+  last presented the pinned certificate.
+- **Renewal and recovery.** The client certificate lasts 397 days and is renewed 30 days
+  before it expires, under the same file and password. `santasyncservice` builds a new
+  `MOLAuthenticatingURLSession` for every sync, which opens `ClientAuthCertificateFile`
+  again with `SecPKCS12Import`, so the renewed certificate is presented on the next
+  sync without a new profile. The replaced certificate's pin is still taken for 30 days
+  (`client.prev.json`) for a sync already under way. When Santa can't sync anyway, the
+  helper's `santa.client.reissue` command (Home's Repair button, or
+  `sudo vigil-helper santa-reissue`) issues a new identity, drops the old pin and the
+  requirement marker, and serves a client without a certificate until Santa presents
+  the new one. Dropping the marker loosens the port, so it needs the admin password.
 - **Monitor mode.** The profile sets `ClientMode` 1: Santa enforces only explicit block
   rules, so a personal Mac keeps working. Lockdown would block every program not
   already allowed.

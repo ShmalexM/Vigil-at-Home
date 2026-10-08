@@ -4,6 +4,10 @@
 //                                i.e. after the admin password dialog (osascript
 //                                on macOS, pkexec on Linux)
 // vigil-helper santa-profile     print the Santa configuration profile
+// vigil-helper santa-reissue     (root) recovery when Santa can't sync: the running
+//                                helper issues Santa a new client certificate, serves
+//                                Santa without one until it presents it, and this
+//                                prints the profile to install again
 // vigil-helper osquery-config    print the osquery configuration
 // vigil-helper osquery-flags     print osquery's startup flags (osquery.flags)
 // vigil-helper osquery-setup     (root) write Vigil's osquery config and start osquery
@@ -19,6 +23,7 @@ import {
   syncTlsPaths,
 } from '@vigil/sensors';
 import { Approvals } from './approval.js';
+import { HelperClient } from './client.js';
 import { defaultPaths, SANTA_SYNC_PORT } from './config.js';
 import { runDaemon } from './daemon.js';
 import { ensureOsquery, removeOsquery } from './osquery.js';
@@ -78,6 +83,30 @@ async function main(argv: string[]): Promise<number> {
       );
       return 0;
     }
+    case 'santa-reissue': {
+      // The same command the app's repair sends. Running it as root (sudo)
+      // stands in for the admin password dialog: the approval is written here.
+      if (process.getuid?.() !== 0) {
+        console.error('santa-reissue must run as root');
+        return 1;
+      }
+      const paths = defaultPaths();
+      const client = await HelperClient.connect(paths.socket, async (nonce, _prompt, also = []) => {
+        for (const n of [nonce, ...also]) Approvals.writeApproval(paths.approvalsDir, n);
+        return true;
+      });
+      try {
+        const r = await client.call<{ mobileconfig: string }>({ kind: 'santa.client.reissue' });
+        process.stdout.write(r.mobileconfig);
+      } finally {
+        client.close();
+      }
+      console.error(
+        'Santa has a new client certificate. If its profile predates the certificate, ' +
+          'install this profile again.',
+      );
+      return 0;
+    }
     case 'osquery-config':
       process.stdout.write(hostPlatform() === 'linux' ? osqueryLinuxConfig() : osqueryConfig());
       return 0;
@@ -101,7 +130,8 @@ async function main(argv: string[]): Promise<number> {
     }
     default:
       console.error(
-        'usage: vigil-helper daemon | approve <nonce>… | santa-profile | osquery-config | ' +
+        'usage: vigil-helper daemon | approve <nonce>… | santa-profile | santa-reissue | ' +
+          'osquery-config | ' +
           'osquery-flags | osquery-setup | osquery-remove',
       );
       return 2;

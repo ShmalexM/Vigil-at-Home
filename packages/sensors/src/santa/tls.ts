@@ -15,6 +15,13 @@
 // Its key stays root-only in client.key; Santa reads the PKCS#12 copy, which
 // is owned by nobody (the user santasyncservice drops to) and mode 0600.
 //
+// Santa opens that file again on every sync: santasyncservice builds a new
+// MOLAuthenticatingURLSession per sync, which reads ClientAuthCertificateFile
+// with SecPKCS12Import when the server asks for a certificate. So renewing it
+// in place (same path, same password) needs no new profile. The pin of the
+// certificate it replaced is kept for 30 days (client.prev.json) for a sync
+// that was already under way, or a Santa that cached the old identity.
+//
 // Uses /usr/bin/openssl (LibreSSL on macOS), driven only with config files so
 // it works on LibreSSL versions without -addext.
 
@@ -46,6 +53,8 @@ export interface SyncTlsPaths {
   clientP12: string;
   /** Password of clientP12, root-only. Santa gets it through the profile. */
   clientP12Password: string;
+  /** The pin of the client certificate a renewal replaced, and until when it is still taken. */
+  clientPrevPin: string;
 }
 
 export function syncTlsPaths(dir: string): SyncTlsPaths {
@@ -59,6 +68,7 @@ export function syncTlsPaths(dir: string): SyncTlsPaths {
     clientCert: join(dir, 'client.pem'),
     clientP12: join(dir, 'client.p12'),
     clientP12Password: join(dir, 'client.p12.pass'),
+    clientPrevPin: join(dir, 'client.prev.json'),
   };
 }
 
@@ -72,6 +82,8 @@ function openssl(bin: string, args: string[]): Promise<void> {
 }
 
 const RENEW_BEFORE_MS = 30 * 24 * 3600 * 1000;
+/** How long the replaced client certificate is still taken after a renewal. */
+export const CLIENT_PIN_OVERLAP_MS = 30 * 24 * 3600 * 1000;
 
 function certNeedsRenewal(path: string, now: number): boolean {
   try {
@@ -95,6 +107,36 @@ export function clientCertNeedsRenewal(paths: SyncTlsPaths, now = Date.now()): b
     !existsSync(paths.clientP12Password) ||
     certNeedsRenewal(paths.clientCert, now)
   );
+}
+
+/** When Santa's client certificate expires (ms since epoch), or null when it can't be read. */
+export function clientCertExpiresAt(paths: SyncTlsPaths): number | null {
+  try {
+    return Date.parse(new X509Certificate(readFileSync(paths.clientCert)).validTo);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The pin of the client certificate the last renewal replaced, while it is
+ * still taken: up to 30 days after the renewal and never past its own expiry.
+ */
+export function previousClientPin(
+  paths: SyncTlsPaths,
+  now = Date.now(),
+): { fingerprint: string; until: number } | null {
+  try {
+    const p = JSON.parse(readFileSync(paths.clientPrevPin, 'utf8')) as {
+      fingerprint?: unknown;
+      until?: unknown;
+    };
+    if (typeof p.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(p.fingerprint)) return null;
+    if (typeof p.until !== 'number' || p.until <= now) return null;
+    return { fingerprint: p.fingerprint, until: p.until };
+  } catch {
+    return null;
+  }
 }
 
 /** SHA-256 of a PEM certificate's DER encoding, as lowercase hex. */
@@ -255,6 +297,9 @@ export async function ensureSyncTls(
     }
 
     if (caChanged || clientCertNeedsRenewal(paths)) {
+      // A renewal under the same CA: Santa may still present the old
+      // certificate for a while, so keep taking it.
+      if (!caChanged) keepPreviousPin(paths);
       await issueClientIdentity(paths, opensslBin, work, p12Owner);
       changed = true;
     }
@@ -272,6 +317,43 @@ export async function ensureSyncTls(
   chmodSync(paths.clientP12, 0o600);
   if (p12Owner) chownSync(paths.clientP12, p12Owner.uid, p12Owner.gid);
   return changed;
+}
+
+/** Records the current client certificate's pin before it is replaced. */
+function keepPreviousPin(paths: SyncTlsPaths, now = Date.now()): void {
+  let cert: X509Certificate;
+  try {
+    cert = new X509Certificate(readFileSync(paths.clientCert));
+  } catch {
+    return;
+  }
+  const until = Math.min(Date.parse(cert.validTo), now + CLIENT_PIN_OVERLAP_MS);
+  if (!(until > now)) return;
+  const fingerprint = createHash('sha256').update(cert.raw).digest('hex');
+  writeFileSync(paths.clientPrevPin, JSON.stringify({ fingerprint, until }) + '\n', {
+    mode: 0o600,
+  });
+  chmodSync(paths.clientPrevPin, 0o600);
+}
+
+/**
+ * Recovery: a new client identity for Santa that owes nothing to the old one.
+ * Same file and password, so the installed profile keeps working once Santa
+ * opens the file again; the old certificate's pin is dropped, not kept.
+ */
+export async function reissueClientIdentity(
+  paths: SyncTlsPaths,
+  opensslBin = '/usr/bin/openssl',
+  opts: SyncTlsOptions = {},
+): Promise<void> {
+  const p12Owner = opts.clientP12Owner ?? defaultP12Owner();
+  const work = mkdtempSync(join(tmpdir(), 'vigil-tls-'));
+  try {
+    rmSync(paths.clientPrevPin, { force: true });
+    await issueClientIdentity(paths, opensslBin, work, p12Owner);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
 }
 
 /** A new key and certificate for Santa, and the PKCS#12 copy Santa reads. */

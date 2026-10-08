@@ -204,6 +204,21 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
             </Button>
           </div>
         )}
+        {setup?.finished &&
+          setup.steps
+            .filter((st) => st.banner)
+            .map((st) => (
+              <div key={st.id} className="attn accent setup-banner">
+                <Wrench size={16} />
+                <span className="grow">{st.banner}.</span>
+                <Button size="sm" kind="ghost" onClick={() => void vigil.dismissSetupBanner(st.id)}>
+                  Later
+                </Button>
+                <Button size="sm" kind="primary" onClick={() => go('settings')}>
+                  Show me
+                </Button>
+              </div>
+            ))}
         {updates?.available && !updates.dismissed && (
           <div className="attn accent setup-banner">
             <Download size={16} />

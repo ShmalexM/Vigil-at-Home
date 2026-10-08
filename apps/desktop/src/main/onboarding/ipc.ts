@@ -16,6 +16,7 @@ type SetupCall =
   | 'checkSetup'
   | 'setSetupMode'
   | 'skipSetupStep'
+  | 'dismissSetupBanner'
   | 'runSetupAction'
   | 'finishSetup'
   | 'restartSetup'
@@ -36,6 +37,10 @@ export function onboardingHandlers(
     },
     skipSetupStep: (id, skipped) => {
       setup.skip(id, skipped);
+      return setup.view();
+    },
+    dismissSetupBanner: (id) => {
+      setup.dismissBanner(id);
       return setup.view();
     },
     runSetupAction: (action) => setup.runAction(action),

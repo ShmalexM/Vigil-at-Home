@@ -207,6 +207,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
                       {s.note}
                     </span>
                   )}
+                  {s.repair === 'santa-sync' && <RepairSantaSync go={go} />}
                   {s.id === 'helper' &&
                     (s.state !== 'ok' || status.helperOutdated) &&
                     status.helperInstallable && (
@@ -274,6 +275,52 @@ function InstallHelper({ kind }: { kind: 'install' | 'reinstall' | 'update' }) {
           : { install: 'Install helper', reinstall: 'Reinstall helper', update: 'Update helper' }[
               kind
             ]}
+      </button>
+      {error && (
+        <span className="t-small" style={{ color: 'var(--poor)', textAlign: 'right' }}>
+          {error}
+        </span>
+      )}
+    </>
+  );
+}
+
+/**
+ * When Santa's syncs fail: the helper issues Santa a new sync certificate and
+ * takes Santa without one until it presents it, which asks for the admin
+ * password. If Santa's profile predates the certificate, Setup then offers it.
+ */
+function RepairSantaSync({ go }: { go: (r: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    const r = await vigil.repairSantaSync();
+    setBusy(false);
+    if (r.ok) setDone(true);
+    else if (r.error !== 'cancelled') setError(r.error ?? 'Repair failed');
+  };
+  if (done)
+    return (
+      <span className="t-small" style={{ textAlign: 'right' }}>
+        Repaired. If Santa still can’t sync,{' '}
+        <button type="button" className="btn sm ghost" onClick={() => go('settings')}>
+          reinstall its profile
+        </button>
+      </span>
+    );
+  return (
+    <>
+      <button
+        type="button"
+        className="btn sm"
+        disabled={busy}
+        title="Gives Santa a new sync certificate. Your password is asked once."
+        onClick={() => void run()}
+      >
+        {busy ? 'Repairing…' : 'Repair'}
       </button>
       {error && (
         <span className="t-small" style={{ color: 'var(--poor)', textAlign: 'right' }}>

@@ -134,10 +134,19 @@ function start(): void {
     ...(demo ? { readPs: async () => [], statInstall: demoInstalled } : {}),
   });
   const windows = new Windows();
+  // Santa doesn't sync while the Mac sleeps, so a missed sync counts from waking.
+  let awakeSince = Date.now();
+  powerMonitor.on('resume', () => {
+    awakeSince = Date.now();
+  });
+  const helperSensors = async () =>
+    (await helper.query<{ sensors?: HelperSensors }>('helper.status'))?.sensors ?? null;
   const probe = macProbe(
     (source) => store.lastEventAt(source),
     () => helper.state,
-    async () => (await helper.query<{ sensors?: HelperSensors }>('helper.status'))?.sensors ?? null,
+    helperSensors,
+    process.platform,
+    () => awakeSince,
   );
 
   // A development build installs the helper that `pnpm build:helper` made.
@@ -188,12 +197,17 @@ function start(): void {
     ...(demo
       ? { probe: demoProbe(), supported: true }
       : {
-          probe: systemProbe(undefined, async () => {
-            if (await helper.ping()) return true;
-            // Just installed: connect now rather than on the next retry.
-            await helper.tryConnect();
-            return helper.ping();
-          }),
+          probe: systemProbe(
+            undefined,
+            async () => {
+              if (await helper.ping()) return true;
+              // Just installed: connect now rather than on the next retry.
+              await helper.tryConnect();
+              return helper.ping();
+            },
+            // Whether Santa's installed profile predates its client certificate.
+            async () => (await helperSensors().catch(() => null))?.santa ?? null,
+          ),
         }),
     // Setup's Codex step can use the user's own Codex sign-in (set up below).
     ...(demo
@@ -316,6 +330,24 @@ function start(): void {
           await runHelperScript(core.helperOutdated ? 'update' : 'install', helperDir()),
         ),
       uninstall: async () => afterHelperScript(await runHelperScript('uninstall', helperDir())),
+      // Home's repair for a Santa that can't sync. The helper asks for the
+      // admin password; afterwards setup offers the profile again if Santa's
+      // installed one predates the certificate.
+      repairSantaSync: async () => {
+        try {
+          const mobileconfig = await helper.reissueSantaClient();
+          if (!mobileconfig) return { ok: false, error: 'The Vigil helper isn’t running' };
+          writeFileSync(santaProfilePath, mobileconfig);
+          return { ok: true };
+        } catch (err) {
+          if (err instanceof HelperCallError && err.code === 'refused')
+            return { ok: false, error: 'cancelled' };
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        } finally {
+          await reportHealth(core.sensors, probe);
+          setup.emit('changed');
+        }
+      },
     },
   );
   windows.createTray();

@@ -56,6 +56,7 @@ describe('request validation', () => {
       { kind: 'helper.journal', limit: 10 },
       { kind: 'santa.profile' },
       { kind: 'events.subscribe' },
+      { kind: 'santa.client.reissue' },
     ]) {
       expect(req(command)).toEqual({ id: 'r1', command });
     }
@@ -65,6 +66,7 @@ describe('request validation', () => {
     expect(req({ kind: 'exec', cmd: 'rm -rf /' })).toHaveProperty('error');
     expect(req({ kind: 'toString' })).toHaveProperty('error');
     expect(req({ kind: 'helper.status', extra: 1 })).toHaveProperty('error');
+    expect(req({ kind: 'santa.client.reissue', password: 'x' })).toHaveProperty('error');
     expect(req({ kind: 'process.kill', pid: 1, path: '/x', force: true })).toMatchObject({
       error: 'unknown field force',
     });

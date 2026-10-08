@@ -72,6 +72,12 @@ export interface SetupStepView {
   skipped: boolean;
   /** Shown as a button on the step, e.g. "Use my Codex sign-in". */
   action?: { id: SetupAction; label: string };
+  /**
+   * Set when a step that was done needs doing again (e.g. reinstalling
+   * Santa's profile). Shown once as a calm banner outside Setup until the
+   * user dismisses it; the step itself stays here.
+   */
+  banner?: string;
 }
 
 export interface ApiKeyView {

@@ -158,6 +158,28 @@ export class HelperLink
   }
 
   /**
+   * Repair for a Santa that can't sync: the helper issues Santa a new client
+   * certificate and serves it without one until Santa presents it. That
+   * loosens the sync port, so the helper asks for the admin password first
+   * (a cancelled dialog throws a HelperCallError with code refused). Returns
+   * the Santa profile to install again, or null while unconnected.
+   */
+  async reissueSantaClient(): Promise<string | null> {
+    const client = this.client;
+    if (!client) return null;
+    try {
+      const out = await withTimeout(
+        client.call<{ mobileconfig: string }>({ kind: 'santa.client.reissue' }),
+        RELEASE_TIMEOUT_MS,
+      );
+      return out.mobileconfig;
+    } catch (err) {
+      if (!(err instanceof HelperCallError)) this.dropped(client);
+      throw err;
+    }
+  }
+
+  /**
    * Hand the helper the blocking rules it can run itself (and Santa before
    * launch), then any indicator list it says it doesn't have yet. Null while
    * unconnected. If the rules turn something off or add an exception, the

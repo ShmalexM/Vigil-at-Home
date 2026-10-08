@@ -20,7 +20,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import type { TLSSocket } from 'node:tls';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import {
   FileHasher,
@@ -31,8 +31,11 @@ import {
   type SignatureInfo,
   SensorHub,
   certFingerprint,
+  clientCertExpiresAt,
   ensureSyncTls,
   fileAccessPolicy,
+  previousClientPin,
+  reissueClientIdentity,
   syncTlsPaths,
 } from '@vigil/sensors';
 import { Approvals } from './approval.js';
@@ -92,6 +95,20 @@ export interface SensorHealth {
      * and needs installing again (SyncClientAuth).
      */
     clientCertRequired: boolean;
+    /** Whether the helper has made Santa a client identity (client.p12). */
+    clientCertIssued: boolean;
+    /**
+     * When Santa last presented the pinned client certificate (ms since
+     * epoch), kept across restarts; null if it never has since the identity
+     * was (re)issued. Proof the profile with the certificate is in use.
+     */
+    clientCertSeenAt: number | null;
+    /** When the client certificate expires; the helper renews it 30 days before. */
+    clientCertExpiresAt: number | null;
+    /** The last connection to the sync port that was turned away, and why. */
+    lastRefusal: { at: number; reason: SyncRefusal } | null;
+    /** How often Santa is told to sync, in seconds. */
+    syncIntervalSeconds: number;
   };
   osquery: { installed: boolean; lastEventAt: number | null };
 }
@@ -123,7 +140,9 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     await ensureSyncTls(tls, opts.opensslBin);
     clientAuth = new SyncClientAuth({
       marker: join(paths.tlsDir, CLIENT_AUTH_MARKER),
+      seen: join(paths.tlsDir, CLIENT_SEEN_FILE),
       clientCert: tls.clientCert,
+      previousPin: () => previousClientPin(tls),
       fresh,
       log,
     });
@@ -156,6 +175,11 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
         lastSyncAt: live.sync?.lastSyncAt ?? null,
         syncError: live.syncError ?? null,
         clientCertRequired: clientAuth?.required ?? false,
+        clientCertIssued: !linux && existsSync(tls.clientP12),
+        clientCertSeenAt: clientAuth?.seenAt ?? null,
+        clientCertExpiresAt: linux ? null : clientCertExpiresAt(tls),
+        lastRefusal: clientAuth?.lastRefusal ?? null,
+        syncIntervalSeconds: live.sync?.fullSyncIntervalSeconds ?? 600,
       },
       osquery: { installed: existsSync(bins.osquery), lastEventAt: seen?.osquery ?? null },
     };
@@ -197,6 +221,18 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
           }),
           triggerSantaSync: async () => {
             await sys.run('santactl', ['sync'], { timeoutMs: 60_000 });
+          },
+          // Recovery when Santa can't sync with its certificate (see Executor).
+          santaClientReissue: {
+            required: () => clientAuth?.required ?? false,
+            reissue: async () => {
+              await reissueClientIdentity(tls, opts.opensslBin);
+              clientAuth?.reset();
+              log(
+                'Santa sync: client identity issued again; clients without a certificate are ' +
+                  'served until Santa presents the new one',
+              );
+            },
           },
           preexec: new PreexecSync(sys, rules, existsSync),
         }),
@@ -390,16 +426,26 @@ function syncTlsFiles(tls: ReturnType<typeof syncTlsPaths>): SyncTlsFiles {
 
 /** Written once Santa has presented its client certificate; from then on it is required. */
 export const CLIENT_AUTH_MARKER = 'client-auth-required';
+/** When Santa last presented its client certificate, so helper.status has it after a restart. */
+export const CLIENT_SEEN_FILE = 'client-cert-seen';
+
+/** Why a connection to the sync port was turned away. */
+export type SyncRefusal = 'no_certificate' | 'wrong_certificate' | 'handshake_failed';
 
 /** Which clients the sync port takes. */
 export interface SyncClientPin {
-  /** SHA-256 (hex) of the DER certificate Santa presents. */
-  readonly fingerprint: string;
   /** Whether a client must present a certificate at all. */
   readonly required: boolean;
+  /** Whether a certificate with this SHA-256 (hex, of the DER) is Santa's. */
+  accepts(fingerprint: string): boolean;
   /** Called when a client presented the pinned certificate. */
   pinnedSeen(): void;
+  /** Called when a client is turned away, so a failing Santa shows in helper.status. */
+  refused?(reason: SyncRefusal): void;
 }
+
+/** How often the time Santa was last seen is written down; it is kept in memory between. */
+const SEEN_WRITE_MS = 60_000;
 
 /**
  * Santa's client certificate pin, and the move from profiles made before it
@@ -415,22 +461,40 @@ export interface SyncClientPin {
  * in a root-only marker and from then on refuses every other client, across
  * restarts. A client presenting any other certificate is always refused.
  * A new install (no CA yet) starts in the required state.
+ *
+ * After a renewal the replaced certificate is still taken for a while
+ * (tls.ts previousClientPin). reset() is the way back when Santa can't sync:
+ * the marker goes, so a client without a certificate is served again until
+ * Santa presents the newly issued one.
  */
 export class SyncClientAuth implements SyncClientPin {
   private pin: string;
+  private previous: { fingerprint: string; until: number } | null;
   private requireCert: boolean;
+  private lastSeen: number | null;
+  private seenWritten = 0;
+  private refusal: { at: number; reason: SyncRefusal } | null = null;
+  private readonly now: () => number;
 
   constructor(
     private readonly o: {
       marker: string;
+      /** Where the time Santa last presented its certificate is kept. */
+      seen: string;
       clientCert: string;
+      /** The replaced certificate's pin while it is still taken. */
+      previousPin?: () => { fingerprint: string; until: number } | null;
       fresh: boolean;
       log: (msg: string) => void;
+      now?: () => number;
     },
   ) {
+    this.now = o.now ?? Date.now;
     this.pin = certFingerprint(readFileSync(o.clientCert));
+    this.previous = o.previousPin?.() ?? null;
     if (o.fresh) this.markRequired();
     this.requireCert = existsSync(o.marker);
+    this.lastSeen = readTime(o.seen);
     if (!this.requireCert)
       o.log(
         "Santa sync: Santa's profile predates its client certificate; clients without one " +
@@ -446,12 +510,54 @@ export class SyncClientAuth implements SyncClientPin {
     return this.requireCert;
   }
 
+  /** When Santa last presented its certificate, or null. */
+  get seenAt(): number | null {
+    return this.lastSeen;
+  }
+
+  get lastRefusal(): { at: number; reason: SyncRefusal } | null {
+    return this.refusal;
+  }
+
+  accepts(fingerprint: string): boolean {
+    if (fingerprint === this.pin) return true;
+    const prev = this.previous;
+    return !!prev && fingerprint === prev.fingerprint && this.now() < prev.until;
+  }
+
   /** Re-reads the certificate after renewal. */
   reload(): void {
     this.pin = certFingerprint(readFileSync(this.o.clientCert));
+    this.previous = this.o.previousPin?.() ?? null;
+  }
+
+  /**
+   * After the client identity was issued again (tls.ts reissueClientIdentity):
+   * take only the new certificate, and serve a client without one until Santa
+   * presents it. Loosens the port, so only through an approved command.
+   */
+  reset(): void {
+    rmSync(this.o.marker, { force: true });
+    rmSync(this.o.seen, { force: true });
+    this.requireCert = false;
+    this.lastSeen = null;
+    this.seenWritten = 0;
+    this.refusal = null;
+    this.reload();
   }
 
   pinnedSeen(): void {
+    const now = this.now();
+    this.lastSeen = now;
+    if (now - this.seenWritten >= SEEN_WRITE_MS) {
+      this.seenWritten = now;
+      try {
+        writeFileSync(this.o.seen, `${new Date(now).toISOString()}\n`, { mode: 0o600 });
+        chmodSync(this.o.seen, 0o600);
+      } catch (err) {
+        this.o.log(`Santa sync: could not record when Santa was seen: ${(err as Error).message}`);
+      }
+    }
     if (this.requireCert) return;
     this.requireCert = true;
     try {
@@ -463,9 +569,25 @@ export class SyncClientAuth implements SyncClientPin {
     this.o.log('Santa sync: Santa presented its client certificate; it is now required');
   }
 
+  refused(reason: SyncRefusal): void {
+    const first = this.refusal?.reason !== reason;
+    this.refusal = { at: this.now(), reason };
+    if (first) this.o.log(`Santa sync: refused a connection (${reason.replace('_', ' ')})`);
+  }
+
   private markRequired(): void {
-    writeFileSync(this.o.marker, `${new Date().toISOString()}\n`, { mode: 0o600 });
+    writeFileSync(this.o.marker, `${new Date(this.now()).toISOString()}\n`, { mode: 0o600 });
     chmodSync(this.o.marker, 0o600);
+  }
+}
+
+/** A time written as an ISO string, or null. */
+function readTime(path: string): number | null {
+  try {
+    const t = Date.parse(readFileSync(path, 'utf8').trim());
+    return Number.isFinite(t) ? t : null;
+  } catch {
+    return null;
   }
 }
 
@@ -494,16 +616,30 @@ export interface SyncTlsFiles {
   ca: Buffer;
 }
 
-/** Whether a TLS connection may reach the sync handler. */
-export function syncClientAllowed(socket: TLSSocket, pin: SyncClientPin): boolean {
+/** Why a TLS connection may not reach the sync handler, or null when it may. */
+export function syncClientRefusal(socket: TLSSocket, pin: SyncClientPin): SyncRefusal | null {
   const peer = socket.getPeerCertificate();
   // An empty object when the client sent no certificate.
-  if (!peer?.raw) return !pin.required;
-  if (!socket.authorized) return false;
-  if (createHash('sha256').update(peer.raw).digest('hex') !== pin.fingerprint) return false;
+  if (!peer?.raw) return pin.required ? 'no_certificate' : null;
+  if (!socket.authorized) return 'wrong_certificate';
+  if (!pin.accepts(createHash('sha256').update(peer.raw).digest('hex'))) return 'wrong_certificate';
   pin.pinnedSeen();
-  return true;
+  return null;
 }
+
+/** Whether a TLS connection may reach the sync handler; a refusal is reported to the pin. */
+export function syncClientAllowed(socket: TLSSocket, pin: SyncClientPin): boolean {
+  const refusal = syncClientRefusal(socket, pin);
+  if (refusal) pin.refused?.(refusal);
+  return refusal === null;
+}
+
+/**
+ * TLS errors that say nothing about Santa: a client that connected and never
+ * finished, or went away. Anything else (a bad certificate either way, a
+ * protocol mismatch) is reported as a failed handshake.
+ */
+const QUIET_TLS_ERRORS = new Set(['ERR_TLS_HANDSHAKE_TIMEOUT', 'ECONNRESET', 'EPIPE']);
 
 /**
  * The Santa sync server: HTTPS with Santa's client certificate pinned.
@@ -520,12 +656,13 @@ export function createSyncHttpsServer(
   const server = createHttpsServer(
     {
       ...tls,
-      // The certificate must chain to Vigil's CA and then match the pin.
-      // While a Santa profile from before the client certificate is still
-      // installed, a client that sends none gets through the handshake to
-      // the check below, which decides (SyncClientAuth).
+      // The certificate must chain to Vigil's CA and then match the pin. The
+      // check below decides as the handshake ends, before a byte of the
+      // request is read: whether a client may come without a certificate
+      // changes at run time (SyncClientAuth: first seen, or reset()), which
+      // a fixed rejectUnauthorized can't follow.
       requestCert: true,
-      rejectUnauthorized: pin.required,
+      rejectUnauthorized: false,
       minVersion: 'TLSv1.2',
       handshakeTimeout: l.handshakeTimeoutMs,
       headersTimeout: l.headersTimeoutMs,
@@ -545,6 +682,9 @@ export function createSyncHttpsServer(
   server.prependListener('secureConnection', (socket: TLSSocket) => {
     if (syncClientAllowed(socket, pin)) admitted.add(socket);
     else socket.destroy();
+  });
+  server.on('tlsClientError', (err: NodeJS.ErrnoException) => {
+    if (!QUIET_TLS_ERRORS.has(err.code ?? '')) pin.refused?.('handshake_failed');
   });
   server.maxConnections = l.maxConnections;
   return server;

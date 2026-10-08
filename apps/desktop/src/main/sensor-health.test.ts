@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { checkHealth, QUIET_AFTER_MS, type HealthProbe } from './sensor-health.js';
+import {
+  checkHealth,
+  QUIET_AFTER_MS,
+  santaSyncProblem,
+  type HealthProbe,
+  type HelperSantaSync,
+} from './sensor-health.js';
 
 function probe(over: Partial<HealthProbe> & { installed?: string[]; procs?: string[] } = {}) {
   const installed = new Set(over.installed ?? []);
@@ -113,5 +119,83 @@ describe('checkHealth', () => {
       });
       expect(ok['fapolicyd']?.state).toBe('ok');
     });
+  });
+});
+
+describe("Santa's syncs with the helper", () => {
+  const NOW = 1_000_000_000;
+  const MIN = 60_000;
+  const required: HelperSantaSync = {
+    lastSyncAt: NOW - 5 * MIN,
+    syncError: null,
+    clientCertRequired: true,
+    clientCertIssued: true,
+    clientCertSeenAt: NOW - 5 * MIN,
+    clientCertExpiresAt: NOW + 300 * 86_400_000,
+    lastRefusal: null,
+    syncIntervalSeconds: 600,
+  };
+
+  it('is quiet while Santa syncs', () => {
+    expect(santaSyncProblem(required, NOW)).toBeUndefined();
+    // An older helper reports none of this.
+    expect(santaSyncProblem({}, NOW)).toBeUndefined();
+    expect(santaSyncProblem(undefined, NOW)).toBeUndefined();
+  });
+
+  it('says so when a Santa without its certificate is refused', () => {
+    const refused = {
+      ...required,
+      lastRefusal: { at: NOW - MIN, reason: 'no_certificate' as const },
+    };
+    expect(santaSyncProblem(refused, NOW)).toMatch(/refused: it came without its certificate/);
+    // A refusal before Santa's last good sync is over.
+    expect(
+      santaSyncProblem({ ...refused, clientCertSeenAt: NOW - 10_000, lastSyncAt: null }, NOW),
+    ).toBeUndefined();
+    expect(
+      santaSyncProblem(
+        { ...required, lastRefusal: { at: NOW - MIN, reason: 'handshake_failed' } },
+        NOW,
+      ),
+    ).toMatch(/secure connection failed/);
+  });
+
+  it('flags Santa missing three syncs, counted from waking', () => {
+    const stale = { ...required, lastSyncAt: null, clientCertSeenAt: NOW - 31 * MIN };
+    expect(santaSyncProblem(stale, NOW)).toBe('Santa hasn’t synced with Vigil for 31 minutes');
+    // The Mac just woke: Santa hasn't had the chance.
+    expect(santaSyncProblem(stale, NOW, NOW - 2 * MIN)).toBeUndefined();
+    // Never seen with the certificate (a new install before the profile): setup's to say.
+    expect(santaSyncProblem({ ...stale, clientCertSeenAt: null }, NOW)).toBeUndefined();
+  });
+
+  it('flags a closed sync port and a certificate about to lapse', () => {
+    expect(santaSyncProblem({ ...required, syncError: 'listen EADDRINUSE' }, NOW)).toMatch(
+      /sync port isn’t open/,
+    );
+    expect(
+      santaSyncProblem({ ...required, clientCertExpiresAt: NOW + 3 * 86_400_000 }, NOW),
+    ).toMatch(/expires in 3 days/);
+  });
+
+  it('shows on the Santa layer as needing a repair, which lowers the level', async () => {
+    const h = await byId(
+      probe({
+        installed: ['/Applications/Santa.app'],
+        procs: ['com.northpolesec.santa.daemon'],
+        helper: () => 'connected' as const,
+        lastEventAt: () => NOW - MIN,
+        helperSensors: async () => ({
+          santa: {
+            installed: true,
+            lastEventAt: NOW - MIN,
+            ...required,
+            lastRefusal: { at: NOW - MIN, reason: 'no_certificate' },
+          },
+        }),
+      }),
+    );
+    expect(h['santa']).toMatchObject({ state: 'degraded', repair: 'santa-sync' });
   });
 });

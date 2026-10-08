@@ -13,6 +13,8 @@ export interface SensorHealth {
   detail?: string;
   /** Why it is in this state, when that isn't obvious, e.g. "No events for 12 minutes". */
   note?: string;
+  /** A fix Vigil can offer on the spot: santa-sync issues Santa a new sync certificate. */
+  repair?: 'santa-sync';
 }
 
 export interface Status {

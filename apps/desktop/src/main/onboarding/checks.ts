@@ -8,7 +8,16 @@ import { FAPOLICYD_ALLOW_RULES, LOCAL_MODEL, LOCAL_MODEL_SMALL } from './plan.js
 export interface CheckResult {
   ok: boolean;
   detail?: string;
+  /**
+   * Not done because something already installed has to be installed again
+   * (Santa's profile from before its client certificate). The step then says
+   * so in its title and is offered once outside Setup.
+   */
+  again?: string;
 }
+
+/** Shown when Santa syncs with Vigil on a profile that predates its client certificate. */
+export const SANTA_REINSTALL = 'Reinstall the Santa profile to finish securing Santa';
 
 /** Everything a check touches, so tests can fake a Mac. Read-only: nothing here installs or changes anything. */
 export interface Probe {
@@ -23,6 +32,8 @@ export interface Probe {
   getJson(url: string): Promise<unknown>;
   /** Ask the running helper for its status over its socket; true when it answers. */
   helperAnswers?(): Promise<boolean>;
+  /** What the helper says about Santa's client certificate (helper.status), or null. */
+  helperSanta?(): Promise<{ clientCertRequired?: boolean; clientCertIssued?: boolean } | null>;
   home: string;
   /** Which computer is being checked; defaults to a Mac. */
   platform?: NodeJS.Platform;
@@ -81,9 +92,24 @@ export const CHECKS: Record<CheckId, (p: Probe) => Promise<CheckResult>> = {
     const local = new RegExp(
       `^https?://(127\\.0\\.0\\.1|localhost|\\[::1\\]):${SANTA_SYNC_PORT}\\b`,
     );
-    return local.test(server)
-      ? { ok: true, detail: 'Santa gets its rules from Vigil' }
-      : { ok: false, detail: `Santa syncs with ${server}, not Vigil` };
+    if (!local.test(server)) return { ok: false, detail: `Santa syncs with ${server}, not Vigil` };
+    // The helper has a client certificate for Santa but still serves it
+    // without one: the installed profile is from before the certificate.
+    const cert = await p.helperSanta?.().catch(() => null);
+    if (cert?.clientCertIssued && cert.clientCertRequired === false) {
+      return {
+        ok: false,
+        again: SANTA_REINSTALL,
+        detail:
+          'Santa gets its rules from Vigil, but its profile is from before Santa had its own certificate, so another program on this Mac could still sync in its place. Installing the new profile replaces the old one.',
+      };
+    }
+    return {
+      ok: true,
+      detail: cert?.clientCertRequired
+        ? 'Santa gets its rules from Vigil, with its own certificate'
+        : 'Santa gets its rules from Vigil',
+    };
   },
 
   osquery: async (p) => {
@@ -192,7 +218,11 @@ const INHERITED_ENV = [
   'SSL_CERT_FILE',
 ] as const;
 
-export function systemProbe(home = homedir(), helperAnswers?: () => Promise<boolean>): Probe {
+export function systemProbe(
+  home = homedir(),
+  helperAnswers?: () => Promise<boolean>,
+  helperSanta?: Probe['helperSanta'],
+): Probe {
   // Finder-launched apps get a minimal PATH. Vendor CLIs installed with npm
   // are node scripts, so node has to be findable too.
   const env: Record<string, string> = {};
@@ -206,6 +236,7 @@ export function systemProbe(home = homedir(), helperAnswers?: () => Promise<bool
     home,
     platform: process.platform,
     ...(helperAnswers ? { helperAnswers } : {}),
+    ...(helperSanta ? { helperSanta } : {}),
     exists: (path) => existsSync(path),
     executable: (path) => {
       try {

@@ -284,6 +284,11 @@ export class SantaSyncServer {
   /** When Santa last finished a sync with this server (ms since epoch), or null. */
   lastSyncAt: number | null = null;
 
+  /** How often Santa is told to sync (full_sync_interval). */
+  get fullSyncIntervalSeconds(): number {
+    return this.opts.fullSyncIntervalSeconds;
+  }
+
   private postflight(machineId: string, body: unknown): Record<string, never> {
     const session = this.session(machineId);
     // A postflight with no sync behind it says nothing about Santa.

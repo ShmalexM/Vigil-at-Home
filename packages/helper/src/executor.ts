@@ -65,6 +65,11 @@ export interface ExecutorDeps {
   santaClientCert?: () => { path: string; password: string };
   /** Ask Santa to sync now so a new rule applies in seconds, not at the next interval. */
   triggerSantaSync?: () => Promise<void>;
+  /**
+   * santa.client.reissue: whether the sync port requires Santa's certificate
+   * now (so the command loosens it), and the reissue itself. Absent on Linux.
+   */
+  santaClientReissue?: { required(): boolean; reissue(): Promise<void> };
   statusExtra?: () => Record<string, unknown>;
   /** Turns block rules into Santa pre-launch rules; absent in tests that don't need it. */
   preexec?: PreexecSync;
@@ -122,6 +127,17 @@ export class Executor {
       if (weakens.length && (!approval || !this.d.approvals.consume(approval, cmd))) {
         const nonce = this.d.approvals.request(cmd);
         return { kind: 'needs_approval', nonce, prompt: syncPrompt(weakens) };
+      }
+    } else if (cmd.kind === 'santa.client.reissue') {
+      if (!this.d.santaClientReissue) throw new ActionError('invalid', 'Santa runs only on macOS');
+      // Clearing the requirement lets a client without a certificate sync
+      // until Santa presents the new one; with none required, nothing loosens.
+      if (
+        this.d.santaClientReissue.required() &&
+        (!approval || !this.d.approvals.consume(approval, cmd))
+      ) {
+        const nonce = this.d.approvals.request(cmd);
+        return { kind: 'needs_approval', nonce, prompt: REISSUE_PROMPT };
       }
     } else if (needsApproval(cmd)) {
       // Check the release can actually happen before bothering the user.
@@ -386,14 +402,13 @@ export class Executor {
           throw policyError(err);
         }
       }
-      case 'santa.profile': {
-        const client = this.d.santaClientCert?.();
-        return {
-          mobileconfig: santaProfile({
-            syncPort: this.d.syncPort,
-            ...(client ? { clientCertPath: client.path, clientCertPassword: client.password } : {}),
-          }),
-        };
+      case 'santa.profile':
+        return { mobileconfig: this.santaProfile() };
+      case 'santa.client.reissue': {
+        await this.d.santaClientReissue!.reissue();
+        // Santa opens the new file on its next sync; ask for that now.
+        await this.syncSanta();
+        return { mobileconfig: this.santaProfile() };
       }
       case 'events.subscribe':
         // Handled by the server, which owns the connection.
@@ -436,6 +451,14 @@ export class Executor {
     return this.record(cmd as HelperAction, `unblocked programs with hash ${sha}`);
   }
 
+  private santaProfile(): string {
+    const client = this.d.santaClientCert?.();
+    return santaProfile({
+      syncPort: this.d.syncPort,
+      ...(client ? { clientCertPath: client.path, clientCertPassword: client.password } : {}),
+    });
+  }
+
   private async syncSanta(): Promise<void> {
     try {
       await this.d.triggerSantaSync?.();
@@ -453,6 +476,10 @@ export class Executor {
     return active.length;
   }
 }
+
+/** The password prompt for santa.client.reissue while the sync port requires Santa's certificate. */
+export const REISSUE_PROMPT =
+  'Vigil wants to repair Santa’s connection: it lets Santa sync without its certificate until Santa uses a new one.';
 
 /** The password prompt for a sync that weakens the helper's rules. Kept short: macOS shows it in a small dialog. */
 export function syncPrompt(weakens: string[]): string {

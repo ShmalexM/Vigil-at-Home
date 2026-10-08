@@ -19,9 +19,13 @@ import {
   SYNC_SESSION_TTL_MS,
 } from './santa/syncServer.js';
 import {
+  CLIENT_PIN_OVERLAP_MS,
   certFingerprint,
+  clientCertExpiresAt,
   clientCertNeedsRenewal,
   ensureSyncTls,
+  previousClientPin,
+  reissueClientIdentity,
   serverCertNeedsRenewal,
   syncTlsPaths,
 } from './santa/tls.js';
@@ -323,6 +327,52 @@ describe('Santa sync server over pinned TLS', () => {
         policy: 'BLOCKLIST',
       }),
     ).toThrow();
+  });
+});
+
+describe("Santa's client certificate over time", () => {
+  let tlsDir: string;
+  beforeAll(async () => {
+    tlsDir = mkdtempSync(join(tmpdir(), 'vigil-client-pin-'));
+    await ensureSyncTls(syncTlsPaths(tlsDir), 'openssl');
+  });
+  afterAll(() => rmSync(tlsDir, { recursive: true, force: true }));
+
+  it('keeps taking the replaced certificate for 30 days after a renewal', async () => {
+    const tls = syncTlsPaths(tlsDir);
+    const old = certFingerprint(readFileSync(tls.clientCert));
+    const password = readFileSync(tls.clientP12Password, 'utf8');
+    expect(previousClientPin(tls)).toBeNull();
+    // About 397 days, so it is renewed while Santa keeps the same file and password.
+    expect(clientCertExpiresAt(tls)! - Date.now()).toBeGreaterThan(396 * 86_400_000);
+
+    rmSync(tls.clientP12);
+    const t0 = Date.now();
+    expect(await ensureSyncTls(tls, 'openssl')).toBe(true);
+    expect(certFingerprint(readFileSync(tls.clientCert))).not.toBe(old);
+    expect(readFileSync(tls.clientP12Password, 'utf8')).toBe(password);
+    const prev = previousClientPin(tls)!;
+    expect(prev.fingerprint).toBe(old);
+    expect(prev.until).toBeGreaterThanOrEqual(t0 + CLIENT_PIN_OVERLAP_MS - 1000);
+    expect(prev.until).toBeLessThanOrEqual(Date.now() + CLIENT_PIN_OVERLAP_MS);
+    expect(statSync(tls.clientPrevPin).mode & 0o777).toBe(0o600);
+    // And no longer once the overlap is over.
+    expect(previousClientPin(tls, prev.until + 1)).toBeNull();
+  });
+
+  it('issues a new identity on recovery without keeping the old one', async () => {
+    const tls = syncTlsPaths(tlsDir);
+    const old = certFingerprint(readFileSync(tls.clientCert));
+    const password = readFileSync(tls.clientP12Password, 'utf8').trim();
+    await reissueClientIdentity(tls, 'openssl');
+    expect(certFingerprint(readFileSync(tls.clientCert))).not.toBe(old);
+    expect(previousClientPin(tls)).toBeNull();
+    // Same file and password, so the installed profile opens the new one.
+    expect(readFileSync(tls.clientP12Password, 'utf8').trim()).toBe(password);
+    expect(() =>
+      createSecureContext({ pfx: readFileSync(tls.clientP12), passphrase: password }),
+    ).not.toThrow();
+    expect(clientCertNeedsRenewal(tls)).toBe(false);
   });
 });
 

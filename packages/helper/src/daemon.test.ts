@@ -17,18 +17,33 @@ import { join } from 'node:path';
 import { DetectionEngine, macosCoreRules, memoryStores } from '@vigil/detection';
 import { fastPathRules } from '@vigil/detection/fastpath';
 import type { SensorEvent } from '@vigil/sensors';
-import { certFingerprint, ensureSyncTls, fileAccessPolicy, syncTlsPaths } from '@vigil/sensors';
+import {
+  certFingerprint,
+  ensureSyncTls,
+  fileAccessPolicy,
+  previousClientPin,
+  reissueClientIdentity,
+  RuleStore,
+  syncTlsPaths,
+} from '@vigil/sensors';
 import { HelperClient } from './client.js';
 import { defaultPaths, type HelperPaths } from './config.js';
 import {
   CLIENT_AUTH_MARKER,
+  CLIENT_SEEN_FILE,
   createSyncHttpsServer,
   listenUnlessStopped,
   runDaemon,
   SYNC_SERVER_LIMITS,
+  SyncClientAuth,
   type SensorHealth,
   type SyncClientPin,
 } from './daemon.js';
+import { Approvals } from './approval.js';
+import { Executor } from './executor.js';
+import { Journal } from './journal.js';
+import { needsApproval } from './protocol.js';
+import { FakeLinuxSystem } from './testing/fakeLinuxSystem.js';
 import type { HelperRan } from './fastpath.js';
 import { FakeSystem } from './testing/fakeSystem.js';
 
@@ -176,14 +191,24 @@ describe('helper daemon', () => {
   it('takes only the pinned client certificate on a new install', async () => {
     const status = await client!.call<{ sensors: SensorHealth }>({ kind: 'helper.status' });
     expect(status.sensors.santa.clientCertRequired).toBe(true);
+    // Never presented yet: nothing to vouch for the profile.
+    expect(status.sensors.santa.clientCertSeenAt).toBeNull();
+    expect(status.sensors.santa.lastRefusal).toBeNull();
     await expect(
       santaPost('preflight', {}, { port, tlsDir: paths.tlsDir, client: false }),
     ).rejects.toThrow();
+    // A refusal shows in helper.status, so the app can say Santa can't sync.
+    const refused = await client!.call<{ sensors: SensorHealth }>({ kind: 'helper.status' });
+    expect(refused.sensors.santa.lastRefusal).toMatchObject({ reason: 'no_certificate' });
     const other = await sameCaIdentity(paths.tlsDir);
     await expect(
       santaPost('preflight', {}, { port, tlsDir: paths.tlsDir, client: other }),
     ).rejects.toThrow();
+    const before = Date.now();
     expect((await santaPost('preflight', {})).sync_type).toBeDefined();
+    const seen = await client!.call<{ sensors: SensorHealth }>({ kind: 'helper.status' });
+    expect(seen.sensors.santa.clientCertSeenAt).toBeGreaterThanOrEqual(before);
+    expect(readFileSync(join(paths.tlsDir, CLIENT_SEEN_FILE), 'utf8')).toMatch(/^\d{4}-/);
   });
 
   it('serves commands, Santa sync and live sensor events together', async () => {
@@ -198,9 +223,19 @@ describe('helper daemon', () => {
         lastSyncAt: null,
         syncError: null,
         clientCertRequired: true,
+        clientCertIssued: true,
+        // The test above presented Santa's certificate, and others before it.
+        clientCertSeenAt: expect.any(Number),
+        clientCertExpiresAt: expect.any(Number),
+        lastRefusal: { at: expect.any(Number), reason: 'wrong_certificate' },
+        syncIntervalSeconds: 600,
       },
       osquery: { installed: false, lastEventAt: null },
     });
+    // 397 days, renewed 30 days before.
+    expect(status.sensors.santa.clientCertExpiresAt! - Date.now()).toBeGreaterThan(
+      390 * 86_400_000,
+    );
 
     await client!.call({
       kind: 'santa.rule.set',
@@ -325,14 +360,21 @@ describe('the Santa sync port', () => {
       ca: readFileSync(t.caCert),
     };
   };
-  const pinned = (required = true): SyncClientPin & { seen: number } => ({
-    fingerprint: certFingerprint(readFileSync(syncTlsPaths(paths.tlsDir).clientCert)),
-    required,
-    seen: 0,
-    pinnedSeen() {
-      this.seen++;
-    },
-  });
+  const pinned = (required = true): SyncClientPin & { seen: number; refusals: string[] } => {
+    const fingerprint = certFingerprint(readFileSync(syncTlsPaths(paths.tlsDir).clientCert));
+    return {
+      required,
+      seen: 0,
+      refusals: [],
+      accepts: (fp) => fp === fingerprint,
+      pinnedSeen() {
+        this.seen++;
+      },
+      refused(reason) {
+        this.refusals.push(reason);
+      },
+    };
+  };
   const freePort = port + 2000;
   const closed = (s: Socket) => new Promise<void>((r) => s.once('close', () => r()));
   const open = async (p: number) => {
@@ -432,6 +474,7 @@ describe('the Santa sync port', () => {
       expect(await tryPreflight(freePort, clientIdentity(paths.tlsDir))).toBe(200);
       expect(s.routed).toEqual(['/preflight/M1']);
       expect(pin.seen).toBeGreaterThan(0);
+      expect(pin.refusals).toEqual(['no_certificate', 'wrong_certificate', 'wrong_certificate']);
     } finally {
       await s.close();
     }
@@ -439,8 +482,9 @@ describe('the Santa sync port', () => {
 
   it('serves a client without a certificate only until Santa presents its own', async () => {
     let required = false;
+    const fingerprint = certFingerprint(readFileSync(syncTlsPaths(paths.tlsDir).clientCert));
     const pin: SyncClientPin = {
-      fingerprint: certFingerprint(readFileSync(syncTlsPaths(paths.tlsDir).clientCert)),
+      accepts: (fp) => fp === fingerprint,
       get required() {
         return required;
       },
@@ -542,6 +586,178 @@ describe('helper upgrade with a Santa profile from before the client certificate
     } finally {
       run.c.close();
       await run.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Santa's client certificate pin", () => {
+  it('takes the replaced certificate until its overlap ends, and resets for recovery', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vigil-pin-'));
+    try {
+      const t = syncTlsPaths(join(dir, 'santa-sync'));
+      await ensureSyncTls(t, 'openssl');
+      const first = certFingerprint(readFileSync(t.clientCert));
+      let now = Date.now();
+      const marker = join(t.dir, CLIENT_AUTH_MARKER);
+      const seen = join(t.dir, CLIENT_SEEN_FILE);
+      const make = () =>
+        new SyncClientAuth({
+          marker,
+          seen,
+          clientCert: t.clientCert,
+          previousPin: () => previousClientPin(t, now),
+          fresh: false,
+          log: () => {},
+          now: () => now,
+        });
+      const auth = make();
+      expect(auth.required).toBe(false);
+      expect(auth.seenAt).toBeNull();
+
+      // Renewal: the new certificate and, for a while, the old one.
+      rmSync(t.clientP12);
+      await ensureSyncTls(t, 'openssl');
+      auth.reload();
+      const second = certFingerprint(readFileSync(t.clientCert));
+      expect(auth.accepts(second)).toBe(true);
+      expect(auth.accepts(first)).toBe(true);
+      expect(auth.accepts(BAD)).toBe(false);
+
+      // Santa presenting the old one still counts as the new profile being in place.
+      auth.pinnedSeen();
+      expect(auth.required).toBe(true);
+      expect(auth.seenAt).toBe(now);
+      // Kept across a restart.
+      expect(make().seenAt).toBe(now);
+      expect(make().required).toBe(true);
+
+      now += 31 * 86_400_000;
+      expect(auth.accepts(first)).toBe(false);
+      expect(auth.accepts(second)).toBe(true);
+
+      auth.refused('no_certificate');
+      expect(auth.lastRefusal).toEqual({ at: now, reason: 'no_certificate' });
+
+      // Recovery: the marker and the seen time go; nothing old is taken.
+      await reissueClientIdentity(t, 'openssl');
+      auth.reset();
+      expect(auth.required).toBe(false);
+      expect(auth.seenAt).toBeNull();
+      expect(auth.lastRefusal).toBeNull();
+      expect(existsSync(marker)).toBe(false);
+      expect(existsSync(seen)).toBe(false);
+      expect(auth.accepts(second)).toBe(false);
+      expect(auth.accepts(certFingerprint(readFileSync(t.clientCert)))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('recovering a Santa that cannot sync', () => {
+  it('needs the admin password to drop the requirement, then serves Santa again', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vigil-daemon-reissue-'));
+    const rePort = port + 4000;
+    const rePaths = testPaths(dir);
+    const s = new FakeSystem();
+    s.console = process.getuid!() === 0 ? 501 : undefined;
+    const stopIt = await runDaemon({
+      paths: rePaths,
+      syncPort: rePort,
+      sys: s,
+      log: () => {},
+      approvalOwnerUid: process.getuid!(),
+      opensslBin: 'openssl',
+      sensorBinaries: { santa: rePaths.santaLog as string, osquery: join(dir, 'no-osqueryd') },
+      osquery: false,
+    });
+    const prompts: string[] = [];
+    let approve = false;
+    const c = await HelperClient.connect(rePaths.socket, async (nonce, prompt, also = []) => {
+      prompts.push(prompt);
+      if (approve)
+        for (const n of [nonce, ...also]) Approvals.writeApproval(rePaths.approvalsDir, n);
+      return approve;
+    });
+    const at = (client: { key: Buffer; cert: Buffer } | false) => ({
+      port: rePort,
+      tlsDir: rePaths.tlsDir,
+      client,
+    });
+    const santa = async () =>
+      (await c.call<{ sensors: SensorHealth }>({ kind: 'helper.status' })).sensors.santa;
+    try {
+      const old = clientIdentity(rePaths.tlsDir);
+      expect((await santaPost('preflight', {}, at(old))).sync_type).toBe('CLEAN');
+      expect((await santa()).clientCertRequired).toBe(true);
+
+      // Cancelled password: nothing changes.
+      await expect(c.call({ kind: 'santa.client.reissue' })).rejects.toThrow(/not approved/);
+      expect(prompts[0]).toMatch(/repair Santa’s connection/);
+      expect((await santa()).clientCertRequired).toBe(true);
+      await expect(santaPost('preflight', {}, at(false))).rejects.toThrow();
+
+      approve = true;
+      const r = await c.call<{ mobileconfig: string }>({ kind: 'santa.client.reissue' });
+      expect(r.mobileconfig).toMatch(/<key>ClientAuthCertificateFile<\/key>/);
+      // Santa is asked to sync, so it opens the new file now.
+      expect(s.runs.some((run) => run.bin === 'santactl' && run.args[0] === 'sync')).toBe(true);
+      const after = await santa();
+      expect(after.clientCertRequired).toBe(false);
+      expect(after.clientCertSeenAt).toBeNull();
+      expect(existsSync(join(rePaths.tlsDir, CLIENT_AUTH_MARKER))).toBe(false);
+      // A Santa with a profile from before the certificate syncs again...
+      expect((await santaPost('preflight', {}, at(false))).sync_type).toBe('CLEAN');
+      // ...the old certificate is not taken...
+      await expect(santaPost('preflight', {}, at(old))).rejects.toThrow();
+      // ...and Santa presenting the new one makes it required again.
+      expect((await santaPost('preflight', {}, at(clientIdentity(rePaths.tlsDir)))).sync_type).toBe(
+        'CLEAN',
+      );
+      expect((await santa()).clientCertRequired).toBe(true);
+      await expect(santaPost('preflight', {}, at(false))).rejects.toThrow();
+    } finally {
+      c.close();
+      await stopIt();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('asks no password when nothing is required, and is refused on Linux', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vigil-reissue-exec-'));
+    try {
+      let reissued = 0;
+      const make = (sys: FakeSystem | FakeLinuxSystem) =>
+        new Executor({
+          sys,
+          journal: new Journal(undefined),
+          approvals: new Approvals({
+            dir: join(dir, 'approvals'),
+            requiredOwnerUid: process.getuid!(),
+          }),
+          rules: new RuleStore(join(dir, 'rules.json')),
+          quarantine: { quarantineDir: join(dir, 'q') },
+          syncPort: 47821,
+          ...(sys instanceof FakeLinuxSystem
+            ? {}
+            : {
+                santaClientReissue: {
+                  required: () => false,
+                  reissue: async () => {
+                    reissued++;
+                  },
+                },
+              }),
+        });
+      const out = await make(new FakeSystem()).execute({ kind: 'santa.client.reissue' });
+      expect(out.kind).toBe('done');
+      expect(reissued).toBe(1);
+      expect(needsApproval({ kind: 'santa.client.reissue' })).toBe(false);
+      await expect(
+        make(new FakeLinuxSystem()).execute({ kind: 'santa.client.reissue' }),
+      ).rejects.toThrow(/only on macOS/);
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });

@@ -8,7 +8,8 @@
 // unblock, restore, enable, Santa allow or rule removal) also need the
 // user's macOS admin password, because malware running as the user could
 // otherwise drive the app and release its own block. So does a detection.sync
-// that weakens the helper's own rules (FastPath.loosening).
+// that weakens the helper's own rules (FastPath.loosening), and a
+// santa.client.reissue while the sync port requires Santa's certificate.
 
 import { z } from 'zod';
 import {
@@ -100,7 +101,20 @@ export const DetectionListSet = z.strictObject({
 });
 export type DetectionListSet = z.infer<typeof DetectionListSet>;
 
-export type HelperCommand = HelperAction | HelperQuery | DetectionSync | DetectionListSet;
+/**
+ * Recovery when Santa can't sync with its client certificate: the helper
+ * issues Santa a new client identity (same file and password, so the
+ * installed profile picks it up), stops taking the old one, and serves a
+ * client without a certificate again until Santa presents the new one. The
+ * answer is the Santa profile, to install again if Santa's predates the
+ * certificate. Serving a client without a certificate loosens the sync
+ * port, so while the port requires it this needs the admin password.
+ */
+export const SantaClientReissue = z.strictObject({ kind: z.literal('santa.client.reissue') });
+export type SantaClientReissue = z.infer<typeof SantaClientReissue>;
+
+export type HelperCommand =
+  HelperAction | HelperQuery | DetectionSync | DetectionListSet | SantaClientReissue;
 
 export interface HelperRequest {
   id: string;
@@ -124,6 +138,7 @@ export function isAction(cmd: HelperCommand): cmd is HelperAction {
     'events.subscribe',
     'detection.sync',
     'detection.list.set',
+    'santa.client.reissue',
   ].includes(cmd.kind);
 }
 
@@ -169,7 +184,9 @@ export function parseRequest(line: string): HelperRequest | { error: string; id?
       ? DetectionSync.safeParse(env.data.command)
       : kind === 'detection.list.set'
         ? DetectionListSet.safeParse(env.data.command)
-        : HelperAction.safeParse(env.data.command);
+        : kind === 'santa.client.reissue'
+          ? SantaClientReissue.safeParse(env.data.command)
+          : HelperAction.safeParse(env.data.command);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     return withId(
