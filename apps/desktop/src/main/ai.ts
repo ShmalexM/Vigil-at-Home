@@ -422,8 +422,8 @@ export class AiBridge extends EventEmitter<{
     core.onIngest = (event, outcome) => this.consider(event, outcome);
     // The strongest catches become quiet "worth a look" alerts (worth-a-look.ts).
     if (core.alerts) this.worthALook = new WorthALook(core.alerts, this.now);
-    core.scheduler.every('label-events', LABEL_EVERY_MS, async () => {
-      await this.labelBatch(core.store);
+    core.scheduler.every('label-events', LABEL_EVERY_MS, async (signal) => {
+      await this.labelBatch(core.store, signal);
     });
   }
 
@@ -496,8 +496,12 @@ export class AiBridge extends EventEmitter<{
     if (this.labelQueue.length > MAX_LABEL_QUEUE) this.labelQueue.shift();
   }
 
-  /** Sends one batch to the classifier and stores what comes back. */
-  async labelBatch(store: Pick<Store, 'setEventLabels'>): Promise<number> {
+  /**
+   * Sends one batch to the classifier and stores what comes back. A run the
+   * scheduler gave up on (`signal` aborted) writes nothing: its events go back
+   * in the queue for the next run.
+   */
+  async labelBatch(store: Pick<Store, 'setEventLabels'>, signal?: AbortSignal): Promise<number> {
     if (this.labelQueue.length === 0) return 0;
     const classifier = this.ai().classifier;
     if (!classifier) {
@@ -507,6 +511,10 @@ export class AiBridge extends EventEmitter<{
     const batch = this.labelQueue;
     this.labelQueue = [];
     const result = await this.busyWhile('labeller', () => classifier.classify(batch));
+    if (signal?.aborted) {
+      this.labelQueue = [...batch, ...this.labelQueue].slice(-MAX_LABEL_QUEUE);
+      return 0;
+    }
     // Whatever wasn't labelled goes back ahead of newer events, within the cap.
     const deferred = new Set(result.deferred);
     this.labelQueue = [...batch.filter((e) => deferred.has(e.id)), ...this.labelQueue].slice(
@@ -529,6 +537,7 @@ export class AiBridge extends EventEmitter<{
     if (this.worthALook) {
       const byId = new Map(batch.map((e) => [e.id, e]));
       for (const l of labelled) {
+        if (signal?.aborted) break;
         const event = byId.get(l.eventId);
         if (!event) continue;
         try {

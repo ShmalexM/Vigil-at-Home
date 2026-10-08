@@ -49,6 +49,8 @@ export interface HealthProbe {
   platform?: NodeJS.Platform;
 }
 
+const PGREP_TIMEOUT_MS = 10_000;
+
 export function macProbe(
   lastEventAt: HealthProbe['lastEventAt'],
   helper: HealthProbe['helper'],
@@ -60,7 +62,12 @@ export function macProbe(
     ...(helperSensors ? { helperSensors } : {}),
     exists: existsSync,
     running: (name) =>
-      new Promise((resolve) => execFile('/usr/bin/pgrep', ['-x', name], (err) => resolve(!err))),
+      new Promise((resolve) =>
+        // A pgrep that hangs counts as not running rather than holding up the health check.
+        execFile('/usr/bin/pgrep', ['-x', name], { timeout: PGREP_TIMEOUT_MS }, (err) =>
+          resolve(!err),
+        ),
+      ),
     lastEventAt,
     helper,
     now: Date.now,

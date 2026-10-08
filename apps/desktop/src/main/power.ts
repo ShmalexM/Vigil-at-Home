@@ -28,11 +28,22 @@ export const BATTERY_SLOWDOWN = 4;
 /**
  * Timers don't run while the Mac sleeps, so one that fires this long after
  * "suspend" means the Mac has run since. That alone could be a dark wake
- * (Power Nap), so it counts as awake only once someone has used it within
- * that time; then the power state is read afresh, in case "resume" (or a
- * battery or heat change) was never announced. Otherwise it checks again.
+ * (Power Nap), so it counts as awake once someone has used it within that
+ * time, or once it has run without a break in sleep for AWAKE_UNBROKEN_MS
+ * (dark wakes are short bursts between sleeps). Then the power state is read
+ * afresh, in case "resume" (or a battery or heat change) was never announced.
+ * Otherwise it checks again.
  */
 export const WAKE_RECHECK_MS = 2 * 60_000;
+export const AWAKE_UNBROKEN_MS = 10 * 60_000;
+/** More wall-clock time than running time between checks than this means it slept. */
+const SLEPT_GAP_MS = 5_000;
+
+/** Wall-clock time (runs on during sleep) and running time (stops during sleep). */
+export interface PowerClocks {
+  wall: () => number;
+  running: () => number;
+}
 /** System load per core above which optional work waits: the user is busy. */
 export const BUSY_LOAD_PER_CORE = 0.8;
 
@@ -42,10 +53,13 @@ export class PowerPolicy extends EventEmitter<{ change: [PowerMode] }> {
   private asleep = false;
   private current: PowerMode;
   private recheck?: ReturnType<typeof setTimeout>;
+  private lastCheck = { wall: 0, running: 0 };
+  private unbroken = 0;
 
   constructor(
     private readonly source: PowerSource,
     private readonly load: () => number = () => loadavg()[0]! / availableParallelism(),
+    private readonly clocks: PowerClocks = { wall: Date.now, running: () => performance.now() },
   ) {
     super();
     this.battery = source.isOnBatteryPower();
@@ -55,6 +69,7 @@ export class PowerPolicy extends EventEmitter<{ change: [PowerMode] }> {
     source.on('on-battery', () => this.update(() => (this.battery = true)));
     source.on('suspend', () => {
       this.update(() => (this.asleep = true));
+      this.unbroken = 0;
       this.checkWakeLater();
     });
     source.on('resume', () => {
@@ -84,6 +99,7 @@ export class PowerPolicy extends EventEmitter<{ change: [PowerMode] }> {
   }
 
   private checkWakeLater(): void {
+    this.lastCheck = { wall: this.clocks.wall(), running: this.clocks.running() };
     clearTimeout(this.recheck);
     this.recheck = setTimeout(() => this.checkWake(), WAKE_RECHECK_MS);
     this.recheck.unref?.();
@@ -91,8 +107,11 @@ export class PowerPolicy extends EventEmitter<{ change: [PowerMode] }> {
 
   private checkWake(): void {
     if (!this.asleep) return;
+    const ran = this.clocks.running() - this.lastCheck.running;
+    const passed = this.clocks.wall() - this.lastCheck.wall;
+    this.unbroken = passed - ran < SLEPT_GAP_MS ? this.unbroken + ran : 0;
     const idle = this.source.getSystemIdleTime?.();
-    if (idle !== undefined && idle * 1000 >= WAKE_RECHECK_MS) {
+    if (idle !== undefined && idle * 1000 >= WAKE_RECHECK_MS && this.unbroken < AWAKE_UNBROKEN_MS) {
       this.checkWakeLater();
       return;
     }

@@ -427,6 +427,21 @@ describe('AiBridge event labels', () => {
     expect(sent[0]).toHaveLength(31);
   });
 
+  it('writes nothing from a run the scheduler gave up on, and keeps its events queued', async () => {
+    const { core, ai, sent } = labelling((ids) => ({ labels: ids, deferred: [] }));
+    ai.labelEventsFrom(core);
+    const a = makeExec('/tmp/late');
+    core.ingest(a, unmatched);
+    core.events.flush();
+    const given = new AbortController();
+    given.abort();
+    expect(await ai.labelBatch(core.store, given.signal)).toBe(0);
+    const [view] = core.store.listEventViews({}).filter((v) => v.event.id === a.id);
+    expect(view!.label).toBeUndefined();
+    expect(await ai.labelBatch(core.store)).toBe(1);
+    expect(sent).toEqual([[a.id], [a.id]]);
+  });
+
   it('puts events the model skipped back in the queue', async () => {
     let round = 0;
     const { core, ai, sent } = labelling((ids) =>

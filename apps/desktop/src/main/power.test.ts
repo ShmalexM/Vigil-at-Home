@@ -1,6 +1,12 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { PowerPolicy, WAKE_RECHECK_MS, type PowerSource, type ThermalState } from './power.js';
+import {
+  AWAKE_UNBROKEN_MS,
+  PowerPolicy,
+  WAKE_RECHECK_MS,
+  type PowerSource,
+  type ThermalState,
+} from './power.js';
 
 function fakeSource(battery = false, thermal: ThermalState = 'nominal') {
   const em = new EventEmitter();
@@ -114,6 +120,30 @@ describe('PowerPolicy', () => {
       vi.advanceTimersByTime(WAKE_RECHECK_MS);
       expect(p.mode).toBe('normal');
       expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('wakes up after running unbroken for a while, even with nobody at the keyboard', () => {
+      vi.useFakeTimers();
+      let slept = 0;
+      const em = new EventEmitter();
+      const source = {
+        isOnBatteryPower: () => false,
+        getCurrentThermalState: () => 'nominal' as ThermalState,
+        getSystemIdleTime: () => 3_600,
+        on: em.on.bind(em),
+      } as unknown as PowerSource;
+      const clocks = { wall: () => Date.now() + slept, running: () => Date.now() };
+      const p = new PowerPolicy(source, () => 0, clocks);
+      em.emit('suspend');
+      // Dark wakes: a little running, then hours of sleep, again and again.
+      for (let i = 0; i < 20; i++) {
+        vi.advanceTimersByTime(WAKE_RECHECK_MS);
+        slept += 3_600_000;
+      }
+      expect(p.mode).toBe('constrained');
+      // Then a real wake with nobody touching it (say, a film playing).
+      vi.advanceTimersByTime(AWAKE_UNBROKEN_MS + WAKE_RECHECK_MS);
+      expect(p.mode).toBe('normal');
     });
   });
 });
