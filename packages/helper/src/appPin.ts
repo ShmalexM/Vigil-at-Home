@@ -1,33 +1,32 @@
-// The app the helper was installed for, pinned by root at install time.
+// The app the helper was installed for, pinned by root.
 //
 // Until the user approves a self grant (fastpath.ts), an app running from
 // outside the installer's folder is an ordinary program to the helper's
-// rules. What keeps those rules off the app that is talking to the helper is
-// this pin: install.sh runs as root, behind the admin password, and records
-// the identity of the app that asked for the install. A connection to the
-// helper's socket counts as that app only when the kernel says who the peer
-// is (peer.ts) and that process's running code matches the pin:
+// rules. What keeps them off it is this pin: install.sh runs as root, behind
+// the admin password, and records the identity of the app that asked for
+// the install. Whenever the helper is about to pause, stop or block a
+// program by hash, it checks the target against the pin itself:
 //
-//   macOS  the cdhash of the app's main executable, as the kernel loaded it
-//          for the running process (codesign on the pid), against the
-//          cdhash codesign read from the file at install time.
-//   Linux  the AppImage by device and inode, checked the way the self floor
-//          checks it (commands/selfImage.ts). A .deb or .rpm install lives in
-//          the installer's root-owned folder, which is protected already.
+//   macOS  the cdhash of the code the kernel loaded for the target pid
+//          (codesign on the pid), against the cdhash of the app's main
+//          executable recorded at install.
+//   Linux  whether the target runs from the pinned AppImage, by device and
+//          inode, checked the way the self floor checks it
+//          (commands/selfImage.ts).
 //
-// What a verified peer gets is narrow: the helper will not pause or stop that
-// one process, or block its program's hashes (the pinned sha256, and on macOS
-// the cdhash), for as long as it stays connected. Nothing the client says is
-// part of the check, and nothing else gets weaker. Without a pin, or when
-// the pin doesn't match (another app, or an app updated since the install),
+// A match is refused, and so is a hash block naming the pinned program's
+// sha256 (or, on macOS, its cdhash). Nothing a client says is part of the
+// check, and any process running the pinned code is the app, so a copy of it
+// gains nothing it couldn't already be. Nothing else gets weaker. Without a
+// pin, or when the pin doesn't match (another app, or an app updated since),
 // there is no protection.
 //
 // Only an app outside the installer's folder (/Applications/Vigil at
 // Home.app, /opt/Vigil at Home) is pinned: one inside it is protected by
 // path already, so it has no pin, an update in place asks for nothing, and
-// no connection is looked up. An app outside it is re-pinned by the next
-// self grant the password approves (repinFromGrant), or else by a helper
-// update.
+// no target is ever looked up. An app outside it is re-pinned by the next
+// self grant the password approves that covers it (repinFromGrant), or else
+// by a helper update.
 
 import { chmodSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
@@ -35,9 +34,8 @@ import { z } from 'zod';
 import { FileHasher } from '@vigil/sensors';
 import { selfRoots, underSelfRoot, type SelfImage } from '@vigil/core/self';
 import type { System } from './system.js';
-import { identifyProcess } from './commands/process.js';
+import type { ProcessIdentity } from './commands/process.js';
 import { runsFromSelfImage } from './commands/selfImage.js';
-import { peerPid } from './peer.js';
 
 const SHA256 = /^[0-9a-f]{64}$/;
 /** Santa's CDHASH identifiers: the first 20 bytes of the CodeDirectory hash. */
@@ -46,7 +44,7 @@ const CDHASH = /^[0-9a-f]{40}$/;
 export const AppPin = z.discriminatedUnion('platform', [
   z.object({
     platform: z.literal('darwin'),
-    /** The main executable, as install.sh was given it. For people reading the file. */
+    /** The main executable, as pinned. For people reading the file. */
     path: z.string(),
     cdhash: z.string().regex(CDHASH),
     sha256: z.string().regex(SHA256),
@@ -84,19 +82,38 @@ export function writePin(file: string, pin: AppPin | undefined): void {
   renameSync(tmp, file);
 }
 
-/** The CDHash line of `codesign -d -vvv` (written to stderr). */
-export function parseCdhash(output: string): string | undefined {
-  return /^CDHash=([0-9a-f]{40})$/m.exec(output)?.[1];
+/** The CDHash and Executable lines of `codesign -d -vvv` (written to stderr). */
+export function parseCodesignIdentity(
+  output: string,
+): { cdhash: string; executable?: string } | undefined {
+  const cdhash = /^CDHash=([0-9a-f]{40})$/m.exec(output)?.[1];
+  if (!cdhash) return undefined;
+  const executable = /^Executable=(\/.+)$/m.exec(output)?.[1];
+  return executable ? { cdhash, executable } : { cdhash };
 }
 
 /**
- * The cdhash of what `target` runs: a path, or a pid, for which codesign
- * reads the code the kernel loaded for that process rather than whatever
- * file sits at its path now.
+ * What `target` runs, by codesign: a path (an app bundle or executable), or
+ * a pid, for which codesign reads the code the kernel loaded for that
+ * process rather than whatever file sits at its path now.
  */
-async function cdhash(sys: System, target: string): Promise<string | undefined> {
+async function codesign(
+  sys: System,
+  target: string,
+): Promise<{ cdhash: string; executable?: string } | undefined> {
   const r = await sys.run('codesign', ['-d', '-vvv', target], { timeoutMs: 10_000 });
-  return r.code === 0 ? parseCdhash(`${r.stderr}\n${r.stdout}`) : undefined;
+  return r.code === 0 ? parseCodesignIdentity(`${r.stderr}\n${r.stdout}`) : undefined;
+}
+
+const sha256Of = (p: string) => new FileHasher({ maxBytes: 4 * 1024 ** 3 }).sha256(p);
+
+/**
+ * Whether `path` is inside the installer's own folder, which the helper
+ * already protects by path: an app there is never pinned.
+ */
+function inInstalled(sys: System, installed: readonly string[], path: string): boolean {
+  const caseless = sys.platform !== 'linux';
+  return underSelfRoot(selfRoots(installed, caseless), path, caseless);
 }
 
 export interface PinOptions {
@@ -106,9 +123,9 @@ export interface PinOptions {
 }
 
 /**
- * Root, at install: the pin for the app at `path` (its main executable on
- * macOS, its AppImage on Linux). Undefined when the app needs none (Linux,
- * installed in the installer's folder). Throws when the file can't be pinned.
+ * Root: the pin for the app at `path` (its bundle or main executable on
+ * macOS, its AppImage on Linux). Undefined when the app needs none (inside
+ * the installer's folder). Throws when the file can't be pinned.
  */
 export async function pinFor(
   sys: System,
@@ -124,120 +141,79 @@ export async function pinFor(
     if (!image || !sha256) throw new Error(`${path} is not a file Vigil can pin`);
     return { platform: 'linux', path, image, sha256 };
   }
-  const cd = await cdhash(sys, path);
-  const sha256 = hash(path);
-  if (!cd || !sha256) throw new Error(`${path} has no code signature to pin`);
-  return { platform: 'darwin', path, cdhash: cd, sha256 };
-}
-
-const sha256Of = (p: string) => new FileHasher({ maxBytes: 4 * 1024 ** 3 }).sha256(p);
-
-/**
- * Whether `path` is inside the installer's own folder, which the helper
- * already protects by path: an app there is never pinned, so an update in
- * place asks for nothing and connections cost nothing to check.
- */
-function inInstalled(sys: System, installed: readonly string[], path: string): boolean {
-  const caseless = sys.platform !== 'linux';
-  return underSelfRoot(selfRoots(installed, caseless), path, caseless);
+  const id = await codesign(sys, path);
+  const exe = id?.executable ?? path;
+  if (!id || inInstalled(sys, opts.installed, exe))
+    throw new Error(`${path} has no code signature to pin`);
+  const sha256 = hash(exe);
+  if (!sha256) throw new Error(`${exe} can't be read`);
+  return { platform: 'darwin', path: exe, cdhash: id.cdhash, sha256 };
 }
 
 export interface RepinOptions extends PinOptions {
-  socketPath: string;
   pinFile: string;
-  /** For tests: the helper's own pid. */
-  self?: number;
 }
 
 /**
- * After the admin password approved a self grant: pin the app that asked
- * for it, so an app updated outside the installer's folder is re-pinned
- * with the grant's one prompt instead of a helper update's. Only the
- * process the kernel names on the connection the grant came from counts,
- * and only when what it runs is inside what the password just approved:
- *
- *   macOS  its executable is inside one of the grant's paths, and the
- *          file there has the cdhash the running process has (so the
- *          sha256 pinned is of the code that runs).
- *   Linux  it runs from one of the grant's AppImages (device and inode).
- *
- * Anything else leaves the pin as it was. Returns the new pin, if any.
+ * After the admin password approved a self grant: pin the app it covers, so
+ * an app updated outside the installer's folder is re-pinned with the
+ * grant's one prompt instead of a helper update's. What the password just
+ * approved is what gets pinned: on macOS the first of the grant's paths
+ * outside the installer's folder that is signed code (the app bundle; its
+ * cdhash and main executable come from codesign on disk, and a path that
+ * isn't code is skipped), on Linux the
+ * first of its AppImages that is still the file at its path. Anything else
+ * leaves the pin as it was. Returns the new pin, if any.
  */
 export async function repinFromGrant(
   sys: System,
-  fd: number,
   grant: { selfPaths: readonly string[]; selfImages?: readonly SelfImage[] | undefined },
   opts: RepinOptions,
 ): Promise<AppPin | undefined> {
-  const pid = await peerPid(sys, fd, opts.socketPath, opts.self);
-  if (pid === undefined) return undefined;
-  const id = await identifyProcess(sys, pid);
-  if (!id || inInstalled(sys, opts.installed, id.path)) return undefined;
-  const hash = opts.sha256 ?? sha256Of;
-  let pin: AppPin | undefined;
-  if (sys.platform === 'linux') {
-    const image = (grant.selfImages ?? []).find(
-      (i) => sys.fileId?.(i.path) === i.id && runsFromSelfImage(sys, pid, [i.id]),
-    );
-    const sha256 = image && hash(image.path);
-    if (image && sha256) pin = { platform: 'linux', path: image.path, image: image.id, sha256 };
-  } else {
-    const caseless = true;
-    if (!underSelfRoot(selfRoots(grant.selfPaths, caseless), id.path, caseless)) return undefined;
-    const running = await cdhash(sys, String(pid));
-    const onDisk = await cdhash(sys, id.path);
-    const sha256 = running && running === onDisk ? hash(id.path) : undefined;
-    if (running && sha256) pin = { platform: 'darwin', path: id.path, cdhash: running, sha256 };
+  const candidates =
+    sys.platform === 'linux'
+      ? (grant.selfImages ?? []).filter((i) => sys.fileId?.(i.path) === i.id).map((i) => i.path)
+      : grant.selfPaths;
+  for (const path of candidates) {
+    if (inInstalled(sys, opts.installed, path)) continue;
+    let pin: AppPin | undefined;
+    try {
+      pin = await pinFor(sys, path, opts);
+    } catch {
+      continue;
+    }
+    if (!pin) continue;
+    writePin(opts.pinFile, pin);
+    return pin;
   }
-  if (!pin) return undefined;
-  // Still the same process.
-  const after = await identifyProcess(sys, pid);
-  if (!after || after.started !== id.started) return undefined;
-  writePin(opts.pinFile, pin);
-  return pin;
+  return undefined;
 }
 
-/** A connected process verified as the pinned app, and the program hashes it runs. */
-export interface ProtectedPeer {
-  pid: number;
-  /** Its start time as ps prints it, so a reused pid is never mistaken for it. */
-  started: string;
-  hashes: readonly string[];
-}
-
-export interface PeerCheckOptions {
-  socketPath: string;
-  pinFile: string;
-  /** For tests: the helper's own pid. */
-  self?: number;
+/** The pinned program's hashes, which no hash block may name. Reads only the pin. */
+export function pinnedHashes(pinFile: string): string[] {
+  const pin = readPin(pinFile);
+  if (!pin) return [];
+  return pin.platform === 'darwin' ? [pin.cdhash, pin.sha256] : [pin.sha256];
 }
 
 /**
- * The process on the other end of the connection on `fd`, if it is the
- * pinned app. Anything less than a match gives undefined.
+ * Whether the identified process runs the pinned app. Nothing runs without
+ * a pin. On macOS the pid's cdhash is read once codesign is done, the
+ * process is identified again: `recheck` says whether it is still the same
+ * one, and if not the answer is 'changed', so a pid reused while codesign
+ * ran is neither spared nor hit.
  */
-export async function verifyPeer(
+export async function runsPinnedApp(
   sys: System,
-  fd: number,
-  opts: PeerCheckOptions,
-): Promise<ProtectedPeer | undefined> {
-  const pin = readPin(opts.pinFile);
-  if (!pin || pin.platform !== (sys.platform ?? 'darwin')) return undefined;
-  const pid = await peerPid(sys, fd, opts.socketPath, opts.self);
-  if (pid === undefined) return undefined;
-  const before = await identifyProcess(sys, pid);
-  if (!before) return undefined;
-  const matches =
-    pin.platform === 'darwin'
-      ? (await cdhash(sys, String(pid))) === pin.cdhash
-      : runsFromSelfImage(sys, pid, [pin.image]);
-  if (!matches) return undefined;
-  // Still the same process: not gone and its pid reused while checking.
-  const after = await identifyProcess(sys, pid);
-  if (!after || after.started !== before.started || after.path !== before.path) return undefined;
-  return {
-    pid,
-    started: before.started,
-    hashes: pin.platform === 'darwin' ? [pin.cdhash, pin.sha256] : [pin.sha256],
-  };
+  pinFile: string,
+  id: ProcessIdentity,
+  recheck: () => Promise<ProcessIdentity | undefined>,
+): Promise<boolean | 'changed'> {
+  const pin = readPin(pinFile);
+  if (!pin || pin.platform !== (sys.platform ?? 'darwin')) return false;
+  if (pin.platform === 'linux') return runsFromSelfImage(sys, id.pid, [pin.image]);
+  const running = await codesign(sys, String(id.pid));
+  const after = await recheck();
+  if (!after || after.started !== id.started || after.path !== id.path) return 'changed';
+  return running?.cdhash === pin.cdhash;
 }

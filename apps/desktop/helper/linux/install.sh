@@ -47,7 +47,8 @@ install -o root -g root -m 644 "$HERE/com.vigilathome.helper.policy" "$POLICY"
 "$LIBEXEC/vigil-helper" osquery-setup || echo "osquery setup failed; Vigil retries it later." >&2
 
 # Pin the app that asked for this install, so the helper's rules stay off it
-# while it is connected. Without a pin the helper still works, unpinned.
+# (nothing is pinned for an app in the installer's folder). Without a pin the
+# helper still works, unpinned.
 if [ -n "${1:-}" ]; then
   "$LIBEXEC/vigil-helper" pin-app "$1" || echo "Could not pin the app; the helper runs without it." >&2
 fi

@@ -52,8 +52,11 @@ export interface ProcessTarget {
   path?: string;
   /** Linux: what is Vigil's own (FastPath.self()), never paused or stopped. */
   self?: { paths: readonly string[]; images: readonly string[] };
-  /** The app connected to the helper, verified against its install-time pin (appPin.ts). */
-  peers?: readonly { pid: number; started: string }[];
+  /**
+   * Whether the process runs the app pinned at install (appPin.ts
+   * runsPinnedApp); 'changed' when it was replaced while being checked.
+   */
+  isPinnedApp?: (id: ProcessIdentity) => Promise<boolean | 'changed'>;
   /** Expected start time, ms since epoch. ps reports whole seconds, so it matches within a second. */
   startTime?: number;
 }
@@ -96,8 +99,6 @@ async function checkTarget(
       );
     }
   }
-  if (expect.peers?.some((p) => p.pid === id.pid && p.started === id.started))
-    throw new ActionError('refused', `${id.path} is Vigil, connected to the helper`);
   if (isSelf(sys, pid, id.path, expect.self))
     throw new ActionError('refused', `${id.path} is part of Vigil`);
   if (isProtectedProcess(id.path, sys.platform))
@@ -105,6 +106,11 @@ async function checkTarget(
       'refused',
       `${id.path} is part of ${sys.platform === 'linux' ? 'the system' : 'macOS'} or Vigil`,
     );
+  // Last, so a program already protected by path costs no codesign.
+  const pinned = await expect.isPinnedApp?.(id);
+  if (pinned === 'changed')
+    throw new ActionError('refused', `process ${pid} changed while it was being checked`);
+  if (pinned) throw new ActionError('refused', `${id.path} is Vigil`);
   return id;
 }
 

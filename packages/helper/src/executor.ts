@@ -21,7 +21,7 @@ import type { Approvals } from './approval.js';
 import type { System } from './system.js';
 import { PolicyRefused, type FastPath, type SelfSet } from './fastpath.js';
 import type { PreexecSync } from './preexec.js';
-import type { ProtectedPeer } from './appPin.js';
+import { pinnedHashes, runsPinnedApp } from './appPin.js';
 import { ActionError } from './commands/errors.js';
 import {
   identifyProcess,
@@ -71,21 +71,12 @@ export interface ExecutorDeps {
   /** What is Vigil's own: never paused, stopped or blocked. Defaults to fastPath.self(). */
   self?: () => SelfSet;
   /**
-   * The connected processes verified as the app the helper was installed for
-   * (appPin.ts): never paused or stopped, and their programs never blocked
-   * by hash, while they stay connected.
+   * The app pinned at install (appPin.ts): a process running it is never
+   * paused or stopped, and its program never blocked by hash.
    */
-  peers?: () => readonly ProtectedPeer[];
-  /**
-   * After the password approved a self grant: re-pin the app on the
-   * connection it came from (appPin.ts repinFromGrant).
-   */
-  repin?: (fd: number, grant: SelfGrant) => Promise<void>;
-}
-
-/** Where a command came from: the helper's end of the client's connection. */
-export interface CommandSource {
-  fd: number;
+  appPin?: string;
+  /** After the password approved a self grant: re-pin the app it covers (appPin.ts repinFromGrant). */
+  repin?: (grant: SelfGrant) => Promise<void>;
 }
 
 export type ExecOutcome =
@@ -124,14 +115,21 @@ export class Executor {
     return this.d.self?.() ?? this.d.fastPath?.self() ?? { paths: [], images: [], hashes: [] };
   }
 
-  private peers(): readonly ProtectedPeer[] {
-    return this.d.peers?.() ?? [];
-  }
-
   /** Whether blocking this hash would block Vigil's own program. */
   private isOwnHash(identifier: string): boolean {
     const id = identifier.toLowerCase();
-    return this.self().hashes.includes(id) || this.peers().some((p) => p.hashes.includes(id));
+    if (this.self().hashes.includes(id)) return true;
+    return this.d.appPin ? pinnedHashes(this.d.appPin).includes(id) : false;
+  }
+
+  /** The pin check for a process about to be paused or stopped; absent without a pin file. */
+  private pinCheck(): { isPinnedApp?: (id: ProcessIdentity) => Promise<boolean | 'changed'> } {
+    const file = this.d.appPin;
+    if (!file) return {};
+    const sys = this.d.sys;
+    return {
+      isPinnedApp: (id) => runsPinnedApp(sys, file, id, () => identifyProcess(sys, id.pid)),
+    };
   }
 
   /** Quarantine settings with the protected folders of the OS the helper acts on. */
@@ -141,7 +139,7 @@ export class Executor {
       : this.d.quarantine;
   }
 
-  async execute(cmd: HelperCommand, approval?: string, from?: CommandSource): Promise<ExecOutcome> {
+  async execute(cmd: HelperCommand, approval?: string): Promise<ExecOutcome> {
     let approvedGrant = false;
     // Refuse what Linux can't do before asking for a password for it.
     if (this.d.sys.platform === 'linux') checkLinuxBlock(cmd);
@@ -180,8 +178,8 @@ export class Executor {
     }
     const result = await this.run(cmd);
     // Only a grant the password approved re-pins, never one that named nothing new.
-    if (approvedGrant && cmd.kind === 'self.grant' && from && this.d.repin)
-      await this.d.repin(from.fd, cmd).catch(() => undefined);
+    if (approvedGrant && cmd.kind === 'self.grant' && this.d.repin)
+      await this.d.repin(cmd).catch(() => undefined);
     return { kind: 'done', result };
   }
 
@@ -284,7 +282,7 @@ export class Executor {
         const id = await suspendProcess(sys, cmd.pid, {
           ...target(cmd),
           self: this.self(),
-          peers: this.peers(),
+          ...this.pinCheck(),
         });
         return this.record(cmd, `paused ${id.path} (pid ${id.pid})`, { process: id });
       }
@@ -306,7 +304,7 @@ export class Executor {
         const id = await killProcess(sys, cmd.pid, {
           ...target(cmd),
           self: this.self(),
-          peers: this.peers(),
+          ...this.pinCheck(),
         });
         for (const e of journal.active()) {
           if (e.kind === 'process.suspend' && (e.undo?.process as ProcessIdentity).pid === id.pid)

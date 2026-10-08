@@ -86,19 +86,18 @@ Santa / osquery ─► SensorHub ─► FastPath (same engine as the app) ─►
   new ones have fully arrived.
 - `helper-rules.json` is root-owned in a root-owned folder, and `helper.status` reports its
   revision (`helperRules.rev`), which goes up with every change.
-- The app on the other end of the socket is spared when the kernel names it and it matches
-  the app pinned at install (`appPin.ts`): `install.sh` runs `vigil-helper pin-app` as
-  root, which records the cdhash and sha256 of the app's main executable on macOS, or the
-  AppImage's device, inode and sha256 on Linux, in `app-pin.json`. The peer comes from the
-  kernel's socket tables (`lsof -U` on macOS, `ss -x` and `/proc` on Linux, `peer.ts`) and
-  its running code is checked against the pin (codesign on the pid; the AppImage's mount
-  on Linux). While it stays connected, the helper won't pause or stop that one process or
-  block those hashes. No pin, or one for another app, spares nothing. Only an app outside
-  the installer's folder is pinned: one in `/Applications/Vigil at Home.app` or
-  `/opt/Vigil at Home` is protected by path already, has no pin, costs no lookup per
-  connection and asks for nothing when updated in place. An app outside it is re-pinned
-  by the next self grant the password approves (the grant must cover what it runs), or
-  else by the helper update the app offers when its pin is stale.
+- The app pinned at install is spared (`appPin.ts`): `install.sh` runs `vigil-helper
+pin-app` as root, which records the cdhash and sha256 of the app's main executable on
+  macOS, or the AppImage's device, inode and sha256 on Linux, in `app-pin.json`. Before
+  pausing or stopping a process, the helper checks the target against the pin (codesign on
+  the pid on macOS, with the process identified again afterwards so a reused pid counts for
+  nothing; the AppImage's mount on Linux), and it refuses a hash block naming the pinned
+  hashes. No pin, or one for another app, spares nothing. Only an app outside the
+  installer's folder is pinned: one in `/Applications/Vigil at Home.app` or
+  `/opt/Vigil at Home` is protected by path already, has no pin, runs no extra codesign
+  and asks for nothing when updated in place. An app outside it is re-pinned by the next
+  self grant the password approves that covers it, or else by the helper update the app
+  offers when its pin is stale.
 
 Anything running as the user can reach the socket and send fewer rules. That only moves
 those blocks back to the app's engine, as before, so this needs no password.

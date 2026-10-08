@@ -21,10 +21,9 @@
 // Vigil's own (a path, an AppImage, a program hash): the app sends that
 // apart from the rules (self.grant, selfLoosening()), so the rules never wait
 // on that password. Until that grant is approved, an app running from
-// outside the installer's folder is not Vigil's own to these rules. The one
-// exception is the app connected to the socket, when the kernel names it and
-// it matches the app pinned at install (appPin.ts): while connected, the
-// executor won't pause or stop it or block its program by hash. Indicator lists change every day as
+// outside the installer's folder is not Vigil's own to these rules, except
+// that the executor won't pause, stop or hash-block the app pinned at
+// install (appPin.ts), checked against each target. Indicator lists change every day as
 // feeds age entries out, so an entry a list drops keeps blocking for
 // RETIRE_MS instead, and a list cannot drop more than RETIRED_MAX entries in
 // that time. The saved policy and its revision live in a root-owned file the

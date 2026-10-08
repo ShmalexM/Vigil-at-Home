@@ -1,478 +1,304 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
-import { spawn } from 'node:child_process';
-import { createServer } from 'node:net';
-import { connect, type Socket } from 'node:net';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RuleStore } from '@vigil/sensors';
 import { Approvals } from './approval.js';
 import {
+  parseCodesignIdentity,
   pinFor,
   readPin,
   repinFromGrant,
-  verifyPeer,
   writePin,
-  type ProtectedPeer,
+  type AppPin,
 } from './appPin.js';
-import { FastPath } from './fastpath.js';
 import { Executor } from './executor.js';
+import { FastPath } from './fastpath.js';
 import { Journal } from './journal.js';
 import type { HelperCommand } from './protocol.js';
-import { parseLsofSockets, peerPid, ssPeerInode } from './peer.js';
-import { HelperServer } from './server.js';
-import { realSystem, type BinaryName, type RunResult } from './system.js';
+import type { BinaryName, RunResult } from './system.js';
 import { FapolicydBlocks } from './commands/fapolicyd.js';
 import { FakeSystem } from './testing/fakeSystem.js';
 import { FakeLinuxSystem } from './testing/fakeLinuxSystem.js';
 
 const STARTED = 'Mon Oct  5 16:20:13 2026';
-const HELPER = 900;
-const FD = 12;
 const CDHASH = 'c'.repeat(40);
 const APP_SHA = 'a'.repeat(64);
-const MAC_SOCKET = '/var/run/vigil-helper.sock';
-const LINUX_SOCKET = '/run/vigil-helper.sock';
+const BUNDLE = '/Users/a/Downloads/Vigil at Home.app';
+const EXE = `${BUNDLE}/Contents/MacOS/Vigil at Home`;
+const INSTALLED_MAC = ['/Applications/Vigil at Home.app'];
 
 let root: string;
+let pinFile: string;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'vigil-pin-'));
+  pinFile = join(root, 'app-pin.json');
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 const ok = (stdout = '', stderr = ''): RunResult => ({ code: 0, stdout, stderr });
 
-/**
- * macOS: lsof's view of the Unix sockets (kernel address, peer address) and
- * the cdhash codesign reads for each running pid.
- */
-class MacPeers extends FakeSystem {
-  /** pid → its sockets as [fd, address, peer address]. */
-  sockets = new Map<number, [number, string, string | undefined][]>();
-  cdhashes = new Map<string, string>();
+/** macOS, with what codesign reads for each path or pid. */
+class MacCode extends FakeSystem {
+  /** target (path or pid) → [cdhash, main executable]. */
+  code = new Map<string, [string, string]>();
+  /** Runs while codesign looks at a pid, to stand in for the pid being reused meanwhile. */
+  duringCodesign: (() => void) | undefined;
 
   override async run(bin: BinaryName, args: string[], opts: { input?: string } = {}) {
-    if (bin === 'lsof' && args.includes('-U')) {
-      this.runs.push({ bin, args, input: opts.input });
-      const only = args.includes('-p') ? Number(args[args.indexOf('-p') + 1]) : undefined;
-      const fd = args.includes('-d') ? Number(args[args.indexOf('-d') + 1]) : undefined;
-      let out = '';
-      for (const [pid, socks] of this.sockets) {
-        if (only !== undefined && pid !== only) continue;
-        out += `p${pid}\n`;
-        for (const [n, addr, peer] of socks) {
-          if (fd !== undefined && n !== fd) continue;
-          out += `f${n}\nd${addr}\nn${peer ? `->${peer}` : MAC_SOCKET}\n`;
-        }
-      }
-      return ok(out);
-    }
-    if (bin === 'codesign') {
-      this.runs.push({ bin, args, input: opts.input });
-      const cd = this.cdhashes.get(args.at(-1)!);
-      return cd
-        ? ok('', `Executable=/x\nIdentifier=com.vigilathome.app\nCDHash=${cd}\nSignature=adhoc\n`)
-        : { code: 1, stdout: '', stderr: 'not signed' };
-    }
-    return super.run(bin, args, opts);
+    if (bin !== 'codesign') return super.run(bin, args, opts);
+    this.runs.push({ bin, args, input: opts.input });
+    const target = args.at(-1)!;
+    if (/^\d+$/.test(target)) this.duringCodesign?.();
+    const c = this.code.get(target);
+    return c
+      ? ok('', `Executable=${c[1]}\nIdentifier=com.vigilathome.app\nCDHash=${c[0]}\n`)
+      : { code: 1, stdout: '', stderr: 'code object is not signed at all' };
   }
 }
 
-/** Linux: `ss -x` lines for the helper's socket, from [own inode, peer inode] pairs. */
-class LinuxPeers extends FakeLinuxSystem {
-  conns: [string, string][] = [];
-
-  override async run(bin: BinaryName, args: string[], opts: { input?: string } = {}) {
-    if (bin === 'ss') {
-      this.runs.push({ bin, args, input: opts.input });
-      const lines = [
-        'Netid State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process',
-        'u_str ESTAB  0      0      /run/systemd/journal/stdout 3001 * 3000',
-        ...this.conns.map(
-          ([own, peer]) => `u_str ESTAB  0      0      ${LINUX_SOCKET} ${own} * ${peer}`,
-        ),
-      ];
-      return ok(lines.join('\n') + '\n');
-    }
-    return super.run(bin, args, opts);
-  }
-}
-
-describe('finding the peer from the kernel’s socket tables', () => {
-  it('reads the peer inode from ss for the helper’s own end only', () => {
-    const out = [
-      'u_str ESTAB 0 0 /run/vigil-helper.sock 5001 * 5002',
-      'u_str ESTAB 0 0 /run/vigil-helper.sock 5003 * 5004',
-      'u_str ESTAB 0 0 /tmp/other.sock 5001 * 6000',
-    ].join('\n');
-    expect(ssPeerInode(out, LINUX_SOCKET, '5001')).toBe('5002');
-    expect(ssPeerInode(out, LINUX_SOCKET, '5003')).toBe('5004');
-    expect(ssPeerInode(out, LINUX_SOCKET, '5005')).toBeUndefined();
-    // A client that names its own socket to look like other fields still
-    // can't move its peer inode: that is always the last one.
-    const sly = 'u_str ESTAB 0 0 /run/vigil-helper.sock 5007 /tmp/x 5001 * 5002 5008';
-    expect(ssPeerInode(sly, LINUX_SOCKET, '5007')).toBe('5008');
-    expect(ssPeerInode(sly, LINUX_SOCKET, '5001')).toBeUndefined();
-  });
-
-  it('reads lsof’s socket and peer addresses', () => {
-    expect(
-      parseLsofSockets('p1\nf3\nd0x0A\nn->0x0b\nf4\nd0xc\nn/var/run/x.sock\np2\nf5\nd0xd\n'),
-    ).toEqual([
-      { pid: 1, addr: 10n, peer: 11n },
-      { pid: 1, addr: 12n },
-      { pid: 2, addr: 13n },
-    ]);
-  });
+const executorDeps = (sys: FakeSystem | FakeLinuxSystem) => ({
+  sys,
+  journal: new Journal(join(root, 'journal.json')),
+  approvals: new Approvals({ dir: join(root, 'approvals'), requiredOwnerUid: process.getuid!() }),
+  rules: new RuleStore(join(root, 'rules.json')),
+  quarantine: { quarantineDir: join(root, 'Quarantine') },
+  syncPort: 47821,
+  appPin: pinFile,
 });
 
-const hasSs = existsSync('/usr/bin/ss') || existsSync('/usr/sbin/ss');
-
-describe('finding a real peer (Linux, with ss)', () => {
-  it.skipIf(process.platform !== 'linux' || !hasSs)(
-    'names the process that connected',
-    async () => {
-      const path = join(root, 's.sock');
-      let accepted!: (fd: number) => void;
-      const fd = new Promise<number>((r) => (accepted = r));
-      const srv = createServer((s) =>
-        accepted((s as unknown as { _handle: { fd: number } })._handle.fd),
-      );
-      await new Promise<void>((r) => srv.listen(path, () => r()));
-      const child = spawn(process.execPath, [
-        '-e',
-        `require('net').connect(${JSON.stringify(path)}); setTimeout(() => {}, 10000)`,
-      ]);
-      try {
-        expect(await peerPid(realSystem(undefined, 'linux'), await fd, path)).toBe(child.pid);
-      } finally {
-        child.kill();
-        srv.close();
-      }
-    },
-  );
+it('reads the cdhash and main executable codesign prints', () => {
+  expect(
+    parseCodesignIdentity(`Executable=${EXE}\nIdentifier=x\nCDHash=${CDHASH}\nSignature=adhoc\n`),
+  ).toEqual({ cdhash: CDHASH, executable: EXE });
+  expect(parseCodesignIdentity('code object is not signed at all')).toBeUndefined();
 });
 
 describe('the app pinned at install (macOS)', () => {
   const APP = 501;
-  let sys: MacPeers;
-  let pinFile: string;
-  const check = () => verifyPeer(sys, FD, { socketPath: MAC_SOCKET, pinFile, self: HELPER });
+  let sys: MacCode;
+  const codesigns = () => sys.runs.filter((r) => r.bin === 'codesign').map((r) => r.args.at(-1));
 
   beforeEach(() => {
-    sys = new MacPeers();
-    pinFile = join(root, 'app-pin.json');
-    sys.processes.set(APP, {
-      path: '/Users/a/Downloads/Vigil at Home.app/Contents/MacOS/Vigil at Home',
-      started: STARTED,
-    });
-    // The helper's end of the connection (0xa1), its listener, and the app's end (0xb1).
-    sys.sockets.set(HELPER, [
-      [9, '0xa0', undefined],
-      [FD, '0xa1', undefined],
-    ]);
-    sys.sockets.set(APP, [[30, '0xb1', '0xa1']]);
-    sys.cdhashes.set(String(APP), CDHASH);
-    writePin(pinFile, { platform: 'darwin', path: '/x', cdhash: CDHASH, sha256: APP_SHA });
+    sys = new MacCode();
+    sys.code.set(BUNDLE, [CDHASH, EXE]);
+    sys.code.set(EXE, [CDHASH, EXE]);
+    sys.code.set(String(APP), [CDHASH, EXE]);
+    sys.processes.set(APP, { path: EXE, started: STARTED });
   });
 
-  it('pins the cdhash and sha256 of the app’s executable, as root reads them', async () => {
-    sys.cdhashes.set('/Apps/Vigil/MacOS/Vigil', CDHASH);
-    const pin = await pinFor(sys, '/Apps/Vigil/MacOS/Vigil', {
-      installed: [],
-      sha256: () => APP_SHA,
-    });
-    expect(pin).toEqual({
-      platform: 'darwin',
-      path: '/Apps/Vigil/MacOS/Vigil',
-      cdhash: CDHASH,
-      sha256: APP_SHA,
-    });
+  it('pins the cdhash and sha256 of the main executable', async () => {
+    const pin = await pinFor(sys, BUNDLE, { installed: INSTALLED_MAC, sha256: () => APP_SHA });
+    expect(pin).toEqual({ platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
     writePin(pinFile, pin);
     expect(readPin(pinFile)).toEqual(pin);
     expect(statSync(pinFile).mode & 0o777).toBe(0o644);
-    await expect(
-      pinFor(sys, '/unsigned', { installed: [], sha256: () => APP_SHA }),
-    ).rejects.toThrow();
-    await expect(pinFor(sys, 'relative', { installed: [] })).rejects.toThrow();
+    const opts = { installed: INSTALLED_MAC, sha256: () => APP_SHA };
+    await expect(pinFor(sys, '/Users/a/unsigned', opts)).rejects.toThrow();
+    await expect(pinFor(sys, 'relative', opts)).rejects.toThrow();
   });
 
-  it('pins nothing for an app in /Applications, so no connection is looked up', async () => {
-    const installed = ['/Applications/Vigil at Home.app'];
-    const exe = '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home';
-    sys.cdhashes.set(exe, CDHASH);
-    expect(await pinFor(sys, exe, { installed, sha256: () => APP_SHA })).toBeUndefined();
-    expect(sys.runs).toEqual([]);
-    // install.sh then leaves no pin, and each connection costs nothing.
-    writePin(pinFile, undefined);
-    expect(await check()).toBeUndefined();
-    expect(sys.runs).toEqual([]);
+  it('pins nothing in /Applications, so nothing extra ever runs', async () => {
+    const app = '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home';
+    sys.code.set(app, [CDHASH, app]);
+    expect(await pinFor(sys, app, { installed: INSTALLED_MAC })).toBeUndefined();
+    expect(codesigns()).toEqual([]);
   });
 
-  describe('re-pinned by an approved self grant', () => {
-    const DOWNLOADS = '/Users/a/Downloads/Vigil at Home.app';
-    const EXE = `${DOWNLOADS}/Contents/MacOS/Vigil at Home`;
-    const NEW = 'e'.repeat(40);
-    const repin = (selfPaths: string[]) =>
-      repinFromGrant(
-        sys,
-        FD,
-        { selfPaths },
-        {
-          socketPath: MAC_SOCKET,
-          pinFile,
-          self: HELPER,
-          installed: ['/Applications/Vigil at Home.app'],
-          sha256: () => 'b'.repeat(64),
-        },
-      );
+  describe('with a pin', () => {
     beforeEach(() => {
-      // The app was updated in Downloads: its code has a new cdhash, the pin the old one.
-      sys.cdhashes.set(String(APP), NEW);
-      sys.cdhashes.set(EXE, NEW);
+      writePin(pinFile, { platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
     });
 
-    it('pins the connected app whose executable the grant covers', async () => {
-      expect(await check()).toBeUndefined();
-      const pin = await repin([DOWNLOADS]);
-      expect(pin).toEqual({ platform: 'darwin', path: EXE, cdhash: NEW, sha256: 'b'.repeat(64) });
-      expect(readPin(pinFile)).toEqual(pin);
-      expect((await check())?.pid).toBe(APP);
-    });
-
-    it('leaves the pin alone otherwise', async () => {
-      const before = readPin(pinFile);
-      // The grant names somewhere else.
-      expect(await repin(['/Users/a/Other.app'])).toBeUndefined();
-      // The file on disk isn't the code that runs.
-      sys.cdhashes.set(EXE, 'f'.repeat(40));
-      expect(await repin([DOWNLOADS])).toBeUndefined();
-      // The app in /Applications is protected by path, never pinned.
-      sys.cdhashes.set(EXE, NEW);
-      sys.processes.set(APP, {
-        path: '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home',
-        started: STARTED,
-      });
-      expect(await repin(['/Applications/Vigil at Home.app'])).toBeUndefined();
-      expect(readPin(pinFile)).toEqual(before);
-    });
-  });
-
-  it('protects the connected process whose running code matches the pin', async () => {
-    expect(await check()).toEqual({ pid: APP, started: STARTED, hashes: [CDHASH, APP_SHA] });
-    // The cdhash comes from the running process, never from a file path.
-    const cs = sys.runs.filter((r) => r.bin === 'codesign');
-    expect(cs.map((r) => r.args.at(-1))).toEqual([String(APP)]);
-  });
-
-  it('finds the peer from either end’s address', async () => {
-    // Some sockets name their peer on the helper's side instead.
-    sys.sockets.set(HELPER, [[FD, '0xa1', '0xb1']]);
-    sys.sockets.set(APP, [[30, '0xb1', undefined]]);
-    expect((await check())?.pid).toBe(APP);
-  });
-
-  it('gives nothing to a process whose code doesn’t match the pin', async () => {
-    sys.cdhashes.set(String(APP), 'd'.repeat(40));
-    expect(await check()).toBeUndefined();
-    // Unsigned, or gone before codesign looked.
-    sys.cdhashes.delete(String(APP));
-    expect(await check()).toBeUndefined();
-  });
-
-  it('gives nothing to another connected process, even while the app runs', async () => {
-    const OTHER = 777;
-    sys.processes.set(OTHER, { path: '/tmp/evil', started: STARTED });
-    // The app runs (and matches) but holds a different connection.
-    sys.sockets.set(APP, [[30, '0xb9', '0xa9']]);
-    sys.sockets.set(OTHER, [[4, '0xe1', '0xa1']]);
-    expect(await check()).toBeUndefined();
-  });
-
-  it('names no one when the client end is shared', async () => {
-    sys.processes.set(778, { path: '/tmp/child', started: STARTED });
-    sys.sockets.set(778, [[30, '0xb1', '0xa1']]);
-    sys.cdhashes.set('778', CDHASH);
-    expect(await check()).toBeUndefined();
-  });
-
-  it('protects nothing, and looks at nothing, without a pin', async () => {
-    writePin(pinFile, undefined);
-    expect(await check()).toBeUndefined();
-    expect(sys.runs).toEqual([]);
-    // A pin made on the other system doesn't count either.
-    writePin(pinFile, { platform: 'linux', path: '/x', image: '1:2', sha256: APP_SHA });
-    expect(await check()).toBeUndefined();
-  });
-});
-
-describe('the app pinned at install (Linux AppImage)', () => {
-  const image = '/home/alex/Apps/Vigil.AppImage';
-  const mount = '/tmp/.mount_VigilaB1c2D';
-  let sys: LinuxPeers;
-  let pinFile: string;
-  const check = () => verifyPeer(sys, FD, { socketPath: LINUX_SOCKET, pinFile, self: HELPER });
-
-  beforeEach(() => {
-    sys = new LinuxPeers();
-    pinFile = join(root, 'app-pin.json');
-    sys.files.set(image, '2049:5501');
-    sys.mounts = [
-      '22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw',
-      '40 22 0:35 / /tmp rw,nosuid,nodev shared:20 - tmpfs tmpfs rw',
-      `612 40 0:71 / ${mount} ro,nosuid,nodev,relatime shared:350 - fuse.Vigil.AppImage Vigil.AppImage ro,user_id=1000,group_id=1000`,
-    ].join('\n');
-    const proc = (pid: number, path: string, start: number, fds: [number, string][]) => {
-      sys.processes.set(pid, { path, started: STARTED });
-      sys.starts.set(pid, start);
-      sys.fds.set(pid, fds);
-    };
-    // Vigil's main process, from the mount, connected on socket 5002.
-    proc(2000, `${mount}/vigil-at-home`, 500, [
-      [3, 'pipe:[90001]'],
-      [40, 'socket:[5002]'],
-    ]);
-    // The image's mount server.
-    proc(2003, image, 501, [
-      [4, 'pipe:[90001]'],
-      [5, image],
-      [6, '/dev/fuse'],
-    ]);
-    proc(2100, '/home/alex/.local/bin/tool', 900, [[7, 'socket:[5004]']]);
-    sys.fds.set(HELPER, [
-      [FD, 'socket:[5001]'],
-      [13, 'socket:[5003]'],
-    ]);
-    sys.conns = [
-      ['5001', '5002'],
-      ['5003', '5004'],
-    ];
-    writePin(pinFile, { platform: 'linux', path: image, image: '2049:5501', sha256: APP_SHA });
-  });
-
-  it('pins the AppImage by device and inode, and nothing in the installer’s folder', async () => {
-    const opts = { installed: ['/opt/Vigil at Home'], sha256: () => APP_SHA };
-    expect(await pinFor(sys, image, opts)).toEqual({
-      platform: 'linux',
-      path: image,
-      image: '2049:5501',
-      sha256: APP_SHA,
-    });
-    expect(await pinFor(sys, '/opt/Vigil at Home/vigil-at-home', opts)).toBeUndefined();
-    await expect(pinFor(sys, '/home/alex/missing', opts)).rejects.toThrow();
-  });
-
-  it('is re-pinned by an approved grant that names the image it runs from', async () => {
-    writePin(pinFile, undefined);
-    const opts = {
-      socketPath: LINUX_SOCKET,
-      pinFile,
-      self: HELPER,
-      installed: ['/opt/Vigil at Home'],
-      sha256: () => APP_SHA,
-    };
-    const other = { path: '/home/alex/Other.AppImage', id: '2049:7777' };
-    sys.files.set(other.path, other.id);
-    expect(
-      await repinFromGrant(sys, FD, { selfPaths: [], selfImages: [other] }, opts),
-    ).toBeUndefined();
-    expect(readPin(pinFile)).toBeUndefined();
-    const grant = { selfPaths: [], selfImages: [{ path: image, id: '2049:5501' }] };
-    expect(await repinFromGrant(sys, FD, grant, opts)).toMatchObject({ image: '2049:5501' });
-    expect((await check())?.pid).toBe(2000);
-  });
-
-  it('protects Vigil running from the pinned image', async () => {
-    expect(await check()).toEqual({ pid: 2000, started: STARTED, hashes: [APP_SHA] });
-  });
-
-  it('gives nothing when the pin names another image', async () => {
-    writePin(pinFile, { platform: 'linux', path: image, image: '2049:9999', sha256: APP_SHA });
-    expect(await check()).toBeUndefined();
-  });
-
-  it('gives nothing to another connected process', async () => {
-    // The helper's connection on FD now leads to the user's own tool.
-    sys.conns = [['5001', '5004']];
-    expect(await check()).toBeUndefined();
-    // And the tool's own connection is no better.
-    expect(
-      await verifyPeer(sys, 13, { socketPath: LINUX_SOCKET, pinFile, self: HELPER }),
-    ).toBeUndefined();
-  });
-
-  it('names no one when the client end is shared', async () => {
-    sys.fds.set(2100, [[7, 'socket:[5002]']]);
-    expect(await check()).toBeUndefined();
-  });
-});
-
-describe('what a verified peer is spared', () => {
-  const APP = 501;
-  const peer: ProtectedPeer = { pid: APP, started: STARTED, hashes: [CDHASH, APP_SHA] };
-  let peers: ProtectedPeer[];
-  const deps = (sys: FakeSystem | FakeLinuxSystem) => ({
-    sys,
-    journal: new Journal(join(root, 'journal.json')),
-    approvals: new Approvals({ dir: join(root, 'approvals'), requiredOwnerUid: process.getuid!() }),
-    rules: new RuleStore(join(root, 'rules.json')),
-    quarantine: { quarantineDir: join(root, 'Quarantine') },
-    syncPort: 47821,
-    peers: () => peers,
-  });
-  beforeEach(() => {
-    peers = [peer];
-  });
-
-  it('macOS: never pauses or stops it, or blocks its program by hash', async () => {
-    const sys = new FakeSystem();
-    const path = '/Users/a/Downloads/Vigil at Home.app/Contents/MacOS/Vigil at Home';
-    sys.processes.set(APP, { path, started: STARTED });
-    sys.processes.set(777, { path: '/tmp/evil', started: STARTED });
-    const ex = new Executor(deps(sys));
-    for (const kind of ['process.suspend', 'process.kill'] as const)
-      await expect(ex.execute({ kind, pid: APP, path })).rejects.toMatchObject({ code: 'refused' });
-    for (const [ruleType, identifier] of [
-      ['cdhash', CDHASH.toUpperCase()],
-      ['binary', APP_SHA],
-    ] as const)
+    it('never pauses or stops a process running the pinned code', async () => {
+      const ex = new Executor(executorDeps(sys));
+      for (const kind of ['process.suspend', 'process.kill'] as const)
+        await expect(ex.execute({ kind, pid: APP, path: EXE })).rejects.toMatchObject({
+          code: 'refused',
+        });
+      expect(sys.signals).toEqual([]);
+      // Read from the running process, never from a file path.
+      expect(codesigns()).toEqual([String(APP), String(APP)]);
+      // A copy elsewhere runs the same code, so it is the app too.
+      sys.processes.set(600, { path: '/tmp/copy/Vigil at Home', started: STARTED });
+      sys.code.set('600', [CDHASH, '/tmp/copy/Vigil at Home']);
       await expect(
-        ex.execute({ kind: 'santa.rule.set', ruleType, identifier, policy: 'block' }),
+        ex.execute({ kind: 'process.kill', pid: 600, path: '/tmp/copy/Vigil at Home' }),
       ).rejects.toMatchObject({ code: 'refused' });
-    // Everything else is blocked as before.
-    await ex.execute({ kind: 'process.kill', pid: 777, path: '/tmp/evil' });
-    await ex.execute({
-      kind: 'santa.rule.set',
-      ruleType: 'cdhash',
-      identifier: 'e'.repeat(40),
-      policy: 'block',
     });
-    expect(sys.signals).toEqual([{ pid: 777, signal: 'SIGKILL' }]);
 
-    // A reused pid is another process.
-    sys.processes.set(APP, { path, started: 'Tue Oct  6 09:00:00 2026' });
-    await ex.execute({ kind: 'process.suspend', pid: APP, path });
-    // Once the app disconnects, it is an ordinary program again.
-    sys.processes.set(APP, { path, started: STARTED });
-    peers = [];
-    await ex.execute({ kind: 'process.suspend', pid: APP, path });
+    it('stops a different program as before', async () => {
+      sys.processes.set(777, { path: '/tmp/evil', started: STARTED });
+      sys.code.set('777', ['d'.repeat(40), '/tmp/evil']);
+      sys.processes.set(778, { path: '/tmp/unsigned', started: STARTED });
+      const ex = new Executor(executorDeps(sys));
+      await ex.execute({ kind: 'process.kill', pid: 777, path: '/tmp/evil' });
+      await ex.execute({ kind: 'process.kill', pid: 778, path: '/tmp/unsigned' });
+      expect(sys.signals.map((s) => s.pid)).toEqual([777, 778]);
+    });
+
+    it('neither spares nor hits a pid reused while codesign looked', async () => {
+      const ex = new Executor(executorDeps(sys));
+      // The process exits during codesign and another takes its pid.
+      sys.duringCodesign = () =>
+        sys.processes.set(APP, { path: '/tmp/evil', started: 'Tue Oct  6 09:00:00 2026' });
+      await expect(ex.execute({ kind: 'process.kill', pid: APP, path: EXE })).rejects.toMatchObject(
+        { code: 'refused' },
+      );
+      // And a pid already reused by another program fails the path check first.
+      sys.duringCodesign = undefined;
+      sys.code.set(String(APP), ['d'.repeat(40), '/tmp/evil']);
+      await ex.execute({ kind: 'process.kill', pid: APP, path: '/tmp/evil' });
+      expect(sys.signals).toEqual([{ pid: APP, signal: 'SIGKILL' }]);
+    });
+
+    it('refuses a hash block of the pinned program, and only that', async () => {
+      const ex = new Executor(executorDeps(sys));
+      for (const [ruleType, identifier] of [
+        ['cdhash', CDHASH.toUpperCase()],
+        ['binary', APP_SHA],
+      ] as const)
+        await expect(
+          ex.execute({ kind: 'santa.rule.set', ruleType, identifier, policy: 'block' }),
+        ).rejects.toMatchObject({ code: 'refused' });
+      await ex.execute({
+        kind: 'santa.rule.set',
+        ruleType: 'cdhash',
+        identifier: 'e'.repeat(40),
+        policy: 'block',
+      });
+      // No process was looked at for a block.
+      expect(codesigns()).toEqual([]);
+    });
+  });
+
+  it('runs no codesign without a pin', async () => {
+    const ex = new Executor(executorDeps(sys));
+    await ex.execute({ kind: 'process.suspend', pid: APP, path: EXE });
     await ex.execute({
       kind: 'santa.rule.set',
       ruleType: 'binary',
       identifier: APP_SHA,
       policy: 'block',
     });
-    expect(sys.signals.map((s) => s.pid)).toEqual([777, APP, APP]);
+    expect(sys.signals).toEqual([{ pid: APP, signal: 'SIGSTOP' }]);
+    expect(codesigns()).toEqual([]);
   });
 
-  it('Linux: no fapolicyd block of the pinned image either', async () => {
-    const sys = new FakeLinuxSystem();
+  it('runs no codesign for a program protected by path', async () => {
+    writePin(pinFile, { platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
+    const app = '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home';
+    sys.processes.set(700, { path: app, started: STARTED });
+    const ex = new Executor(executorDeps(sys));
+    await expect(ex.execute({ kind: 'process.kill', pid: 700, path: app })).rejects.toMatchObject({
+      code: 'refused',
+    });
+    expect(codesigns()).toEqual([]);
+  });
+
+  describe('re-pinned by an approved self grant', () => {
+    const NEW = 'e'.repeat(40);
+    const repin = (selfPaths: string[]) =>
+      repinFromGrant(
+        sys,
+        { selfPaths },
+        { pinFile, installed: INSTALLED_MAC, sha256: () => 'b'.repeat(64) },
+      );
+    beforeEach(() => {
+      writePin(pinFile, { platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
+      // The app in Downloads was updated: its code has a new cdhash.
+      sys.code.set(BUNDLE, [NEW, EXE]);
+    });
+
+    it('pins the executable the grant covers, by its cdhash on disk', async () => {
+      const pin = await repin(['/Users/a/Library/not-code', BUNDLE]);
+      expect(pin).toEqual({ platform: 'darwin', path: EXE, cdhash: NEW, sha256: 'b'.repeat(64) });
+      expect(readPin(pinFile)).toEqual(pin);
+    });
+
+    it('leaves the pin alone for a grant inside /Applications or naming no code', async () => {
+      const before = readPin(pinFile);
+      const app = '/Applications/Vigil at Home.app';
+      sys.code.set(app, [NEW, `${app}/Contents/MacOS/Vigil at Home`]);
+      expect(await repin([app, '/Users/a/Library/not-code'])).toBeUndefined();
+      expect(readPin(pinFile)).toEqual(before);
+      expect(sys.runs.filter((r) => r.args.at(-1) === app)).toEqual([]);
+    });
+
+    it('happens only when the password approved a grant', async () => {
+      const asked: HelperCommand[] = [];
+      const fast = new FastPath({
+        file: join(root, 'helper-rules.json'),
+        run: async () => {
+          throw new Error('unused');
+        },
+      });
+      const ex = new Executor({
+        ...executorDeps(sys),
+        fastPath: fast,
+        repin: async (grant) => void asked.push(grant),
+      });
+      const grant: HelperCommand = { kind: 'self.grant', selfPaths: [BUNDLE] };
+      const ask = await ex.execute(grant);
+      expect(ask.kind).toBe('needs_approval');
+      expect(asked).toEqual([]);
+      const nonce = (ask as { nonce: string }).nonce;
+      Approvals.writeApproval(join(root, 'approvals'), nonce);
+      await ex.execute(grant, nonce);
+      expect(asked).toEqual([grant]);
+      // The same grant again names nothing new, needs no password, and re-pins nothing.
+      await ex.execute(grant);
+      expect(asked).toHaveLength(1);
+    });
+  });
+});
+
+describe('the app pinned at install (Linux AppImage)', () => {
+  const image = '/home/alex/Apps/Vigil.AppImage';
+  const mount = '/tmp/.mount_VigilaB1c2D';
+  let sys: FakeLinuxSystem;
+  const pin: AppPin = { platform: 'linux', path: image, image: '2049:5501', sha256: APP_SHA };
+
+  beforeEach(() => {
+    sys = new FakeLinuxSystem();
+    sys.files.set(image, '2049:5501');
+    sys.mounts = [
+      '22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw',
+      '40 22 0:35 / /tmp rw,nosuid,nodev shared:20 - tmpfs tmpfs rw',
+      `612 40 0:71 / ${mount} ro,nosuid,nodev,relatime shared:350 - fuse.Vigil.AppImage Vigil.AppImage ro,user_id=1000,group_id=1000`,
+    ].join('\n');
+    const proc = (pid: number, path: string, start: number, fds: [number, string][] = []) => {
+      sys.processes.set(pid, { path, started: STARTED });
+      sys.starts.set(pid, start);
+      sys.fds.set(pid, fds);
+    };
+    // Vigil's main process, from the image's mount, and the mount server.
+    proc(2000, `${mount}/vigil-at-home`, 500, [[3, 'pipe:[90001]']]);
+    proc(2003, image, 501, [
+      [4, 'pipe:[90001]'],
+      [5, image],
+      [6, '/dev/fuse'],
+    ]);
+    proc(2100, '/home/alex/.local/bin/tool', 900);
+  });
+
+  it('pins the AppImage by device and inode, and nothing in the installer’s folder', async () => {
+    const opts = { installed: ['/opt/Vigil at Home'], sha256: () => APP_SHA };
+    expect(await pinFor(sys, image, opts)).toEqual(pin);
+    expect(await pinFor(sys, '/opt/Vigil at Home/vigil-at-home', opts)).toBeUndefined();
+    await expect(pinFor(sys, '/home/alex/missing', opts)).rejects.toThrow();
+  });
+
+  it('never stops Vigil running from the pinned image, or blocks the image by hash', async () => {
+    writePin(pinFile, pin);
     const blocks = new FapolicydBlocks(sys, {
       store: join(root, 'blocked.json'),
       rulesDir: join(root, 'rules.d'),
     });
-    sys.processes.set(APP, { path: '/tmp/.mount_X/vigil-at-home', started: STARTED });
-    const ex = new Executor({ ...deps(sys), fapolicyd: blocks });
+    const ex = new Executor({ ...executorDeps(sys), fapolicyd: blocks });
+    await expect(
+      ex.execute({ kind: 'process.kill', pid: 2000, path: `${mount}/vigil-at-home` }),
+    ).rejects.toMatchObject({ code: 'refused' });
     const set = {
       kind: 'santa.rule.set',
       ruleType: 'binary',
@@ -480,113 +306,29 @@ describe('what a verified peer is spared', () => {
       policy: 'block',
     } as const;
     await expect(ex.execute(set)).rejects.toMatchObject({ code: 'refused' });
-    await expect(
-      ex.execute({ kind: 'process.kill', pid: APP, path: '/tmp/.mount_X/vigil-at-home' }),
-    ).rejects.toMatchObject({ code: 'refused' });
     expect(blocks.has(APP_SHA)).toBe(false);
-    peers = [];
-    await ex.execute(set);
-    expect(blocks.has(APP_SHA)).toBe(true);
-  });
-});
-
-describe('the self grant’s password re-pins', () => {
-  it('asks for a re-pin only after the password approved a grant', async () => {
-    const sys = new FakeSystem();
-    const asked: number[] = [];
-    const fast = new FastPath({
-      file: join(root, 'helper-rules.json'),
-      run: async () => {
-        throw new Error('unused');
-      },
-    });
-    const ex = new Executor({
-      sys,
-      journal: new Journal(join(root, 'journal.json')),
-      approvals: new Approvals({
-        dir: join(root, 'approvals'),
-        requiredOwnerUid: process.getuid!(),
-      }),
-      rules: new RuleStore(join(root, 'rules.json')),
-      quarantine: { quarantineDir: join(root, 'Quarantine') },
-      syncPort: 47821,
-      fastPath: fast,
-      repin: async (fd) => void asked.push(fd),
-    });
-    const grant: HelperCommand = {
-      kind: 'self.grant',
-      selfPaths: ['/Users/a/Downloads/Vigil at Home.app'],
-    };
-    const ask = await ex.execute(grant, undefined, { fd: FD });
-    expect(ask.kind).toBe('needs_approval');
-    expect(asked).toEqual([]);
-    const nonce = (ask as { nonce: string }).nonce;
-    Approvals.writeApproval(join(root, 'approvals'), nonce);
-    await ex.execute(grant, nonce, { fd: FD });
-    expect(asked).toEqual([FD]);
-    // The same grant again names nothing new, needs no password, and re-pins nothing.
-    await ex.execute(grant, undefined, { fd: FD });
-    expect(asked).toEqual([FD]);
-  });
-});
-
-describe('the server checks each connection once, for as long as it lasts', () => {
-  let server: HelperServer;
-  const socketPath = () => join(root, 'h.sock');
-  const open = () =>
-    new Promise<Socket>((resolve) => {
-      const s = connect(socketPath());
-      s.once('connect', () => resolve(s));
-    });
-  const until = async (cond: () => boolean) => {
-    for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 5));
-    expect(cond()).toBe(true);
-  };
-  afterEach(() => server.close());
-
-  it('protects a verified connection until it closes', async () => {
-    const seen: number[] = [];
-    let answer: ProtectedPeer | undefined = { pid: 501, started: STARTED, hashes: [APP_SHA] };
-    server = new HelperServer({
-      socketPath: socketPath(),
-      executor: {} as Executor,
-      identifyPeer: async (fd) => {
-        seen.push(fd);
-        return answer;
-      },
-    });
-    await server.listen();
-    const app = await open();
-    await until(() => server.peers().length === 1);
-    expect(typeof seen[0]).toBe('number');
-    // Another client, which the kernel says is not the pinned app.
-    answer = undefined;
-    const other = await open();
-    await until(() => seen.length === 2);
-    expect(server.peers()).toEqual([{ pid: 501, started: STARTED, hashes: [APP_SHA] }]);
-    app.destroy();
-    await until(() => server.peers().length === 0);
-    other.destroy();
+    // Another program is stopped as before.
+    await ex.execute({ kind: 'process.kill', pid: 2100, path: '/home/alex/.local/bin/tool' });
+    expect(sys.signals.map((s) => s.pid)).toEqual([2100]);
   });
 
-  it('keeps nothing for a connection that closed while it was checked', async () => {
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    server = new HelperServer({
-      socketPath: socketPath(),
-      executor: {} as Executor,
-      identifyPeer: async () => {
-        await gate;
-        return { pid: 501, started: STARTED, hashes: [] } satisfies ProtectedPeer;
-      },
-    });
-    await server.listen();
-    const s = await open();
-    await new Promise((r) => setTimeout(r, 20));
-    s.destroy();
-    await new Promise((r) => setTimeout(r, 20));
-    release();
-    await new Promise((r) => setTimeout(r, 20));
-    expect(server.peers()).toEqual([]);
+  it('spares nothing when the pin names another image, or there is none', async () => {
+    writePin(pinFile, { ...pin, image: '2049:9999', sha256: 'b'.repeat(64) });
+    const ex = new Executor(executorDeps(sys));
+    await ex.execute({ kind: 'process.suspend', pid: 2000, path: `${mount}/vigil-at-home` });
+    writePin(pinFile, undefined);
+    await ex.execute({ kind: 'process.suspend', pid: 2000, path: `${mount}/vigil-at-home` });
+    expect(sys.signals.map((s) => s.pid)).toEqual([2000, 2000]);
+  });
+
+  it('is re-pinned by an approved grant naming the image', async () => {
+    const opts = { pinFile, installed: ['/opt/Vigil at Home'], sha256: () => APP_SHA };
+    // An image that is no longer the file at its path is skipped.
+    const moved = { path: '/home/alex/Old.AppImage', id: '2049:7777' };
+    expect(await repinFromGrant(sys, { selfPaths: [], selfImages: [moved] }, opts)).toBeUndefined();
+    expect(readPin(pinFile)).toBeUndefined();
+    const grant = { selfPaths: [], selfImages: [{ path: image, id: '2049:5501' }] };
+    expect(await repinFromGrant(sys, grant, opts)).toEqual(pin);
+    expect(readPin(pinFile)).toEqual(pin);
   });
 });
