@@ -936,7 +936,9 @@ function jsonStringEnd(text: string, at: number): { end: number; escaped: boolea
 interface Frame {
   readonly object: boolean;
   readonly secret: Secret | undefined;
-  readonly keys: Set<string> | undefined;
+  /** The object's first key, then all of them once there is a second. */
+  first: string | undefined;
+  keys: Set<string> | undefined;
 }
 
 /** Read the JSON value that opens at `open`, iteratively, so depth costs no stack. */
@@ -958,8 +960,13 @@ function readJson(text: string, open: number): JsonRead {
     const { end, escaped } = jsonStringEnd(text, i);
     if (end < 0) return false;
     const key = escaped ? (JSON.parse(text.slice(i, end)) as string) : text.slice(i + 1, end - 1);
-    if (frame.keys!.has(key)) clean = false;
-    frame.keys!.add(key);
+    if (frame.first === undefined) {
+      frame.first = key;
+    } else {
+      frame.keys ??= new Set([frame.first]);
+      if (frame.keys.has(key)) clean = false;
+      frame.keys.add(key);
+    }
     i = skipJsonSpace(text, end);
     if (text.charCodeAt(i) !== 0x3a) return false;
     i++;
@@ -980,7 +987,7 @@ function readJson(text: string, open: number): JsonRead {
     let opened = false;
     if (c === 0x7b || c === 0x5b) {
       const object = c === 0x7b;
-      const frame: Frame = { object, secret, keys: object ? new Set() : undefined };
+      const frame: Frame = { object, secret, first: undefined, keys: undefined };
       frames.push(frame);
       if (frames.length > MAX_DEPTH) clean = false;
       i = skipJsonSpace(text, i + 1);
@@ -1032,30 +1039,38 @@ function readJson(text: string, open: number): JsonRead {
   }
 }
 
-/** A JSON string's content decoded, with where in the text each decoded unit was written. */
-function decodeJsonString(text: string, start: number, end: number) {
-  const units: string[] = [];
-  const at: number[] = [];
-  for (let i = start; i < end;) {
-    at.push(i);
-    if (text.charCodeAt(i) !== 0x5c) {
-      units.push(text[i]!);
-      i++;
-      continue;
-    }
-    const e = text[i + 1]!;
-    if (e === 'u') {
-      units.push(String.fromCharCode(parseInt(text.slice(i + 2, i + 6), 16)));
-      i += 6;
-    } else {
-      units.push(
-        ({ b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' } as Record<string, string>)[e] ?? e,
-      );
-      i += 2;
-    }
+/**
+ * Where in the text each unit of a JSON string's decoded content was written,
+ * and where the content ends. The escapes were checked when it was read.
+ */
+function decodedPositions(text: string, start: number, end: number): Int32Array {
+  const at = new Int32Array(end - start + 1);
+  let k = 0;
+  for (let i = start; i < end; k++) {
+    at[k] = i;
+    if (text.charCodeAt(i) !== 0x5c) i++;
+    else i += text[i + 1] === 'u' ? 6 : 2;
   }
-  at.push(end);
-  return { value: units.join(''), at };
+  at[k] = end;
+  return at;
+}
+
+// JSON repeats its strings, often thousands of times in one field: within a
+// field, each short string is read once.
+const MAX_CACHED_STRINGS = 4096;
+const MAX_CACHED_LENGTH = 256;
+const stringCache = new Map<string, readonly Finding[]>();
+
+function analyzeString(text: string, options: NameOptions, depth: number): readonly Finding[] {
+  if (text.length > MAX_CACHED_LENGTH) return analyze(text, options, depth);
+  const key = `${depth}\0${text}`;
+  let found = stringCache.get(key);
+  if (!found) {
+    found = analyze(text, options, depth);
+    if (stringCache.size >= MAX_CACHED_STRINGS) stringCache.clear();
+    stringCache.set(key, found);
+  }
+  return found;
 }
 
 /** Add what each string of a clean read holds, as found in the text. */
@@ -1080,16 +1095,18 @@ function addJsonFindings(
     if (!s.escaped) {
       const field = text.slice(s.start, s.end);
       if (!mayHoldSecret(field, options)) continue;
-      for (const x of analyze(field, options, depth + 1)) {
+      for (const x of analyzeString(field, options, depth + 1)) {
         f.push({ ...x, start: x.start + s.start, end: x.end + s.start });
       }
       continue;
     }
-    const { value, at } = decodeJsonString(text, s.start, s.end);
+    const value = JSON.parse(text.slice(s.start - 1, s.end + 1)) as string;
     if (!mayHoldSecret(value, options)) continue;
-    for (const x of analyze(value, options, depth + 1)) {
-      const start = at[x.start]!;
-      const end = at[x.end]!;
+    const found = analyzeString(value, options, depth + 1);
+    const at = found.length ? decodedPositions(text, s.start, s.end) : undefined;
+    for (const x of found) {
+      const start = at![x.start]!;
+      const end = at![x.end]!;
       // Written with escapes: what the text shows isn't what was found.
       if (x.withhold || text.slice(start, end).includes('\\')) f.withhold(s.start);
       else f.push({ ...x, start, end });
@@ -1366,6 +1383,7 @@ function redactText(input: string, options: NameOptions): string {
   const clipped = input.length > MAX_REDACT_CHARS;
   if (!clipped && !mayHoldSecret(input, options)) return input;
   const text = clipped ? input.slice(0, MAX_REDACT_CHARS + CUT_MARGIN) : input;
+  stringCache.clear();
   const found = analyze(text, options, 0);
   if (found.some((x) => x.withhold)) return WITHHELD;
   const spans = found.length ? settle(found) : found;
