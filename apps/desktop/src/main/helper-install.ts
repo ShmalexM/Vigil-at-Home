@@ -182,14 +182,30 @@ export function rootStageScript(platform: NodeJS.Platform = process.platform): s
   return [
     'set -eu',
     'src=$1; run=$2; want=$3; shift 3',
-    't=$(mktemp -d)',
-    'trap "rm -rf $t" EXIT',
-    'for f; do case $f in */*) mkdir -p "$t/${f%/*}";; esac; cp "$src/$f" "$t/$f"; done',
+    // A fixed root-owned, sticky parent: a folder made in the user's own
+    // TMPDIR could be renamed away and replaced by its owner.
+    't=$(mktemp -d /tmp/vigil-helper.XXXXXXXX)',
+    'trap \'rm -rf "$t"\' EXIT',
+    // Plain files only, never links: a FIFO or a link to a device would hang root or fill the disk.
+    'for f; do [ -f "$src/$f" ] && [ ! -h "$src/$f" ] || { echo "Missing $f" >&2; exit 1; }; case $f in */*) mkdir -p "$t/${f%/*}";; esac; cp -P "$src/$f" "$t/$f"; [ -f "$t/$f" ] && [ ! -h "$t/$f" ] || exit 1; done',
     `got=$(for f; do ${hash} < "$t/$f"; done | ${hash})`,
     '[ "${got%% *}" = "$want" ] || { echo "The helper files changed while installing, so nothing was changed." >&2; exit 1; }',
     'sh "$t/$run"',
   ].join('; ');
 }
+
+/**
+ * How root starts {@link rootStageScript}: with an empty environment, so
+ * nothing the user set (PATH, TMPDIR, NODE_OPTIONS, PERL5OPT…) reaches the
+ * programs root runs.
+ */
+export const ROOT_SHELL = [
+  '/usr/bin/env',
+  '-i',
+  'PATH=/usr/bin:/bin:/usr/sbin:/sbin',
+  '/bin/sh',
+  '-c',
+] as const;
 
 /** The arguments after `sh -c <rootStageScript>` that run `kind` from `from`. */
 function stageArgs(
@@ -210,7 +226,7 @@ export function helperInstallCommand(
   if (!dir) return undefined;
   const run = (from: string) => {
     const [name, src, ...rest] = stageArgs(dir, from, 'install', platform);
-    return `sudo sh -c ${shellQuote(rootStageScript(platform))} ${name} ${src} ${rest.map(shellQuote).join(' ')}`;
+    return `sudo ${ROOT_SHELL.join(' ')} ${shellQuote(rootStageScript(platform))} ${name} ${src} ${rest.map(shellQuote).join(' ')}`;
   };
   try {
     // Linux: root can't read an AppImage's mount, so copy the helper out first,
@@ -287,7 +303,7 @@ async function runWithPkexec(
     return { ok: false, error: 'This build of Vigil is missing some of the helper’s files' };
   }
   try {
-    const out = await run(PKEXEC, ['/bin/sh', '-c', rootStageScript('linux'), ...digested]);
+    const out = await run(PKEXEC, [...ROOT_SHELL, rootStageScript('linux'), ...digested]);
     if (out.code === 0) return { ok: true };
     // pkexec exits 126 when the password dialog is closed, 127 when not allowed.
     if (out.code === 126) return { ok: false, error: 'cancelled' };
@@ -318,7 +334,7 @@ export async function runHelperScript(
   let command: string;
   try {
     const args = stageArgs(dir, dir, script, platform).map(shellQuote).join(' ');
-    command = `/bin/sh -c ${shellQuote(rootStageScript(platform))} ${args}`;
+    command = `${ROOT_SHELL.join(' ')} ${shellQuote(rootStageScript(platform))} ${args}`;
   } catch {
     return { ok: false, error: 'This build of Vigil is missing some of the helper’s files' };
   }
