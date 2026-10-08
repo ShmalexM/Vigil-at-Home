@@ -145,3 +145,14 @@ export function agentTree(
     observe: <E extends DetectionEvent>(e: E): E => tracker.observe(e),
   };
 }
+
+/**
+ * Claude Code's Bash steps on a real Mac (2026-10-08) that read a local
+ * service's JSON and raised the download-run rule. See rules/quiet-lines.ts.
+ */
+export const REAL_LOCAL_READS = [
+  `T=$(curl -s http://127.0.0.1:7401/api/bootstrap | python3 -c "import json,sys;print(json.load(sys.stdin)['token'])") && for code in a b; do python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7401/api/run')"; done`,
+  `for i in 1 2 3; do S=$(curl -s -m 8 http://127.0.0.1:17010/api/status | python3 -c "import json,sys; print(json.load(sys.stdin)['state'])"); echo $S; sleep 2; done`,
+  `for i in 1 2 3; do curl -s -m 8 http://127.0.0.1:11434/api/ps | python3 -c "import json,sys; d=json.load(sys.stdin); print([m['name'] for m in d.get('models',[])])"; sleep 2; done`,
+  `curl -s -m 3 http://localhost:11434/api/tags | python3 -c "import sys,json; print(json.load(sys.stdin))"`,
+];

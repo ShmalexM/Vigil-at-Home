@@ -1,4 +1,4 @@
-import type { Condition, DetectionRuleInput } from '../types.js';
+import type { DetectionRuleInput } from '../types.js';
 
 /**
  * Built-in macOS rules.
@@ -54,18 +54,8 @@ const SANTA_BLOCK_BINARY = {
   policy: 'block',
 } as const;
 
-/**
- * Running a download: a download (curl or wget) anywhere on the line together
- * with an interpreter, shell or eval that could run it. The whole decision
- * lives in process.pipesDownloadIntoCode (rules/inline-code.ts), which reads
- * the command with a shell lexer and fails closed; see there for what stays
- * quiet (a download with no interpreter, and the known real Claude Code lines).
- */
-export const RUNS_DOWNLOAD: Condition = {
-  field: 'process.pipesDownloadIntoCode',
-  op: 'eq',
-  value: true,
-};
+/** A download piped straight into a shell: `curl … | sh`, `wget … | sudo bash`. */
+export const PIPE_TO_SHELL_RE = '(curl|wget)\\s[^|]*\\|\\s*(sudo\\s+)?(ba|z|da)?sh\\b';
 
 /** Developer tools (Homebrew Python, Ansible, git helpers) read these every day. */
 const SSH_KEY_GLOBS = ['~/.ssh/id_*'];
@@ -420,13 +410,23 @@ export const macosCoreRules: DetectionRuleInput[] = [
     id: 'download-pipe-to-shell',
     name: 'Downloaded script run directly',
     description:
-      "A shell ran something straight from curl or wget, or piped it into Python, Perl, Ruby or Node. Some installers do this, but so do fake 'paste this into Terminal' fixes.",
+      "A shell ran something straight from curl or wget. Some installers do this, but so do fake 'paste this into Terminal' fixes.",
     mode: 'alert',
     severity: 'medium',
     fidelity: 'medium',
     eventKinds: ['process.exec'],
     condition: {
-      all: [{ field: 'process.name', op: 'in', value: SHELLS }, RUNS_DOWNLOAD],
+      all: [
+        { field: 'process.name', op: 'in', value: SHELLS },
+        {
+          any: [
+            { field: 'process.commandLine', op: 'regex', value: [PIPE_TO_SHELL_RE] },
+            { field: 'process.commandLine', op: 'contains', value: ['$(curl', '$(wget'] },
+          ],
+        },
+        // Claude Code's exact local-service reads (see rules/quiet-lines.ts).
+        { not: { field: 'process.quietDownloadLine', op: 'eq', value: true } },
+      ],
     },
     response: [SUSPEND],
     reasons: [

@@ -160,28 +160,23 @@ describe('rule scoring', () => {
     const [score] = scoreCandidates(
       [
         {
-          id: 'candidate-hidden-appsupport',
+          id: 'candidate-pipe-full-path',
           version: 1,
           origin: 'user',
-          name: 'Unsigned program in a hidden Application Support folder',
-          description: 'An unsigned binary running from a dot-folder under Application Support.',
+          name: 'Downloaded script piped to a shell by full path',
+          description: 'curl or wget piped into /bin/sh, /bin/bash or /bin/zsh.',
           mode: 'shadow',
           severity: 'medium',
           fidelity: 'medium',
           eventKinds: ['process.exec'],
           condition: {
-            all: [
-              { field: 'process.signing', op: 'eq', value: 'unsigned' },
-              {
-                field: 'process.path',
-                op: 'glob',
-                value: ['**/Library/Application Support/.*/**'],
-              },
-            ],
+            field: 'process.commandLine',
+            op: 'regex',
+            value: ['(curl|wget)\\s[^|]*\\|\\s*(sudo\\s+)?/bin/(ba|z|da)?sh\\b'],
           },
           response: [],
           exclusions: [],
-          reasons: ['An unsigned program ran from a hidden Application Support folder.'],
+          reasons: ['A command downloaded code and ran it with a shell.'],
           tags: [],
           createdAt: START,
           updatedAt: START,
@@ -189,10 +184,7 @@ describe('rule scoring', () => {
       ],
       { days: 8, telemetry: ['sensors'] },
     );
-    // The download-run rule now reads the pipe stages and separate commands itself,
-    // so the two-step download-then-run is a built-in catch; the gap a candidate
-    // still fills here is an unsigned second stage dropped in a hidden folder.
-    expect(score?.newlyCaught).toContain('curl-dropped-hidden-folder (sensors)');
+    expect(score?.newlyCaught).toContain('curl-pipe-full-path (sensors)');
     expect(score?.falsePerDay.developer.alerts).toBe(0);
   }, 30_000);
 });

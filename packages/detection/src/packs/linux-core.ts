@@ -1,5 +1,5 @@
 import type { DetectionRuleInput } from '../types.js';
-import { RUNS_DOWNLOAD, SHELLS, UNTRUSTED_SIGNING } from './macos-core.js';
+import { PIPE_TO_SHELL_RE, SHELLS, UNTRUSTED_SIGNING } from './macos-core.js';
 
 /**
  * Built-in Linux rules.
@@ -144,13 +144,23 @@ export const linuxCoreRules: DetectionRuleInput[] = [
     id: 'download-pipe-to-shell',
     name: 'Downloaded script run directly',
     description:
-      "A shell ran something straight from curl or wget, or piped it into Python, Perl, Ruby or Node. Some installers do this, but so do fake 'paste this into your terminal' fixes.",
+      "A shell ran something straight from curl or wget. Some installers do this, but so do fake 'paste this into your terminal' fixes.",
     mode: 'alert',
     severity: 'medium',
     fidelity: 'medium',
     eventKinds: ['process.exec'],
     condition: {
-      all: [{ field: 'process.name', op: 'in', value: SHELLS }, RUNS_DOWNLOAD],
+      all: [
+        { field: 'process.name', op: 'in', value: SHELLS },
+        {
+          any: [
+            { field: 'process.commandLine', op: 'regex', value: [PIPE_TO_SHELL_RE] },
+            { field: 'process.commandLine', op: 'contains', value: ['$(curl', '$(wget'] },
+          ],
+        },
+        // Claude Code's exact local-service reads (see rules/quiet-lines.ts).
+        { not: { field: 'process.quietDownloadLine', op: 'eq', value: true } },
+      ],
     },
     response: [SUSPEND],
     reasons: [

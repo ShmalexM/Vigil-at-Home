@@ -1,5 +1,5 @@
 import type { DetectionEvent } from '../types.js';
-import { pipesDownloadIntoCode } from './inline-code.js';
+import { runsQuietLine } from './quiet-lines.js';
 
 export type FieldValue = string | number | boolean | string[] | undefined;
 export type FieldGetter = (e: DetectionEvent) => FieldValue;
@@ -25,17 +25,10 @@ const COMPUTED: Record<string, FieldGetter> = {
     'process' in e ? (basename(e.process?.parentPath) ?? e.process?.ancestors?.[0]) : undefined,
   'process.commandLine': (e) => ('process' in e ? e.process?.args?.join(' ') : undefined),
   /**
-   * The command runs code it downloads with curl or wget (see
-   * rules/inline-code.ts). A shell's `-c` command is read on its own; any
-   * other process's arguments are joined.
+   * A shell running exactly one of Claude Code's real local-service reads
+   * (see rules/quiet-lines.ts). The download-run rule stays quiet on these.
    */
-  'process.pipesDownloadIntoCode': (e) => {
-    const args = 'process' in e ? e.process?.args : undefined;
-    if (!args?.length) return undefined;
-    const c = args.findIndex((a, i) => i > 0 && i < 4 && /^-[A-Za-z]*c[A-Za-z]*$/.test(a));
-    const src = c > 0 && args[c + 1] !== undefined ? args.slice(c + 1).join(' ') : args.join(' ');
-    return pipesDownloadIntoCode(src);
-  },
+  'process.quietDownloadLine': (e) => ('process' in e ? runsQuietLine(e.process?.args) : undefined),
   /**
    * The download a process comes from: the nearest downloaded ancestor, or the
    * process itself when it carries the quarantine flag. Chain rules key on it.
