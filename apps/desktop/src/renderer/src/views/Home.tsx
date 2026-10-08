@@ -20,6 +20,12 @@ const levelSentence = {
   poor: 'Protection has stopped.',
 };
 
+/** "Santa, osquery and the Vigil helper", from the layers this computer has. */
+export function layerNames(names: string[]): string {
+  const n = names.map((x) => (x === 'Vigil helper' ? 'the Vigil helper' : x));
+  return n.length < 2 ? (n[0] ?? 'its layers') : `${n.slice(0, -1).join(', ')} and ${n.at(-1)}`;
+}
+
 export function HomeView({ go }: { go: (r: string) => void }) {
   const [status] = useLive(() => vigil.getStatus());
   const [alerts] = useLive(() => vigil.listAlerts('open'));
@@ -91,8 +97,9 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               ))}
             </ul>
             <p className="t-small">
-              The level is only about protection: Santa, osquery and the Vigil helper. Alerts
-              waiting on you are counted separately, so they never make protection look broken.
+              The level is only about protection: {layerNames(status.sensors.map((s) => s.name))}.
+              Alerts waiting on you are counted separately, so they never make protection look
+              broken.
             </p>
           </details>
           {status.dryRun && (
