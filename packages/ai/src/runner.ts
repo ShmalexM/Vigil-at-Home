@@ -5,7 +5,7 @@ import { QuotaTracker } from './quota.js';
 import { redactAndSerialize, redactValue } from './redact.js';
 import type { AiSettings } from './settings.js';
 import { spendingDays, spendingLimits, spendingPlans, type SpendingSnapshot } from './spending.js';
-import { LOCAL_PROVIDERS, mayUsePlan } from './types.js';
+import { LOCAL_PROVIDERS, MONTHLY_CAP_HELD, PLAN_LIMITS_HELD, mayUsePlan } from './types.js';
 import type {
   AdapterRunOutput,
   PromptLog,
@@ -75,6 +75,21 @@ function enabled(settings: AiSettings, id: ProviderId): boolean {
   return allowedByMode(settings, id) && settings[id].enabled;
 }
 
+/** Longest a provider's probe, usage read or key lookup may take before it counts as not ready. */
+export const PROBE_DEADLINE_MS = 30_000;
+
+/** `p`, or `fallback` once `ms` passed (or p failed). Never leaves a caller waiting forever. */
+function settleWithin<T, F>(p: Promise<T>, ms: number, fallback: F): Promise<T | F> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(fallback), ms);
+    t.unref?.();
+    p.then(
+      (v) => (clearTimeout(t), resolve(v)),
+      () => (clearTimeout(t), resolve(fallback)),
+    );
+  });
+}
+
 export function createAiRunner(deps: AiRunnerDeps): AiRunner {
   const now = deps.now ?? Date.now;
   const quota = deps.quota ?? new QuotaTracker(deps.settings.quota.backgroundSharePercent, now);
@@ -92,7 +107,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
         const adapter = adapters.get(id);
         if (!adapter?.readUsage || !enabled(deps.settings, id)) return;
         if ((await statusOf(adapter)).state !== 'ready') return;
-        const usage = await adapter.readUsage();
+        const usage = await settleWithin(adapter.readUsage(), PROBE_DEADLINE_MS, undefined);
         if (!usage) return;
         if (usage.plan) planNames.set(id, usage.plan);
         usage.windows.forEach((w) => quota.observe(w));
@@ -131,7 +146,13 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
   async function statusOf(adapter: ProviderAdapter, fresh = false): Promise<ProviderStatus> {
     const cached = statusCache.get(adapter.id);
     if (!fresh && cached && now() - cached.at < STATUS_TTL_MS) return cached.status;
-    const status = await adapter.probe();
+    // A probe that never answers (a CLI that hangs) must not hold the run, or
+    // the app's scheduler slot it runs in, forever.
+    const status = await settleWithin(adapter.probe(), PROBE_DEADLINE_MS, {
+      provider: adapter.id,
+      state: 'error' as const,
+      detail: 'It did not answer in time.',
+    });
     statusCache.set(adapter.id, { status, at: now() });
     return status;
   }
@@ -248,19 +269,28 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
       const planOk = mayUsePlan(request);
       let lastReason: RunFailureReason = 'no_provider';
       let lastDetail: string | undefined;
+      /** Why a ready provider was passed over without a call, when that is all that happened. */
+      let held: string | undefined;
 
       for (const id of deps.settings.order) {
         const adapter = adapters.get(id);
         if (!adapter || !enabled(deps.settings, id)) continue;
         if (request.providers && !request.providers.includes(id)) continue;
-        if (adapter.canServe && !(await adapter.canServe(planOk))) continue;
+        if (
+          adapter.canServe &&
+          !(await settleWithin(adapter.canServe(planOk), PROBE_DEADLINE_MS, false))
+        )
+          continue;
         const status = await statusOf(adapter);
         if (status.state !== 'ready') continue;
-        const allowed =
-          (request.urgency === 'now' ? quota.allowNow(id) : quota.allowBackground(id)) &&
-          !(await overMonthlyCap(id, planOk));
-        if (!allowed) {
+        if (!(request.urgency === 'now' ? quota.allowNow(id) : quota.allowBackground(id))) {
           lastReason = 'quota';
+          held ??= PLAN_LIMITS_HELD;
+          continue;
+        }
+        if (await overMonthlyCap(id, planOk)) {
+          lastReason = 'quota';
+          held = MONTHLY_CAP_HELD;
           continue;
         }
 
@@ -317,7 +347,11 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
         }
       }
 
+      // A run that reached no AI still leaves one entry, so it is never silent:
+      // nothing was set up, or every ready AI was held back (the monthly cap
+      // on the user's keys, or their plans' limits).
       if (lastReason === 'no_provider') record(null, 'no_provider');
+      else if (entries === 0 && lastReason === 'quota') record(null, 'quota', undefined, held);
       return {
         ok: false,
         reason: lastReason,

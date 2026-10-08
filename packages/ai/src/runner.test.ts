@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { QuotaTracker } from './quota.js';
-import { createAiRunner } from './runner.js';
+import { createAiRunner, PROBE_DEADLINE_MS } from './runner.js';
 import { defaultAiSettings, type AiSettings } from './settings.js';
 import { readTool } from './tools.js';
 import { watchAiApps, type AiAppsSnapshot } from './watch.js';
@@ -176,6 +176,28 @@ describe('runner', () => {
     const { runner } = setup([claude]);
     const result = await runner.run({ ...request, deadlineMs: 50 });
     expect(result).toMatchObject({ ok: false, reason: 'timeout' });
+  });
+
+  it('passes over a provider whose probe never answers', async () => {
+    vi.useFakeTimers();
+    try {
+      const hung: ProviderAdapter = {
+        id: 'codex',
+        probe: () => new Promise(() => {}),
+        run: async () => ({ kind: 'error', message: 'x', audit: audit() }),
+      };
+      const ollama = fake('ollama', () => ({
+        kind: 'ok',
+        json: { verdict: 'benign', summary: 'ok' },
+        audit: audit(),
+      }));
+      const { runner } = setup([hung, ollama], { order: ['codex', 'ollama'] });
+      const result = runner.run(request);
+      await vi.advanceTimersByTimeAsync(PROBE_DEADLINE_MS + 1);
+      expect(await result).toMatchObject({ ok: true, provider: 'ollama' });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reports no_provider when nothing is set up', async () => {
