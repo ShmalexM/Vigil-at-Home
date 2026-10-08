@@ -32,8 +32,18 @@ mac:
       filter: ['**/*', '!linux/**']
     - from: build/helper/darwin-${arch}
       to: helper
-      filter: [node]
+      filter: [node, NODE-LICENSE]
     # License notices for the code and fonts bundled into out/ (NOTICE lists them).
+    # build/licenses holds the full texts of the npm packages bundled into out/
+    # and the helper (scripts/third-party-licenses.mjs).
+    - from: build/licenses
+      to: licenses
+    # electron-builder drops Electron's and Chromium's licenses from mac builds
+    # (Linux keeps them); build-helper.mjs copies them here.
+    - from: build/electron-licenses/LICENSE.electron.txt
+      to: LICENSE.electron.txt
+    - from: build/electron-licenses/LICENSES.chromium.html
+      to: LICENSES.chromium.html
     - from: ../../LICENSE
       to: LICENSE
     - from: ../../NOTICE
@@ -78,7 +88,9 @@ linux:
         ['**/*', '!com.vigilathome.helper.plist', '!install.sh', '!uninstall.sh', '!vigil-helper']
     - from: build/helper/linux-${arch}
       to: helper
-      filter: [node]
+      filter: [node, NODE-LICENSE]
+    - from: build/licenses
+      to: licenses
     - from: ../../LICENSE
       to: LICENSE
     - from: ../../NOTICE
