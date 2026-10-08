@@ -14,6 +14,7 @@
 // Events Santa uploads over sync are not used: any local account can post to
 // the port, and santa.log already has the same executions and file accesses.
 
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import { chmodSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -248,12 +249,8 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       eventDetailText: 'Open Vigil',
     });
     live.sync = sync;
-    const server = createHttpsServer(
-      {
-        key: readFileSync(tls.serverKey),
-        cert: readFileSync(tls.serverCert),
-        minVersion: 'TLSv1.2',
-      },
+    const server = createSyncHttpsServer(
+      { key: readFileSync(tls.serverKey), cert: readFileSync(tls.serverCert) },
       sync.handler,
     );
     https = server;
@@ -364,6 +361,44 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       await new Promise<void>((r) => server.close(() => r()));
     }
   };
+}
+
+/**
+ * Limits on the Santa sync port. Any local process can connect, so slow or
+ * idle clients are cut off and only a few connections are kept at once.
+ */
+export const SYNC_SERVER_LIMITS: Readonly<{
+  maxConnections: number;
+  handshakeTimeoutMs: number;
+  headersTimeoutMs: number;
+  requestTimeoutMs: number;
+  keepAliveTimeoutMs: number;
+}> = {
+  maxConnections: 16,
+  handshakeTimeoutMs: 10_000,
+  headersTimeoutMs: 15_000,
+  requestTimeoutMs: 30_000,
+  keepAliveTimeoutMs: 5_000,
+};
+
+export function createSyncHttpsServer(
+  tls: { key: Buffer; cert: Buffer },
+  handler: (req: IncomingMessage, res: ServerResponse) => void,
+  l: typeof SYNC_SERVER_LIMITS = SYNC_SERVER_LIMITS,
+): HttpsServer {
+  const server = createHttpsServer(
+    {
+      ...tls,
+      minVersion: 'TLSv1.2',
+      handshakeTimeout: l.handshakeTimeoutMs,
+      headersTimeout: l.headersTimeoutMs,
+      requestTimeout: l.requestTimeoutMs,
+      keepAliveTimeout: l.keepAliveTimeoutMs,
+    },
+    handler,
+  );
+  server.maxConnections = l.maxConnections;
+  return server;
 }
 
 function writeFileAccessPolicy(path: string): void {

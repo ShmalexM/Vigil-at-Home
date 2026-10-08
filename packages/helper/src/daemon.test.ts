@@ -9,16 +9,21 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { request } from 'node:https';
-import { createServer } from 'node:net';
+import { connect, createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DetectionEngine, macosCoreRules, memoryStores } from '@vigil/detection';
 import { fastPathRules } from '@vigil/detection/fastpath';
 import type { SensorEvent } from '@vigil/sensors';
-import { fileAccessPolicy } from '@vigil/sensors';
+import { fileAccessPolicy, syncTlsPaths } from '@vigil/sensors';
 import { HelperClient } from './client.js';
 import { defaultPaths, type HelperPaths } from './config.js';
-import { runDaemon, type SensorHealth } from './daemon.js';
+import {
+  createSyncHttpsServer,
+  runDaemon,
+  SYNC_SERVER_LIMITS,
+  type SensorHealth,
+} from './daemon.js';
 import type { HelperRan } from './fastpath.js';
 import { FakeSystem } from './testing/fakeSystem.js';
 
@@ -245,6 +250,51 @@ describe('helper daemon with the sync port taken', () => {
       blocker.close();
       await stopBusy?.();
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the Santa sync port', () => {
+  const tlsFiles = () => {
+    const t = syncTlsPaths(paths.tlsDir);
+    return { key: readFileSync(t.serverKey), cert: readFileSync(t.serverCert) };
+  };
+  const freePort = port + 2000;
+  const closed = (s: Socket) => new Promise<void>((r) => s.once('close', () => r()));
+  const open = async (p: number) => {
+    const s = connect(p, '127.0.0.1');
+    s.on('error', () => {});
+    await new Promise<void>((r) => s.once('connect', () => r()));
+    return s;
+  };
+
+  it('cuts off slow clients and keeps few connections', () => {
+    const server = createSyncHttpsServer(tlsFiles(), () => {});
+    expect(server.maxConnections).toBe(16);
+    expect(server.headersTimeout).toBe(15_000);
+    expect(server.requestTimeout).toBe(30_000);
+    expect(server.keepAliveTimeout).toBe(5_000);
+    expect(SYNC_SERVER_LIMITS.handshakeTimeoutMs).toBe(10_000);
+  });
+
+  it('drops a connection that never finishes the TLS handshake, and ones over the limit', async () => {
+    const server = createSyncHttpsServer(tlsFiles(), () => {}, {
+      ...SYNC_SERVER_LIMITS,
+      maxConnections: 2,
+      handshakeTimeoutMs: 200,
+    });
+    await new Promise<void>((r) => server.listen(freePort, '127.0.0.1', () => r()));
+    try {
+      const [a, b] = [await open(freePort), await open(freePort)];
+      const third = await open(freePort);
+      // Over the limit: closed at once, long before the handshake timeout.
+      const t0 = Date.now();
+      await closed(third);
+      expect(Date.now() - t0).toBeLessThan(150);
+      // Never sent a ClientHello: closed after the handshake timeout.
+      await Promise.all([closed(a), closed(b)]);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
     }
   });
 });

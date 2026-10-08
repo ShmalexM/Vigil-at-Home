@@ -411,3 +411,61 @@ describe('request logging', () => {
     expect(logSafe('/preflight/M1')).toBe('/preflight/M1');
   });
 });
+
+describe('request limits', () => {
+  // A request whose body arrives only when the test says so.
+  function fakeRequest(path: string, headers: Record<string, string> = {}) {
+    const body = new Readable({ read() {} });
+    const req = Object.assign(body, { method: 'POST', url: path, headers });
+    return { req: req as unknown as IncomingMessage, body };
+  }
+  function respond(s: SantaSyncServer, req: IncomingMessage): Promise<number> {
+    return new Promise((resolve) => {
+      let status = 0;
+      const res = {
+        writeHead: (code: number) => ((status = code), res),
+        end: () => resolve(status),
+      } as unknown as ServerResponse;
+      s.handler(req, res);
+    });
+  }
+
+  it('refuses a body declared too large without reading it', async () => {
+    const s = new SantaSyncServer({ store: new RuleStore() });
+    const { req, body } = fakeRequest('/eventupload/M', {
+      'content-length': String(4 * 1024 * 1024 + 1),
+    });
+    expect(await respond(s, req)).toBe(413);
+    expect(body.readableEnded).toBe(false);
+  });
+
+  it('refuses a body over 4 MiB that did not declare its size', async () => {
+    const s = new SantaSyncServer({ store: new RuleStore() });
+    const { req, body } = fakeRequest('/eventupload/M');
+    const status = respond(s, req);
+    for (let i = 0; i < 5; i++) body.push(Buffer.alloc(1024 * 1024, 0x20));
+    body.push(null);
+    expect(await status).toBe(413);
+  });
+
+  it('handles only a few requests at once', async () => {
+    const s = new SantaSyncServer({ store: new RuleStore() });
+    const held = Array.from({ length: 4 }, () => fakeRequest('/preflight/M'));
+    const pending = held.map(({ req }) => respond(s, req));
+    expect(await respond(s, fakeRequest('/preflight/M').req)).toBe(503);
+    held[0]!.body.push(null);
+    expect(await pending[0]).toBe(200);
+    const next = fakeRequest('/preflight/M');
+    next.body.push(null);
+    expect(await respond(s, next.req)).toBe(200);
+    // A request that fails also gives its place back.
+    held[1]!.body.push('not json');
+    held[1]!.body.push(null);
+    expect(await pending[1]).toBe(400);
+    const after = fakeRequest('/preflight/M');
+    after.body.push(null);
+    expect(await respond(s, after.req)).toBe(200);
+    for (const { body } of held.slice(2)) body.push(null);
+    expect(await Promise.all(pending.slice(2))).toEqual([200, 200]);
+  });
+});

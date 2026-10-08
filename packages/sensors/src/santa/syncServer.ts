@@ -53,7 +53,13 @@ export interface SyncServerOptions {
   eventDetailText?: string;
   /** Rules per RuleDownload page. */
   pageSize?: number;
+  /**
+   * Largest request body, before and after decompression. Uploads are
+   * ignored and the other requests are small, so a big body is refused.
+   */
   maxBodyBytes?: number;
+  /** Requests handled at once; more get 503 until one finishes. */
+  maxInFlight?: number;
   log?: (msg: string) => void;
   /** For tests. */
   now?: () => number;
@@ -95,6 +101,7 @@ export class HttpError extends Error {
 
 export class SantaSyncServer {
   private readonly sessions = new Map<string, SyncSession>();
+  private inFlight = 0;
   private readonly opts: Required<
     Omit<SyncServerOptions, 'onEvent' | 'eventDetailUrl' | 'eventDetailText' | 'log'>
   > &
@@ -105,7 +112,8 @@ export class SantaSyncServer {
       clientMode: 'MONITOR',
       fullSyncIntervalSeconds: 600,
       pageSize: 500,
-      maxBodyBytes: 16 * 1024 * 1024,
+      maxBodyBytes: 4 * 1024 * 1024,
+      maxInFlight: 4,
       now: Date.now,
       ...options,
     };
@@ -113,7 +121,15 @@ export class SantaSyncServer {
 
   /** Node http(s) request handler. */
   readonly handler = (req: IncomingMessage, res: ServerResponse): void => {
+    if (this.inFlight >= this.opts.maxInFlight) {
+      res.writeHead(503, { 'content-type': 'text/plain', connection: 'close' });
+      res.end('busy');
+      return;
+    }
+    this.inFlight++;
     this.handle(req)
+      // Give the place back before answering, so a client's next request fits.
+      .finally(() => this.inFlight--)
       .then((body) => {
         const json = JSON.stringify(body);
         res.writeHead(200, {
@@ -127,7 +143,11 @@ export class SantaSyncServer {
         this.opts.log?.(
           `santa sync ${logSafe(req.method ?? '')} ${logSafe(req.url ?? '')} failed: ${(err as Error).message}`,
         );
-        res.writeHead(status, { 'content-type': 'text/plain' });
+        // Don't read the rest of a body that was refused for its size.
+        res.writeHead(status, {
+          'content-type': 'text/plain',
+          ...(status === 413 ? { connection: 'close' } : {}),
+        });
         res.end(status === 500 ? 'internal error' : (err as Error).message);
       });
   };
@@ -283,6 +303,8 @@ export class SantaSyncServer {
   }
 
   private async readJson(req: IncomingMessage): Promise<unknown> {
+    const declared = Number(req.headers['content-length']);
+    if (declared > this.opts.maxBodyBytes) throw new HttpError(413, 'body too large');
     const chunks: Buffer[] = [];
     let size = 0;
     for await (const chunk of req) {
