@@ -1,4 +1,4 @@
-import { Search } from 'lucide-react';
+import { ChevronRight, Search } from 'lucide-react';
 import { useState } from 'react';
 import { useLive, vigil } from '../api';
 import { NoticedList } from '../components/Attention';
@@ -28,6 +28,8 @@ export function HistoryView({ go }: { go: (r: string) => void }) {
   const [open] = useLive(() => vigil.listAlerts('open'));
   const [status] = useLive(() => vigil.getStatus());
   const [query, setQuery] = useState('');
+  // One row opens in place; the full alert is a button away.
+  const [expanded, setExpanded] = useState<string>();
   if (!alerts || !actions) return null;
   const noticed = (open ?? []).filter(isNoticed);
   const all = historyEntries(alerts, actions);
@@ -48,7 +50,7 @@ export function HistoryView({ go }: { go: (r: string) => void }) {
         purpose={`What Vigil handled in the last ${DAYS} days, and what it only noticed. None of it is waiting on a decision.`}
         right={
           all.length > 0 ? (
-            <label className="search">
+            <label className="search history-search">
               <Search size={14} aria-hidden />
               <input
                 type="search"
@@ -103,28 +105,13 @@ export function HistoryView({ go }: { go: (r: string) => void }) {
           <div className="list">
             {d.items.map((e) =>
               e.kind === 'alert' ? (
-                <button
+                <AlertRow
                   key={e.alert.id}
-                  type="button"
-                  className="list-row history-row"
-                  onClick={() => go(`alerts/${e.alert.id}`)}
-                >
-                  <SeverityMark severity={e.alert.severity} />
-                  <span className="col grow" style={{ gap: 2 }}>
-                    <span className="t-h3 clamp-2" title={e.alert.title}>
-                      {e.alert.title}
-                    </span>
-                    {e.actions.length > 0 && (
-                      <span className="t-small ellipsis">
-                        {e.actions.map((r) => describeRecord(r)).join(' · ')}
-                      </span>
-                    )}
-                  </span>
-                  <Chip tone={e.alert.containment === 'active' ? 'good' : undefined}>
-                    {outcome(e.alert)}
-                  </Chip>
-                  <span className="t-small nowrap">{time(e.at)}</span>
-                </button>
+                  e={e}
+                  expanded={expanded === e.alert.id}
+                  onToggle={() => setExpanded(expanded === e.alert.id ? undefined : e.alert.id)}
+                  go={go}
+                />
               ) : (
                 <ActionRow key={e.record.id} e={e} go={go} />
               ),
@@ -172,5 +159,76 @@ function ActionRow({ e, go }: { e: Extract<Entry, { kind: 'action' }>; go: (r: s
     </button>
   ) : (
     <div className="list-row history-row">{body}</div>
+  );
+}
+
+/**
+ * A handled alert. Clicking opens what happened right here, in History,
+ * instead of jumping to Advanced › Alerts; the full alert is one more click.
+ */
+function AlertRow({
+  e,
+  expanded,
+  onToggle,
+  go,
+}: {
+  e: Extract<Entry, { kind: 'alert' }>;
+  expanded: boolean;
+  onToggle: () => void;
+  go: (r: string) => void;
+}) {
+  const a = e.alert;
+  const panel = `history-${a.id}`;
+  return (
+    <div className={expanded ? 'history-item open' : 'history-item'}>
+      <button
+        type="button"
+        className="list-row history-row"
+        aria-expanded={expanded}
+        aria-controls={panel}
+        onClick={onToggle}
+      >
+        <SeverityMark severity={a.severity} />
+        <span className="col grow" style={{ gap: 2, minWidth: 0 }}>
+          <span className="t-h3 clamp-2" title={a.title}>
+            {a.title}
+          </span>
+          {e.actions.length > 0 && (
+            <span className="t-small ellipsis">
+              {e.actions.map((r) => describeRecord(r)).join(' · ')}
+            </span>
+          )}
+        </span>
+        <Chip tone={a.containment === 'active' ? 'good' : undefined}>{outcome(a)}</Chip>
+        <span className="t-small nowrap">{time(e.at)}</span>
+        <ChevronRight size={14} className="history-chevron" aria-hidden />
+      </button>
+      {expanded && (
+        <div id={panel} className="col history-detail">
+          {a.summary && <p className="t-small">{a.summary}</p>}
+          {a.subject?.path && <div className="subject mono">{a.subject.path}</div>}
+          {e.actions.length > 0 && (
+            <ul className="t-small">
+              {e.actions.map((r) => (
+                <li key={r.id}>
+                  {describeRecord(r)} · {actorLabel(r.actor)} · {time(r.requestedAt)}
+                </li>
+              ))}
+            </ul>
+          )}
+          {a.decision && (
+            <span className="t-small">
+              You decided at {time(a.decision.at)}
+              {a.decision.note ? ` · ${a.decision.note}` : ''}
+            </span>
+          )}
+          <span className="row" style={{ gap: 8 }}>
+            <button type="button" className="btn sm" onClick={() => go(`alerts/${a.id}`)}>
+              Open the full alert
+            </button>
+          </span>
+        </div>
+      )}
+    </div>
   );
 }
