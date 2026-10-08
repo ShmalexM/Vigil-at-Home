@@ -52,7 +52,7 @@ export const ApiKeyInput = z.object({
 });
 export type ApiKeyInput = z.input<typeof ApiKeyInput>;
 
-/** Keys for threat feeds that need one (FeedSource.auth in @vigil/detection). */
+/** Keys for threat feeds that take one (FeedSource.auth in @vigil/detection). */
 export const FeedKeyName = z.enum(['abusech']);
 export type FeedKeyName = z.infer<typeof FeedKeyName>;
 
@@ -68,6 +68,17 @@ export interface FeedKeysView {
   saved: Record<FeedKeyName, boolean>;
   /** False when the Keychain or keyring isn't available, so keys can't be saved. */
   canSave: boolean;
+  /** A feed was refused without a key and stays off until one is added. */
+  needsKey: boolean;
+}
+
+/** The one line under the abuse.ch key: it only says feeds are off when one actually is. */
+export function feedKeyNote(view: FeedKeysView): string {
+  if (view.saved.abusech)
+    return 'URLhaus and MalwareBazaar send your key. It is free for non-commercial use.';
+  if (view.needsKey)
+    return 'URLhaus and MalwareBazaar feeds are off until you add a free abuse.ch Auth-Key.';
+  return 'Optional: abuse.ch may start requiring a free key for URLhaus and MalwareBazaar. Adding one keeps those feeds working.';
 }
 
 /** A one-click fix a step offers besides its commands. */

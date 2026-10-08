@@ -2,13 +2,14 @@ import { ExternalLink, KeyRound } from 'lucide-react';
 import { useState } from 'react';
 import { useLive, vigil } from '../api';
 import { Button, Chip, SectionHead } from '../components/ui';
+import { feedKeyNote } from '../../../shared/setup';
 import { cleanError } from './onboarding/ApiKeys';
 import './onboarding/onboarding.css';
 
 /**
  * The threat feeds card. Feodo Tracker needs nothing; URLhaus and
- * MalwareBazaar need the user's own free abuse.ch Auth-Key, and stay off
- * (keeping what they already listed) until one is added.
+ * MalwareBazaar take the user's own free abuse.ch Auth-Key if they add one.
+ * Only if abuse.ch refuses them without a key does this say they are off.
  */
 export function ThreatFeedsSection() {
   const [view, reload] = useLive(() => vigil.getFeedKeys());
@@ -50,11 +51,7 @@ export function ThreatFeedsSection() {
               <span className="t-h3">abuse.ch Auth-Key</span>
               {saved && <Chip tone="good">Saved</Chip>}
             </div>
-            <span className="t-small">
-              {saved
-                ? 'URLhaus and MalwareBazaar feeds are on. The key is free for non-commercial use.'
-                : 'URLhaus and MalwareBazaar feeds are off until you add a free abuse.ch Auth-Key.'}
-            </span>
+            <span className="t-small">{feedKeyNote(view)}</span>
           </div>
           <a
             className="btn sm ghost"

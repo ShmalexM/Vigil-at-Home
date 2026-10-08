@@ -116,7 +116,7 @@ Issues and pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.
 
 ## Thanks
 
-Vigil at Home stands on [Santa](https://github.com/northpolesec/santa), [osquery](https://github.com/osquery/osquery) and [fapolicyd](https://github.com/linux-application-whitelisting/fapolicyd) for watching and blocking, and on [abuse.ch](https://abuse.ch)'s free threat feeds. Two of those feeds, URLhaus and MalwareBazaar, need a free abuse.ch Auth-Key, which you add in Settings under Advanced. Parts of the UI are adapted from [T3 Code](https://github.com/pingdotgg/t3code) and [Beautiful UI](https://github.com/slev12397/beautiful-ui).
+Vigil at Home stands on [Santa](https://github.com/northpolesec/santa), [osquery](https://github.com/osquery/osquery) and [fapolicyd](https://github.com/linux-application-whitelisting/fapolicyd) for watching and blocking, and on [abuse.ch](https://abuse.ch)'s free threat feeds. A free abuse.ch Auth-Key is optional; adding one in Settings under Advanced keeps the URLhaus and MalwareBazaar feeds working if abuse.ch starts requiring it. Parts of the UI are adapted from [T3 Code](https://github.com/pingdotgg/t3code) and [Beautiful UI](https://github.com/slev12397/beautiful-ui).
 
 ## License
 

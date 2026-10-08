@@ -5,13 +5,13 @@
  * The defaults are abuse.ch feeds, published under CC0 and chosen for a low
  * false-positive rate: confirmed botnet command servers, hosts currently
  * serving malware, and hashes of confirmed malware samples. URLhaus and
- * MalwareBazaar downloads need the user's own free abuse.ch Auth-Key; Vigil
- * never ships one.
+ * MalwareBazaar downloads take the user's own free abuse.ch Auth-Key when
+ * they have one; Vigil never ships one.
  */
 
 export type FeedList = 'known_bad_sha256' | 'known_bad_domains' | 'known_bad_ips';
 
-/** Keys the user can add for feeds that need one. */
+/** Keys the user can add for feeds that take one. */
 export type FeedKeyName = 'abusech';
 
 /** abuse.ch's per-user key, free at https://auth.abuse.ch/ for non-commercial use. */
@@ -40,9 +40,10 @@ export interface FeedSource {
   /** Extra request headers, e.g. an API key the provider requires. */
   headers?: Record<string, string>;
   /**
-   * The user's own key this feed needs, sent in `header`. Until the importer's
-   * `keys` option returns one for `key`, the feed is left out: not fetched,
-   * not counted as failing, and its stored entries are kept.
+   * The user's own key this feed takes, sent in `header` when the importer's
+   * `keys` option returns one for `key`. Without it the feed is fetched as
+   * usual; if that is refused (401/403) the feed reports `needs_key`, is not
+   * counted as failing, and its stored entries are kept.
    */
   auth?: { key: FeedKeyName; header: string };
   license: string;

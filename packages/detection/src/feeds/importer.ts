@@ -14,6 +14,8 @@ export interface FeedState {
   fetchedAt?: number;
   lastAttemptAt?: number;
   lastError?: string;
+  /** The provider refused a request sent without a key (401/403); cleared by any other answer. */
+  needsKey?: boolean;
 }
 
 export interface FeedStateStore {
@@ -60,15 +62,15 @@ export interface FeedImporterOptions extends CleanOptions {
    */
   minShrinkRatio?: number;
   /**
-   * The user's key for a feed that needs one (FeedSource.auth), read on every
-   * run so a key added or removed takes effect at once. Main process only.
+   * The user's key for a feed that can take one (FeedSource.auth), read on
+   * every run so a key added or removed takes effect at once. Main process only.
    */
   keys?: (name: FeedKeyName) => string | undefined;
 }
 
 export interface FeedRunResult {
   sourceId: string;
-  /** `needs_key`: left out until the user adds the key it needs; not an error. */
+  /** `needs_key`: refused without a key; kept as it was until the user adds one. Not an error. */
   status: 'updated' | 'not_modified' | 'skipped' | 'needs_key' | 'failed';
   /** Entries this source now contributes. */
   entries: number;
@@ -85,7 +87,7 @@ export interface FeedStatus {
   entries: number;
   fetchedAt?: number;
   lastError?: string;
-  /** Off until the user adds the key it needs. Its stored entries still count. */
+  /** Refused without a key, so off until the user adds one. Its stored entries still count. */
   needsKey?: boolean;
   /** No successful fetch for three intervals. Never set while the feed needs a key. */
   stale: boolean;
@@ -148,6 +150,8 @@ export class FeedImporter {
     const st = this.state.get(s.id);
     const last = Math.max(st?.fetchedAt ?? 0, st?.lastAttemptAt ?? 0);
     if (!last) return 0;
+    // Refused for want of a key and the user has since added one: try it straight away.
+    if (st?.needsKey && this.keyFor(s) !== undefined) return 0;
     // After a failure, retry within the hour rather than waiting a full interval.
     const failed = st?.lastError !== undefined && (st.lastAttemptAt ?? 0) >= (st.fetchedAt ?? 0);
     const interval = s.intervalHours * 3_600_000;
@@ -155,16 +159,20 @@ export class FeedImporter {
     return last + wait;
   }
 
-  /** The key a source needs, '' when it needs none, undefined when the user hasn't added it. */
+  /** The user's key for a source that can take one, if they added it. */
   private keyFor(s: FeedSource): string | undefined {
-    if (!s.auth) return '';
-    return this.options.keys?.(s.auth.key) || undefined;
+    return (s.auth && this.options.keys?.(s.auth.key)) || undefined;
+  }
+
+  /** Refused without a key on its last try, and still no key. */
+  private needsKey(s: FeedSource, st: FeedState | undefined): boolean {
+    return !!st?.needsKey && this.keyFor(s) === undefined;
   }
 
   /**
    * Fetch every source that is due (or all of them with `force`), then rebuild
-   * the affected lists. A source still waiting for its key is left out
-   * entirely: its state and its entries in the list stay as they were.
+   * the affected lists. A source refused for want of a key keeps its entries
+   * in the list as they were.
    */
   run(opts: { force?: boolean } = {}): Promise<FeedRunResult[]> {
     this.running ??= this.runAll(opts).finally(() => (this.running = undefined));
@@ -176,15 +184,6 @@ export class FeedImporter {
     const results: FeedRunResult[] = [];
     const touched = new Set<FeedList>();
     for (const s of this.sources) {
-      const key = this.keyFor(s);
-      if (key === undefined) {
-        results.push({
-          sourceId: s.id,
-          status: 'needs_key',
-          entries: Object.keys(this.state.get(s.id)?.entries ?? {}).length,
-        });
-        continue;
-      }
       if (!opts.force && this.dueAt(s) > now) {
         results.push({
           sourceId: s.id,
@@ -193,7 +192,7 @@ export class FeedImporter {
         });
         continue;
       }
-      const r = await this.fetchSource(s, key, now);
+      const r = await this.fetchSource(s, now);
       results.push(r);
       if (r.status === 'updated') touched.add(s.list);
     }
@@ -210,7 +209,7 @@ export class FeedImporter {
     const now = this.now();
     return this.sources.map((s) => {
       const st = this.state.get(s.id);
-      const needsKey = this.keyFor(s) === undefined;
+      const needsKey = this.needsKey(s, st);
       const out: FeedStatus = {
         sourceId: s.id,
         name: s.name,
@@ -222,7 +221,7 @@ export class FeedImporter {
       };
       if (needsKey) out.needsKey = true;
       if (st?.fetchedAt !== undefined) out.fetchedAt = st.fetchedAt;
-      // An error from before the key was removed (or before keys were needed) is no longer news.
+      // An error from before the feed was refused for want of a key is no longer news.
       if (st?.lastError !== undefined && !needsKey) out.lastError = st.lastError;
       return out;
     });
@@ -237,13 +236,16 @@ export class FeedImporter {
     this.lists.replace(list, union, { source: 'feeds', updatedAt: now });
   }
 
-  private async fetchSource(s: FeedSource, key: string, now: number): Promise<FeedRunResult> {
+  private async fetchSource(s: FeedSource, now: number): Promise<FeedRunResult> {
     const prev: FeedState = this.state.get(s.id) ?? { sourceId: s.id, entries: {} };
+    // Any answer other than a keyless refusal settles that the feed doesn't need a key.
+    delete prev.needsKey;
     const fail = (error: string): FeedRunResult => {
       this.state.put({ ...prev, lastAttemptAt: now, lastError: error });
       return { sourceId: s.id, status: 'failed', entries: Object.keys(prev.entries).length, error };
     };
 
+    const key = this.keyFor(s);
     const headers: Record<string, string> = { ...(s.headers ?? {}) };
     if (s.auth && key) headers[s.auth.header] = key;
     if (prev.etag) headers['If-None-Match'] = prev.etag;
@@ -262,6 +264,14 @@ export class FeedImporter {
           status: 'not_modified',
           entries: Object.keys(prev.entries).length,
         };
+      }
+      if (s.auth && !key && (res.status === 401 || res.status === 403)) {
+        // The provider wants a key now. Not a failure: entries, list and fetch times stay put
+        // until the user adds one; only the attempt is noted so it is retried at the usual pace.
+        const st: FeedState = { ...prev, lastAttemptAt: now, needsKey: true };
+        delete st.lastError;
+        this.state.put(st);
+        return { sourceId: s.id, status: 'needs_key', entries: Object.keys(prev.entries).length };
       }
       if (res.status !== 200) return fail(`HTTP ${res.status}`);
       const len = Number(res.headers.get('content-length') ?? '0');

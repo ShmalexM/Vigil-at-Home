@@ -6,6 +6,7 @@ import { memoryStore } from '../testing.js';
 import { CHECKS, HELPER_SOCKET, type Probe } from './checks.js';
 import { FeedKeyStore, KeyStore, type Cipher } from './keys.js';
 import { calls } from '../../shared/ipc.js';
+import { feedKeyNote } from '../../shared/setup.js';
 import {
   FAPOLICYD_ALLOW_RULES,
   LOCAL_MODEL,
@@ -421,6 +422,20 @@ describe('feed keys', () => {
     expect(() => store().keys.set('abusech', 'short')).toThrow('too short');
     expect(() => store().keys.set('abusech', 'has spaces 0123456789abcdef')).toThrow();
     expect(() => store(testCipher(false)).keys.set('abusech', abuseKey)).toThrow('Keychain');
+  });
+
+  it('says the feeds are off only when one was refused without a key', () => {
+    const view = (saved: boolean, needsKey: boolean) => ({
+      saved: { abusech: saved },
+      canSave: true,
+      needsKey,
+    });
+    expect(feedKeyNote(view(false, false))).toMatch(/^Optional: abuse.ch may start requiring/);
+    expect(feedKeyNote(view(false, false))).not.toMatch(/\boff\b/);
+    expect(feedKeyNote(view(false, true))).toBe(
+      'URLhaus and MalwareBazaar feeds are off until you add a free abuse.ch Auth-Key.',
+    );
+    expect(feedKeyNote(view(true, false))).not.toMatch(/\boff\b/);
   });
 
   it('validates the feed-key IPC arguments', () => {

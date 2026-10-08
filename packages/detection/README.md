@@ -172,7 +172,7 @@ feeds.status(); // per source: entries, last fetch, last error, stale, needs a k
 | URLhaus hostfile                    | `known_bad_domains` | 6 h   | Hosts currently serving malware                      |
 | MalwareBazaar recent SHA-256 export | `known_bad_sha256`  | 1 h   | Only the last 48 h, so entries are kept for 180 days |
 
-URLhaus and MalwareBazaar need the user's own free abuse.ch Auth-Key (https://auth.abuse.ch/), sent as the `Auth-Key` header. Pass it with the `keys` option; without one those two sources are left out of every run (status `needs_key`), are not reported as failing or stale, and keep the entries they already contributed. No key is ever shipped.
+URLhaus and MalwareBazaar take an optional free abuse.ch Auth-Key (https://auth.abuse.ch/), sent as the `Auth-Key` header when passed with the `keys` option. Without one they are fetched as before; if abuse.ch refuses that (401/403) the source reports `needs_key`, is not reported as failing or stale, and keeps the entries it already contributed. No key is ever shipped.
 
 Feeds can trigger automatic blocks, so the importer distrusts them:
 
