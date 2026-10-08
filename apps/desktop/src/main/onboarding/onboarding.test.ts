@@ -236,6 +236,34 @@ describe('checks', () => {
 });
 
 describe('OnboardingService', () => {
+  it('offers a one-click helper install, and treats a closed password dialog as no error', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vigil-setup-'));
+    let answer: { ok: boolean; error?: string } = { ok: false, error: 'cancelled' };
+    let installs = 0;
+    const svc = new OnboardingService({
+      store: memoryStore(),
+      keys: new KeyStore(join(dir, 'k.json'), testCipher()),
+      probe: { ...fakeMac({}), platform: 'linux' },
+      supported: true,
+      plan: () => ({ helperInstallCommand: 'sudo sh install.sh' }),
+      installHelper: async () => (installs++, answer),
+    });
+    svc.skip('fapolicyd', true);
+    svc.skip('osquery', true);
+    const helper = (await svc.view(true)).steps.find((s) => s.id === 'helper');
+    expect(helper).toMatchObject({
+      state: 'todo',
+      action: { id: 'helper-install', label: 'Install helper' },
+    });
+    // The command to paste stays as the fallback.
+    expect(helper?.commands.map((c) => c.cmd)).toEqual(['sudo sh install.sh']);
+
+    await expect(svc.runAction('helper-install')).resolves.toHaveProperty('steps');
+    answer = { ok: false, error: 'No password dialog could open' };
+    await expect(svc.runAction('helper-install')).rejects.toThrow('No password dialog');
+    expect(installs).toBe(2);
+  });
+
   it('shows the pre-flight step as done once the hook has checked in, without running a check', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'vigil-setup-'));
     let connected = false;

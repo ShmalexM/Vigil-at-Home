@@ -199,6 +199,11 @@ function start(): void {
     ...(demo
       ? {}
       : { codex: { status: () => ai.codexStatus(), share: () => ai.shareCodexSignIn() } }),
+    // The helper step's button: the same password dialog as Home's.
+    installHelper: async () =>
+      afterHelperScript(
+        await runHelperScript(core.helperOutdated ? 'update' : 'install', helperDir()),
+      ),
     // The wizard's helper and Santa steps, once this build can install them.
     plan: () => {
       const command = helperInstallCommand(helperDir());

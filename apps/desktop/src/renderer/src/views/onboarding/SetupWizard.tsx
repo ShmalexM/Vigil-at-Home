@@ -355,7 +355,11 @@ function StepAction({
             }
           }}
         >
-          {busy ? 'Checking…' : action.label}
+          {busy
+            ? action.id === 'helper-install'
+              ? 'Waiting for your password…'
+              : 'Checking…'
+            : action.label}
         </Button>
       </div>
       {error && (

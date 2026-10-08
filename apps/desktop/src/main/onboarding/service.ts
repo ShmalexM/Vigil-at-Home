@@ -46,6 +46,11 @@ export interface OnboardingOptions {
   codex?: CodexSetup;
   supported?: boolean;
   now?: () => number;
+  /**
+   * Installs the helper through the system's own password dialog, so the
+   * helper step has a button as well as the command to paste.
+   */
+  installHelper?: () => Promise<{ ok: boolean; error?: string }>;
 }
 
 /**
@@ -109,6 +114,16 @@ export class OnboardingService extends EventEmitter<{ changed: [] }> {
   /** A step's one-click fix. Only runs when the user presses its button. */
   async runAction(action: SetupAction): Promise<SetupView> {
     switch (action) {
+      case 'helper-install': {
+        if (!this.o.installHelper) throw new Error('This build of Vigil can’t install the helper');
+        const r = await this.o.installHelper();
+        // A closed password dialog is the user's answer, not an error.
+        if (!r.ok && r.error !== 'cancelled') {
+          throw new Error(r.error ?? 'The helper didn’t install');
+        }
+        this.emit('changed');
+        return this.view(true);
+      }
       case 'codex-share': {
         if (!this.o.codex) throw new Error('Codex isn’t connected to Vigil yet');
         const r = await this.o.codex.share();
@@ -196,7 +211,19 @@ export class OnboardingService extends EventEmitter<{ changed: [] }> {
           detail: d.unavailable ?? 'Not available in this build',
         };
       } else {
-        view = { ...base, state: 'todo', ...(r?.detail ? { detail: r.detail } : {}) };
+        view = {
+          ...base,
+          state: 'todo',
+          ...(r?.detail ? { detail: r.detail } : {}),
+          ...(d.id === 'helper' && d.commands.length && this.o.installHelper
+            ? {
+                action: {
+                  id: 'helper-install' as const,
+                  label: r?.detail ? 'Reinstall helper' : 'Install helper',
+                },
+              }
+            : {}),
+        };
       }
       if (view.state === 'done' || view.skipped) doneIds.add(d.id);
       steps.push(view);
