@@ -7,7 +7,12 @@ import { compileAgentMatchers } from '../agents/match.js';
 import { parsePsComm } from '../agents/ps-table.js';
 import { AgentRegistry } from '../agents/registry.js';
 import { sessionId } from '../agents/session-id.js';
-import { AgentTracker, type SessionStart, type TrackerOptions } from '../agents/tracker.js';
+import {
+  AgentTracker,
+  bareShellCommand,
+  type SessionStart,
+  type TrackerOptions,
+} from '../agents/tracker.js';
 import { MemoryAgentStore } from '../state/stores.js';
 import type { DetectionEvent, DetectionProcessRef } from '../types.js';
 import { userOrigin } from '../user.js';
@@ -88,6 +93,61 @@ describe('agent tracker', () => {
     t.retag();
     expect(t.lookup(under.process.pid)?.tag?.teamId).toBeUndefined();
     expect(t.lookup(sec.process.pid)?.tag).toMatchObject(signed);
+  });
+
+  it('lets a bare sh -c hand the signature to its one command only', () => {
+    const { launch } = tracker();
+    const signed = { teamId: 'Q6L2SF6YDW' };
+    const root = launch(CLAUDE_BIN, 501, signed);
+    const sh = (cmd: string) =>
+      launch('/bin/sh', root.process.pid, { args: ['/bin/sh', '-c', cmd] });
+    const child = (parent: ExecEvent, args: string[]) =>
+      launch(`/usr/bin/${args[0]}`, parent.process.pid, { args });
+    const a = sh(`security find-generic-password -w -s "Claude Code"`);
+    const words = ['security', 'find-generic-password', '-w', '-s', 'Claude Code'];
+    expect(child(a, words).process.agent).toMatchObject(signed);
+    // Only the first child.
+    expect(child(a, words).process.agent?.teamId).toBeUndefined();
+    // Not another program, or with other arguments.
+    expect(
+      child(sh('security find-generic-password -w'), ['ls']).process.agent?.teamId,
+    ).toBeUndefined();
+    expect(child(sh('security x'), ['security', 'y']).process.agent?.teamId).toBeUndefined();
+    // Not when the command is more than one plain command.
+    for (const cmd of [
+      'security x; true',
+      'security $(x)',
+      'security x > /tmp/k',
+      'security "x',
+      'security \\x',
+    ])
+      expect(child(sh(cmd), ['security', 'x']).process.agent?.teamId).toBeUndefined();
+  });
+
+  it('splits a plain command into words, and nothing else', () => {
+    expect(bareShellCommand(`security -s "Claude Code" -a 'a b'  -w`)).toEqual([
+      'security',
+      '-s',
+      'Claude Code',
+      '-a',
+      'a b',
+      '-w',
+    ]);
+    for (const cmd of [
+      'a;b',
+      'a|b',
+      'a&b',
+      'a `b`',
+      'a $b',
+      'a (b)',
+      'a <b',
+      'a\nb',
+      'a "b',
+      'a *',
+      'a # b',
+      '',
+    ])
+      expect(bareShellCommand(cmd), cmd).toBeUndefined();
   });
 
   it('gives a root found by ps its signature once a sensor reports it', () => {

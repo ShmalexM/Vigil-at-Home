@@ -748,6 +748,57 @@ describe('agent rule packs', () => {
         expect(fired(e), JSON.stringify(procOf(e)?.args)).toContain('agent-keychain-secret');
     });
 
+    describe('the security a bare sh -c starts (real Mac, 2026-10-08)', () => {
+      const NATIVE = `${home}/.local/share/claude/versions/2.1.283`;
+      const READ =
+        'security find-generic-password -a "alexmargaris" -w -s "Claude Code-credentials"';
+      const CHILD_ARGS = [
+        'security',
+        'find-generic-password',
+        '-a',
+        'alexmargaris',
+        '-w',
+        '-s',
+        'Claude Code-credentials',
+      ];
+      // As the sensor reported it: no parent path, the shell missing from the ancestry.
+      const ancestors = ['2.1.283', '2.1.283', '-zsh', 'login'];
+      let pid = 97_000;
+      const pair = (root: Partial<DetectionProcessRef>, command = READ) => {
+        const t = agentTree(NATIVE, { basePid: (pid += 100), args: ['2.1.283'], root });
+        const copy = t.exec(NATIVE, ['2.1.283'], t.root.process, {
+          signing: 'developer_id',
+          ...root,
+        });
+        const shell = t.exec('/bin/sh', ['/bin/sh', '-c', command], copy.process);
+        const child = () => t.exec('/usr/bin/security', CHILD_ARGS, shell.process, { ancestors });
+        return { shell, child };
+      };
+
+      it('is Claude Code’s own read, for the shell and the security it starts', () => {
+        const { shell, child } = pair(ANTHROPIC);
+        expect(fired(shell)).not.toContain('agent-keychain-secret');
+        expect(fired(child())).not.toContain('agent-keychain-secret');
+      });
+
+      it('still alerts on another child, chaining, a second child or an unsigned root', () => {
+        const bad = [
+          pair(ANTHROPIC, 'echo hi').child(),
+          pair(ANTHROPIC, `${READ}; true`).child(),
+          pair(ANTHROPIC, `${READ} > /tmp/k`).child(),
+          pair(ANTHROPIC, READ.replace('alexmargaris', 'someone')).child(),
+          pair({}).child(),
+          pair({}).shell,
+          pair({ teamId: 'ABCDE12345' }).child(),
+        ];
+        const twice = pair(ANTHROPIC);
+        expect(fired(twice.child())).not.toContain('agent-keychain-secret');
+        bad.push(twice.child());
+        for (const e of bad)
+          expect(fired(e), JSON.stringify(procOf(e))).toContain('agent-keychain-secret');
+      });
+    });
+
     it('alerts on the same read when the Claude Code that asks is not the signed one', () => {
       const READ =
         'security find-generic-password -a "alexmargaris" -w -s "Claude Code-credentials"';
