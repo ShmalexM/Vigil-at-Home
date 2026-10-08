@@ -53,6 +53,9 @@ describe('Linux paths and protection', () => {
       '/home/alex/.ssh',
       '/opt/Vigil at Home/vigil-at-home',
       '/usr/libexec/vigil-helper',
+      '/usr/libexec/vigil-helper.d/current/node',
+      '/usr/libexec/vigil-helper.d/versions/20261008.abc123/helper.mjs',
+      '/usr/libexec/vigil-helper.d.lock',
       '/var/lib/vigil/helper-journal.json',
       '/usr/local',
     ]) {
