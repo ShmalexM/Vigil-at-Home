@@ -379,15 +379,22 @@ export class Store {
 
   /**
    * Events since `since`, newest first, of some kinds and holding some text,
-   * for Vigil's tools for agents. Text is looked for in at most `scanRows` of
-   * the newest events in the window, so a rare word never walks a week of
-   * events on the thread that also runs detection. `partial` says the window
-   * held more events than that and fewer than `limit` matched.
+   * for Vigil's tools for agents. Text and labels are looked for in at most
+   * `scanRows` of the newest events in the window, so a rare word never walks
+   * a week of events on the thread that also runs detection. `partial` says
+   * the window held more events than that and fewer than `limit` matched.
+   * An agent and matched-only have indexes, so they narrow the window itself.
    */
   searchEvents(q: {
     since: number;
     kinds?: readonly EventKind[];
     text?: string;
+    /** Only events from this agent's sessions. */
+    agent?: string;
+    /** Only events that matched a rule. */
+    matchedOnly?: boolean;
+    /** Only events a model labelled so. */
+    label?: EventLabel['label'];
     limit: number;
     scanRows: number;
   }): { views: EventView[]; partial: boolean } {
@@ -397,22 +404,35 @@ export class Store {
       where.push(`kind IN (${q.kinds.map(() => '?').join(',')})`);
       args.push(...q.kinds);
     }
+    if (q.agent) {
+      where.push('agent_id = ?');
+      args.push(q.agent);
+    }
+    if (q.matchedOnly) where.push('matched = 1');
     const filter = where.join(' AND ');
     const window = `SELECT body, outcome, label, args, ts, id FROM events WHERE ${filter}
       ORDER BY ts DESC, id DESC`;
-    if (!q.text) {
+    const scanned: string[] = [];
+    const scanArgs: SQLInputValue[] = [];
+    if (q.text) {
+      scanned.push(`(body LIKE ? ESCAPE '\\' OR (args IS NOT NULL AND vigil_args_hit(args)))`);
+      scanArgs.push(likePattern(q.text));
+    }
+    if (q.label) {
+      scanned.push(`json_extract(label, '$.label') = ?`);
+      scanArgs.push(q.label);
+    }
+    if (!scanned.length) {
       const rows = this.db.prepare(`${window} LIMIT ?`).all(...args, q.limit) as EventRow[];
       return { views: rows.map((r) => this.view(r)), partial: false };
     }
-    const like = likePattern(q.text);
-    this.argsLike(like);
+    if (q.text) this.argsLike(likePattern(q.text));
     const rows = this.db
       .prepare(
         `SELECT body, outcome, label, args FROM (${window} LIMIT ?)
-         WHERE (body LIKE ? ESCAPE '\\' OR (args IS NOT NULL AND vigil_args_hit(args)))
-         ORDER BY ts DESC, id DESC LIMIT ?`,
+         WHERE ${scanned.join(' AND ')} ORDER BY ts DESC, id DESC LIMIT ?`,
       )
-      .all(...args, q.scanRows, like, q.limit) as EventRow[];
+      .all(...args, q.scanRows, ...scanArgs, q.limit) as EventRow[];
     const partial =
       rows.length < q.limit &&
       this.db

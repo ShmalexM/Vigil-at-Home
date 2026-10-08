@@ -215,6 +215,47 @@ describe('Store', () => {
     expect(s.searchEvents({ since: 0, text: 'git', limit: 10, scanRows: 4 }).partial).toBe(false);
   });
 
+  it('searches events by agent, rule matches and label', () => {
+    const s = memoryStore();
+    const agent = { id: 'claude-code', session: 'aaaaaaaaaaaaaaaa', depth: 1 };
+    const exec = (path: string, ts: number, tagged = false) => {
+      const e = { ...makeExec(path), ts };
+      return tagged ? { ...e, process: { ...e.process, agent } } : e;
+    };
+    const npm = exec('/usr/local/bin/npm', 1000, true);
+    const curl = exec('/usr/bin/curl', 2000);
+    const ssh = exec('/usr/bin/ssh', 3000, true);
+    const matches = [{ ruleId: 'r', ruleName: 'R', mode: 'alert' as const }];
+    s.insertEvents([
+      { event: npm },
+      { event: curl, outcome: { checked: 1, matches } },
+      { event: ssh, outcome: { checked: 1, matches: [] } },
+    ]);
+    const label = (l: 'unusual' | 'suspicious') => ({
+      label: l,
+      score: 0.5,
+      reason: 'x',
+      by: 'model' as const,
+      at: 1,
+    });
+    s.setEventLabels([
+      { eventId: npm.id, label: label('unusual') },
+      { eventId: ssh.id, label: label('suspicious') },
+    ]);
+    const ids = (q: Partial<Parameters<typeof s.searchEvents>[0]>) =>
+      s.searchEvents({ since: 0, limit: 10, scanRows: 100, ...q }).views.map((v) => v.event.id);
+
+    expect(ids({ agent: 'claude-code' })).toEqual([ssh.id, npm.id]);
+    expect(ids({ matchedOnly: true })).toEqual([curl.id]);
+    expect(ids({ label: 'suspicious' })).toEqual([ssh.id]);
+    expect(ids({ label: 'unusual', agent: 'claude-code', text: 'npm' })).toEqual([npm.id]);
+    // Labels are looked for in the newest events only, like text.
+    expect(s.searchEvents({ since: 0, label: 'unusual', limit: 10, scanRows: 1 })).toEqual({
+      views: [],
+      partial: true,
+    });
+  });
+
   it('fills in the outcome of an event an alert already stored, keeping its raw record', () => {
     const s = memoryStore();
     const e = { ...makeExec(), raw: { line: 'santa' } };
