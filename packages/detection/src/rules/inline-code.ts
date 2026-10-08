@@ -1,47 +1,89 @@
-// Does a shell command pipe a download (curl, wget) into a script interpreter
-// that runs it? Used by the `process.pipesDownloadIntoCode` field (fields.ts).
+// Does a shell command run something it downloads with curl or wget? Used by
+// the `process.pipesDownloadIntoCode` field (fields.ts), alongside the regexes
+// in macos-core.ts that catch the plain `curl … | sh` and `sh -c "$(curl …)"`
+// shapes.
 //
-// Piping a download into python3, perl, ruby or node runs it, with one
-// exception seen in Claude Code's own steps on a real Mac (2026-10-08): an
-// inline program that only reads the download as data (`curl … | python3 -c
-// "import json,sys; print(json.load(sys.stdin)['x'])"`). That exception is an
-// allowlist, checked token by token: python3 -c or node -e whose program uses
-// only a few data-reading names (see PY_* and JS_*). Anything else, perl and
-// ruby always, counts as running the download.
+// This file covers what a regex over the raw line cannot read safely:
+//   - a download piped into python, perl, ruby or node. Perl and ruby always
+//     run it. python and node run it unless the inline program (`-c`/`-e`)
+//     only reads the download as data, which is decided by a strict allowlist
+//     of names, attributes and keys (pythonReadsOnly, nodeReadsOnly) — never a
+//     denylist, so an unlisted name is refused rather than missed;
+//   - a download captured into a variable and then run (`V=$(curl …); sh -c
+//     "$V"`, `eval "$V"`);
+//   - the same written in a way a plain regex misses: ${IFS}/$IFS word splits,
+//     a line continuation inside a word, quoted or backslash-escaped program
+//     names, and env/sudo wrappers before the interpreter.
 //
-// The command is read with a small shell lexer (quotes, escapes, `$( )`,
-// backticks, `<( )`, `eval '…'` and `sh -c '…'` read again), never run. When
-// the lexer cannot account for every download piped into an interpreter that a
-// plain regex sees, the answer is "runs".
+// The command is read with a small shell lexer (quotes, escapes, $( ),
+// backticks, <( ), and `eval`/`sh -c` bodies read again), never run. When a
+// stage cannot be read with confidence, it is treated as running the download.
 
-import * as fs from 'node:fs';
-
-/** curl or wget piped into an interpreter, as plain text. Every such pair must be explained. */
-const PAIR_RE =
-  /(curl|wget)\s[^|]*\|\s*(\S+=\S*\s+){0,4}((sudo|env|command|exec|nice|nohup|time)\s+(-\S+\s+){0,4})?(\S*\/)?(python[0-9.]*|perl|ruby|node)(?![\w.-])/g;
-/** Programs that run the program named after them. */
-const WRAPPERS = new Set(['sudo', 'env', 'command', 'exec', 'nice', 'nohup', 'time']);
-const INTERPRETER_RE = /^(python[0-9.]*|perl|ruby|node)$/;
-const SHELL_RE = /^(sh|bash|zsh|dash|ksh)$/;
-const SHELL_C_RE = /^-[A-Za-z]*c[A-Za-z]*$/;
-/** Longest command read; a longer one counts as running. */
-const MAX_COMMAND = 64 * 1024;
+/** How deep the lexer follows substitutions and nested shells. */
 const MAX_DEPTH = 6;
+/** Longest command read; a longer one is treated as running. */
+const MAX_COMMAND = 64 * 1024;
+/** Longest inline program the allowlists read. */
+const MAX_CODE = 4096;
+
+const DOWNLOADERS = new Set(['curl', 'wget']);
+const INTERPRETERS = new Set(['python', 'perl', 'ruby', 'node']);
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh']);
+/** Programs that run the program named after them; their own options and VAR=val are skipped. */
+const WRAPPERS = new Set([
+  'sudo',
+  'env',
+  'command',
+  'exec',
+  'nice',
+  'nohup',
+  'builtin',
+  'time',
+  'stdbuf',
+  'setsid',
+  'ionice',
+  'doas',
+]);
+const ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const SHELL_C_RE = /^-[A-Za-z]*[ce][A-Za-z]*$/;
 
 function basename(p: string): string {
   const i = p.lastIndexOf('/');
   return i === -1 ? p : p.slice(i + 1);
 }
 
+/** python3.12 and python2 are python; the rest keep their name. */
+function family(name: string): string {
+  const m = /^(python|perl|ruby|node|bash|zsh|dash|ksh|sh|curl|wget)[0-9.]*$/.exec(name);
+  return m ? m[1]! : name;
+}
+
+// --------------------------------------------------------------- preprocessing
+
+/**
+ * Fold away two spellings before lexing: a backslash before a newline joins
+ * the two lines (so a word split across lines reads as one), and ${IFS} or
+ * $IFS (the field separator, a space by default) becomes a space.
+ */
+function preprocess(cmd: string): string {
+  return cmd
+    .replace(/\\\r?\n/g, '')
+    .replace(/\$\{IFS\}/g, ' ')
+    .replace(/\$IFS(?![A-Za-z0-9_])/g, ' ');
+}
+
 // ------------------------------------------------------------------ shell lexer
 
-type Tok = { w: string } | { op: string };
-
-interface Lexed {
-  toks: Tok[];
-  /** The text of every `$( )`, backtick and `<( )` substitution, read again on its own. */
+interface Word {
+  /** The literal text, with substitutions left out and quotes removed. */
+  text: string;
+  /** The bodies of the $( ), ` ` and <( ) substitutions inside this word. */
   subs: string[];
+  /** A quote or expansion this reader could not resolve, so the word is not trustworthy. */
+  unsure: boolean;
 }
+
+type Token = { word: Word } | { op: string };
 
 /** Index just past the `)` that closes the `(` before `i`, skipping quoted text. */
 function closeParen(s: string, i: number): number | undefined {
@@ -67,14 +109,23 @@ function closeParen(s: string, i: number): number | undefined {
   return undefined;
 }
 
-/** Words and operators of a shell command, or undefined when it cannot be read (an open quote). */
-function lex(s: string): Lexed | undefined {
-  const toks: Tok[] = [];
-  const subs: string[] = [];
-  let word: string | undefined;
+/** Words and operators of a shell command, or undefined when a quote is left open. */
+function lex(s: string): Token[] | undefined {
+  const toks: Token[] = [];
+  let text: string | undefined;
+  let subs: string[] = [];
+  let unsure = false;
   const end = () => {
-    if (word !== undefined) toks.push({ w: word });
-    word = undefined;
+    if (text !== undefined || subs.length || unsure) {
+      toks.push({ word: { text: text ?? '', subs, unsure } });
+      text = undefined;
+      subs = [];
+      unsure = false;
+    }
+  };
+  const op = (o: string) => {
+    end();
+    toks.push({ op: o });
   };
   let i = 0;
   while (i < s.length) {
@@ -82,205 +133,318 @@ function lex(s: string): Lexed | undefined {
     if (c === ' ' || c === '\t') {
       end();
       i++;
-    } else if (c === '#' && word === undefined) {
+    } else if (c === '#' && text === undefined && subs.length === 0) {
       while (i < s.length && s[i] !== '\n') i++;
-    } else if (c === '\n' || c === ';' || c === '&' || c === '|' || c === '(' || c === ')') {
-      end();
+    } else if (c === '\n' || c === ';' || c === '&' || c === '|') {
       const two = s.slice(i, i + 2);
-      const op = ['&&', '||', ';;', '|&'].includes(two) ? two : c === '\n' ? ';' : c;
-      toks.push({ op });
-      i += op.length === 2 ? 2 : 1;
-    } else if (c === '<' && s[i + 1] === '(') {
+      const known = ['&&', '||', ';;', '|&'].includes(two) ? two : c === '\n' ? ';' : c;
+      op(known);
+      i += known.length === 2 ? 2 : 1;
+    } else if ((c === '<' || c === '>') && s[i + 1] === '(') {
       const close = closeParen(s, i + 2);
       if (close === undefined) return undefined;
       subs.push(s.slice(i + 2, close - 1));
-      word = (word ?? '') + s.slice(i, close);
+      unsure = true; // its output becomes a path; nothing good uses it as a program
       i = close;
-    } else if (c === '<' || c === '>') {
+    } else if (c === '(' || c === ')') {
+      // A subshell grouping; its contents are judged as their own command.
       end();
+      i++;
+    } else if (c === '<' || c === '>') {
+      // A redirection and its target are not part of any command's program.
+      op('redir');
       let j = i + 1;
-      while (j < s.length && '<>|&'.includes(s[j]!)) j++;
-      toks.push({ op: 'redir' });
+      while (j < s.length && '<>&|'.includes(s[j]!)) j++;
       i = j;
     } else if (c === "'") {
       const close = s.indexOf("'", i + 1);
       if (close === -1) return undefined;
-      word = (word ?? '') + s.slice(i + 1, close);
+      text = (text ?? '') + s.slice(i + 1, close);
+      i = close + 1;
+    } else if (c === '$' && s[i + 1] === "'") {
+      // ANSI-C quoting, whose escapes this reader does not decode.
+      const close = s.indexOf("'", i + 2);
+      if (close === -1) return undefined;
+      const body = s.slice(i + 2, close);
+      if (/\\/.test(body)) unsure = true;
+      else text = (text ?? '') + body;
       i = close + 1;
     } else if (c === '"') {
-      let v = '';
       i++;
       for (;;) {
         if (i >= s.length) return undefined;
         const d = s[i]!;
         if (d === '"') break;
         if (d === '\\' && i + 1 < s.length && '$`"\\\n'.includes(s[i + 1]!)) {
-          v += s[i + 1];
+          text = (text ?? '') + s[i + 1];
           i += 2;
         } else if (d === '$' && s[i + 1] === '(') {
           const close = closeParen(s, i + 2);
           if (close === undefined) return undefined;
           subs.push(s.slice(i + 2, close - 1));
-          v += s.slice(i, close);
           i = close;
         } else if (d === '`') {
           const close = s.indexOf('`', i + 1);
           if (close === -1) return undefined;
           subs.push(s.slice(i + 1, close));
-          v += s.slice(i, close + 1);
           i = close + 1;
         } else {
-          v += d;
+          text = (text ?? '') + d;
           i++;
         }
       }
-      word = (word ?? '') + v;
       i++;
     } else if (c === '\\') {
-      word = (word ?? '') + (s[i + 1] ?? '');
+      if (i + 1 < s.length) text = (text ?? '') + s[i + 1];
       i += 2;
     } else if (c === '$' && s[i + 1] === '(') {
       const close = closeParen(s, i + 2);
       if (close === undefined) return undefined;
       subs.push(s.slice(i + 2, close - 1));
-      word = (word ?? '') + s.slice(i, close);
       i = close;
-    } else if (c === '$' && s[i + 1] === "'") {
-      // ANSI-C quoting: escapes this reader does not decode. Kept raw, so an
-      // inline program written this way never passes the allowlist.
-      const close = s.indexOf("'", i + 2);
-      if (close === -1) return undefined;
-      word = (word ?? '') + s.slice(i, close + 1);
-      i = close + 1;
     } else if (c === '`') {
       const close = s.indexOf('`', i + 1);
       if (close === -1) return undefined;
       subs.push(s.slice(i + 1, close));
-      word = (word ?? '') + s.slice(i, close + 1);
       i = close + 1;
+    } else if (c === '$' && /[A-Za-z_{]/.test(s[i + 1] ?? '')) {
+      // $VAR / ${VAR}: kept literally so a later `eval "$VAR"` can be spotted.
+      text = (text ?? '') + c;
+      i++;
     } else {
-      word = (word ?? '') + c;
+      text = (text ?? '') + c;
       i++;
     }
   }
   end();
-  return { toks, subs };
+  return toks;
 }
 
-// --------------------------------------------------------------- the pipeline
+// ------------------------------------------------------------- command structure
 
-interface Found {
-  runs: boolean;
-  /** Download → interpreter pairs found and judged. */
-  pairs: number;
+interface Stage {
+  words: Word[];
+}
+interface Command {
+  stages: Stage[];
 }
 
-const ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
+/** Split tokens into commands (at ; && || &) and each command into pipe stages. */
+function commandsOf(toks: Token[]): Command[] {
+  const commands: Command[] = [];
+  let stages: Stage[] = [];
+  let words: Word[] = [];
+  let skip = false;
+  const endStage = () => {
+    stages.push({ words });
+    words = [];
+  };
+  const endCommand = () => {
+    endStage();
+    commands.push({ stages });
+    stages = [];
+  };
+  for (const t of toks) {
+    if ('word' in t) {
+      if (skip) skip = false;
+      else words.push(t.word);
+    } else if (t.op === 'redir') {
+      skip = true; // the redirection target is not an argument
+    } else if (t.op === '|' || t.op === '|&') {
+      endStage();
+    } else {
+      endCommand();
+    }
+  }
+  endCommand();
+  return commands;
+}
 
-/** Does an interpreter command, given what a download wrote to its input, run it? */
-function interpreterRuns(words: string[]): boolean {
-  // An environment assignment (PYTHONPATH, NODE_OPTIONS) or sudo changes what runs.
-  if (!words.length || ASSIGNMENT_RE.test(words[0]!)) return true;
-  const prog = basename(words[0]!);
-  const args = words.slice(1);
-  if (/^python[0-9.]*$/.test(prog)) {
+/** The program a stage runs: its name family, skipping VAR=val and wrapper commands. */
+function stageProgram(stage: Stage): {
+  name?: string;
+  unsure: boolean;
+  wrapped: boolean;
+  rest: Word[];
+} {
+  const words = stage.words;
+  let i = 0;
+  let wrapped = false;
+  while (i < words.length) {
+    const w = words[i]!;
+    if (w.unsure || (w.text === '' && w.subs.length)) return { unsure: true, wrapped, rest: [] };
+    if (w.text === '' && !w.subs.length) {
+      i++;
+      continue;
+    }
+    if (ASSIGNMENT_RE.test(w.text)) {
+      wrapped = true; // an inline VAR=val changes the environment the program runs in
+      i++;
+      continue;
+    }
+    const name = family(basename(w.text));
+    if (WRAPPERS.has(name)) {
+      wrapped = true;
+      i++;
+      // Skip this wrapper's own options and, for env, its VAR=val pairs.
+      while (i < words.length) {
+        const a = words[i]!;
+        if (a.unsure) return { unsure: true, wrapped, rest: [] };
+        if (a.text.startsWith('-') || ASSIGNMENT_RE.test(a.text)) i++;
+        else break;
+      }
+      continue;
+    }
+    return { name, unsure: false, wrapped, rest: words.slice(i) };
+  }
+  return { unsure: false, wrapped, rest: [] };
+}
+
+// --------------------------------------------------------------------- judging
+
+interface Ctx {
+  downloadVars: Set<string>;
+}
+
+/** Does a stage's words, as an interpreter invocation, run what it reads? */
+function interpreterRuns(words: Word[]): boolean {
+  if (words.some((w) => w.unsure)) return true;
+  const name = family(basename(words[0]!.text));
+  const args = words.slice(1).map((w) => w.text);
+  if (name === 'perl' || name === 'ruby') return true;
+  if (name === 'python') {
     let i = 0;
-    while (i < args.length && /^-[uIESBsqO]+$/.test(args[i]!)) i++;
-    // python3 -m json.tool, the pretty-printer, with its formatting options only.
+    while (i < args.length && /^-[uIESBsqOdvx]+$/.test(args[i]!)) i++;
     if (args[i] === '-m' && args[i + 1] === 'json.tool')
       return !args
         .slice(i + 2)
         .every((a) =>
-          /^(--(sort-keys|compact|no-ensure-ascii|json-lines|tab|no-indent)|--indent|\d{1,2})$/.test(
-            a,
-          ),
+          /^(--(sort-keys|compact|no-ensure-ascii|json-lines|tab|indent)|\d{1,3})$/.test(a),
         );
     if (args[i] !== '-c' || args[i + 1] === undefined) return true;
     return !pythonReadsOnly(args[i + 1]!);
   }
-  if (prog === 'node') {
+  if (name === 'node') {
     if (!['-e', '--eval', '-p', '--print'].includes(args[0] ?? '') || args[1] === undefined)
       return true;
-    return !nodeReadsOnly(args[1]);
+    return !nodeReadsOnly(args[1]!);
   }
-  return true; // perl, ruby
+  return true;
 }
 
-/** Read one command (and what it substitutes, evals or hands to `sh -c`). */
-function scan(src: string, depth: number, out: Found): void {
-  if (out.runs) return;
-  if (depth > MAX_DEPTH) {
-    out.runs = true;
-    return;
-  }
-  const lexed = lex(src);
-  if (!lexed) {
-    // Unreadable: only a problem if it holds a pair (the caller's count decides).
-    return;
-  }
-  for (const sub of lexed.subs) scan(sub, depth + 1, out);
-  // Commands, each with the operator that ends it.
-  const cmds: { words: string[]; next?: string }[] = [{ words: [] }];
-  let skipNext = false;
-  for (const t of lexed.toks) {
-    const cur = cmds[cmds.length - 1]!;
-    if ('w' in t) {
-      if (skipNext) skipNext = false;
-      else cur.words.push(t.w);
-    } else if (t.op === 'redir') {
-      skipNext = true;
-    } else {
-      cur.next = t.op;
-      cmds.push({ words: [] });
+/** A word references one of the capture variables (`$V`, `${V}`, `"$V"`). */
+function referencesVar(w: Word, vars: Set<string>): boolean {
+  if (!vars.size) return false;
+  for (const m of w.text.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g))
+    if (vars.has(m[1]!)) return true;
+  return false;
+}
+
+/** A pipeline runs a download when a download stage feeds a runner (or an unreadable) stage. */
+function pipelineRuns(stages: Stage[]): boolean {
+  const progs = stages.map(stageProgram);
+  let seenDownload = false;
+  for (const p of progs) {
+    if (
+      seenDownload &&
+      (p.unsure || (p.name && (SHELLS.has(p.name) || INTERPRETERS.has(p.name))))
+    ) {
+      if (p.unsure || !p.name || SHELLS.has(p.name)) return true;
+      // A wrapper (sudo, env, an inline VAR=val) before the interpreter is not how a
+      // benign data read is written, and it changes how the program runs; treat it as run.
+      if (p.wrapped || interpreterRuns(p.rest)) return true;
     }
+    if (!p.unsure && p.name && DOWNLOADERS.has(p.name)) seenDownload = true;
   }
-  for (let i = 0; i < cmds.length; i++) {
-    const { words, next } = cmds[i]!;
-    // What it hands to another shell reading: eval's words, sh -c's command.
-    let k = 0;
-    while (k < words.length && ASSIGNMENT_RE.test(words[k]!)) k++;
-    const prog = words[k] === undefined ? '' : basename(words[k]!);
-    if (prog === 'eval') scan(words.slice(k + 1).join(' '), depth + 1, out);
-    else if (SHELL_RE.test(prog) && words[k + 1] && SHELL_C_RE.test(words[k + 1]!)) {
-      const cmd = words[k + 2];
-      if (cmd !== undefined) scan(cmd, depth + 1, out);
+  return false;
+}
+
+/** Collect variables assigned the output of a command substitution that downloads. */
+function collectDownloadVars(commands: Command[], ctx: Ctx, depth: number): void {
+  for (const cmd of commands)
+    for (const stage of cmd.stages)
+      for (const w of stage.words) {
+        const m = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(w.text);
+        if (m && w.subs.some((sub) => judge(sub, depth + 1, true))) ctx.downloadVars.add(m[1]!);
+      }
+}
+
+/** A stage runs a captured download variable: `eval "$V"`, `sh -c "$V"`. */
+function runsCaptured(commands: Command[], vars: Set<string>): boolean {
+  if (!vars.size) return false;
+  for (const cmd of commands)
+    for (const stage of cmd.stages) {
+      const p = stageProgram(stage);
+      if (p.unsure || !p.name) continue;
+      if (p.name === 'eval' || p.name === 'source' || p.name === '.') {
+        if (p.rest.slice(1).some((w) => referencesVar(w, vars))) return true;
+      } else if (SHELLS.has(p.name)) {
+        const hasC = p.rest.some((w) => SHELL_C_RE.test(w.text));
+        if (hasC && p.rest.some((w) => referencesVar(w, vars))) return true;
+      }
     }
-    if (next !== '|' && next !== '|&') continue;
-    if (!words.some((w) => /^(curl|wget)$/.test(basename(w)))) continue;
-    const to = cmds[i + 1]?.words ?? [];
-    let j = 0;
-    while (j < to.length && ASSIGNMENT_RE.test(to[j]!)) j++;
-    const p = to[j] === undefined ? '' : basename(to[j]!);
-    if (WRAPPERS.has(p)) {
-      out.pairs++;
-      out.runs ||= to.slice(j + 1).some((w) => INTERPRETER_RE.test(basename(w)));
-      continue;
-    }
-    if (!INTERPRETER_RE.test(p)) continue;
-    out.pairs++;
-    if (interpreterRuns(to)) out.runs = true;
-  }
+  return false;
 }
 
 /**
- * True when `command` pipes curl or wget output into python, perl, ruby or
- * node and that interpreter runs it: anything but an inline program on the
- * allowlist (see pythonReadsOnly and nodeReadsOnly).
+ * The core walk. `downloadOnly` asks only whether the first stage downloads
+ * (for capture-variable collection); otherwise it asks whether a download is
+ * run anywhere in `src`, following substitutions and `eval`/`sh -c` bodies.
  */
-export function pipesDownloadIntoCode(command: string): boolean {
-  const seen = command.match(PAIR_RE)?.length ?? 0;
-  if (seen === 0) return false;
-  if (command.length > MAX_COMMAND) return true;
-  const out: Found = { runs: false, pairs: 0 };
-  scan(command, 0, out);
-  // Every pair the plain text shows must have been found and judged.
-  return out.runs || out.pairs < seen;
+function judge(src: string, depth: number, downloadOnly = false): boolean {
+  if (src.length > MAX_COMMAND || depth > MAX_DEPTH) return true;
+  const toks = lex(src);
+  if (!toks) return true;
+  const commands = commandsOf(toks);
+
+  if (downloadOnly) {
+    const first = commands[0]?.stages[0];
+    if (!first) return false;
+    const p = stageProgram(first);
+    return !p.unsure && !!p.name && DOWNLOADERS.has(p.name);
+  }
+
+  // Substitutions anywhere are commands in their own right.
+  for (const cmd of commands)
+    for (const stage of cmd.stages)
+      for (const w of stage.words) for (const sub of w.subs) if (judge(sub, depth + 1)) return true;
+
+  for (const cmd of commands) if (pipelineRuns(cmd.stages)) return true;
+
+  // `eval <code>` and `sh -c <code>` run another shell over text.
+  for (const cmd of commands)
+    for (const stage of cmd.stages) {
+      const p = stageProgram(stage);
+      if (p.unsure || !p.name) continue;
+      if (p.name === 'eval' || p.name === 'source' || p.name === '.') {
+        for (const w of p.rest.slice(1)) if (judge(w.text, depth + 1)) return true;
+      } else if (SHELLS.has(p.name)) {
+        const ci = p.rest.findIndex((w) => SHELL_C_RE.test(w.text));
+        if (ci >= 0 && p.rest[ci + 1]) if (judge(p.rest[ci + 1]!.text, depth + 1)) return true;
+      }
+    }
+
+  const ctx: Ctx = { downloadVars: new Set() };
+  collectDownloadVars(commands, ctx, depth);
+  return runsCaptured(commands, ctx.downloadVars);
 }
 
-// ------------------------------------------------------------ python allowlist
+/**
+ * True when the command runs code it downloads with curl or wget: piped into
+ * an interpreter that runs it, run through `eval`/`sh -c`, or captured into a
+ * variable and then run. Reads the command without executing it; anything it
+ * cannot read with confidence counts as running.
+ */
+export function pipesDownloadIntoCode(command: string): boolean {
+  // A cheap gate: with no downloader named at all, nothing is run from a download.
+  if (!command.includes('curl') && !command.includes('wget')) return false;
+  return judge(preprocess(command), 0);
+}
 
-/** Names a data-reading python3 -c program may use, besides its own variables. */
-const PY_NAMES = new Set([
+// ------------------------------------------------------ python inline allowlist
+
+/** Names a data-reading `python -c` program may use (besides its own variables). */
+const PY_ALLOWED = new Set([
   'json',
   'sys',
   'print',
@@ -289,12 +453,24 @@ const PY_NAMES = new Set([
   'int',
   'float',
   'round',
+  'bool',
   'sorted',
+  'reversed',
+  'enumerate',
+  'zip',
+  'range',
   'list',
   'dict',
+  'tuple',
+  'set',
   'min',
   'max',
   'sum',
+  'abs',
+  'any',
+  'all',
+  'map',
+  'filter',
   'for',
   'in',
   'if',
@@ -308,17 +484,83 @@ const PY_NAMES = new Set([
   'True',
   'False',
 ]);
-/** Attributes it may use, on anything. */
+/** Attribute names (after `.`) it may use, on anything. */
 const PY_ATTRS = new Set([
   'load',
   'loads',
+  'dump',
   'dumps',
-  'stdin',
   'read',
+  'readline',
+  'readlines',
+  'stdin',
   'get',
   'items',
   'keys',
   'values',
+  'append',
+  'split',
+  'rsplit',
+  'strip',
+  'lstrip',
+  'rstrip',
+  'join',
+  'lower',
+  'upper',
+  'format',
+  'startswith',
+  'endswith',
+  'replace',
+]);
+/** Names that mean code, refused wherever they appear (even as an assignment target). */
+const PY_DENY = new Set([
+  'exec',
+  'eval',
+  'compile',
+  'open',
+  'input',
+  'getattr',
+  'setattr',
+  'delattr',
+  'globals',
+  'locals',
+  'vars',
+  'dir',
+  'breakpoint',
+  'memoryview',
+  'bytearray',
+  'os',
+  'subprocess',
+  'pickle',
+  'marshal',
+  'yaml',
+  'importlib',
+  'builtins',
+  'ctypes',
+  'socket',
+  'shutil',
+  'pty',
+  'platform',
+  'commands',
+  'popen',
+  'system',
+  'lambda',
+  'class',
+  'def',
+  'async',
+  'await',
+  'with',
+  'yield',
+  'global',
+  'nonlocal',
+  'from',
+  'type',
+  'super',
+  'object',
+  'property',
+  'classmethod',
+  'staticmethod',
+  'vars',
 ]);
 const PY_MODULES = new Set(['json', 'sys']);
 const PY_OPS = [
@@ -330,6 +572,7 @@ const PY_OPS = [
   '>=',
   '+=',
   '-=',
+  '*=',
   '(',
   ')',
   '[',
@@ -351,11 +594,7 @@ const PY_OPS = [
 ];
 
 type PyTok =
-  | { k: 'name'; v: string }
-  | { k: 'num' }
-  | { k: 'str'; f: string[] }
-  | { k: 'op'; v: string }
-  | { k: 'nl' };
+  { k: 'name'; v: string } | { k: 'num' } | { k: 'str'; f: string[] } | { k: 'op'; v: string };
 
 /** Python tokens, or undefined for anything outside the small language allowed. */
 function pyTokens(code: string): PyTok[] | undefined {
@@ -368,48 +607,44 @@ function pyTokens(code: string): PyTok[] | undefined {
       continue;
     }
     if (c === '\n') {
-      out.push({ k: 'nl' });
+      out.push({ k: 'op', v: ';' });
       i++;
       continue;
     }
-    if (c === '#') {
-      while (i < code.length && code[i] !== '\n') i++;
-      continue;
-    }
-    const str = /^([rRuUfF]{0,2})('''|"""|'|")/.exec(code.slice(i, i + 5));
-    if (str) {
-      const prefix = str[1]!.toLowerCase();
-      const q = str[2]!;
-      if (/[b]/.test(prefix)) return undefined;
-      let j = i + str[0].length;
+    if (c === '#') return undefined;
+    const q = /^([rRuUfF]{0,2})('''|"""|'|")/.exec(code.slice(i, i + 5));
+    if (q) {
+      const prefix = q[1]!.toLowerCase();
+      const quote = q[2]!;
+      if (prefix.includes('b')) return undefined;
+      let j = i + q[0].length;
       let body = '';
       for (;;) {
         if (j >= code.length) return undefined;
-        if (code.startsWith(q, j)) break;
+        if (code.startsWith(quote, j)) break;
         if (code[j] === '\\' && !prefix.includes('r')) {
           body += code.slice(j, j + 2);
           j += 2;
         } else {
-          if (q.length === 1 && code[j] === '\n') return undefined;
+          if (quote.length === 1 && code[j] === '\n') return undefined;
           body += code[j];
           j++;
         }
       }
       const f: string[] = [];
-      if (prefix.includes('f')) {
-        // The expressions in an f-string are code too.
+      if (prefix.includes('f'))
         for (let a = 0; a < body.length; a++) {
           if (body[a] === '{' && body[a + 1] === '{') a++;
+          else if (body[a] === '}' && body[a + 1] === '}') a++;
           else if (body[a] === '{') {
             const close = body.indexOf('}', a);
             if (close === -1) return undefined;
-            f.push(body.slice(a + 1, close).replace(/![rsa]$|:[^\]})]*$/, ''));
+            f.push(body.slice(a + 1, close).replace(/![rsa]$|:[^}]*$/, ''));
             a = close;
           }
         }
-      }
       out.push({ k: 'str', f });
-      i = j + q.length;
+      i = j + quote.length;
       continue;
     }
     const name = /^[A-Za-z_][A-Za-z0-9_]*/.exec(code.slice(i, i + 256));
@@ -418,7 +653,7 @@ function pyTokens(code: string): PyTok[] | undefined {
       i += name[0].length;
       continue;
     }
-    const num = /^[0-9][0-9_.eE]*/.exec(code.slice(i, i + 64));
+    const num = /^[0-9][0-9_.eExXoObB]*/.exec(code.slice(i, i + 64));
     if (num) {
       out.push({ k: 'num' });
       i += num[0].length;
@@ -433,18 +668,25 @@ function pyTokens(code: string): PyTok[] | undefined {
 }
 
 /**
- * True when a python3 -c program only reads its input as data: json and sys,
- * json.load(sys.stdin), sys.stdin.read(), print, a few built-ins, .get,
- * .items, .keys, .values, subscripts, for and comprehensions, if/else,
- * literals (f-string expressions checked the same way) and plain-name
- * assignments. No dunder, no other import, no from, no other name or
- * attribute.
+ * True when a `python -c` program only reads its input as data. Every name,
+ * attribute and keyword must be on the small allowlists above; any name that
+ * means code (PY_DENY) is refused wherever it appears, so reassigning it does
+ * not help; imports are limited to json and sys; and `__` is refused outright
+ * (it blocks dunder access). A program's own variables are the plain names it
+ * assigns or loops over, and they may not be a PY_DENY name. f-string
+ * expressions are checked the same way.
  */
 export function pythonReadsOnly(code: string): boolean {
-  if (code.includes('__') || code.length > 4096) return false;
+  if (code.length > MAX_CODE || code.includes('__')) return false;
   const toks = pyTokens(code);
   if (!toks) return false;
-  // Its own variables: plain names assigned at the top level, and loop targets.
+  if (toks.some((t) => t.k === 'name' && PY_DENY.has(t.v))) return false;
+  const locals = collectPyLocals(toks);
+  return pyCheck(toks, locals);
+}
+
+/** The plain names a program assigns to or loops over (its own variables). */
+function collectPyLocals(toks: PyTok[]): Set<string> {
   const locals = new Set<string>();
   let depth = 0;
   for (let i = 0; i < toks.length; i++) {
@@ -452,31 +694,28 @@ export function pythonReadsOnly(code: string): boolean {
     if (t.k === 'op' && '([{'.includes(t.v)) depth++;
     else if (t.k === 'op' && ')]}'.includes(t.v)) depth--;
     const next = toks[i + 1];
-    if (t.k === 'name' && depth === 0 && next?.k === 'op' && /^[-+]?=$/.test(next.v)) {
+    if (t.k === 'name' && depth === 0 && next?.k === 'op' && /^[-+*]?=$/.test(next.v)) {
       const prev = toks[i - 1];
-      if (!prev || prev.k === 'nl' || (prev.k === 'op' && (prev.v === ';' || prev.v === ':')))
-        locals.add(t.v);
+      if (!prev || (prev.k === 'op' && (prev.v === ';' || prev.v === ':'))) locals.add(t.v);
     }
-    if (t.k === 'name' && t.v === 'for') {
+    if (t.k === 'name' && t.v === 'for')
       for (let j = i + 1; j < toks.length; j++) {
         const u = toks[j]!;
         if (u.k === 'name' && u.v === 'in') break;
         if (u.k === 'name') locals.add(u.v);
-        else if (!(u.k === 'op' && '(),'.includes(u.v))) return false;
+        else if (!(u.k === 'op' && '(),[]'.includes(u.v))) break;
       }
-    }
   }
-  return pyCheck(toks, locals, true);
+  return locals;
 }
 
-function pyCheck(toks: PyTok[], locals: Set<string>, statements: boolean): boolean {
+function pyCheck(toks: PyTok[], locals: Set<string>): boolean {
   let depth = 0;
   let stmtStart = true;
   for (let i = 0; i < toks.length; i++) {
     const t = toks[i]!;
     const prev = toks[i - 1];
-    if (t.k === 'nl' || (t.k === 'op' && t.v === ';')) {
-      if (!statements) return false;
+    if (t.k === 'op' && t.v === ';') {
       stmtStart = true;
       continue;
     }
@@ -485,27 +724,26 @@ function pyCheck(toks: PyTok[], locals: Set<string>, statements: boolean): boole
     if (t.k === 'op') {
       if ('([{'.includes(t.v)) depth++;
       else if (')]}'.includes(t.v)) depth--;
-      if (t.v === ':' && depth === 0) stmtStart = true; // if x: y, for a in b: c
       if (depth < 0) return false;
+      if (t.v === ':' && depth === 0) stmtStart = true;
       continue;
     }
     if (t.k === 'num') continue;
     if (t.k === 'str') {
       for (const expr of t.f) {
         const inner = pyTokens(expr);
-        if (!inner || !pyCheck(inner, locals, false)) return false;
+        if (!inner || inner.some((u) => u.k === 'name' && PY_DENY.has(u.v))) return false;
+        if (!pyCheck(inner, locals)) return false;
       }
       continue;
     }
-    // A name.
     if (t.v === 'import') {
-      if (!statements || !atStart) return false;
-      // import json, sys: only those, up to the end of the statement.
+      if (!atStart) return false;
       let j = i + 1;
       let expectName = true;
       for (; j < toks.length; j++) {
         const u = toks[j]!;
-        if (u.k === 'nl' || (u.k === 'op' && u.v === ';')) break;
+        if (u.k === 'op' && u.v === ';') break;
         if (expectName && u.k === 'name' && PY_MODULES.has(u.v)) expectName = false;
         else if (!expectName && u.k === 'op' && u.v === ',') expectName = true;
         else return false;
@@ -519,7 +757,7 @@ function pyCheck(toks: PyTok[], locals: Set<string>, statements: boolean): boole
       continue;
     }
     const next = toks[i + 1];
-    // A keyword argument's name (print(x, end='')) is not a lookup.
+    // A keyword argument's name (`print(x, end='')`) is not a lookup.
     if (
       depth > 0 &&
       next?.k === 'op' &&
@@ -528,26 +766,27 @@ function pyCheck(toks: PyTok[], locals: Set<string>, statements: boolean): boole
       '(,'.includes(prev.v)
     )
       continue;
-    if (!PY_NAMES.has(t.v) && !locals.has(t.v)) return false;
+    if (!PY_ALLOWED.has(t.v) && !locals.has(t.v)) return false;
   }
   return depth === 0;
 }
 
-// -------------------------------------------------------------- node allowlist
+// -------------------------------------------------------- node inline allowlist
 
-/** Names a data-reading node -e program may use, besides its own variables. */
-const JS_NAMES = new Set([
+/** Identifiers a data-reading `node -e` program may use (besides its own variables). */
+const JS_ALLOWED = new Set([
   'JSON',
   'require',
   'process',
   'console',
   'Object',
+  'Array',
   'String',
   'Number',
-  'true',
-  'false',
-  'null',
-  'undefined',
+  'Boolean',
+  'Math',
+  'parseInt',
+  'parseFloat',
   'const',
   'let',
   'var',
@@ -556,17 +795,26 @@ const JS_NAMES = new Set([
   'in',
   'if',
   'else',
+  'return',
   'typeof',
+  'true',
+  'false',
+  'null',
+  'undefined',
 ]);
-/** Attributes it may use on anything, the globals above included. */
+/** Attribute and string-key names it may use, on anything. Data field names are not here. */
 const JS_ATTRS = new Set([
   'parse',
   'stringify',
-  'readFileSync',
   'stdin',
+  'stdout',
+  'readFileSync',
   'on',
+  'once',
   'log',
   'error',
+  'warn',
+  'info',
   'length',
   'keys',
   'values',
@@ -574,56 +822,46 @@ const JS_ATTRS = new Set([
   'map',
   'filter',
   'forEach',
+  'reduce',
   'join',
   'slice',
   'includes',
+  'indexOf',
   'sort',
   'trim',
   'split',
-  'toFixed',
   'toString',
-  'find',
-  'some',
-  'every',
+  'toFixed',
   'push',
+  'read',
   'setEncoding',
-  'name',
-  'stdout',
-  'write',
   'pipe',
+  'write',
+  'end',
 ]);
-
-/**
- * Other attribute names are data (`d.models`, `m.name`) unless something the
- * program can reach has them: fs and its promises, process, Object, Reflect,
- * functions (call, apply, bind), the global object, or a few that lead to code.
- */
-const JS_DENY: ReadonlySet<string> = (() => {
-  const deny = new Set([
-    'constructor',
-    'prototype',
-    'caller',
-    'callee',
-    'mainModule',
-    'binding',
-    'require',
-    'eval',
-    'Function',
-    'then',
-  ]);
-  const add = (o: object | undefined) => {
-    for (let p = o; p && p !== Object.prototype; p = Object.getPrototypeOf(p) as object)
-      for (const k of Object.getOwnPropertyNames(p)) deny.add(k);
-  };
-  for (const o of [fs, fs.promises, process, Object, Reflect, Function.prototype, globalThis])
-    add(o);
-  for (const k of Object.getOwnPropertyNames(Object.prototype)) deny.add(k);
-  for (const k of JS_ATTRS) deny.delete(k);
-  return deny;
-})();
+/** Identifiers that mean code, refused wherever they appear. */
+const JS_DENY = new Set([
+  'eval',
+  'Function',
+  'globalThis',
+  'global',
+  'import',
+  'arguments',
+  'Reflect',
+  'Proxy',
+  'module',
+  'exports',
+  'Buffer',
+  'setTimeout',
+  'setInterval',
+  'setImmediate',
+  'queueMicrotask',
+  'WebAssembly',
+  'constructor',
+  'new',
+]);
 const JS_OPS = [
   '===',
-  '+=',
   '!==',
   '=>',
   '==',
@@ -634,6 +872,7 @@ const JS_OPS = [
   '||',
   '??',
   '?.',
+  '+=',
   '(',
   ')',
   '[',
@@ -676,7 +915,7 @@ function jsTokens(code: string): JsTok[] | undefined {
         if (j >= code.length) return undefined;
         const d = code[j]!;
         if (d === c) break;
-        if (d === '\\') return undefined; // escapes could spell anything
+        if (d === '\\') return undefined; // an escape could spell anything
         if (c === '`' && d === '$' && code[j + 1] === '{') return undefined;
         v += d;
         j++;
@@ -691,7 +930,7 @@ function jsTokens(code: string): JsTok[] | undefined {
       i += name[0].length;
       continue;
     }
-    const num = /^[0-9][0-9.]*/.exec(code.slice(i, i + 64));
+    const num = /^[0-9][0-9.xXeEoObB]*/.exec(code.slice(i, i + 64));
     if (num) {
       out.push({ k: 'num' });
       i += num[0].length;
@@ -706,57 +945,35 @@ function jsTokens(code: string): JsTok[] | undefined {
 }
 
 /**
- * True when a node -e program only reads its input as data: JSON.parse,
- * require('fs').readFileSync(0…) or process.stdin, console.log, property
- * access to data (not to anything in JS_DENY), literals, its own
- * const/let/var and arrow-function parameters. No other require, no eval,
- * Function, new, import(), child_process or vm (no name for them is on the
- * list), no comment, escape or template expression, and computed member
- * access only by a literal.
+ * True when a `node -e` program only reads its input as data: JSON.parse,
+ * require('fs').readFileSync(0 | '/dev/stdin'), process.stdin, console, and a
+ * small set of array and string methods. Every identifier must be allowed or a
+ * declared local (never a JS_DENY name, even if declared), every attribute and
+ * string key must be on the allowlist (so data is reached by subscript, not by
+ * dotting through objects), and `$` as an identifier character blocks `$`
+ * globals. `__`, escapes, comments and template expressions are refused.
  */
 export function nodeReadsOnly(code: string): boolean {
-  if (code.includes('__') || code.length > 4096) return false;
+  if (code.length > MAX_CODE || code.includes('__')) return false;
   const toks = jsTokens(code);
   if (!toks) return false;
-  const locals = new Set<string>();
-  for (let i = 0; i < toks.length; i++) {
-    const t = toks[i]!;
-    const next = toks[i + 1];
-    if (t.k === 'name' && ['const', 'let', 'var'].includes(t.v) && next?.k === 'name')
-      locals.add(next.v);
-    if (t.k === 'name' && next?.k === 'op' && next.v === '=>') locals.add(t.v);
-    if (t.k === 'op' && t.v === ')' && next?.k === 'op' && next.v === '=>') {
-      // (a, b) => …
-      for (let j = i - 1; j >= 0; j--) {
-        const u = toks[j]!;
-        if (u.k === 'op' && u.v === '(') break;
-        if (u.k === 'name') locals.add(u.v);
-        else if (!(u.k === 'op' && u.v === ',')) return false;
-      }
-    }
-  }
+  if (toks.some((t) => t.k === 'name' && (JS_DENY.has(t.v) || t.v.includes('$')))) return false;
+  const locals = collectJsLocals(toks);
   for (let i = 0; i < toks.length; i++) {
     const t = toks[i]!;
     const prev = toks[i - 1];
     const next = toks[i + 1];
     if (t.k === 'op' && t.v === '[') {
-      // Member access by a computed key only with a literal: d['models'], a[0].
-      const isMember =
-        prev &&
-        (prev.k === 'name' ||
-          prev.k === 'str' ||
-          (prev.k === 'op' && (prev.v === ')' || prev.v === ']')));
-      if (isMember) {
-        const key = toks[i + 1];
-        if (!key || (key.k !== 'str' && key.k !== 'num')) return false;
-        if (key.k === 'str' && /^(constructor|prototype|caller|callee)$/.test(key.v)) return false;
-        if (toks[i + 2]?.k !== 'op' || (toks[i + 2] as { v: string }).v !== ']') return false;
-      }
+      // A computed key must be a literal; a string key must be on the allowlist,
+      // which blocks reaching a method or module through brackets.
+      const key = next;
+      if (!key || (key.k !== 'str' && key.k !== 'num')) return false;
+      if (key.k === 'str' && !JS_ATTRS.has(key.v)) return false;
       continue;
     }
     if (t.k !== 'name') continue;
     if (prev?.k === 'op' && (prev.v === '.' || prev.v === '?.')) {
-      if (JS_DENY.has(t.v)) return false;
+      if (!JS_ATTRS.has(t.v)) return false;
       continue;
     }
     if (t.v === 'require') {
@@ -773,7 +990,39 @@ export function nodeReadsOnly(code: string): boolean {
         return false;
       continue;
     }
-    if (!JS_NAMES.has(t.v) && !locals.has(t.v)) return false;
+    if (!JS_ALLOWED.has(t.v) && !locals.has(t.v)) return false;
+  }
+  // readFileSync's first argument must be the standard input.
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i]!;
+    if (t.k === 'name' && t.v === 'readFileSync') {
+      const open = toks[i + 1];
+      const arg = toks[i + 2];
+      if (open?.k !== 'op' || open.v !== '(') return false;
+      const ok =
+        arg?.k === 'num' ||
+        (arg?.k === 'str' && /^(\/dev\/stdin|\/proc\/self\/fd\/0)$/.test(arg.v));
+      if (!ok) return false;
+    }
   }
   return true;
+}
+
+/** Plain names a node program declares (its own variables), as const/let/var or arrow parameters. */
+function collectJsLocals(toks: JsTok[]): Set<string> {
+  const locals = new Set<string>();
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i]!;
+    const next = toks[i + 1];
+    if (t.k === 'name' && (t.v === 'const' || t.v === 'let' || t.v === 'var') && next?.k === 'name')
+      locals.add(next.v);
+    if (t.k === 'name' && next?.k === 'op' && next.v === '=>') locals.add(t.v);
+    if (t.k === 'op' && t.v === ')' && next?.k === 'op' && next.v === '=>')
+      for (let j = i - 1; j >= 0; j--) {
+        const u = toks[j]!;
+        if (u.k === 'op' && u.v === '(') break;
+        if (u.k === 'name') locals.add(u.v);
+      }
+  }
+  return locals;
 }
