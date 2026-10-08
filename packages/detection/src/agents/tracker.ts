@@ -193,6 +193,12 @@ interface Node {
   /** This process was that agent before it exec'd into something else. */
   wasAgent?: string;
   /**
+   * This PID exec'd into a different program image. A code signature belongs
+   * to the image, not the PID, so a tag this node still carries from its old
+   * image must not lend its signature any more (see resolve/stripSignature).
+   */
+  reExeced?: true;
+  /**
    * A shell the signed agent started as `sh -c <one plain command>`: that
    * command's words, until its first child is seen (see bareShellCommand).
    */
@@ -248,6 +254,13 @@ function sameTag(a: AgentTag | undefined, b: AgentTag | undefined): boolean {
       a.teamId === b.teamId &&
       a.signingId === b.signingId)
   );
+}
+
+/** The tag without the agent root's signature (attribution id/session/depth stay). */
+function stripSignature(t: AgentTag): AgentTag {
+  if (t.teamId === undefined && t.signingId === undefined) return t;
+  const { teamId: _t, signingId: _s, ...rest } = t;
+  return rest;
 }
 
 /** The root's signature on a session's first tag, when its launch reported one. */
@@ -551,6 +564,7 @@ export class AgentTracker {
       // The same process running a new program (a shell's exec, a wrapper script).
       // It keeps its tag unless the new program is itself an agent.
       n = prev;
+      if (n.path !== p.path) n.reExeced = true;
       if (n.tag && n.tag.depth === 0 && n.tag.id !== VIGIL_SELF && n.tag.id !== VIGIL_CONNECTOR)
         n.wasAgent = n.tag.id;
       this.setProgram(n, p, m);
@@ -608,6 +622,9 @@ export class AgentTracker {
     identity: AgentIdentity | undefined,
     base: AgentTag | undefined,
   ): AgentTag | undefined {
+    // A code signature belongs to the program image. When this PID exec'd into a
+    // different image, the tag it still carries must not lend that signature on.
+    if (n.reExeced && base !== undefined) base = stripSignature(base);
     // A connector Vigil started runs the user's program: a session of its own.
     // Once tagged it stays a connector, even after Vigil stops tracking the pid.
     if (base?.id === VIGIL_SELF && n.tag?.id === VIGIL_CONNECTOR && n.tag.depth === 0) return n.tag;
@@ -627,7 +644,24 @@ export class AgentTracker {
       return { id: VIGIL_CONNECTOR, session, depth: 0 };
     }
     // Vigil's own tree stays Vigil's: the claude and codex it runs are its helpers.
-    if (base?.id === VIGIL_SELF) return base;
+    // A signed agent program running inside it lends its signature to the tree,
+    // so that agent's own sign-in read can be verified like any other agent's.
+    if (base?.id === VIGIL_SELF) {
+      if (
+        !n.reExeced &&
+        identity?.watch &&
+        identity.status === 'active' &&
+        (n.teamId !== undefined || n.signingId !== undefined)
+      ) {
+        const t: AgentTag = { ...base };
+        if (n.teamId !== undefined) t.teamId = n.teamId;
+        else delete t.teamId;
+        if (n.signingId !== undefined) t.signingId = n.signingId;
+        else delete t.signingId;
+        return sameTag(t, base) ? base : t;
+      }
+      return base;
+    }
     // A connector's tree stays the connector's, whatever it runs.
     if (base?.id === VIGIL_CONNECTOR) return base;
     if (!identity?.watch || identity.status !== 'active' || identity.id === base?.id) return base;
