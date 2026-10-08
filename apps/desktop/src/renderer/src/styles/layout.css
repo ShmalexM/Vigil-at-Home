@@ -505,6 +505,14 @@ div.history-row:hover {
 }
 
 /* Home's one quiet line for what Vigil only noticed, linking to History. */
+.noticed-confirm {
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+  border: 1px solid var(--ln1);
+}
 .noticed-hint {
   gap: 6px;
   padding: 2px 4px;

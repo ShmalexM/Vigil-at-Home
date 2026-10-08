@@ -1,6 +1,12 @@
-import { CircleCheck, Eye, TriangleAlert } from 'lucide-react';
+import {
+  ChevronRight,
+  CircleCheck,
+  Eye,
+  History as HistoryIcon,
+  TriangleAlert,
+} from 'lucide-react';
 import { useState } from 'react';
-import { useLive, vigil } from '../api';
+import { useClock, useLive, vigil } from '../api';
 import { homeMood } from '../components/AskScout';
 import { NeedsYouLine, needsRows, NoticedList, pileLine, WatchLine } from '../components/Attention';
 import { Dog } from '../components/Dog';
@@ -27,6 +33,7 @@ export function layerNames(names: string[]): string {
 }
 
 export function HomeView({ go }: { go: (r: string) => void }) {
+  useClock();
   const [status] = useLive(() => vigil.getStatus());
   const [alerts] = useLive(() => vigil.listAlerts('open'));
   const allNeeds = needsRows((alerts ?? []).filter(needsDecision));
@@ -75,8 +82,15 @@ export function HomeView({ go }: { go: (r: string) => void }) {
           {status.needsYou > 0 && <NeedsYouLine count={status.needsYou} />}
           <div className="row spread" style={{ flexWrap: 'wrap' }}>
             <WatchLine watch={status.watch} />
-            <button type="button" className="btn sm ghost" onClick={() => go('history')}>
-              What Vigil handled
+            <button
+              type="button"
+              className="btn sm ghost"
+              title="Everything Vigil blocked, paused or closed in the last 30 days"
+              onClick={() => go('history')}
+            >
+              <HistoryIcon size={14} aria-hidden />
+              See what Vigil handled
+              <ChevronRight size={14} aria-hidden />
             </button>
           </div>
           {pack && <PackDiary pack={pack} />}
@@ -236,13 +250,19 @@ export function HomeView({ go }: { go: (r: string) => void }) {
 
       {status && noticed.length > 0 && status.alertView === 'more' && (
         <Card>
-          <NoticedList alerts={noticed} view="more" open={(id) => go(`alerts/${id}`)} limit={8} />
+          <NoticedList
+            alerts={noticed}
+            total={status.noticed}
+            view="more"
+            open={(id) => go(`alerts/${id}`)}
+            limit={8}
+          />
         </Card>
       )}
       {status && noticed.length > 0 && status.alertView === 'less' && (
         <button type="button" className="row t-small noticed-hint" onClick={() => go('history')}>
           <Eye size={14} />
-          Vigil also noticed {noticed.length === 1 ? 'one thing' : `${noticed.length} things`},
+          Vigil also noticed {status.noticed === 1 ? 'one thing' : `${status.noticed} things`},
           probably you. Nothing was blocked. See History.
         </button>
       )}

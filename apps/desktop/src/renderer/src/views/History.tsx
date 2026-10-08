@@ -26,6 +26,7 @@ export function HistoryView({ go }: { go: (r: string) => void }) {
   const [alerts] = useLive(() => vigil.listAlerts('resolved'));
   const [actions] = useLive(() => vigil.listActions());
   const [open] = useLive(() => vigil.listAlerts('open'));
+  const [status] = useLive(() => vigil.getStatus());
   const [query, setQuery] = useState('');
   if (!alerts || !actions) return null;
   const noticed = (open ?? []).filter(isNoticed);
@@ -44,7 +45,7 @@ export function HistoryView({ go }: { go: (r: string) => void }) {
     <div className="page">
       <PageHead
         title="History"
-        purpose={`What Vigil handled in the last ${DAYS} days. Nothing here needs you.`}
+        purpose={`What Vigil handled in the last ${DAYS} days, and what it only noticed. None of it is waiting on a decision.`}
         right={
           all.length > 0 ? (
             <label className="search">
@@ -65,6 +66,7 @@ export function HistoryView({ go }: { go: (r: string) => void }) {
         <Card>
           <NoticedList
             alerts={noticed}
+            total={status?.noticed}
             view="more"
             toggle={false}
             open={(id) => go(`alerts/${id}`)}
