@@ -28,7 +28,9 @@ command -v systemctl >/dev/null || { echo "The helper needs systemd." >&2; exit 
 # Copy the new files first, then stop the running copy, if any, and swap them
 # in, so an update leaves the helper stopped for as short a time as possible.
 install -d -o root -g root -m 755 "$LIBEXEC"
-# Each run stages in its own folder, so two runs never share one.
+# Each run stages in its own folder, so two runs never share one. Older
+# versions staged in DEST.new; clear any they left.
+rm -rf "$DEST.new"
 NEW=$(mktemp -d "$DEST.new.XXXXXX")
 trap 'rm -rf "$NEW"' EXIT
 chown root:root "$NEW"
@@ -37,7 +39,8 @@ install -o root -g root -m 755 "$SRC/node" "$NEW/node"
 install -o root -g root -m 644 "$SRC/helper.mjs" "$NEW/helper.mjs"
 systemctl stop vigil-helper.service 2>/dev/null || true
 rm -rf "$DEST"
-mv "$NEW" "$DEST"
+# -T: if another run put DEST back meanwhile, fail rather than nest inside it.
+mv -T "$NEW" "$DEST"
 install -o root -g root -m 755 "$HERE/vigil-helper" "$LIBEXEC/vigil-helper"
 install -o root -g root -m 644 "$HERE/vigil-helper.service" "$UNIT"
 install -d -o root -g root -m 755 "$(dirname "$POLICY")"
