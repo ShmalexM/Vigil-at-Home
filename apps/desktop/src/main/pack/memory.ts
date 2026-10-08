@@ -20,9 +20,10 @@ const PROMPT_CHARS = 6000;
  * sourced entries, grouped by topic), with three changes for a security app:
  *
  * - Only the person's own words go in. The Lead dog notes a fact straight
- *   away only from an answer that used no tool; anything a tool, an alert or
- *   a connector returned could be written by an attacker, so changes from
- *   such an answer wait on a "Remember this?" card. Pack jobs and Vigil's
+ *   away only when its answer read no outside text, or the person typed the
+ *   fact in their message; anything a tool, an alert or a connector returned
+ *   could be written by an attacker, so other changes from such an answer
+ *   wait on a "Remember this?" card. Pack jobs and Vigil's
  *   helpers read it and never write it, and no AI tidies it in the
  *   background.
  * - It is background for answers, never a decision: nothing here blocks,

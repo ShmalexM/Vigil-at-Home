@@ -119,10 +119,18 @@ export interface Dog {
   createdAt: number;
   /**
    * The job could hold someone else's text: the Lead dog's change that wrote
-   * it read outside text. Cleared only when the person edits the dog
-   * themselves. A pack dog saved before this was recorded counts as tainted.
+   * it read outside text, and the person didn't type the job themselves.
+   * Cleared when the person edits the job, or a later change writes one they
+   * typed. A pack dog saved before this was recorded counts as tainted.
    */
   jobTainted?: boolean;
+  /**
+   * The name could hold someone else's text: it came from a Lead dog change
+   * whose input read outside text. Cleared when the person names the dog
+   * themselves. Saved before this was recorded, it counts as tainted unless
+   * it is the built-in name. Prompts then name the dog by its id only.
+   */
+  nameTainted?: boolean;
   lastReport?: DogReport;
 }
 
@@ -140,6 +148,9 @@ export interface LeadAction {
   status: 'pending' | 'done' | 'declined' | 'failed';
   /** Why it waits, or why it failed. */
   note?: string;
+  /** Where its name and job came from: not the person's words, and the answer read outside text. */
+  nameTainted?: boolean;
+  jobTainted?: boolean;
 }
 
 export interface ChatMessage {
@@ -152,7 +163,11 @@ export interface ChatMessage {
   memory?: MemoryChange[];
   /** Tools the Lead dog used while answering. */
   used?: string[];
-  /** Its input could hold someone else's text: a tool's result, a dog's report, or an answer that read one. */
+  /**
+   * Its input could hold someone else's text: a tool's result, a dog's report,
+   * or an answer that read one. The person's own messages are clean. Saved
+   * before this was recorded, a message counts as tainted.
+   */
   tainted?: boolean;
   failed?: boolean;
 }
@@ -290,10 +305,11 @@ export interface MemoryEntry {
 
 /**
  * A change the Lead dog asked for in the pack's memory. Applied straight
- * away only when that answer rested on the person's own words alone (no tool
- * was used, no dog's report or tool-using answer was read); otherwise it
- * waits on a "Remember this?" card, because text an alert or a connector
- * returned could be written by anyone.
+ * away only when that answer read no outside text (no tool was used, no
+ * tainted report, job, fact or answer went into its prompt), or the person
+ * typed the fact in their message; otherwise it waits on a "Remember this?"
+ * card, because text an alert or a connector returned could be written by
+ * anyone.
  */
 export interface MemoryChange {
   id: string;

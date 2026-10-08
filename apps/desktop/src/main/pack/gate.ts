@@ -61,14 +61,14 @@ export function afterJudge(
 }
 
 /**
- * A change the Lead dog wants to make to the pack. An answer whose input
- * held someone else's text (it used a tool, or its prompt carried a dog's
- * report, a job, a memory fact or a connector's tool text that came from
- * outside the person) only proposes, in every mode. Otherwise: Ask for
- * approval: every change waits. Full access: all go ahead, a tool that can
- * change things included, since the person typed it. Let AI decide: adding,
- * changing or running a dog goes ahead, unless it hands a dog a tool that
- * can change things; retiring one waits.
+ * A change the Lead dog wants to make to the pack. `tainted` is the change's
+ * own taint, from where its arguments came from (PackService.argumentTaint):
+ * one whose new fields are not all the person's own words, in an answer
+ * whose input held someone else's text, only proposes, in every mode.
+ * Otherwise: Ask for approval: every change waits. Full access: all go ahead,
+ * a tool that can change things included, since the person typed it. Let AI
+ * decide: adding, changing or running a dog goes ahead, unless it hands a dog
+ * a tool that can change things; retiring one waits.
  */
 export function gateAction(
   mode: PermissionMode,
