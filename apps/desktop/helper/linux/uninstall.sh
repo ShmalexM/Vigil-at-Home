@@ -20,8 +20,6 @@ VH_GROUP=root
 # shellcheck source=SCRIPTDIR/../lib.sh
 . "$SRC/lib.sh"
 
-# Wait for an install that is still running, so nothing it writes is left behind.
-if [ -d "$LIBEXEC" ]; then vh_lock_acquire; fi
 # Stop Vigil's osquery setup and put back any osquery settings from before Vigil.
 "$LIBEXEC/vigil-helper" osquery-remove 2>/dev/null || true
 systemctl disable --now vigil-helper.service 2>/dev/null || true

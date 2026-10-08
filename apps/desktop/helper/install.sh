@@ -27,41 +27,45 @@ done
 . "$SRC/lib.sh"
 
 install -d -o root -g wheel -m 755 "$TOOLS"
-# One install or removal at a time; the lock goes when this script ends.
-vh_lock_acquire
+# Stop the running helper before changing anything. An older helper doesn't
+# know every file this script writes, so it could quarantine one halfway
+# through; stopped, it can't. Santa keeps enforcing the rules it already has
+# until the new helper starts.
+launchctl bootout "system/$LABEL" 2>/dev/null || true
 
-# Each install adds a complete new version, DEST/versions/<id>, and then
-# points DEST/current at it in one rename. The running helper keeps its own
-# version until launchd restarts it, and no version changes once written.
-# Santa keeps enforcing the rules it already has while the helper restarts.
+# Each install adds a complete new version, DEST/versions/<id>, under a name
+# of its own, and then points DEST/current at it in one rename. No version
+# changes once written, so installs that overlap need no lock: the last
+# switch wins, and each one switches only to a complete version.
 vh_prepare
 vh_build "$SRC/node" "$SRC/helper.mjs"
 # A downloaded app's files carry the quarantine flag; the copies don't need it.
 xattr -cr "$DEST/versions/$VH_VERSION" 2>/dev/null || true
-vh_current
-PREVIOUS=$VH_CURRENT
 # Nothing uses DEST/current before the new launcher, so a first install, or
 # one over the layout from before versions, can point it at the new version now.
-[ -n "$PREVIOUS" ] || vh_switch "$VH_VERSION"
+vh_current
+[ -n "$VH_CURRENT" ] || vh_switch "$VH_VERSION"
 
 # The launcher and launchd job run the helper through DEST/current, the same
 # for every version. Write them first, so the switch is the one step that
 # changes which helper runs.
-vh_lock_check
 vh_put 755 "$SRC/vigil-helper" "$TOOLS/vigil-helper"
 vh_put 644 "$SRC/$LABEL.plist" "$PLIST"
 xattr -c "$TOOLS/vigil-helper" "$PLIST" 2>/dev/null || true
 vh_switch "$VH_VERSION"
 
-launchctl bootout "system/$LABEL" 2>/dev/null || true
 install -d -o root -g wheel -m 755 /Library/Logs/Vigil
 
 # Point osquery at Vigil's queries, keeping any config it had before.
 if [ -d /var/osquery ]; then
   for f in conf flags; do
     target=/var/osquery/osquery.$f
-    if [ -f "$target" ] && [ ! -f "$target.before-vigil" ]; then
-      cp -p "$target" "$target.before-vigil"
+    if [ -f "$target" ] && [ ! -e "$target.before-vigil" ]; then
+      # ln makes the backup only if no other install running now has, so the
+      # first copy, taken before any install rewrote the file, is the one kept.
+      cp -p "$target" "$target.before-vigil.tmp.$$"
+      ln "$target.before-vigil.tmp.$$" "$target.before-vigil" 2>/dev/null || true
+      rm -f "$target.before-vigil.tmp.$$"
     fi
   done
   "$TOOLS/vigil-helper" osquery-config >/var/osquery/osquery.conf
@@ -69,7 +73,11 @@ if [ -d /var/osquery ]; then
   launchctl kickstart -k system/io.osquery.agent 2>/dev/null || true
 fi
 
-launchctl bootstrap system "$PLIST"
+# Another install running at the same time may have started the job already;
+# then restart it, so it runs whatever DEST/current names now.
+if ! started=$(launchctl bootstrap system "$PLIST" 2>&1); then
+  launchctl kickstart -k "system/$LABEL" || vh_die "The helper did not start: $started"
+fi
 
 i=0
 while [ ! -S "$SOCKET" ] && [ "$i" -lt 40 ]; do
@@ -80,7 +88,7 @@ if [ ! -S "$SOCKET" ]; then
   echo "The helper did not start. See /Library/Logs/Vigil/helper.log" >&2
   exit 1
 fi
-# Now the old files can go: those from before versions, and every version
-# but this one and the one before it.
-vh_finish "$PREVIOUS"
+# Now the old files can go: those from before versions, and old versions
+# nothing uses (see vh_finish in lib.sh).
+vh_finish
 echo "Vigil helper installed and running."

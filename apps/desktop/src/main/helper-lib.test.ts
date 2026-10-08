@@ -2,11 +2,13 @@ import { spawn, spawnSync } from 'node:child_process';
 import {
   existsSync,
   lstatSync,
+  lutimesSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   readlinkSync,
+  rmSync,
   statSync,
   symlinkSync,
   utimesSync,
@@ -16,9 +18,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-// The install scripts' shared lock, version switch and pruning (helper/lib.sh),
-// run under /bin/sh against a temporary folder in place of the real one. The
-// scripts themselves need root, launchd or systemd, so they run in CI's Linux
+// The install scripts' version switch and pruning (helper/lib.sh), run under
+// /bin/sh against a temporary folder in place of the real one. The scripts
+// themselves need root, launchd or systemd, so they run in CI's Linux
 // integration test instead.
 
 const helper = join(import.meta.dirname, '..', '..', 'helper');
@@ -32,26 +34,23 @@ const prologue = `set -eu
 DEST=$1
 VH_GROUP=${group}
 VH_CHOWN=${root ? 1 : 0}
-VH_LOCK_TIMEOUT=\${T:-20}
-VH_LOCK_GRACE=\${G:-10}
 `;
 
 /** The steps install.sh takes, without the service manager. */
 const INSTALL = `${prologue}
-vh_lock_acquire
 echo "start $TAG" >>"$LOG"
 vh_prepare
+# Wait for the go-ahead, so runs can be started at the same moment.
+while [ -n "\${GO:-}" ] && [ ! -e "$GO" ]; do sleep 0.01; done
 vh_build "$SRC/node" "$SRC/helper.mjs"
 [ -z "\${PAUSE:-}" ] || sleep "$PAUSE" </dev/null >/dev/null 2>&1
 vh_current
-PREVIOUS=$VH_CURRENT
-[ -n "$PREVIOUS" ] || vh_switch "$VH_VERSION"
-vh_lock_check
+[ -n "$VH_CURRENT" ] || vh_switch "$VH_VERSION"
 vh_put 755 "$SRC/vigil-helper" "$(dirname "$DEST")/vigil-helper"
 vh_switch "$VH_VERSION"
 [ -z "\${AFTER_SWITCH:-}" ] || eval "$AFTER_SWITCH"
-vh_finish "$PREVIOUS"
-echo "end $TAG" >>"$LOG"
+vh_finish
+echo "end $TAG $VH_VERSION" >>"$LOG"
 `;
 
 interface World {
@@ -136,19 +135,36 @@ function current(w: World): string {
 }
 
 const versions = (w: World) => readdirSync(join(w.dest, 'versions')).sort();
-const lock = (w: World) => `${w.dest}.lock`;
-const bootId = () => readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
-const startOf = (w: World, pid: number) => lib(w, `vh_proc_start ${pid}`).stdout.trim();
-
-function plantLock(w: World, owner: string) {
-  mkdirSync(lock(w));
-  writeFileSync(join(lock(w), 'owner'), owner);
+const versionDir = (w: World, v: string) => join(w.dest, 'versions', v);
+/** The tag a complete version was built from. */
+const tagOf = (w: World, v: string) =>
+  readFileSync(join(versionDir(w, v), 'helper.mjs'), 'utf8')
+    .trim()
+    .replace(/^helper /, '');
+/** The version each tag's run built, from the log. */
+function built(w: World): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of readFileSync(w.log, 'utf8').trim().split('\n')) {
+    const [what, tag, v] = line.split(' ');
+    if (what === 'end') out[tag!] = v!;
+  }
+  return out;
 }
 
-function deadPid(): number {
-  const p = spawnSync('/bin/true');
-  return p.pid!;
+const twoHoursAgo = () => new Date(Date.now() - 2 * 3600_000);
+/** Make paths look last changed two hours ago (a symlink's own time, not its target's). */
+function age(...paths: string[]) {
+  const past = twoHoursAgo();
+  for (const p of paths) {
+    if (lstatSync(p).isSymbolicLink()) lutimesSync(p, past, past);
+    else utimesSync(p, past, past);
+  }
 }
+
+const switchTo = (w: World, v: string) => {
+  const r = lib(w, `vh_switch '${v}'\n`);
+  expect(r.status, r.stderr).toBe(0);
+};
 
 describe.skipIf(process.platform !== 'linux')('helper lib.sh (versioned install)', () => {
   it('passes sh -n, and shellcheck when it is installed', () => {
@@ -183,14 +199,17 @@ describe.skipIf(process.platform !== 'linux')('helper lib.sh (versioned install)
     expect(lstatSync(join(w.dest, 'current')).isSymbolicLink()).toBe(true);
     const [v] = versions(w);
     expect(versions(w)).toHaveLength(1);
-    const dir = join(w.dest, 'versions', v!);
+    // The time (UTC), this run's pid and random letters.
+    expect(v).toMatch(/^\d{14}\.\d+\.[A-Za-z0-9]{6}$/);
+    const dir = versionDir(w, v!);
     expect(statSync(dir).mode & 0o777).toBe(0o755);
     expect(statSync(join(dir, 'node')).mode & 0o777).toBe(0o755);
     expect(statSync(join(dir, 'helper.mjs')).mode & 0o777).toBe(0o644);
+    expect(readdirSync(dir).sort()).toEqual(['helper.mjs', 'node']);
     expect(statSync(join(w.base, 'tools', 'vigil-helper')).mode & 0o777).toBe(0o755);
     if (root) expect(statSync(join(dir, 'node')).uid).toBe(0);
-    expect(existsSync(lock(w))).toBe(false);
     expect(readdirSync(w.dest).sort()).toEqual(['current', 'versions']);
+    expect(readdirSync(join(w.base, 'tools')).sort()).toEqual(['vigil-helper', 'vigil-helper.d']);
   });
 
   it('upgrades the layout from before versions, keeping it until after the switch', () => {
@@ -213,7 +232,24 @@ describe.skipIf(process.platform !== 'linux')('helper lib.sh (versioned install)
     expect(readdirSync(w.dest).sort()).toEqual(['current', 'versions']);
   });
 
-  it('serializes overlapping runs; current always names one complete version', async () => {
+  it('gives each run its own version, even two in the same second', () => {
+    const w = world();
+    const src = w.bundle('x');
+    const r = lib(
+      w,
+      `vh_prepare
+vh_build "${src}/node" "${src}/helper.mjs"; a=$VH_VERSION
+vh_build "${src}/node" "${src}/helper.mjs"; b=$VH_VERSION
+echo "$a $b"
+`,
+    );
+    expect(r.status, r.stderr).toBe(0);
+    const [a, b] = r.stdout.trim().split(' ');
+    expect(a).not.toBe(b);
+    expect(versions(w)).toEqual([a, b].sort());
+  });
+
+  it('lets overlapping runs all finish; current always names one complete version', async () => {
     const w = world();
     expect(install(w, 'first').status).toBe(0);
     const tags = ['p', 'q', 'r', 's'];
@@ -231,190 +267,194 @@ describe.skipIf(process.platform !== 'linux')('helper lib.sh (versioned install)
     expect(checks).toBeGreaterThan(10);
     expect(tags).toContain(current(w));
     for (const t of seen) expect(['first', ...tags]).toContain(t);
-    // Each run finished before the next started.
+    // They did overlap: every run started before the first one ended.
     const lines = readFileSync(w.log, 'utf8').trim().split('\n').slice(2);
-    expect(lines).toHaveLength(8);
-    for (let i = 0; i < lines.length; i += 2) {
-      expect(lines[i]).toMatch(/^start /);
-      expect(lines[i + 1]).toBe(lines[i]!.replace('start', 'end'));
+    expect(lines.slice(0, 4).every((l) => l.startsWith('start '))).toBe(true);
+    // Every version is under an hour old, so all are kept, each complete.
+    expect(versions(w)).toHaveLength(5);
+    expect(
+      versions(w)
+        .map((v) => tagOf(w, v))
+        .sort(),
+    ).toEqual(['first', ...tags].sort());
+  });
+
+  it('two installs at the same moment both succeed, and current names a complete version', async () => {
+    const w = world();
+    for (let round = 0; round < 5; round++) {
+      const go = join(w.base, `go-${round}`);
+      const pair = [`x${round}`, `y${round}`];
+      const runs = pair.map((t) => installAsync(w, t, { GO: go }));
+      // Both are waiting at the go-ahead; release them together.
+      await new Promise((r) => setTimeout(r, 100));
+      writeFileSync(go, '');
+      const results = await Promise.all(runs.map((r) => r.done));
+      for (const r of results) expect(r.code, r.stderr).toBe(0);
+      expect(pair).toContain(current(w));
+      const target = readlinkSync(join(w.dest, 'current')).replace(/^versions\//, '');
+      expect(versions(w)).toContain(target);
+      // Each run built and kept its own complete version.
+      const ids = built(w);
+      expect(ids[pair[0]!]).not.toBe(ids[pair[1]!]);
+      for (const t of pair) expect(tagOf(w, ids[t]!)).toBe(t);
     }
-    expect(versions(w)).toHaveLength(2);
-    expect(existsSync(lock(w))).toBe(false);
+    expect(versions(w)).toHaveLength(10);
+    expect(readdirSync(w.dest).sort()).toEqual(['current', 'versions']);
   });
 
-  it('takes over a lock whose process is gone or from before the last boot', () => {
-    const w = world();
-    plantLock(w, `boot=${bootId()}\npid=${deadPid()}\nstart=12345\n`);
-    let r = install(w, 'a', { T: '3' });
-    expect(r.status, r.stderr).toBe(0);
-    expect(existsSync(lock(w))).toBe(false);
-
-    // A live pid, but the lock was written before a reboot.
-    const old = `boot=00000000-0000-0000-0000-000000000000\npid=${process.pid}\nstart=${startOf(w, process.pid)}\n`;
-    plantLock(w, old);
-    r = install(w, 'b', { T: '3' });
-    expect(r.status, r.stderr).toBe(0);
-    // A live pid that was reused: its start time differs.
-    plantLock(w, `boot=${bootId()}\npid=${process.pid}\nstart=1\n`);
-    r = install(w, 'c', { T: '3' });
-    expect(r.status, r.stderr).toBe(0);
-    expect(current(w)).toBe('c');
-    expect(readdirSync(join(w.base, 'tools')).filter((f) => f.includes('.lock'))).toEqual([]);
-  });
-
-  it('puts back a lock another run took between finding it stale and renaming it', () => {
-    const w = world();
-    plantLock(w, `boot=${bootId()}\npid=${deadPid()}\nstart=1\n`);
-    // Another run removes the stale lock and takes its own right after this one
-    // has judged the old one stale.
-    const r = lib(
-      w,
-      `VH_LOCK=$DEST.lock
-vh_owner_stale() {
-  rm -rf "$VH_LOCK"; mkdir "$VH_LOCK"; printf 'theirs' >"$VH_LOCK/owner"
-}
-vh_lock_takeover
-cat "$VH_LOCK/owner"
-`,
-    );
-    expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout).toBe('theirs');
-    expect(readdirSync(join(w.base, 'tools')).filter((f) => f.includes('.stale'))).toEqual([]);
-  });
-
-  it('leaves an empty owner file alone during the grace period, then takes over', () => {
-    const w = world();
-    plantLock(w, '');
-    let r = install(w, 'a', { T: '1', G: '10' });
-    expect(r.status).not.toBe(0);
-    expect(r.stderr).toContain('is still running after 1s');
-    expect(existsSync(join(lock(w), 'owner'))).toBe(true);
-    expect(existsSync(join(w.dest, 'current'))).toBe(false);
-
-    const past = new Date(Date.now() - 60_000);
-    utimesSync(join(lock(w), 'owner'), past, past);
-    utimesSync(lock(w), past, past);
-    r = install(w, 'a', { T: '3', G: '10' });
-    expect(r.status, r.stderr).toBe(0);
-    expect(current(w)).toBe('a');
-
-    // No owner file at all counts the same, by the lock's own age.
-    mkdirSync(lock(w));
-    utimesSync(lock(w), past, past);
-    expect(install(w, 'b', { T: '3' }).status).toBe(0);
-  });
-
-  it("waits for a live owner, then gives up with a clear error and doesn't touch its lock", () => {
-    const w = world();
-    expect(install(w, 'a').status).toBe(0);
-    const sleeper = spawn('sleep', ['30']);
-    try {
-      const owner = `boot=${bootId()}\npid=${sleeper.pid}\nstart=${startOf(w, sleeper.pid!)}\n`;
-      expect(owner).toMatch(/start=\d+/);
-      plantLock(w, owner);
-      const t0 = Date.now();
-      // date +%s counts whole seconds, so a 3 s timeout waits more than 2 s.
-      const r = install(w, 'b', { T: '3' });
-      expect(Date.now() - t0).toBeGreaterThanOrEqual(1900);
-      expect(r.status).not.toBe(0);
-      expect(r.stderr).toContain(`Vigil helper (process ${sleeper.pid}) is still running after 3s`);
-      expect(readFileSync(join(lock(w), 'owner'), 'utf8')).toBe(owner);
-      expect(current(w)).toBe('a');
-      expect(versions(w)).toHaveLength(1);
-    } finally {
-      sleeper.kill();
-    }
-  });
-
-  it('recovers from a run killed mid-build; current stays on the old version', async () => {
+  it('recovers from a run killed mid-install; current stays on the old version', async () => {
     const w = world();
     expect(install(w, 'a').status).toBe(0);
     const killed = installAsync(w, 'b', { PAUSE: '30' });
-    // Wait until it holds the lock and has written its version.
-    for (let i = 0; i < 200 && versions(w).length < 2; i++)
-      await new Promise((r) => setTimeout(r, 25));
-    expect(versions(w)).toHaveLength(2);
-    killed.child.kill('SIGKILL');
+    // Wait until it has written its version in full, then kill it before the switch.
+    const complete = () =>
+      versions(w).filter((v) => existsSync(join(versionDir(w, v), 'helper.mjs'))).length;
+    for (let i = 0; i < 200 && complete() < 2; i++) await new Promise((r) => setTimeout(r, 25));
+    expect(complete()).toBe(2);
+    process.kill(-killed.child.pid!, 'SIGKILL');
     expect((await killed.done).signal).toBe('SIGKILL');
-    expect(existsSync(lock(w))).toBe(true);
     expect(current(w)).toBe('a');
 
-    const r = install(w, 'c', { T: '3' });
+    // Nothing is left to wait for or clear up: the next run just goes ahead.
+    let r = install(w, 'c');
     expect(r.status, r.stderr).toBe(0);
     expect(current(w)).toBe('c');
-    // The half-done version is gone; the one before is kept.
-    expect(versions(w)).toHaveLength(2);
-    const kept = versions(w).map((v) =>
-      readFileSync(join(w.dest, 'versions', v, 'helper.mjs'), 'utf8'),
-    );
-    expect(kept.sort()).toEqual(['helper a\n', 'helper c\n']);
-    expect(existsSync(lock(w))).toBe(false);
+    // The killed run's version is under an hour old, so it is kept for now.
+    expect(
+      versions(w)
+        .map((v) => tagOf(w, v))
+        .sort(),
+    ).toEqual(['a', 'b', 'c']);
+
+    // An hour on, the next run keeps only the two newest complete versions
+    // (by name, which starts with the time; the order within one second is
+    // arbitrary) and current, which is d.
+    for (const v of versions(w)) age(versionDir(w, v));
+    const before = versions(w);
+    r = install(w, 'd');
+    expect(r.status, r.stderr).toBe(0);
+    expect(current(w)).toBe('d');
+    const d = built(w)['d']!;
+    const kept = new Set([...[...before, d].sort().slice(-2), d]);
+    expect(versions(w)).toEqual([...kept].sort());
   });
 
-  it('releases its lock when stopped with a signal', async () => {
+  it('prunes only versions that are old, not among the newest two, and not current', () => {
     const w = world();
-    const run = installAsync(w, 'a', { PAUSE: '30' });
-    for (let i = 0; i < 200 && !existsSync(join(lock(w), 'owner')); i++)
-      await new Promise((r) => setTimeout(r, 25));
-    expect(existsSync(join(lock(w), 'owner'))).toBe(true);
-    // Let it reach the pause, then stop it the way Ctrl-C or the app would.
-    await new Promise((r) => setTimeout(r, 300));
-    process.kill(-run.child.pid!, 'SIGTERM');
-    const done = await run.done;
-    expect(done.code).toBe(143);
-    expect(existsSync(lock(w))).toBe(false);
+    for (const t of ['a', 'b', 'c', 'd', 'e']) expect(install(w, t).status).toBe(0);
+    // By name, which starts with the time: v0 is the oldest, v4 the newest.
+    const [v0, v1, v2, v3, v4] = versions(w);
+    // current points at the oldest, as after going back to it.
+    switchTo(w, v0!);
+    // Incomplete folders: one old, left by a run that was stopped, and one
+    // young that sorts newest, as another run still writing would.
+    const oldPartial = '20200101000000.1.oldold';
+    const youngPartial = '29990101000000.1.young';
+    for (const p of [oldPartial, youngPartial]) {
+      mkdirSync(versionDir(w, p));
+      writeFileSync(join(versionDir(w, p), 'node'), 'node partial\n');
+    }
+    // Everything is old except v2 and the young partial one.
+    for (const v of versions(w)) if (v !== v2 && v !== youngPartial) age(versionDir(w, v));
+
+    const r = lib(w, 'vh_finish\n');
+    expect(r.status, r.stderr).toBe(0);
+    // v0 is current, v2 is young, v3 and v4 are the newest two complete ones
+    // (the young partial one doesn't count, being incomplete, and is kept as
+    // it may still be being written). v1 and the old partial one go.
+    expect(versions(w)).toEqual([v0, v2, v3, v4, youngPartial].sort());
+    expect(existsSync(versionDir(w, v1!))).toBe(false);
+    const target = readlinkSync(join(w.dest, 'current'));
+    expect(target).toBe(`versions/${v0}`);
+    expect(tagOf(w, v0!)).toBe(current(w));
   });
 
-  it('releases only its own lock', () => {
+  it('reads current again right before each removal', () => {
     const w = world();
+    for (const t of ['a', 'b', 'c', 'd', 'e']) expect(install(w, t).status).toBe(0);
+    for (const v of versions(w)) age(versionDir(w, v));
+    const all = versions(w);
+    // All old; the three oldest by name are not among the newest two.
+    const candidates = all.slice(0, 3);
+    // Another run switches current to another of them just as the first of
+    // them is being removed, whichever that is.
     const r = lib(
       w,
-      `vh_lock_acquire
-printf 'boot=x\\npid=1\\nstart=1\\n' >"$DEST.lock/owner"
+      `vh_remove() {
+  _n=\${1##*/}
+  case " ${candidates.join(' ')} " in *" $_n "*)
+    if [ ! -e "$DEST/.switched" ]; then
+      for _o in ${candidates.join(' ')}; do [ "$_o" = "$_n" ] || break; done
+      echo "$_o" >"$DEST/.switched"
+      ln -s "versions/$_o" "$DEST/.switch"; mv -fT "$DEST/.switch" "$DEST/current"
+    fi ;;
+  esac
+  if [ -L "$1" ]; then rm -f "$1"; elif [ -e "$1" ]; then rm -rf "$1"; fi
+}
+vh_finish
 `,
     );
     expect(r.status, r.stderr).toBe(0);
-    expect(readFileSync(join(lock(w), 'owner'), 'utf8')).toBe('boot=x\npid=1\nstart=1\n');
+    const switched = readFileSync(join(w.dest, '.switched'), 'utf8').trim();
+    expect(candidates).toContain(switched);
+    expect(readlinkSync(join(w.dest, 'current'))).toBe(`versions/${switched}`);
+    current(w);
+    expect(versions(w)).toEqual([switched, ...all.slice(-2)].sort());
   });
 
-  it('keeps current and the version before it, and never follows symlinks while pruning', () => {
+  it('removes nothing more when current is missing', () => {
     const w = world();
     for (const t of ['a', 'b', 'c']) expect(install(w, t).status).toBe(0);
-    const tags = () =>
-      versions(w).map((v) => readFileSync(join(w.dest, 'versions', v, 'helper.mjs'), 'utf8'));
-    expect(tags().sort()).toEqual(['helper b\n', 'helper c\n']);
+    for (const v of versions(w)) age(versionDir(w, v));
+    rmSync(join(w.dest, 'current'));
+    const r = lib(w, 'vh_finish\n');
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('current is missing');
+    expect(versions(w)).toHaveLength(3);
+  });
 
+  it('never follows symlinks while pruning, and keeps another run’s fresh temporary link', () => {
+    const w = world();
+    for (const t of ['a', 'b', 'c']) expect(install(w, t).status).toBe(0);
     const outside = join(w.base, 'outside');
     mkdirSync(outside);
     writeFileSync(join(outside, 'keep'), 'precious');
+    writeFileSync(join(outside, 'node'), 'not a version');
     writeFileSync(join(outside, 'helper.mjs'), 'not a version');
-    symlinkSync(outside, join(w.dest, 'versions', 'planted'));
-    symlinkSync(outside, join(w.dest, 'versions', '.hidden'));
-    writeFileSync(join(w.dest, 'versions', 'stray-file'), 'x');
+    symlinkSync(outside, versionDir(w, 'planted'));
+    symlinkSync(outside, versionDir(w, '.hidden'));
+    symlinkSync(outside, versionDir(w, '99990101000000.1.link'));
+    writeFileSync(versionDir(w, 'stray-file'), 'x');
+    // A switch that was stopped long ago, and one another run is making now.
+    // Their age is the link's own, never its target's.
+    symlinkSync(outside, join(w.dest, '.current.tmp.11111'));
+    age(join(w.dest, '.current.tmp.11111'));
+    const oldTarget = join(w.base, 'old-target');
+    mkdirSync(oldTarget);
+    age(oldTarget);
+    symlinkSync(oldTarget, join(w.dest, '.current.tmp.22222'));
 
     expect(install(w, 'd').status).toBe(0);
     expect(current(w)).toBe('d');
     expect(readFileSync(join(outside, 'keep'), 'utf8')).toBe('precious');
-    // c, the one before d, stays; b is gone, and so are the links and the stray file.
-    expect(tags().sort()).toEqual(['helper c\n', 'helper d\n']);
-  });
-
-  it('never removes the version current points to, even when told to keep another', () => {
-    const w = world();
-    expect(install(w, 'a').status).toBe(0);
-    const r = lib(w, 'vh_lock_acquire\nvh_finish does-not-exist\n');
-    expect(r.status, r.stderr).toBe(0);
-    expect(current(w)).toBe('a');
+    // The links and the stray file go; every version is young, so all stay.
+    expect(
+      versions(w)
+        .map((v) => tagOf(w, v))
+        .sort(),
+    ).toEqual(['a', 'b', 'c', 'd']);
+    expect(readdirSync(w.dest).sort()).toEqual(['.current.tmp.22222', 'current', 'versions']);
+    expect(readdirSync(outside).sort()).toEqual(['helper.mjs', 'keep', 'node']);
   });
 
   it('refuses to switch to a version that is incomplete or a symlink', () => {
     const w = world();
     expect(install(w, 'a').status).toBe(0);
-    mkdirSync(join(w.dest, 'versions', 'partial'));
-    writeFileSync(join(w.dest, 'versions', 'partial', 'node'), 'node x');
-    symlinkSync(join(w.dest, 'versions', versions(w)[0]!), join(w.dest, 'versions', 'link'));
+    mkdirSync(versionDir(w, 'partial'));
+    writeFileSync(join(versionDir(w, 'partial'), 'node'), 'node x');
+    symlinkSync(versionDir(w, versions(w)[0]!), versionDir(w, 'link'));
     for (const v of ['partial', 'link', '../x', '']) {
-      const r = lib(w, `vh_lock_acquire\nvh_switch '${v}'\n`);
+      const r = lib(w, `vh_switch '${v}'\n`);
       expect(r.status, v).not.toBe(0);
     }
     expect(current(w)).toBe('a');
@@ -427,27 +467,14 @@ printf 'boot=x\\npid=1\\nstart=1\\n' >"$DEST.lock/owner"
     const outside = join(w.base, 'outside');
     mkdirSync(outside);
     writeFileSync(join(outside, 'keep'), 'precious');
-    symlinkSync(outside, join(w.dest, 'versions', 'planted'));
+    symlinkSync(outside, versionDir(w, 'planted'));
     mkdirSync(`${w.dest}.new`);
     mkdirSync(`${w.dest}.old`);
-    const r = lib(w, 'vh_lock_acquire\nvh_remove_dest\n');
+    const r = lib(w, 'vh_remove_dest\n');
     expect(r.status, r.stderr).toBe(0);
     expect(existsSync(w.dest)).toBe(false);
     expect(existsSync(`${w.dest}.new`)).toBe(false);
     expect(existsSync(`${w.dest}.old`)).toBe(false);
-    expect(existsSync(lock(w))).toBe(false);
     expect(readFileSync(join(outside, 'keep'), 'utf8')).toBe('precious');
-  });
-
-  it('makes uninstall wait for an install that is still running', async () => {
-    const w = world();
-    const run = installAsync(w, 'a', { PAUSE: '1' });
-    for (let i = 0; i < 200 && !existsSync(join(lock(w), 'owner')); i++)
-      await new Promise((r) => setTimeout(r, 25));
-    const r = lib(w, 'vh_lock_acquire\nvh_remove_dest\n');
-    expect(r.status, r.stderr).toBe(0);
-    expect((await run.done).code).toBe(0);
-    // The install finished first, then the removal took everything it wrote.
-    expect(existsSync(w.dest)).toBe(false);
   });
 });

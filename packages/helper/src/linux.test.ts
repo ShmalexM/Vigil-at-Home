@@ -55,7 +55,6 @@ describe('Linux paths and protection', () => {
       '/usr/libexec/vigil-helper',
       '/usr/libexec/vigil-helper.d/current/node',
       '/usr/libexec/vigil-helper.d/versions/20261008.abc123/helper.mjs',
-      '/usr/libexec/vigil-helper.d.lock',
       '/var/lib/vigil/helper-journal.json',
       '/usr/local',
     ]) {

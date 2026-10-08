@@ -9,11 +9,10 @@ describe('vetPath', () => {
       '/Library/PrivilegedHelperTools/vigil-helper',
       '/Library/PrivilegedHelperTools/vigil-helper.d/node',
       '/Library/PrivilegedHelperTools/vigil-helper.d/helper.mjs',
-      // install.sh's versioned layout and its lock.
+      // install.sh's versioned layout.
       '/Library/PrivilegedHelperTools/vigil-helper.d/current',
       '/Library/PrivilegedHelperTools/vigil-helper.d/current/node',
       '/Library/PrivilegedHelperTools/vigil-helper.d/versions/20261008.abc123/helper.mjs',
-      '/Library/PrivilegedHelperTools/vigil-helper.d.lock',
       '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home',
     ]) {
       expect(() => vetPath(path, opts), path).toThrow(expect.objectContaining({ code: 'refused' }));

@@ -87,9 +87,8 @@ export const PROTECTED_PREFIXES = [
   '/Applications/Santa.app',
   '/Library/PrivilegedHelperTools/vigil-helper',
   // The helper's Node runtime and code (versions/<id> and the current link to
-  // one), the lock install.sh holds while it runs, and the app itself.
+  // one), and the app itself.
   '/Library/PrivilegedHelperTools/vigil-helper.d/',
-  '/Library/PrivilegedHelperTools/vigil-helper.d.lock',
   '/Applications/Vigil at Home.app/',
 ];
 

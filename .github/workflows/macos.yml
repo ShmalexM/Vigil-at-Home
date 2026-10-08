@@ -176,17 +176,28 @@ jobs:
             });
             s.write(JSON.stringify({ id: '1', command: { kind: 'helper.status' } }) + '\\n');
           "
-          # Reinstalling over a running copy works, and two runs at once take turns.
+          # Reinstalling over a running copy works, and so do two runs at once.
           sudo "$h/install.sh"
           sudo "$h/install.sh" & sudo "$h/install.sh"; wait $!
           test -S /var/run/vigil-helper.sock
-          test "$(ls "$d/versions" | wc -l)" -eq 2
-          ! test -e "$d.lock"
+          # Each run made its own version; none is pruned within the hour.
+          test "$(ls "$d/versions" | wc -l)" -eq 4
+          # current names one complete version.
+          test -f "$d/current/node"
+          test -f "$d/current/helper.mjs"
           sudo "$h/uninstall.sh"
-          ! test -e /Library/PrivilegedHelperTools/vigil-helper
-          ! test -e "$d"
-          ! test -e "$d.lock"
-          ! sudo launchctl print system/com.vigilathome.helper 2>/dev/null
+          # A negated command (! cmd) never fails a step under errexit, so these
+          # are spelled as ifs.
+          for p in /Library/PrivilegedHelperTools/vigil-helper "$d"; do
+            if test -e "$p" || test -L "$p"; then
+              echo "$p is still there after uninstall.sh" >&2
+              exit 1
+            fi
+          done
+          if sudo launchctl print system/com.vigilathome.helper >/dev/null 2>&1; then
+            echo "The helper's launchd job is still loaded after uninstall.sh" >&2
+            exit 1
+          fi
       - if: failure()
         run: sudo cat /Library/Logs/Vigil/helper.log || true
 

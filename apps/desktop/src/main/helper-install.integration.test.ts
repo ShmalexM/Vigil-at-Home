@@ -1,5 +1,13 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, lstatSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readdirSync,
+  readlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -55,12 +63,14 @@ describe.skipIf(!enabled)('Linux helper install', () => {
       expect(lstatSync(`${d}/current`).isSymbolicLink()).toBe(true);
       expect(existsSync(`${d}/node`)).toBe(false);
 
-      // Installing again replaces the running copy, keeping the one before it.
+      // Installing again replaces the running copy. Versions from the last hour
+      // are kept, since another install could still be using them.
       expect(sh('install.sh').status).toBe(0);
       expect(readdirSync(`${d}/versions`)).toHaveLength(2);
       expect(sh('install.sh').status).toBe(0);
-      expect(readdirSync(`${d}/versions`)).toHaveLength(2);
-      expect(existsSync(`${d}.lock`)).toBe(false);
+      expect(readdirSync(`${d}/versions`)).toHaveLength(3);
+      const target = readlinkSync(`${d}/current`).replace(/^versions\//, '');
+      expect(readdirSync(`${d}/versions`)).toContain(target);
       expect(spawnSync('systemctl', ['is-active', '--quiet', 'vigil-helper.service']).status).toBe(
         0,
       );
@@ -69,7 +79,6 @@ describe.skipIf(!enabled)('Linux helper install', () => {
       expect(remove.status).toBe(0);
       expect(existsSync('/usr/libexec/vigil-helper')).toBe(false);
       expect(existsSync('/usr/libexec/vigil-helper.d')).toBe(false);
-      expect(existsSync('/usr/libexec/vigil-helper.d.lock')).toBe(false);
       expect(existsSync('/etc/systemd/system/vigil-helper.service')).toBe(false);
       expect(existsSync('/usr/share/polkit-1/actions/com.vigilathome.helper.policy')).toBe(false);
       expect(

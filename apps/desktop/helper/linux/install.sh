@@ -30,24 +30,24 @@ command -v systemctl >/dev/null || { echo "The helper needs systemd." >&2; exit 
 . "$SRC/lib.sh"
 
 install -d -o root -g root -m 755 "$LIBEXEC"
-# One install or removal at a time; the lock goes when this script ends.
-vh_lock_acquire
 
-# Each install adds a complete new version, DEST/versions/<id>, and then
-# points DEST/current at it in one rename. The running helper keeps its own
-# version until systemd restarts it, and no version changes once written.
+# Each install adds a complete new version, DEST/versions/<id>, under a name
+# of its own, and then points DEST/current at it in one rename. No version
+# changes once written, so installs that overlap need no lock: the last
+# switch wins, and each one switches only to a complete version. The running
+# helper keeps its own version until systemd restarts it. Everything written
+# here is under paths every helper version protects (/usr/libexec, /etc,
+# /usr/share), so it can keep running meanwhile.
 vh_prepare
 vh_build "$SRC/node" "$SRC/helper.mjs"
-vh_current
-PREVIOUS=$VH_CURRENT
 # Nothing uses DEST/current before the new launcher, so a first install, or
 # one over the layout from before versions, can point it at the new version now.
-[ -n "$PREVIOUS" ] || vh_switch "$VH_VERSION"
+vh_current
+[ -n "$VH_CURRENT" ] || vh_switch "$VH_VERSION"
 
 # The launcher, unit and polkit policy run the helper through DEST/current,
 # the same for every version. Write them first, so the switch is the one step
 # that changes which helper runs.
-vh_lock_check
 vh_put 755 "$HERE/vigil-helper" "$LIBEXEC/vigil-helper"
 vh_put 644 "$HERE/vigil-helper.service" "$UNIT"
 install -d -o root -g root -m 755 "$(dirname "$POLICY")"
@@ -72,7 +72,7 @@ if [ ! -S "$SOCKET" ]; then
   echo "The helper did not start. See: journalctl -u vigil-helper" >&2
   exit 1
 fi
-# Now the old files can go: those from before versions, and every version
-# but this one and the one before it.
-vh_finish "$PREVIOUS"
+# Now the old files can go: those from before versions, and old versions
+# nothing uses (see vh_finish in lib.sh).
+vh_finish
 echo "Vigil helper installed and running."

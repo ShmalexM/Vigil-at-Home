@@ -20,8 +20,6 @@ VH_GROUP=wheel
 # shellcheck source=SCRIPTDIR/lib.sh
 . "$SRC/lib.sh"
 
-# Wait for an install that is still running, so nothing it writes is left behind.
-if [ -d "$TOOLS" ]; then vh_lock_acquire; fi
 # Stop Vigil's osquery job and put back any osquery settings from before Vigil.
 # Older helpers don't have this command, so a failure here doesn't stop the removal.
 "$TOOLS/vigil-helper" osquery-remove 2>/dev/null || true
