@@ -264,6 +264,22 @@ export class DetectionEngine {
     this.stores.ruleState.put({ ...prev, mode });
   }
 
+  /** The user's override of a rule's mode, or undefined when it runs in its own mode. */
+  modeOverride(ruleId: string): RuleMode | undefined {
+    return this.stores.ruleState.get(ruleId)?.mode;
+  }
+
+  /**
+   * Drop a rule's override, so it runs in its own mode again (and follows a
+   * pack update to it). Package-internal, like `_setMode`.
+   */
+  _clearMode(ruleId: string): void {
+    const prev = this.stores.ruleState.get(ruleId);
+    if (prev?.mode === undefined) return;
+    const { mode: _mode, ...rest } = prev;
+    this.stores.ruleState.put(rest);
+  }
+
   private reindex(): void {
     this.byKind = new Map();
     this.learnByKind = new Map();

@@ -128,8 +128,8 @@ type CostTotals = Pick<UsageTotals, 'costUsd' | 'billedUsd' | 'billedUnpricedRun
 /**
  * The headline's note on what the total is: what was billed to the user's
  * keys (and whether some of it has no price), and that the rest is Claude
- * Code's estimate at API prices. It says "not charged" only when Vigil knows
- * the run went to a plan.
+ * Code's estimate at API prices. A run Vigil knows went to a plan says so,
+ * with no claim about cost: paid extra usage can charge a plan run.
  */
 export function costNote(t: CostTotals): string {
   const parts: string[] = [];
@@ -143,14 +143,14 @@ export function costNote(t: CostTotals): string {
     parts.push(
       t.loginUsd > 0
         ? `${parts.length ? 'the rest ' : ''}at API prices, on your Claude login`
-        : `${parts.length ? 'the rest ' : ''}at API prices, not charged`,
+        : `${parts.length ? 'the rest ' : ''}at API prices, on your plan`,
     );
   if (parts.length === 0) return t.costUsd > 0 ? 'API estimate' : 'nothing billed';
   return parts.join(', ');
 }
 
-/** A provider's note when its price is only an estimate: not charged on a plan, else unknown. */
+/** A provider's note when its price is only an estimate: on a plan, or on a login Vigil can't tell. */
 export function estimateNote(p: CostTotals): string | undefined {
   if (!(p.costUsd > 0 && p.billedUsd === 0)) return undefined;
-  return p.loginUsd > 0 ? 'at API prices, on your Claude login' : 'at API prices, not charged';
+  return p.loginUsd > 0 ? 'at API prices, on your Claude login' : 'at API prices, on your plan';
 }

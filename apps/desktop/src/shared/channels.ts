@@ -15,6 +15,8 @@ export const CALL_NAMES = [
   'rejectProposal',
   'listRules',
   'setRuleMode',
+  'quietRule',
+  'undoQuietRule',
   'getRuleEditor',
   'previewRule',
   'saveRule',

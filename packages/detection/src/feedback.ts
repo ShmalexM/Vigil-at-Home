@@ -168,6 +168,13 @@ export class Feedback {
     this.engine._setMode(ruleId, mode);
   }
 
+  /** Put a rule back in its own mode, for an undo that restores "no override". */
+  clearMode(ruleId: string, origin: UserOrigin): void {
+    assertUserOrigin(origin);
+    if (!this.engine.getRule(ruleId)) throw new Error(`no rule ${ruleId}`);
+    this.engine._clearMode(ruleId);
+  }
+
   removeException(id: string, origin: UserOrigin): void {
     assertUserOrigin(origin);
     this.engine.stores.exceptions.remove(id);

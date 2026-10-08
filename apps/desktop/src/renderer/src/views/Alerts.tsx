@@ -1,4 +1,4 @@
-import type { Alert, SensorEvent } from '@vigil/core';
+import type { Alert, RuleMode, SensorEvent } from '@vigil/core';
 import {
   Activity,
   Bell,
@@ -411,17 +411,26 @@ function RuleCard({
   const toast = useToast();
   const quieter = quieterMode(rule);
   const reached = REACHED[alert.notify];
+  // The main process checks the mode when it applies the change, so a card
+  // drawn before another change (say, to Block) can't turn that rule down.
+  const refused = (mode: RuleMode) =>
+    toast({
+      text: `${rule.name} is set to ${modeLabel(rule, mode)} now, so it was left as it is.`,
+    });
   const quiet = async () => {
     if (!quieter) return;
-    const before = rule.mode;
-    const { helper } = await vigil.setRuleMode(rule.id, quieter);
-    if (helper === 'declined') {
+    const result = await vigil.quietRule(rule.id);
+    if (!result.ok) return refused(result.mode);
+    if (result.helper === 'declined') {
       toast({ text: `${rule.name}: ${PASSWORD_CANCELLED}` });
       return;
     }
     toast({
-      text: `${rule.name}: ${modeLabel(rule, quieter)}. It stops alerting and keeps logging matches in Activity.${helperNote(helper)}`,
-      undo: () => void vigil.setRuleMode(rule.id, before),
+      text: `${rule.name}: ${modeLabel(rule, quieter)}. It stops alerting and keeps logging matches in Activity.${helperNote(result.helper)}`,
+      undo: () =>
+        void vigil.undoQuietRule(rule.id, result.prior).then((undone) => {
+          if (!undone.ok) refused(undone.mode);
+        }),
     });
   };
   return (

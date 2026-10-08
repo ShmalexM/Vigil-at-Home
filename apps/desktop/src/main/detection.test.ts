@@ -530,6 +530,69 @@ describe('stale open alerts', () => {
   });
 });
 
+describe('Only log this rule', () => {
+  const ID = 'download-pipe-to-shell'; // a pack rule that alerts
+  const modeOf = (core: VigilCore) => core.rules().find((r) => r.rule.id === ID)?.rule.mode;
+
+  it('refuses when the rule went to Block after the card was drawn', async () => {
+    const { core } = setup();
+    expect(modeOf(core)).toBe('alert');
+    await core.setRuleMode(ID, 'block');
+    expect(await core.quietRule(ID)).toEqual({ ok: false, mode: 'block' });
+    expect(modeOf(core)).toBe('block');
+    expect(core.detector!.engine.modeOverride(ID)).toBe('block');
+  });
+
+  it('checks the mode when it applies, behind a change still waiting on the helper', async () => {
+    const { core } = setup();
+    let release!: () => void;
+    const held = new Promise<'applied'>((resolve) => (release = () => resolve('applied')));
+    let calls = 0;
+    // The first sync (the change to Block) waits; later ones go straight through.
+    core.detector!.syncHelper = () => (calls++ === 0 ? held : Promise.resolve('applied'));
+    const toBlock = core.setRuleMode(ID, 'block');
+    const quiet = core.quietRule(ID);
+    release();
+    await toBlock;
+    expect(await quiet).toEqual({ ok: false, mode: 'block' });
+    expect(modeOf(core)).toBe('block');
+  });
+
+  it('undo takes off the override when the rule had none', async () => {
+    const { core } = setup();
+    const engine = core.detector!.engine;
+    expect(engine.modeOverride(ID)).toBeUndefined();
+    const quiet = await core.quietRule(ID);
+    expect(quiet).toMatchObject({ ok: true, prior: null, rule: { id: ID, mode: 'shadow' } });
+    expect(modeOf(core)).toBe('shadow');
+    const undo = await core.undoQuietRule(ID, null);
+    expect(undo).toMatchObject({ ok: true, rule: { mode: 'alert' } });
+    expect(engine.modeOverride(ID)).toBeUndefined();
+    // With no override left, a pack update to the rule's own mode takes effect.
+    engine.upsertRule({ ...engine.getRule(ID)!, mode: 'block' });
+    expect(modeOf(core)).toBe('block');
+  });
+
+  it('undo puts back the override the rule had', async () => {
+    const { core } = setup();
+    const engine = core.detector!.engine;
+    await core.setRuleMode(ID, 'alert');
+    expect(engine.modeOverride(ID)).toBe('alert');
+    const quiet = await core.quietRule(ID);
+    expect(quiet).toMatchObject({ ok: true, prior: 'alert' });
+    expect(await core.undoQuietRule(ID, 'alert')).toMatchObject({ ok: true });
+    expect(engine.modeOverride(ID)).toBe('alert');
+  });
+
+  it('undo leaves a newer change alone', async () => {
+    const { core } = setup();
+    await core.quietRule(ID);
+    await core.setRuleMode(ID, 'block');
+    expect(await core.undoQuietRule(ID, null)).toEqual({ ok: false, mode: 'block' });
+    expect(core.detector!.engine.modeOverride(ID)).toBe('block');
+  });
+});
+
 describe('alert detail', () => {
   it("shows a pack rule's card, in the mode the engine applies", async () => {
     const { core } = setup();
@@ -561,5 +624,29 @@ describe('alert detail', () => {
     expect(json).not.toMatch(/alice/i);
     expect(JSON.parse(json).rule.name).toBe('Downloaded script run directly');
     expect(core.alertEvidence('nope')).toBeNull();
+  });
+  it('copies the evidence without a secret passed as its own arg, or short names', async () => {
+    const { core } = setup();
+    core.evidenceRedaction = () => ({ username: 'al', hostname: 'pc.local' });
+    const rule = makeRule({ id: 'download-pipe-to-shell', mode: 'alert', severity: 'medium' });
+    const event = exec('/usr/local/bin/tool');
+    if (event.kind === 'process.exec') {
+      event.process.args = [
+        'tool',
+        '--token',
+        'secret123456',
+        'al@pc',
+        'sh -c "x --password pw99"',
+      ];
+    }
+    const alert = await core.alerts.raise({ rule, events: [event], actions: [] });
+    const args = JSON.parse(core.alertEvidence(alert.id)!).events[0].process.args;
+    expect(args).toEqual([
+      'tool',
+      '--token',
+      '<redacted>',
+      '<user>@<host>',
+      'sh -c "x --password <redacted>"',
+    ]);
   });
 });

@@ -205,7 +205,7 @@ function CostSection({
                     className="usage-info"
                     tabIndex={0}
                     title={[
-                      'Claude Code reports what each run would cost at API prices. On a claude.ai plan that isn’t charged per run; on another login Vigil can’t tell.',
+                      'Claude Code reports what each run would cost at API prices. On a claude.ai plan the run counts toward the plan, and extra usage, if you turned it on, can be charged; on another login Vigil can’t tell.',
                       ...(usesBilled
                         ? [
                             'Jev, cloud API keys and Codex on an OpenAI key show what you were billed.',

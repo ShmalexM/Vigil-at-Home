@@ -64,6 +64,9 @@ export const FEED_CHECK_MS = 30 * 60 * 1000;
  */
 export type HelperSyncOutcome = 'applied' | 'declined' | 'unavailable';
 
+/** A checked mode change: done (with the override it replaced) or refused in this mode. */
+export type QuietOutcome = { ok: true; prior: RuleMode | null } | { ok: false; mode: RuleMode };
+
 /**
  * How to send the helper its rules. `hold`: let the next password dialog ask
  * for it, and call `onHeld` once it waits on that. `byUser`: the user just
@@ -444,6 +447,45 @@ export class Detector {
     return this.change(() => this.feedback.setMode(id, mode, userOrigin('rules-screen'))).then(
       (r) => r.helper,
     );
+  }
+
+  /**
+   * "Only log this rule" from an alert: Alert to Shadow, checked against the
+   * mode in force when the change applies (after any change still waiting on
+   * the password), not the one the screen showed. Any other mode is refused
+   * unchanged, so this never turns a blocking rule down. On success it gives
+   * the override the rule had before (null: none), for `undoQuiet`.
+   */
+  async quiet(id: string): Promise<{ value: QuietOutcome; helper: HelperSyncOutcome }> {
+    return this.change((): QuietOutcome => {
+      const rule = this.engine.getRule(id);
+      if (!rule) throw new Error(`No rule ${id}`);
+      const mode = this.engine.modeOf(rule);
+      if (mode !== 'alert') return { ok: false, mode };
+      const prior = this.engine.modeOverride(id) ?? null;
+      this.feedback.setMode(id, 'shadow', userOrigin('alert'));
+      return { ok: true, prior };
+    });
+  }
+
+  /**
+   * Undo `quiet`: put back exactly the override it replaced, or none. Only
+   * while the rule is still in the Shadow it left; after any other change the
+   * undo is refused, so it can't overwrite (or weaken) a newer choice.
+   */
+  async undoQuiet(
+    id: string,
+    prior: RuleMode | null,
+  ): Promise<{ value: QuietOutcome; helper: HelperSyncOutcome }> {
+    return this.change((): QuietOutcome => {
+      const rule = this.engine.getRule(id);
+      if (!rule) throw new Error(`No rule ${id}`);
+      const mode = this.engine.modeOf(rule);
+      if (this.engine.modeOverride(id) !== 'shadow') return { ok: false, mode };
+      if (prior === null) this.feedback.clearMode(id, userOrigin('alert'));
+      else this.feedback.setMode(id, prior, userOrigin('alert'));
+      return { ok: true, prior: 'shadow' };
+    });
   }
 
   /**

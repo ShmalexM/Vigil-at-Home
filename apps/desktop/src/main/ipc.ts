@@ -76,6 +76,16 @@ export function registerIpc(
       windows.broadcast('changed');
       return result;
     },
+    quietRule: async (id) => {
+      const result = await core.quietRule(id);
+      windows.broadcast('changed');
+      return result;
+    },
+    undoQuietRule: async (id, prior) => {
+      const result = await core.undoQuietRule(id, prior);
+      windows.broadcast('changed');
+      return result;
+    },
     getRuleEditor: (id) => core.ruleEditing()?.view(id) ?? null,
     previewRule: (json) => editing(core).preview(json),
     saveRule: (json) => editing(core).save(json),
