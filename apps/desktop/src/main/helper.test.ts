@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { SensorEvent } from '@vigil/core';
 import type { HelperRan } from '@vigil/helper';
 import type { HelperClient } from '@vigil/helper/client';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { HelperLink } from './helper.js';
 
 function fakeClient(answer: (cmd: { kind: string }) => unknown) {
@@ -179,5 +179,54 @@ describe('HelperLink', () => {
     await link.tryConnect();
     link.stop();
     expect(link.state).toBe('not_running');
+  });
+  it('reconnects at once after a dropped connection, without showing the helper as stopped', async () => {
+    let n = 0;
+    const link = new HelperLink(socket(), async () => {
+      n++;
+      return fakeClient(() => {
+        throw new Error('connection reset');
+      }).client;
+    });
+    const states: string[] = [];
+    link.on('state', (s) => states.push(s));
+    await link.tryConnect();
+    await link.execute({ kind: 'process.kill', pid: 5 });
+    await vi.waitFor(() => expect(n).toBe(2));
+    await vi.waitFor(() => expect(states).toEqual(['connected', 'connected']));
+    expect(link.state).toBe('connected');
+    link.stop();
+  });
+
+  it('shows the helper as not running only when the reconnect fails too', async () => {
+    let up = true;
+    const link = new HelperLink(socket(), async () => {
+      if (!up) throw new Error('ECONNREFUSED');
+      return fakeClient(() => {
+        throw new Error('connection reset');
+      }).client;
+    });
+    await link.tryConnect();
+    up = false;
+    await link.execute({ kind: 'process.kill', pid: 5 });
+    await vi.waitFor(() => expect(link.state).toBe('not_running'));
+    link.stop();
+  });
+
+  it('treats a helper that connects but never answers as not running', async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = fakeClient(() => ({}));
+      const hung = { ...fake.client, subscribe: () => new Promise<void>(() => {}) };
+      const link = new HelperLink(socket(), async () => hung as unknown as HelperClient);
+      const done = link.tryConnect();
+      await vi.advanceTimersByTimeAsync(6000);
+      await done;
+      expect(link.state).toBe('not_running');
+      expect(link.simulated).toBe(true);
+      link.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

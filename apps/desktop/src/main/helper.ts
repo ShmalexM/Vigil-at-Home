@@ -260,10 +260,20 @@ export class HelperLink
         client.close();
         return;
       }
-      this.client = client;
       client.onEvent((e, ran) => this.received(e, ran));
-      await client.subscribe(this.lastEventId);
-      this.setState('connected');
+      // A helper that accepts the connection but never answers counts as not
+      // running, rather than leaving the link stuck mid-connect.
+      try {
+        await withTimeout(client.subscribe(this.lastEventId), QUERY_TIMEOUT_MS);
+      } catch (err) {
+        client.close();
+        throw err;
+      }
+      this.client = client;
+      // After a quiet reconnect the state hasn't changed, but listeners still
+      // need to hear of the new connection (to send the rules again).
+      if (this.state === 'connected') this.emit('state', 'connected');
+      else this.setState('connected');
     } catch {
       this.client = undefined;
       this.setState('not_running');
@@ -312,12 +322,16 @@ export class HelperLink
     return result;
   }
 
+  /**
+   * A dropped connection is tried again at once before anything changes on
+   * screen, so a blip (a timed-out query, a helper restart) never shows the
+   * helper as stopped. Only a failed reconnect changes the state.
+   */
   private dropped(client: HelperClient): void {
     if (this.client !== client) return;
     this.client = undefined;
     client.close();
-    this.setState(existsSync(this.socket) ? 'not_running' : 'not_installed');
-    this.retry();
+    void this.tryConnect();
   }
 
   private retry(): void {
