@@ -32,6 +32,7 @@ import {
   CLIENT_SEEN_FILE,
   createSyncHttpsServer,
   REFUSAL_LOG_MS,
+  RULE_SYNC_FILE,
   listenUnlessStopped,
   runDaemon,
   SYNC_SERVER_LIMITS,
@@ -226,6 +227,9 @@ describe('helper daemon', () => {
     expect((await santaPost('preflight', {})).sync_type).toBeDefined();
     const seen = await client!.call<{ sensors: SensorHealth }>({ kind: 'helper.status' });
     expect(seen.sensors.santa.clientCertSeenAt).toBeGreaterThanOrEqual(before);
+    // A handshake and a preflight are not a rule sync.
+    expect(seen.sensors.santa.lastRuleSyncAt).toBeNull();
+    expect(seen.sensors.santa.lastAuthRuleSyncAt).toBeNull();
     expect(readFileSync(join(paths.tlsDir, CLIENT_SEEN_FILE), 'utf8')).toMatch(/^\d{4}-/);
   });
 
@@ -248,6 +252,8 @@ describe('helper daemon', () => {
         // The test above presented Santa's certificate, and others before it.
         clientCertSeenAt: expect.any(Number),
         clientCertExpiresAt: expect.any(Number),
+        lastRuleSyncAt: null,
+        lastAuthRuleSyncAt: null,
         lastRefusal: { at: expect.any(Number), reason: 'wrong_certificate' },
         syncIntervalSeconds: 600,
       },
@@ -293,6 +299,13 @@ describe('helper daemon', () => {
     const after = await client!.call<{ sensors: SensorHealth }>({ kind: 'helper.status' });
     expect(after.sensors.santa.lastEventAt).toBeGreaterThan(0);
     expect(after.sensors.santa.lastSyncAt).toBeGreaterThan(0);
+    // A sync that applied every rule, on a connection with Santa's certificate.
+    expect(after.sensors.santa.lastRuleSyncAt).toBe(after.sensors.santa.lastSyncAt);
+    expect(after.sensors.santa.lastAuthRuleSyncAt).toBe(after.sensors.santa.lastSyncAt);
+    expect(JSON.parse(readFileSync(join(paths.tlsDir, RULE_SYNC_FILE), 'utf8'))).toEqual({
+      last: after.sensors.santa.lastRuleSyncAt,
+      authenticated: after.sensors.santa.lastRuleSyncAt,
+    });
     expect(after.sensors.osquery.lastEventAt).toBeNull();
   });
 
@@ -583,9 +596,17 @@ describe('helper upgrade with a Santa profile from before the client certificate
         santaPost('preflight', {}, at(await sameCaIdentity(upPaths.tlsDir))),
       ).rejects.toThrow();
       expect(requiredOnDisk(upPaths.tlsDir)).toBe(false);
+      // A whole sync without a certificate counts as a rule sync, not an authenticated one.
+      await santaPost('preflight', { machine_id: 'M1' }, at());
+      const sent = (await santaPost('ruledownload', { cursor: '' }, at())).rules.length;
+      await santaPost('postflight', { rules_received: sent, rules_processed: sent }, at());
+      const compat = (await run.c.call<{ sensors: SensorHealth }>({ kind: 'helper.status' }))
+        .sensors.santa;
+      expect(compat.lastRuleSyncAt).toBeGreaterThan(0);
+      expect(compat.lastAuthRuleSyncAt).toBeNull();
       // The new profile is installed and Santa presents its certificate.
       expect((await santaPost('preflight', {}, at(clientIdentity(upPaths.tlsDir)))).sync_type).toBe(
-        'CLEAN',
+        'NORMAL',
       );
       expect(await required()).toBe(true);
       for (let i = 0; i < 50 && !requiredOnDisk(upPaths.tlsDir); i++)
@@ -600,7 +621,7 @@ describe('helper upgrade with a Santa profile from before the client certificate
       expect(await required()).toBe(true);
       await expect(santaPost('preflight', {}, at())).rejects.toThrow();
       expect((await santaPost('preflight', {}, at(clientIdentity(upPaths.tlsDir)))).sync_type).toBe(
-        'CLEAN',
+        'NORMAL',
       );
     } finally {
       run.c.close();
@@ -621,6 +642,7 @@ describe("Santa's client certificate pin", () => {
       new SyncClientAuth({
         store,
         seen: join(store.paths.dir, CLIENT_SEEN_FILE),
+        ruleSync: join(store.paths.dir, RULE_SYNC_FILE),
         log: (m) => logs.push(m),
         now: () => now,
       });
@@ -704,6 +726,20 @@ describe("Santa's client certificate pin", () => {
         'Santa sync: refused a connection (no certificate); 149 more since the last one logged',
       );
       expect(t.logs).toHaveLength(3);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the last rule syncs across restarts, authenticated ones apart', async () => {
+    const t = await setup();
+    try {
+      const auth = t.make();
+      expect(auth.ruleSyncs).toEqual({ last: null, authenticated: null });
+      auth.ruleSynced(1000, true);
+      auth.ruleSynced(2000, false);
+      expect(auth.ruleSyncs).toEqual({ last: 2000, authenticated: 1000 });
+      expect(t.make().ruleSyncs).toEqual({ last: 2000, authenticated: 1000 });
     } finally {
       rmSync(t.dir, { recursive: true, force: true });
     }

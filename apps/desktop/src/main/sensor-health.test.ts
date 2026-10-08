@@ -127,6 +127,10 @@ describe("Santa's syncs with the helper", () => {
   const MIN = 60_000;
   const required: HelperSantaSync = {
     lastSyncAt: NOW - 5 * MIN,
+    lastRuleSyncAt: NOW - 5 * MIN,
+    lastAuthRuleSyncAt: NOW - 5 * MIN,
+    installedAt: NOW - 90 * 86_400_000,
+    identityProblem: null,
     syncError: null,
     clientCertRequired: true,
     clientCertIssued: true,
@@ -153,7 +157,7 @@ describe("Santa's syncs with the helper", () => {
   });
 
   it('names a refusal that came before missed syncs', () => {
-    const stale = { ...required, lastSyncAt: null, clientCertSeenAt: NOW - 40 * MIN };
+    const stale = { ...required, lastSyncAt: null, lastRuleSyncAt: NOW - 40 * MIN };
     expect(
       santaSyncProblem(
         { ...stale, lastRefusal: { at: NOW - 35 * MIN, reason: 'no_certificate' } },
@@ -172,12 +176,52 @@ describe("Santa's syncs with the helper", () => {
   });
 
   it('flags Santa missing three syncs, counted from waking', () => {
-    const stale = { ...required, lastSyncAt: null, clientCertSeenAt: NOW - 31 * MIN };
+    const stale = { ...required, lastSyncAt: null, lastRuleSyncAt: NOW - 31 * MIN };
     expect(santaSyncProblem(stale, NOW)).toBe('Santa hasn’t synced with Vigil for 31 minutes');
     // The Mac just woke: Santa hasn't had the chance.
     expect(santaSyncProblem(stale, NOW, NOW - 2 * MIN)).toBeUndefined();
-    // Never seen with the certificate (a new install before the profile): setup's to say.
-    expect(santaSyncProblem({ ...stale, clientCertSeenAt: null }, NOW)).toBeUndefined();
+  });
+
+  it('counts only syncs that applied the rules, never a handshake', () => {
+    // Santa presented its certificate a minute ago, but no rule sync for 40.
+    const handshake = {
+      ...required,
+      lastSyncAt: null,
+      clientCertSeenAt: NOW - MIN,
+      lastRuleSyncAt: NOW - 40 * MIN,
+    };
+    expect(santaSyncProblem(handshake, NOW)).toBe('Santa hasn’t synced with Vigil for 40 minutes');
+    // An older helper without lastRuleSyncAt: its lastSyncAt, not the handshake.
+    const { lastRuleSyncAt: _, ...rest } = handshake;
+    const older = { ...rest, lastSyncAt: NOW - 40 * MIN };
+    expect(santaSyncProblem(older, NOW)).toBe('Santa hasn’t synced with Vigil for 40 minutes');
+  });
+
+  it('counts from install time when Santa never synced at all', () => {
+    const never = {
+      ...required,
+      lastSyncAt: null,
+      lastRuleSyncAt: null,
+      lastAuthRuleSyncAt: null,
+      clientCertSeenAt: NOW - MIN,
+      installedAt: NOW - 45 * MIN,
+    };
+    expect(santaSyncProblem(never, NOW)).toBe(
+      'Santa hasn’t synced with Vigil since it was set up 45 minutes ago',
+    );
+    // Just installed: give Santa its three intervals.
+    expect(santaSyncProblem({ ...never, installedAt: NOW - 10 * MIN }, NOW)).toBeUndefined();
+  });
+
+  it('flags a problem the helper reports with Santa’s identity', () => {
+    expect(
+      santaSyncProblem(
+        { ...required, identityProblem: 'Couldn’t save that Santa’s certificate is required' },
+        NOW,
+      ),
+    ).toBe(
+      'Santa’s sync certificate needs attention: Couldn’t save that Santa’s certificate is required',
+    );
   });
 
   it('flags a closed sync port and a certificate about to lapse', () => {
@@ -210,7 +254,17 @@ describe("Santa's syncs with the helper", () => {
     expect(probed).toMatchObject({ state: 'ok', lastRefusal });
     expect(probed?.repair).toBeUndefined();
     expect(
-      await layer({ ...required, lastSyncAt: null, clientCertSeenAt: NOW - 40 * MIN }),
+      await layer({ ...required, lastSyncAt: null, lastRuleSyncAt: NOW - 40 * MIN }),
+    ).toMatchObject({ state: 'degraded', repair: 'santa-sync' });
+    // Never a rule sync since install: Fair with Repair too, not a quiet "ok".
+    expect(
+      await layer({
+        ...required,
+        lastSyncAt: null,
+        lastRuleSyncAt: null,
+        lastAuthRuleSyncAt: null,
+        installedAt: NOW - 60 * MIN,
+      }),
     ).toMatchObject({ state: 'degraded', repair: 'santa-sync' });
   });
 });

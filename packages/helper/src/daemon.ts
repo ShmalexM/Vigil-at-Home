@@ -109,6 +109,13 @@ export interface SensorHealth {
     /** When the sync identity was first set up (its install-complete marker). */
     installedAt: number | null;
     /**
+     * When Santa last finished a sync that applied every rule it was sent,
+     * kept across restarts. A handshake alone never counts.
+     */
+    lastRuleSyncAt: number | null;
+    /** The same, for a sync on a connection that presented the pinned certificate. */
+    lastAuthRuleSyncAt: number | null;
+    /**
      * When Santa last presented the pinned client certificate (ms since
      * epoch), kept across restarts; null if it never has since the identity
      * was (re)issued. Proof the profile with the certificate is in use.
@@ -158,6 +165,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     clientAuth = new SyncClientAuth({
       store: identity,
       seen: join(paths.tlsDir, CLIENT_SEEN_FILE),
+      ruleSync: join(paths.tlsDir, RULE_SYNC_FILE),
       log,
     });
 
@@ -196,6 +204,8 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
         installedAt: id?.installedAt ?? null,
         clientCertSeenAt: clientAuth?.seenAt ?? null,
         clientCertExpiresAt: id?.expiresAt ?? null,
+        lastRuleSyncAt: clientAuth?.ruleSyncs.last ?? null,
+        lastAuthRuleSyncAt: clientAuth?.ruleSyncs.authenticated ?? null,
         lastRefusal: clientAuth?.lastRefusal ?? null,
         syncIntervalSeconds: live.sync?.fullSyncIntervalSeconds ?? 600,
       },
@@ -322,9 +332,11 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   let syncRetry: NodeJS.Timeout | undefined;
   let stopped = false;
   if (clientAuth) {
+    const auth = clientAuth;
     const sync = new SantaSyncServer({
       store: rules,
       log,
+      onRuleSync: ({ at, req }) => auth.ruleSynced(at, presentedCertificate(req?.socket)),
       eventDetailUrl: 'vigil://santa/event?sha256=%file_sha%',
       eventDetailText: 'Open Vigil',
     });
@@ -443,6 +455,8 @@ function syncTlsFiles(tls: ReturnType<typeof syncTlsPaths>): SyncTlsFiles {
 
 /** When Santa last presented its client certificate, so helper.status has it after a restart. */
 export const CLIENT_SEEN_FILE = 'client-cert-seen';
+/** When Santa last finished a rule sync, with and without its certificate. */
+export const RULE_SYNC_FILE = 'rule-sync.json';
 
 /** Why a connection to the sync port was turned away. */
 export type SyncRefusal = 'no_certificate' | 'wrong_certificate' | 'handshake_failed';
@@ -488,6 +502,7 @@ export class SyncClientAuth implements SyncClientPin {
   private seenWritten = 0;
   private refusal: { at: number; reason: SyncRefusal } | null = null;
   private readonly refusalLog = new Map<SyncRefusal, { at: number; suppressed: number }>();
+  private syncs: { last: number | null; authenticated: number | null };
   private readonly now: () => number;
 
   constructor(
@@ -495,12 +510,15 @@ export class SyncClientAuth implements SyncClientPin {
       store: SyncIdentityStore;
       /** Where the time Santa last presented its certificate is kept. */
       seen: string;
+      /** Where the times of the last rule syncs are kept. */
+      ruleSync: string;
       log: (msg: string) => void;
       now?: () => number;
     },
   ) {
     this.now = o.now ?? Date.now;
     this.lastSeen = readTime(o.seen);
+    this.syncs = readRuleSyncs(o.ruleSync);
     if (!o.store.required)
       o.log(
         "Santa sync: Santa's profile predates its client certificate; clients without one " +
@@ -519,6 +537,11 @@ export class SyncClientAuth implements SyncClientPin {
 
   get lastRefusal(): { at: number; reason: SyncRefusal } | null {
     return this.refusal;
+  }
+
+  /** When Santa last finished a rule sync at all, and on a connection with its certificate. */
+  get ruleSyncs(): Readonly<{ last: number | null; authenticated: number | null }> {
+    return this.syncs;
   }
 
   accepts(fingerprint: string): boolean {
@@ -556,6 +579,20 @@ export class SyncClientAuth implements SyncClientPin {
       this.o.log('Santa sync: Santa presented its client certificate; it is now required');
   }
 
+  /** Santa finished a sync that applied every rule; `authenticated` when it presented its certificate. */
+  ruleSynced(at: number, authenticated: boolean): void {
+    this.syncs = {
+      last: at,
+      authenticated: authenticated ? at : this.syncs.authenticated,
+    };
+    try {
+      writeFileSync(this.o.ruleSync, JSON.stringify(this.syncs) + '\n', { mode: 0o600 });
+      chmodSync(this.o.ruleSync, 0o600);
+    } catch (err) {
+      this.o.log(`Santa sync: could not record the last sync: ${(err as Error).message}`);
+    }
+  }
+
   /**
    * Any local program can open the port, so each kind of refusal is logged
    * at most once per REFUSAL_LOG_MS, with a count of the ones in between.
@@ -572,6 +609,22 @@ export class SyncClientAuth implements SyncClientPin {
     const more = last?.suppressed ? `; ${last.suppressed} more since the last one logged` : '';
     this.o.log(`Santa sync: refused a connection (${reason.replace('_', ' ')})${more}`);
   }
+}
+
+function readRuleSyncs(path: string): { last: number | null; authenticated: number | null } {
+  try {
+    const r = JSON.parse(readFileSync(path, 'utf8')) as { last?: unknown; authenticated?: unknown };
+    const time = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    return { last: time(r.last), authenticated: time(r.authenticated) };
+  } catch {
+    return { last: null, authenticated: null };
+  }
+}
+
+/** Whether a request came on a connection that presented a certificate (only Santa's gets that far). */
+function presentedCertificate(socket: unknown): boolean {
+  const s = socket as Partial<TLSSocket> | undefined;
+  return typeof s?.getPeerCertificate === 'function' && !!s.getPeerCertificate()?.raw;
 }
 
 /** A time written as an ISO string, or null. */

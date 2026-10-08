@@ -37,6 +37,17 @@ export const FAPOLICYD_PATHS = ['/usr/sbin/fapolicyd', '/usr/bin/fapolicyd'];
 export interface HelperSantaSync {
   /** When Santa last finished a sync (since the helper started). */
   lastSyncAt?: number | null;
+  /**
+   * When Santa last finished a sync that applied every rule (kept across
+   * helper restarts). What missed syncs count from; a handshake never counts.
+   */
+  lastRuleSyncAt?: number | null;
+  /** The same, on a connection that presented Santa's certificate. */
+  lastAuthRuleSyncAt?: number | null;
+  /** When the helper first set up Santa's sync identity. */
+  installedAt?: number | null;
+  /** Something wrong with Santa's sync identity the helper couldn't fix, or null. */
+  identityProblem?: string | null;
   /** Why the sync port isn't listening, or null. */
   syncError?: string | null;
   /** The sync port takes only Santa's client certificate. */
@@ -75,9 +86,14 @@ const REFUSAL_WORDS: Record<NonNullable<HelperSantaSync['lastRefusal']>['reason'
  * Why rule updates aren't reaching Santa, or undefined when its syncs are
  * fine. Once Santa's certificate is required, a Santa that can't present it
  * stops getting rules without any other sign, so every failure shows here:
- * the port not listening, no sync for three intervals, or a certificate
- * about to lapse. A refused connection alone is not one: any local program
- * can open the port. It only explains missed syncs that follow it.
+ * the port not listening, a problem with the identity the helper reports,
+ * no rule sync for three intervals, or a certificate about to lapse.
+ *
+ * Missed syncs count from the last sync that applied Santa's rules; a
+ * handshake or a preflight alone never counts. Before the first one, they
+ * count from when the helper set up Santa's identity, so a Santa that never
+ * syncs shows too. A refused connection alone is not a problem: any local
+ * program can open the port. It only explains missed syncs that follow it.
  * `since` is when the app could first expect a sync (start, or wake from sleep).
  */
 export function santaSyncProblem(
@@ -88,18 +104,20 @@ export function santaSyncProblem(
   if (!s) return undefined;
   if (s.syncError)
     return `Rule updates can’t reach Santa: Vigil’s sync port isn’t open (${s.syncError})`;
-  const times = [s.lastSyncAt, s.clientCertSeenAt].filter(
-    (t): t is number => typeof t === 'number',
-  );
-  const lastGood = times.length ? Math.max(...times) : null;
-  if (s.clientCertRequired && lastGood !== null) {
+  if (s.identityProblem) return `Santa’s sync certificate needs attention: ${s.identityProblem}`;
+  // A helper from before lastRuleSyncAt reports only lastSyncAt.
+  const lastRuleSync = s.lastRuleSyncAt !== undefined ? s.lastRuleSyncAt : (s.lastSyncAt ?? null);
+  const from = lastRuleSync ?? s.installedAt ?? null;
+  if (s.clientCertRequired && from !== null) {
     const intervalMs = (s.syncIntervalSeconds ?? 600) * 1000;
-    const quiet = now - Math.max(lastGood, since);
+    const quiet = now - Math.max(from, since);
     if (quiet > MISSED_SYNCS * intervalMs) {
       const refusal = s.lastRefusal;
       const why =
-        refusal && refusal.at > lastGood ? `; since then ${REFUSAL_WORDS[refusal.reason]}` : '';
-      return `Santa hasn’t synced with Vigil for ${minutes(now - lastGood)} minutes${why}`;
+        refusal && refusal.at > from ? `; since then ${REFUSAL_WORDS[refusal.reason]}` : '';
+      return lastRuleSync !== null
+        ? `Santa hasn’t synced with Vigil for ${minutes(now - from)} minutes${why}`
+        : `Santa hasn’t synced with Vigil since it was set up ${minutes(now - from)} minutes ago${why}`;
     }
   }
   if (s.clientCertRequired && s.clientCertExpiresAt != null) {

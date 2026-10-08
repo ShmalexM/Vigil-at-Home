@@ -48,7 +48,8 @@ is its sync server on the same Mac:
   for good (`SyncClientAuth` in the helper). A new install requires it from the start.
   Until the user reinstalls the profile, `helper.status` reports
   `clientCertRequired: false`; `clientCertSeenAt` is when Santa last presented the
-  pinned certificate.
+  pinned certificate, and `lastRuleSyncAt` / `lastAuthRuleSyncAt` when it last finished
+  a sync that applied its rules (with the certificate, for the second).
 - **One identity store.** The CA, server and client certificates, the PKCS#12 file, its
   password, the pin, the previous pin, revoked pins and the required flag are written
   together into a new `versions/<id>/` folder, and a `current` link is switched to it
