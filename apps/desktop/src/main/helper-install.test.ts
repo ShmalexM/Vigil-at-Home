@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -7,6 +16,7 @@ import {
   helperBundleDir,
   helperInstallCommand,
   helperMatch,
+  helperPayloadDir,
   installedHelperFiles,
   runHelperScript,
   shellQuote,
@@ -158,16 +168,31 @@ describe('helper install', () => {
         writeFileSync(join(dir, 'linux', f), f);
       const root = mkdtempSync(join(tmpdir(), 'root-'));
       const files = installedHelperFiles(dir, platform, root);
+      const payload = join(root, helperPayloadDir(platform));
+      let n = 0;
+      // As install.sh does: a new versions/<id>, then `current` pointed at it.
       const install = () => {
+        const version = `v${++n}`;
+        mkdirSync(join(payload, 'versions', version), { recursive: true });
+        rmSync(join(payload, 'current'), { force: true });
+        symlinkSync(`versions/${version}`, join(payload, 'current'));
         for (const f of files) {
           mkdirSync(dirname(f.installed), { recursive: true });
           writeFileSync(f.installed, readFileSync(f.bundled));
         }
       };
+      expect(files[0]!.installed).toBe(join(payload, 'current', 'helper.mjs'));
+      expect(files[1]!.installed).toBe(join(payload, 'current', 'node'));
 
       const none = helperMatch(dir, platform, root);
       expect(none.installed).toBe('none');
+      // A helper from before versions, with its files at the top of the folder.
+      mkdirSync(payload, { recursive: true });
+      writeFileSync(join(payload, 'helper.mjs'), readFileSync(join(dir, 'helper.mjs')));
+      writeFileSync(join(payload, 'node'), readFileSync(join(dir, 'node')));
+      expect(helperMatch(dir, platform, root).installed).toBe('outdated');
       install();
+      expect(lstatSync(join(payload, 'current')).isSymbolicLink()).toBe(true);
       expect(helperMatch(dir, platform, root)).toEqual({
         installed: 'current',
         bundle: none.bundle,

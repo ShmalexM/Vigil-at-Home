@@ -37,10 +37,18 @@ export function helperScript(
   return platform === 'linux' ? join(dir, 'linux', `${kind}.sh`) : join(dir, `${kind}.sh`);
 }
 
+/** The root-owned folder install.sh keeps the helper's versions in. */
+export function helperPayloadDir(platform: NodeJS.Platform = process.platform): string {
+  return platform === 'linux'
+    ? '/usr/libexec/vigil-helper.d'
+    : '/Library/PrivilegedHelperTools/vigil-helper.d';
+}
+
 /**
  * Where install.sh puts each file the app ships, so the app can tell whether
- * the installed helper is the one it carries. Node is compared by size: it is
- * large, and a new Node release always changes it.
+ * the installed helper is the one it carries. Node and helper.mjs are read
+ * through `current`, the link to the version the launcher runs. Node is
+ * compared by size: it is large, and a new Node release always changes it.
  */
 export function installedHelperFiles(
   dir: string,
@@ -48,11 +56,14 @@ export function installedHelperFiles(
   root = '',
 ): { bundled: string; installed: string; by: 'content' | 'size' }[] {
   const at = (p: string) => join(root, p);
+  const d = `${helperPayloadDir(platform)}/current`;
+  const payload = [
+    { bundled: join(dir, 'helper.mjs'), installed: at(`${d}/helper.mjs`), by: 'content' },
+    { bundled: join(dir, 'node'), installed: at(`${d}/node`), by: 'size' },
+  ] as const;
   if (platform === 'linux') {
-    const d = '/usr/libexec/vigil-helper.d';
     return [
-      { bundled: join(dir, 'helper.mjs'), installed: at(`${d}/helper.mjs`), by: 'content' },
-      { bundled: join(dir, 'node'), installed: at(`${d}/node`), by: 'size' },
+      ...payload,
       {
         bundled: join(dir, 'linux', 'vigil-helper'),
         installed: at('/usr/libexec/vigil-helper'),
@@ -70,10 +81,8 @@ export function installedHelperFiles(
       },
     ];
   }
-  const d = '/Library/PrivilegedHelperTools/vigil-helper.d';
   return [
-    { bundled: join(dir, 'helper.mjs'), installed: at(`${d}/helper.mjs`), by: 'content' },
-    { bundled: join(dir, 'node'), installed: at(`${d}/node`), by: 'size' },
+    ...payload,
     {
       bundled: join(dir, 'vigil-helper'),
       installed: at('/Library/PrivilegedHelperTools/vigil-helper'),
@@ -114,7 +123,12 @@ export function helperMatch(
     .update(shipped.map((f) => fingerprint(f.bundled, f.by)).join('\n'))
     .digest('hex')
     .slice(0, 16);
-  if (!existsSync(files[0]!.installed)) return { installed: 'none', bundle };
+  if (!existsSync(files[0]!.installed)) {
+    // A helper installed before versions keeps its files at the top of the
+    // folder, with no `current`. It needs install.sh to move to the new layout.
+    const legacy = existsSync(join(root, helperPayloadDir(platform), 'helper.mjs'));
+    return { installed: legacy ? 'outdated' : 'none', bundle };
+  }
   const same = shipped.every((f) => {
     try {
       return fingerprint(f.bundled, f.by) === fingerprint(f.installed, f.by);
