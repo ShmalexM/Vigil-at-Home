@@ -120,6 +120,9 @@
     grid-template-columns: 84px minmax(0, 1fr);
   }
 }
+.split-detail {
+  min-width: 0;
+}
 .split-list {
   position: sticky;
   top: 44px;
@@ -127,6 +130,7 @@
   gap: 2px;
 }
 .subject {
+  overflow-wrap: anywhere;
   padding: 8px 10px;
   border-radius: var(--radius-sm);
   background: var(--bg2);
