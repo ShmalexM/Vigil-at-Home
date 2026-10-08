@@ -180,7 +180,7 @@ function Exclusions({ view, reload }: { view: RuleEditorView; reload: () => void
         <input
           className="field"
           aria-label="Value"
-          placeholder="/Applications/Docker.app/Contents/MacOS/com.docker.backend"
+          placeholder="e.g. /Applications/Docker.app/…"
           value={draft.value}
           onChange={(e) => setDraft({ ...draft, value: e.target.value })}
           onKeyDown={(e) => {

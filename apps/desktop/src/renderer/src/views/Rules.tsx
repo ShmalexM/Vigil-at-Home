@@ -1,5 +1,5 @@
 import type { RuleMode } from '@vigil/core';
-import { BellRing, Pencil, Plus, Search } from 'lucide-react';
+import { BellRing, ChevronDown, ChevronRight, Pencil, Plus, Search } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { RuleView } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
@@ -16,6 +16,7 @@ import {
   isToolRule,
   modeLabel,
   modesFor,
+  RAISED_BY_VIGIL,
   visibleRules,
   type RuleSort,
 } from '../rule-modes';
@@ -142,6 +143,13 @@ export function RulesView({
   );
 }
 
+/** What the modes mean, beside the control. */
+const MODE_HELP = {
+  rule: 'Shadow only logs matches. Alert tells you. Block also acts at once.',
+  tool: 'Record only logs the step. Ask has Claude Code ask you. Deny stops it.',
+  raised: 'Record only logs it. Alert tells you.',
+};
+
 function RuleRow({
   view,
   editing,
@@ -154,7 +162,8 @@ function RuleRow({
   const { rule, matches } = view;
   const toast = useToast();
   const [confirmBlock, setConfirmBlock] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (editing) ref.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
   }, [editing]);
@@ -179,10 +188,20 @@ function RuleRow({
     });
   };
 
+  const expanded = open || editing;
+  const tone = rule.mode === 'block' ? 'poor' : rule.mode === 'alert' ? 'fair' : undefined;
+
   return (
     <Card tight>
-      <div ref={ref} className="row rule-row">
-        <div className="col grow" style={{ gap: 2 }}>
+      {/* The mode is changed only from the opened row, so a stray click on the list changes nothing. */}
+      <button
+        ref={ref}
+        type="button"
+        className="row rule-row rule-head"
+        aria-expanded={expanded}
+        onClick={() => (editing ? onEdit(false) : setOpen(!open))}
+      >
+        <div className="col grow" style={{ gap: 2, minWidth: 0 }}>
           <div className="row">
             <span className="t-h3 ellipsis">{rule.name}</span>
             {rule.origin === 'ai' && <Chip tone="ai">AI-drafted</Chip>}
@@ -193,36 +212,53 @@ function RuleRow({
               </span>
             )}
           </div>
-          <span className="t-small clamp-2" title={rule.description}>
+          <span className={`t-small ${expanded ? '' : 'clamp-2'}`} title={rule.description}>
             {rule.description}
           </span>
         </div>
-        <SeverityMark severity={rule.severity} />
-        <Chip title="How often this rule is expected to be right">{rule.fidelity} fidelity</Chip>
-        <span
-          className="t-small nowrap"
-          style={{ width: 104, textAlign: 'right' }}
-          title="Matches in the last 14 days, in any mode"
-        >
-          {matches} in 14 days
+        <span className="row rule-meta">
+          <SeverityMark severity={rule.severity} />
+          <Chip title="How often this rule is expected to be right">{rule.fidelity} fidelity</Chip>
+          <span
+            className="t-small nowrap"
+            style={{ width: 104, textAlign: 'right' }}
+            title="Matches in the last 14 days, in any mode"
+          >
+            {matches} in 14 days
+          </span>
+          <Chip
+            tone={tone}
+            title="What this rule does when it matches. Open the rule to change it."
+          >
+            {modeLabel(rule, rule.mode)}
+          </Chip>
+          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </span>
-        <Segmented
-          label={`Mode for ${rule.name}`}
-          value={rule.mode}
-          options={modesFor(rule)}
-          onChange={(m) => void set(m)}
-        />
-        <Button
-          size="sm"
-          kind={editing ? 'secondary' : 'ghost'}
-          icon={<Pencil size={13} />}
-          aria-expanded={editing}
-          title={`Edit ${rule.name} and its exclusions`}
-          onClick={() => onEdit(!editing)}
-        >
-          {editing ? 'Close' : 'Edit'}
-        </Button>
-      </div>
+      </button>
+      {expanded && (
+        <div className="row rule-controls">
+          <span className="t-label">Mode</span>
+          <Segmented
+            label={`Mode for ${rule.name}`}
+            value={rule.mode}
+            options={modesFor(rule)}
+            onChange={(m) => void set(m)}
+          />
+          <span className="t-small grow">
+            {MODE_HELP[RAISED_BY_VIGIL.has(rule.id) ? 'raised' : tool ? 'tool' : 'rule']}
+          </span>
+          <Button
+            size="sm"
+            kind={editing ? 'secondary' : 'ghost'}
+            icon={<Pencil size={13} />}
+            aria-expanded={editing}
+            title={`Edit ${rule.name} and its exclusions`}
+            onClick={() => onEdit(!editing)}
+          >
+            {editing ? 'Close editor' : 'Edit rule'}
+          </Button>
+        </div>
+      )}
       {rule.provenance && (
         <span className="t-small">Why the AI drafted it: {rule.provenance.rationale}</span>
       )}
