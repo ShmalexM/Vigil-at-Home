@@ -3,6 +3,7 @@ import { SensorRegistry } from './sensors.js';
 import {
   AwakeClock,
   checkHealth,
+  helperSensorsFrom,
   QUIET_AFTER_MS,
   reportHealth,
   type HealthProbe,
@@ -44,6 +45,24 @@ describe('checkHealth', () => {
       }),
     );
     expect(failed['helper']?.state).toBe('down');
+  });
+
+  it('says the helper is down while it reconnects with no connection', async () => {
+    const h = await byId(
+      probe({
+        helper: () => 'connected' as const,
+        helperSensors: helperSensorsFrom(async () => null),
+      }),
+    );
+    expect(h['helper']?.state).toBe('down');
+    // An older helper that answers without sensors is still up.
+    const old = await byId(
+      probe({
+        helper: () => 'connected' as const,
+        helperSensors: helperSensorsFrom(async () => ({})),
+      }),
+    );
+    expect(old['helper']?.state).toBe('ok');
   });
 
   it('lets only the latest check report when checks overlap', async () => {

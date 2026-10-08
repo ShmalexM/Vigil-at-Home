@@ -26,20 +26,61 @@ done
 # in, so an update leaves the helper stopped for as short a time as possible.
 # Santa keeps enforcing the rules it already has while the helper restarts.
 install -d -o root -g wheel -m 755 "$TOOLS"
-# Each run stages in its own folder, so two runs never share one. Older
-# versions staged in DEST.new; clear any they left.
-rm -rf "$DEST.new"
+# One run at a time: mkdir is atomic, so a second run (the app and a
+# terminal at once) waits here. A lock whose run died without its traps is
+# taken over.
+LOCK=$DEST.lock
+i=0
+until mkdir "$LOCK" 2>/dev/null; do
+  pid=$(cat "$LOCK/pid" 2>/dev/null || true)
+  if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+    rm -rf "$LOCK"
+    continue
+  fi
+  i=$((i + 1))
+  [ "$i" -lt 240 ] || { echo "Another helper install is still running." >&2; exit 1; }
+  sleep 0.5
+done
+echo $$ >"$LOCK/pid"
+NEW=
+OLD=
+cleanup() {
+  # Never leave the computer without the helper's files: put the old copy
+  # back if the new one didn't make it in.
+  if [ -n "$OLD" ]; then
+    [ -e "$DEST" ] || [ ! -e "$OLD" ] || mv "$OLD" "$DEST"
+    rm -rf "${OLD%/helper.d}"
+  fi
+  [ -z "$NEW" ] || rm -rf "$NEW"
+  rm -rf "$LOCK"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+# Each run stages in its own folder. Under the lock, anything left behind
+# (DEST.new from older versions too) belongs to a run that is gone; a run
+# killed mid-swap may have left the only copy aside, so put that back first.
+if [ ! -e "$DEST" ]; then
+  for o in "$DEST".old.*/helper.d; do
+    if [ -d "$o" ]; then mv "$o" "$DEST" && break; fi
+  done
+fi
+rm -rf "$DEST.new" "$DEST".new.* "$DEST".old.*
 NEW=$(mktemp -d "$DEST.new.XXXXXX")
-trap 'rm -rf "$NEW"' EXIT
 chown root:wheel "$NEW"
 chmod 755 "$NEW"
 install -o root -g wheel -m 755 "$SRC/node" "$NEW/node"
 install -o root -g wheel -m 644 "$SRC/helper.mjs" "$NEW/helper.mjs"
 launchctl bootout "system/$LABEL" 2>/dev/null || true
-rm -rf "$DEST"
+# Two renames and no delete in between, so DEST is never missing for long
+# and is put back if the swap fails.
+if [ -e "$DEST" ]; then
+  OLD=$(mktemp -d "$DEST.old.XXXXXX")/helper.d
+  mv "$DEST" "$OLD"
+fi
 mv "$NEW" "$DEST"
-# If another run put DEST back meanwhile, mv nested this copy inside it.
-rm -rf "$DEST/${NEW##*/}"
+NEW=
+[ -z "$OLD" ] || rm -rf "${OLD%/helper.d}"
+OLD=
 install -o root -g wheel -m 755 "$SRC/vigil-helper" "$TOOLS/vigil-helper"
 install -o root -g wheel -m 644 "$SRC/$LABEL.plist" "$PLIST"
 install -d -o root -g wheel -m 755 /Library/Logs/Vigil

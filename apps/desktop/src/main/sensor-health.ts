@@ -55,6 +55,22 @@ export interface HealthProbe {
   platform?: NodeJS.Platform;
 }
 
+/**
+ * The helper's sensor report, from its helper.status answer. No answer
+ * because there is no connection (it dropped and is reconnecting) means
+ * the helper can't be vouched for, so it throws and the check says down; an
+ * older helper's answer without sensors is just no report.
+ */
+export function helperSensorsFrom(
+  query: () => Promise<{ sensors?: HelperSensors } | null>,
+): () => Promise<HelperSensors | null> {
+  return async () => {
+    const status = await query();
+    if (status === null) throw new Error('The helper is not connected');
+    return status.sensors ?? null;
+  };
+}
+
 export function macProbe(
   lastEventAt: HealthProbe['lastEventAt'],
   helper: HealthProbe['helper'],
