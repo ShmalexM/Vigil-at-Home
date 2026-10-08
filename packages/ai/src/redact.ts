@@ -44,14 +44,15 @@ export const MAX_REDACT_CHARS = 512 * 1024;
 // the field's shape alone puts it in a value:
 //
 // - a field that is one NAME=value assignment, its value a single token;
-// - a field that is one URL, with no blank or shell metacharacter in it;
+// - a field that is one URL, with no blank or shell metacharacter in it: the
+//   password of its userinfo, and the value of a credential-named query
+//   parameter. A secret anywhere else in it withholds the field;
 // - a field that is one JSON document, under a credential-named key, or in a
 //   string that is itself one of these shapes (never an array's element,
-//   which may be an argument list);
-// - in an argument list (argv) whose argv[0] is a known client such as curl
-//   or mysql, the value of that tool's credential flag, or a URL argument.
-//   argv[0] is never replaced, and any other secret in the list withholds
-//   the whole list.
+//   which may be an argument list).
+//
+// An argument list (argv) is one field, and no secret in it is cut out: a
+// secret in any argument, whatever the tool, withholds every argument.
 //
 // User, host and email names are privacy, not secrets: they are replaced
 // wherever their rule finds them, each with a marker that says which name
@@ -1198,38 +1199,127 @@ function outsideRegions(found: Finding[], regions: readonly number[]): Finding[]
  * Where a field sits, which decides whether a secret in it may be cut out:
  *
  * - field: a string of its own. Only a field that is, whole, one NAME=value
- *   assignment, one URL with no blank or shell metacharacter, or one JSON
- *   document, has a place for a secret that nothing runs.
- *   A field that is only a URL or only a JSON document is not a realistic
- *   command name, so its precise replacement is accepted as safe.
- *   Free text such as a command line is withheld whole when it holds a
- *   secret: losing precision there is the safe direction.
- * - url: an argument a known client takes as a URL, with no shell between
- *   them. Only the password of a field that is one URL is cut out.
+ *   assignment, one URL (see analyzeUrl), or one JSON document, has a place
+ *   for a secret that nothing runs. A field that is only a URL or only a JSON
+ *   document is not a realistic command name, so its precise replacement is
+ *   accepted as safe. Free text such as a command line is withheld whole
+ *   when it holds a secret: losing precision there is the safe direction.
  * - word: a word that may be a command, such as an argument or an array's
  *   element. No secret in it is cut out.
  */
-type Shape = 'field' | 'url' | 'word';
+type Shape = 'field' | 'word';
 
 const URL_START = /^[A-Za-z][A-Za-z0-9+.-]{0,30}:\/\//;
 const ASSIGNMENT_START = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
-/**
- * Where the part after scheme:// starts when the field is one URL, else -1.
- * Strict, it may hold only characters no shell acts on, and ? # [ ], which
- * no shell reads as the end of a word; else anything but a blank.
- */
-function urlValueStart(text: string, strict: boolean): number {
-  const scheme = URL_START.exec(text);
-  if (!scheme) return -1;
-  for (let i = scheme[0].length; i < text.length; i++) {
-    const c = text.charCodeAt(i);
-    const ok = strict
-      ? isSafeCode(c) || c === 0x3f || c === 0x23 || c === 0x5b || c === 0x5d
-      : c > 0x20 && c !== 0x7f;
-    if (!ok) return -1;
+// ---------------------------------------------------------------------------
+// A field that is one URL. Only two kinds of value in it are cut out: the
+// password of its userinfo, and the value of a query parameter whose name is
+// a credential's. A secret anywhere else (the host, the path, the fragment,
+// the user name, a parameter's name or another parameter's value) withholds
+// the field. The URL is parsed with the WHATWG parser, and read only when it
+// serializes back to exactly the field, so each part's place in the field is
+// known; the replacements are spliced into the field as written.
+
+/** The last word of a query parameter name that makes its value a secret. */
+const URL_KEY_WORDS = new Set(['key', 'sig', 'signature']);
+
+function isUrlCredentialKey(key: string): boolean {
+  if (isCredentialName(key)) return true;
+  const parts = nameParts(key);
+  return parts.length > 0 && URL_KEY_WORDS.has(parts[parts.length - 1]!);
+}
+
+/** A character a field read as one URL may hold: safe ones, and ? # [ ] &. */
+function isUrlCode(code: number): boolean {
+  return (
+    isSafeCode(code) ||
+    code === 0x3f ||
+    code === 0x23 ||
+    code === 0x5b ||
+    code === 0x5d ||
+    code === 0x26
+  );
+}
+
+function decodeQueryPart(part: string): string {
+  try {
+    return decodeURIComponent(part.replace(/\+/g, ' '));
+  } catch {
+    return part;
   }
-  return scheme[0].length;
+}
+
+/**
+ * The findings of a field that is one URL, or undefined when it isn't one
+ * the parser serializes back to exactly the field.
+ */
+function analyzeUrl(text: string, options: NameOptions, depth: number): Finding[] | undefined {
+  for (let i = 0; i < text.length; i++) if (!isUrlCode(text.charCodeAt(i))) return undefined;
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return undefined;
+  }
+  const { protocol, username, password, host, pathname, search, hash } = url;
+  const userinfo = username || password ? `${username}${password ? `:${password}` : ''}@` : '';
+  // The parser writes an empty path of http://host as /: the one change
+  // allowed, as it moves no part of the field.
+  const paths = pathname === '/' ? ['/', ''] : [pathname];
+  const href = url.href;
+  if (
+    !paths.some(
+      (path) =>
+        `${protocol}//${userinfo}${host}${path}${search}${hash}` === text &&
+        href === `${protocol}//${userinfo}${host}${pathname}${search}${hash}`,
+    )
+  ) {
+    return undefined;
+  }
+  // [start, end] of each value to replace, and of what to leave out when the
+  // rest of the field is checked for secrets: the password with its colon,
+  // and each credential parameter whole.
+  const replace: Array<readonly [number, number]> = [];
+  const drop: Array<readonly [number, number]> = [];
+  if (password) {
+    const start = protocol.length + 2 + username.length + 1;
+    replace.push([start, start + password.length]);
+    drop.push([start - 1, start + password.length]);
+  }
+  if (search.length > 1) {
+    let at = text.length - hash.length - search.length + 1;
+    for (const pair of search.slice(1).split('&')) {
+      const eq = pair.indexOf('=');
+      const key = eq < 0 ? pair : pair.slice(0, eq);
+      if (eq >= 0 && isUrlCredentialKey(decodeQueryPart(key))) {
+        const value = pair.slice(eq + 1);
+        drop.push([at, at + pair.length]);
+        if (!isBenignValue(decodeQueryPart(value), isPasswordName(decodeQueryPart(key)))) {
+          replace.push([at + eq + 1, at + pair.length]);
+        }
+      }
+      at += pair.length + 1;
+    }
+  }
+  for (const [start, end] of replace) if (!isSafeToken(text, start, end)) return [WITHHOLD];
+  // Every other part of the field must hold no secret.
+  let rest = '';
+  let last = 0;
+  for (const [start, end] of drop) {
+    rest += text.slice(last, start);
+    last = end;
+  }
+  rest += text.slice(last);
+  if (analyze(rest, options, depth, 'word').some((x) => x.withhold || x.rank > RANK_NAME)) {
+    return [WITHHOLD];
+  }
+  const f = new Findings(text);
+  addNames(text, options, f);
+  for (const [start, end] of replace) {
+    f.push({ start, end, with: REDACTED, rank: RANK_KEYED, withhold: false });
+  }
+  return f.list;
 }
 
 /** Where the value starts when the field is one NAME=value with a clean value, else -1. */
@@ -1274,6 +1364,10 @@ const DETECTORS = [
  */
 function analyze(text: string, options: NameOptions, depth: number, shape: Shape): Finding[] {
   if (!mayHoldSecret(text, options)) return [];
+  if (shape === 'field' && URL_START.test(text)) {
+    const url = analyzeUrl(text, options, depth);
+    if (url) return url;
+  }
   const rules = new Findings(text);
   for (const step of DETECTORS) {
     step(text, rules);
@@ -1292,12 +1386,7 @@ function analyze(text: string, options: NameOptions, depth: number, shape: Shape
   if (!found.some((x) => x.rank > RANK_NAME)) return found;
   // A secret. JSON's own reading placed each one it found, by key.
   if (shape === 'field' && isJsonDocument(text, regions)) return found;
-  let from = -1;
-  if (shape === 'url') {
-    if (!found.every((x) => x.rank === RANK_NAME || x.with === URL_CREDENTIALS)) return [WITHHOLD];
-    from = urlValueStart(text, false);
-  } else if (shape === 'field')
-    from = Math.max(urlValueStart(text, true), assignmentValueStart(text));
+  const from = shape === 'field' ? assignmentValueStart(text) : -1;
   if (from < 0) return [WITHHOLD];
   return found.every((x) => x.rank === RANK_NAME || x.start >= from) ? found : [WITHHOLD];
 }
@@ -1385,274 +1474,16 @@ export function redactField(text: string, options: NameOptions = {}): string {
 }
 
 // ---------------------------------------------------------------------------
-// Argument lists. The list is one field. Where argv[0] names a client on a
-// short fixed list, the value of that client's credential flag and the
-// password of a URL argument are cut out; argv[0] never is. Any other
-// secret in the list withholds all of it, so a word that a wrapper (env,
-// sudo, xargs, sh -c, ...) runs is never replaced.
-
-/** How a credential flag's value holds its secret. */
-type Credential =
-  /** All of it. */
-  | 'secret'
-  /** user:password, the part after the first colon; with no colon, the tool asks. */
-  | 'userpass'
-  /** An HTTP header: the value of Authorization or a credential-named header. */
-  | 'header'
-  /** openssl's pass:password; env:, file: and the rest name where it is. */
-  | 'openssl';
-
-/** A credential flag: how its value holds the secret, and whether the next argument is its value. */
-type CredentialFlag = readonly [Credential, boolean];
-
-interface Client {
-  /** The subcommand argv[1] must be, where the tool has aliases or runs others. */
-  readonly subcommands?: ReadonlySet<string>;
-  /** Credential flags: -f value, -fvalue, --flag value or --flag=value. */
-  readonly flags?: Readonly<Record<string, CredentialFlag>>;
-  /** The URL schemes an argument may have to be read as a URL, or every one. */
-  readonly schemes?: ReadonlySet<string> | 'any';
-  /** Flags whose next argument is a URL. */
-  readonly urlFlags?: ReadonlySet<string>;
-  /**
-   * The tool can run code or files it is given, so a flag or URL right after
-   * a flag that may take a value (--eval -p x) isn't read: it may be that
-   * flag's value, and what follows it something the tool runs.
-   */
-  readonly runs?: boolean;
-}
-
-const MYSQL: Client = {
-  // A bare -p or --password prompts, and the next argument is the database.
-  flags: { '-p': ['secret', false], '--password': ['secret', false] },
-};
-const LOGIN: Client = {
-  subcommands: new Set(['login']),
-  flags: { '-p': ['secret', true], '--password': ['secret', true] },
-  schemes: 'any',
-};
-const MONGO: Client = {
-  flags: { '-p': ['secret', true], '--password': ['secret', true] },
-  schemes: new Set(['mongodb', 'mongodb+srv']),
-  runs: true,
-};
-
-const CLIENTS: ReadonlyMap<string, Client> = new Map<string, Client>([
-  [
-    'curl',
-    {
-      flags: {
-        '-u': ['userpass', true],
-        '--user': ['userpass', true],
-        '-U': ['userpass', true],
-        '--proxy-user': ['userpass', true],
-        '-H': ['header', true],
-        '--header': ['header', true],
-        '--proxy-header': ['header', true],
-        '--oauth2-bearer': ['secret', true],
-      },
-      schemes: 'any',
-      urlFlags: new Set(['--url', '-x', '--proxy']),
-    },
-  ],
-  [
-    'wget',
-    {
-      flags: {
-        '--password': ['secret', true],
-        '--http-password': ['secret', true],
-        '--ftp-password': ['secret', true],
-        '--proxy-password': ['secret', true],
-        '--header': ['header', true],
-      },
-      schemes: 'any',
-    },
-  ],
-  [
-    'git',
-    {
-      subcommands: new Set(['clone', 'fetch', 'pull', 'push', 'ls-remote', 'remote', 'submodule']),
-      schemes: 'any',
-      runs: true,
-    },
-  ],
-  [
-    'gh',
-    {
-      subcommands: new Set(['api', 'auth', 'browse', 'issue', 'pr', 'release', 'repo']),
-      schemes: new Set(['http', 'https']),
-      runs: true,
-    },
-  ],
-  [
-    'aws',
-    {
-      subcommands: new Set(['s3', 's3api', 'sts', 'ecr', 'ec2', 'iam', 'lambda', 'logs', 'ssm']),
-      schemes: new Set(['http', 'https']),
-      urlFlags: new Set(['--endpoint-url']),
-      runs: true,
-    },
-  ],
-  ['docker', LOGIN],
-  ['podman', LOGIN],
-  ['mysql', MYSQL],
-  ['mysqldump', MYSQL],
-  ['mysqladmin', MYSQL],
-  ['mariadb', MYSQL],
-  ['mariadb-dump', MYSQL],
-  ['psql', { schemes: new Set(['postgres', 'postgresql']), runs: true }],
-  [
-    'redis-cli',
-    {
-      flags: { '-a': ['secret', true], '--pass': ['secret', true] },
-      schemes: new Set(['redis', 'rediss']),
-      urlFlags: new Set(['-u']),
-    },
-  ],
-  ['mongosh', MONGO],
-  ['mongo', MONGO],
-  [
-    'npm',
-    {
-      subcommands: new Set(['install', 'i', 'ci', 'add', 'publish', 'view', 'info', 'ping']),
-      schemes: 'any',
-      urlFlags: new Set(['--registry']),
-      runs: true,
-    },
-  ],
-  [
-    'openssl',
-    {
-      flags: {
-        '-k': ['secret', true],
-        '-K': ['secret', true],
-        '-pass': ['openssl', true],
-        '-passin': ['openssl', true],
-        '-passout': ['openssl', true],
-      },
-    },
-  ],
-]);
-
-const HEADER = /^([A-Za-z0-9_-]{1,128})[ \t]*:[ \t]*/;
-
-/** A credential flag's value with its secret replaced, or undefined when it holds none. */
-function replaceCredential(value: string, kind: Credential): string | undefined {
-  let keep = 0;
-  switch (kind) {
-    case 'secret':
-      break;
-    case 'userpass':
-      keep = value.indexOf(':') + 1;
-      if (keep === 0) return undefined;
-      break;
-    case 'openssl':
-      if (!value.startsWith('pass:')) return undefined;
-      keep = 5;
-      break;
-    case 'header': {
-      const header = HEADER.exec(value);
-      if (!header) return undefined;
-      const name = describeName(header[1]!);
-      if (!name.credential) return undefined;
-      keep = header[0].length;
-      if (name.authorization) keep += matchAt(AUTH_SCHEME, value, keep).length;
-      break;
-    }
-  }
-  return keep < value.length ? value.slice(0, keep) + REDACTED : undefined;
-}
-
-/** True for a URL a client takes as one, by its scheme. */
-function isClientUrl(arg: string, client: Client): boolean {
-  if (!client.schemes) return false;
-  const scheme = URL_START.exec(arg);
-  if (!scheme) return false;
-  if (client.schemes === 'any') return true;
-  return client.schemes.has(scheme[0].slice(0, -3).toLowerCase());
-}
-
-/** A flag that may take the next argument as its value: -x or --name, nothing glued. */
-function mayTakeValue(arg: string): boolean {
-  return arg.length > 1 && arg.startsWith('-') && !arg.includes('=');
-}
-
-/**
- * Each argument of a known client's list, read by its place: a credential
- * flag's value with its secret replaced, a URL to read as a URL, or a word.
- */
-function readClientArgv(argv: readonly string[], client: Client): Array<[string, Shape]> {
-  const out: Array<[string, Shape]> = argv.map((arg) => [arg, 'word']);
-  let i = client.subcommands ? 2 : 1;
-  let options = true;
-  for (; i < argv.length; i++) {
-    const arg = argv[i]!;
-    // A flag or URL right after a flag that may take a value may be that value.
-    const placed = !client.runs || !mayTakeValue(argv[i - 1]!);
-    if (arg === '--') {
-      options = false;
-      continue;
-    }
-    if (!placed) continue;
-    if (options && client.urlFlags?.has(arg) && i + 1 < argv.length) {
-      const next = argv[i + 1]!;
-      if (isClientUrl(next, client)) out[i + 1] = [next, 'url'];
-      i++;
-      continue;
-    }
-    if (options && client.flags && arg.startsWith('-')) {
-      const flag = credentialFlag(arg, client.flags);
-      if (flag) {
-        const [name, kind, takesNext] = flag;
-        if (arg.length > name.length) {
-          // Glued: -pvalue, --password=value.
-          const glue = name.startsWith('--') ? 1 : 0;
-          const replaced = replaceCredential(arg.slice(name.length + glue), kind);
-          if (replaced !== undefined)
-            out[i] = [arg.slice(0, name.length + glue) + replaced, 'word'];
-        } else if (takesNext && i + 1 < argv.length) {
-          const replaced = replaceCredential(argv[i + 1]!, kind);
-          if (replaced !== undefined) out[i + 1] = [replaced, 'word'];
-          i++;
-        }
-        continue;
-      }
-    }
-    if (isClientUrl(arg, client)) out[i] = [arg, 'url'];
-  }
-  return out;
-}
-
-/**
- * The credential flag `arg` is, as the flag's name, its kind and whether the
- * next argument is its value: -p, -pvalue, --password or --password=value.
- */
-function credentialFlag(
-  arg: string,
-  flags: Readonly<Record<string, CredentialFlag>>,
-): readonly [string, Credential, boolean] | undefined {
-  let name = arg;
-  if (!Object.hasOwn(flags, name)) {
-    // Glued: --name=value, or -xvalue for a one-letter flag.
-    if (arg.startsWith('--')) name = arg.slice(0, Math.max(0, arg.indexOf('=')));
-    else name = arg.slice(0, 2);
-    if (name.length < 2 || name.length === arg.length || !Object.hasOwn(flags, name)) {
-      return undefined;
-    }
-  }
-  const [kind, takesNext] = flags[name]!;
-  return [name, kind, takesNext];
-}
-
-function basename(path: string): string {
-  return path.slice(path.lastIndexOf('/') + 1);
-}
+// Argument lists. The list is one field, and nothing in it is cut out: no
+// tool's flags are read, so an argument is never taken for a value it isn't.
+// Any secret anywhere in the list, in one argument or across several read
+// as a command line, withholds every argument. User, host and email names
+// are still replaced, in any argument.
 
 /**
  * Redact an argument list as one field: WITHHELD for every argument when any
- * secret in it is anywhere but a known client's credential flag value or URL
- * password, else the list with those replaced. argv[0] is never replaced;
- * user, host and email names are, in any argument.
+ * secret is in it, else the list with only user, host and email names
+ * replaced.
  */
 function redactArgvWithin(
   argv: readonly string[],
@@ -1660,27 +1491,22 @@ function redactArgvWithin(
   oversized?: number[],
 ): string[] {
   if (!argv.length) return [];
-  const client = CLIENTS.get(basename(argv[0]!));
-  const read: ReadonlyArray<readonly [string, Shape]> =
-    client && (!client.subcommands || client.subcommands.has(argv[1] ?? ''))
-      ? readClientArgv(argv, client)
-      : argv.map((arg) => [arg, 'word'] as const);
   const out: string[] = [];
   let withheld = false;
-  for (const [i, [arg, shape]] of read.entries()) {
+  for (const arg of argv) {
     // Too long to read: withheld unread, and the list with it.
-    if (argv[i]!.length > MAX_REDACT_CHARS) {
-      oversized?.push(argv[i]!.length);
+    if (arg.length > MAX_REDACT_CHARS) {
+      oversized?.push(arg.length);
       withheld = true;
       continue;
     }
-    const redacted = redactText(arg, options, undefined, shape);
+    const redacted = redactText(arg, options, undefined, 'word');
     if (redacted === WITHHELD && arg !== WITHHELD) withheld = true;
     out.push(redacted);
   }
   // Read whole, as a command line, a list still holds no secret: a flag and
-  // its value, such as a wrapper's curl -u user:pass, span two arguments.
-  if (!withheld && holdsSecret(out.join(' '))) withheld = true;
+  // its value span two arguments.
+  if (!withheld && holdsSecret(argv.join(' '))) withheld = true;
   return withheld ? argv.map(() => WITHHELD) : out;
 }
 
@@ -1692,8 +1518,8 @@ function holdsSecret(text: string): boolean {
 }
 
 /**
- * Redact a command's arguments as one field: the value of a known client's
- * credential flag or a URL's password cut out, or every argument WITHHELD.
+ * Redact a command's arguments as one field: every argument WITHHELD when any
+ * secret is in it, else only user, host and email names replaced.
  */
 export function redactArgv(argv: readonly string[], options: NameOptions = {}): string[] {
   return redactArgvWithin(argv, options);
