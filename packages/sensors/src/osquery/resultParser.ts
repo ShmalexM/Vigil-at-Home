@@ -7,7 +7,7 @@ import { QUERY_NAMES } from './config.js';
 import { LINUX_QUERY_NAMES } from './linuxConfig.js';
 import { osquerySigning } from '../signing.js';
 
-interface OsqueryResultLine {
+export interface OsqueryResultLine {
   name?: string;
   unixTime?: number | string;
   action?: 'added' | 'removed';
@@ -46,12 +46,25 @@ function launchdMechanism(path: string): EventOfKind<'persistence'>['mechanism']
 }
 
 export function osqueryLineToEvents(line: string, opts: OsqueryParseOptions = {}): SensorEvent[] {
-  let parsed: OsqueryResultLine;
+  const parsed = parseOsqueryLine(line);
+  return parsed === undefined ? [] : osqueryResultToEvents(line, parsed, opts);
+}
+
+/** One results-log line as JSON, or undefined if it isn't JSON. */
+export function parseOsqueryLine(line: string): OsqueryResultLine | undefined {
   try {
-    parsed = JSON.parse(line) as OsqueryResultLine;
+    return JSON.parse(line) as OsqueryResultLine;
   } catch {
-    return [];
+    return undefined;
   }
+}
+
+/** osqueryLineToEvents for a line already parsed with parseOsqueryLine. */
+export function osqueryResultToEvents(
+  line: string,
+  parsed: OsqueryResultLine,
+  opts: OsqueryParseOptions = {},
+): SensorEvent[] {
   const c = parsed.columns;
   if (!c || typeof c !== 'object') return [];
   // Event tables only ever hold new activity, so their first run is real too.
@@ -232,12 +245,14 @@ function commandLine(json: string | undefined, plain: string | undefined): strin
  * rows a run replaces come back as "removed" and say nothing new.
  */
 export function osqueryHealth(line: string): { denylisted: string[] } | undefined {
-  let parsed: OsqueryResultLine;
-  try {
-    parsed = JSON.parse(line) as OsqueryResultLine;
-  } catch {
-    return undefined;
-  }
+  const parsed = parseOsqueryLine(line);
+  return parsed === undefined ? undefined : osqueryResultHealth(parsed);
+}
+
+/** osqueryHealth for a line already parsed with parseOsqueryLine. */
+export function osqueryResultHealth(
+  parsed: OsqueryResultLine,
+): { denylisted: string[] } | undefined {
   if (parsed.name !== QUERY_NAMES.health) return undefined;
   const c = parsed.columns;
   const off = parsed.action !== 'removed' && c?.denylisted === '1' && c.name;
