@@ -114,8 +114,8 @@ export function eventViewsQuery(
   if (q.text) {
     where.push('ts >= ?');
     args.push((q.before ?? now) - TEXT_SEARCH_WINDOW_MS);
-    // Arguments kept as ids (see ArgDictionary) are searched through the ids
-    // whose text matches, which the caller sets up with argsLike().
+    // Arguments kept as ids (see ArgDictionary) are searched by their text,
+    // which the caller sets up with argsLike().
     where.push(`(body LIKE ? ESCAPE '\\' OR (args IS NOT NULL AND vigil_args_hit(args)))`);
     args.push(likePattern(q.text));
   }
@@ -162,8 +162,13 @@ export class Store {
   >();
   private txDepth = 0;
   private readonly argDict: ArgDictionary;
-  /** Argument ids a text search matches (argsLike), for vigil_args_hit. */
-  private searchIds = new Set<number>();
+  /**
+   * The text search running now (argsLike), for vigil_args_hit: the text,
+   * folded as LIKE folds it, what each argument id seen so far gave, and,
+   * once a search has looked up many ids, every matching id at once.
+   */
+  private search:
+    { text: string; needle: string; seen: Map<number, boolean>; all?: Set<number> } | undefined;
 
   constructor(private readonly db: DatabaseSync) {
     db.exec(`
@@ -179,22 +184,41 @@ export class Store {
     this.migrate();
     this.argDict = new ArgDictionary(db);
     db.function('vigil_args_hit', { deterministic: false, directOnly: true }, (blob) =>
-      blob instanceof Uint8Array && this.searchIds.size > 0 && hasAnyId(blob, this.searchIds)
-        ? 1
-        : 0,
+      blob instanceof Uint8Array && this.argsHit(blob) ? 1 : 0,
     );
   }
 
   /**
-   * Point vigil_args_hit at the arguments whose text matches `pattern` (a
-   * LIKE pattern) before a search runs. Scans the argument dictionary, which
-   * is small next to the events (165,000 strings for six busy hours).
+   * Point vigil_args_hit at `text` before a search runs. A search that checks
+   * a few events looks up only their arguments, so its cost doesn't grow
+   * with the dictionary; one that reaches many distinct arguments matches
+   * the whole dictionary once instead, so it never costs much more than that.
    */
-  private argsLike(pattern: string): void {
-    const rows = this.stmt(`SELECT id FROM arg_strings WHERE value LIKE ? ESCAPE '\\'`).all(
-      pattern,
-    ) as { id: number }[];
-    this.searchIds = new Set(rows.map((r) => Number(r.id)));
+  private argsLike(text: string): void {
+    this.search = { text, needle: likeFold(text), seen: new Map() };
+  }
+
+  /** Whether any of an event's arguments holds the search text, as LIKE '%text%' would. */
+  private argsHit(blob: Uint8Array): boolean {
+    const search = this.search;
+    if (!search) return false;
+    for (const id of argIds(blob)) {
+      let hit = search.all?.has(id) ?? search.seen.get(id);
+      if (hit === undefined) {
+        if (search.seen.size >= ARG_LOOKUPS_BEFORE_SCAN) {
+          const rows = this.stmt(`SELECT id FROM arg_strings WHERE value LIKE ? ESCAPE '\\'`).all(
+            likePattern(search.text),
+          ) as { id: number }[];
+          search.all = new Set(rows.map((r) => Number(r.id)));
+          hit = search.all.has(id);
+        } else {
+          hit = likeFold(this.argDict.value(id)).includes(search.needle);
+          search.seen.set(id, hit);
+        }
+      }
+      if (hit) return true;
+    }
+    return false;
   }
 
   /**
@@ -372,7 +396,7 @@ export class Store {
    */
   listEventViews(q: EventQuery = {}, now = Date.now()): EventView[] {
     const { sql, args } = eventViewsQuery(q, now);
-    if (q.text) this.argsLike(likePattern(q.text));
+    if (q.text) this.argsLike(q.text);
     const rows = this.db.prepare(sql).all(...args) as EventRow[];
     return rows.map((r) => this.view(r));
   }
@@ -426,7 +450,7 @@ export class Store {
       const rows = this.db.prepare(`${window} LIMIT ?`).all(...args, q.limit) as EventRow[];
       return { views: rows.map((r) => this.view(r)), partial: false };
     }
-    if (q.text) this.argsLike(likePattern(q.text));
+    if (q.text) this.argsLike(q.text);
     const rows = this.db
       .prepare(
         `SELECT body, outcome, label, args FROM (${window} LIMIT ?)
@@ -1106,18 +1130,11 @@ export class Store {
 }
 
 /** True when the packed id list (ArgDictionary.encode) holds one of `ids`. */
-function hasAnyId(blob: Uint8Array, ids: ReadonlySet<number>): boolean {
-  let i = 0;
-  while (i < blob.length) {
-    let id = 0;
-    let shift = 1;
-    let b: number;
-    do {
-      b = blob[i++]!;
-      id += (b & 0x7f) * shift;
-      shift *= 128;
-    } while (b & 0x80 && i < blob.length);
-    if (ids.has(id)) return true;
-  }
-  return false;
+
+/** Distinct arguments a text search looks up one by one before matching the whole dictionary. */
+const ARG_LOOKUPS_BEFORE_SCAN = 2_000;
+
+/** Text as SQLite's LIKE compares it: ASCII letters fold case, nothing else does. */
+function likeFold(text: string): string {
+  return text.replace(/[A-Z]+/g, (m) => m.toLowerCase());
 }

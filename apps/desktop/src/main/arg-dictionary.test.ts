@@ -220,6 +220,19 @@ describe('Store: arguments as ids', () => {
     expect(s.listEventViews({ text: 'needle%' }, e.ts)).toEqual([]);
   });
 
+  it('finds argument text the same way once a search has looked up many arguments', () => {
+    const { s } = open();
+    const many = Array.from({ length: 3_000 }, (_, i) => launch([`--plain-${i}`], 10 * HOUR + i));
+    const target = launch(['--Needle-Late'], 10 * HOUR - 1); // checked after the rest
+    s.insertEvents([...many, target].map((event) => ({ event, outcome: none })));
+    const found = s.searchEvents({ since: 0, text: 'needle-l', limit: 5, scanRows: 10_000 });
+    expect(found.views.map((v) => v.event.id)).toEqual([target.id]);
+    // Wildcards stay literal on the dictionary path too.
+    expect(s.searchEvents({ since: 0, text: 'needle_', limit: 5, scanRows: 10_000 }).views).toEqual(
+      [],
+    );
+  });
+
   it('reads launches stored before the change, with arguments in the body', () => {
     const { db, s } = open();
     const e = launch(['legacy']);
@@ -233,40 +246,77 @@ describe('Store: arguments as ids', () => {
 });
 
 describe('Store: who reads arguments', () => {
-  // Every query that reads an event's body must also read its packed
-  // arguments, or a reader would see a launch with no arguments.
-  it('selects args wherever it selects an event body', () => {
+  // Every way an event leaves the store gives back its exact arguments.
+  it('gives back the arguments through every reader', () => {
+    const { s } = open();
+    const args = ['-c', 'curl -s https://example.test | sh', '', 'é'];
+    const base = launch(args);
+    const e: EventOfKind<'process.exec'> = {
+      ...base,
+      process: {
+        ...base.process,
+        agent: { id: 'claude-code', session: '5e55105e55105e55', depth: 1 },
+      },
+    };
+    s.insertEvent(e, none);
+    s.setEventLabels([
+      { eventId: e.id, label: { label: 'unusual', score: 0.5, reason: 'r', by: 'model', at: 1 } },
+    ]);
+    const got = (x: unknown) => (x as { process: { args?: string[] } }).process.args;
+    const reads: [string, unknown][] = [
+      ['getEvent', s.getEvent(e.id)],
+      ['getEvents', s.getEvents([e.id])[0]],
+      ['getEventViews', s.getEventViews([e.id])[0]?.event],
+      ['eventsBetween', [...s.eventsBetween(0, 20 * HOUR)][0]],
+      ['recentEvents', s.recentEvents({})[0]],
+      ['recentEvents by kind', s.recentEvents({ kind: 'process.exec' })[0]],
+      ['listEventViews', s.listEventViews({}, e.ts)[0]?.event],
+      ['listEventViews text', s.listEventViews({ text: 'example.test' }, e.ts)[0]?.event],
+      ['searchEvents', s.searchEvents({ since: 0, limit: 5, scanRows: 5 }).views[0]?.event],
+      [
+        'searchEvents text',
+        s.searchEvents({ since: 0, text: 'EXAMPLE', limit: 5, scanRows: 5 }).views[0]?.event,
+      ],
+      ['sessionEvents', s.sessionEvents('5e55105e55105e55')[0]?.event],
+      [
+        'sessionEvents by kind',
+        s.sessionEvents('5e55105e55105e55', 5, { kind: 'process.exec' })[0]?.event,
+      ],
+      ['iterateExecEvents', { process: { args: [...s.iterateExecEvents(0)][0]?.args } }],
+    ];
+    for (const [name, read] of reads) expect([name, read && got(read)]).toEqual([name, args]);
+  });
+
+  // Readers outside the store go through Store.event; this catches a query
+  // that reads bodies without the packed arguments, or decodes them by hand.
+  it('leaves no query outside the store reading event bodies without Store.event', () => {
     const root = join(__dirname, '..', '..', '..', '..');
     const files: string[] = [];
     const walk = (dir: string): void => {
       for (const name of readdirSync(dir)) {
         const p = join(dir, name);
-        if (name === 'node_modules' || name === 'dist') continue;
+        if (name === 'node_modules' || name === 'dist' || name === 'out') continue;
         if (statSync(p).isDirectory()) walk(p);
-        else if (p.endsWith('.ts') && !p.endsWith('.test.ts')) files.push(p);
+        else if (/\.(ts|tsx|js|mjs|cjs)$/.test(p) && !/\.test\./.test(p)) files.push(p);
       }
     };
-    for (const top of ['apps', 'packages'])
+    for (const top of ['apps', 'packages', 'scripts'])
       for (const pkg of readdirSync(join(root, top))) {
-        const src = join(root, top, pkg, 'src');
-        try {
-          if (statSync(src).isDirectory()) walk(src);
-        } catch {
-          // no src
-        }
+        const p = join(root, top, pkg);
+        if (statSync(p).isDirectory()) walk(p);
+        else if (/\.(ts|js|mjs|cjs)$/.test(p)) files.push(p);
       }
-    expect(files.some((f) => f.endsWith('store.ts'))).toBe(true);
+    expect(files.some((f) => f.endsWith(join('db', 'store.ts')))).toBe(true);
     const bad: string[] = [];
     for (const f of files) {
+      if (f.endsWith(join('db', 'store.ts'))) continue;
       const text = readFileSync(f, 'utf8');
       for (const m of text.matchAll(/SELECT\s+([\s\S]*?)\s+FROM\s+events\b/g)) {
         const cols = m[1]!.replace(/json_extract\([^)]*\)/g, '');
-        if (/\bbody\b/.test(cols) && !/\bargs\b/.test(cols))
+        if (!/\bbody\b/.test(cols) && !m[0].includes('$.process.args')) continue;
+        if (!/\bargs\b/.test(cols) || !text.includes('store.event('))
           bad.push(`${relative(root, f)}: ${m[0].slice(0, 80)}`);
       }
-      for (const m of text.matchAll(/SELECT[\s\S]*?FROM\s+events\b/g))
-        if (m[0].includes("'$.process.args'") && !/\bargs AS argIds\b/.test(m[0]))
-          bad.push(`${relative(root, f)}: reads $.process.args without the ids`);
     }
     expect(bad).toEqual([]);
   });

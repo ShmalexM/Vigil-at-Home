@@ -61,7 +61,7 @@ export class ArgDictionary {
 
   /** The exact arguments `encode` was given. */
   decode(blob: Uint8Array): string[] {
-    return argIds(blob).map((id) => this.valueOf(id));
+    return argIds(blob).map((id) => this.value(id));
   }
 
   /**
@@ -116,7 +116,8 @@ export class ArgDictionary {
     return id;
   }
 
-  private valueOf(id: number): string {
+  /** One argument's text, by id. */
+  value(id: number): string {
     const hit = this.values.get(id);
     if (hit !== undefined) return hit;
     const row = this.byId.get(id) as { value: string } | undefined;
