@@ -45,7 +45,7 @@ describe('quiet download lines', () => {
 
   it('keeps the real Claude Code lines quiet, bare and in the harness wrappers', () => {
     for (const c of real) {
-      expect(isQuietLine(c), c).toBe(true);
+      expect(isQuietLine(c, 'alex'), c).toBe(true);
       expect(ours(c), c).toBe(false);
       expect(fires(linuxCoreRules, exec(agentShell(c, '/usr/bin/bash'))), c).toBe(false);
     }
@@ -96,6 +96,26 @@ describe('quiet download lines', () => {
     }
     // The appended forms that run something are caught exactly as on main.
     expect(ours(`x && ${REAL_LOCAL_READS[1]!.replace('127.0.0.1', 'x.test')}`)).toBe(true);
+  });
+
+  it("needs the snapshot in the shell user's own home", () => {
+    const c = REAL_LOCAL_READS[1]!;
+    const at = (home: string) => wrapped(c).replace('/Users/alex/', home);
+    expect(isQuietLine(wrapped(c), 'alex')).toBe(true);
+    // No user on the event: the snapshot form is not quiet, the others still are.
+    expect(isQuietLine(wrapped(c))).toBe(false);
+    expect(isQuietLine(c)).toBe(true);
+    expect(isQuietLine(evald(c))).toBe(true);
+    for (const home of ['/Users/mallory/', '/Users/Shared/', '/home/alex2/', '/Users/alex./']) {
+      expect(isQuietLine(at(home), 'alex'), home).toBe(false);
+      const [o, m] = both({ ...agentShell(at(home)) });
+      expect(o, home).toBe(m);
+    }
+    expect(isQuietLine(at('/Users/Shared/'), 'Shared')).toBe(false);
+    // Another user's own snapshot is fine for that user.
+    expect(isQuietLine(at('/Users/mallory/'), 'mallory')).toBe(true);
+    const [o, m] = both({ ...agentShell(wrapped(c)), user: undefined });
+    expect([o, m]).toEqual([true, true]);
   });
 
   it('needs a system shell started with an exact argv', () => {
@@ -154,7 +174,7 @@ describe('quiet download lines', () => {
   it('never treats a round-4 shape as a quiet line, bare or wrapped', () => {
     for (const c of [...caught, ...gaps]) {
       for (const form of [c, evald(c), wrapped(c)]) {
-        expect(isQuietLine(form), form).toBe(false);
+        expect(isQuietLine(form, 'alex'), form).toBe(false);
         expect(ours(form), form).toBe(mains(form));
       }
     }

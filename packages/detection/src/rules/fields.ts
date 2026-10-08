@@ -30,14 +30,14 @@ const COMPUTED: Record<string, FieldGetter> = {
    * (see rules/quiet-lines.ts). The download-run rule stays quiet on these.
    */
   'process.quietDownloadLine': (e) =>
-    'process' in e ? runsQuietLine(e.process?.path, e.process?.args) : undefined,
+    'process' in e ? runsQuietLine(e.process?.path, e.process?.args, e.process?.user) : undefined,
   /**
    * The process's arguments (after its own name) download something and have
    * any way to run code (see rules/download-run.ts). Meant for shells; the
    * download-then-run rule checks process.name first.
    */
   'process.downloadThenRun': (e) =>
-    'process' in e ? shellDownloadsAndRuns(e.process?.args) : undefined,
+    'process' in e ? shellDownloadsAndRuns(e.process?.args, e.process?.user) : undefined,
   /**
    * The download a process comes from: the nearest downloaded ancestor, or the
    * process itself when it carries the quarantine flag. Chain rules key on it.

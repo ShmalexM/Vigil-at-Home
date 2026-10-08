@@ -162,6 +162,7 @@ export const agentShell = (cmd: string, path = '/bin/zsh', flags: string[] = ['-
   proc({
     path,
     args: [path, ...flags, cmd],
+    user: 'alex',
     signing: 'apple',
     parentPath: '/Users/alex/.local/share/claude/versions/2.1.0',
   });
