@@ -24,7 +24,7 @@ import { AgentsView } from './Agents';
 import { AlertsView } from './Alerts';
 import { HistoryView } from './History';
 import { HomeView } from './Home';
-import { navKey, navShortcut } from './nav-keys';
+import { isTyping, navKey, navKeys, navShortcut } from './nav-keys';
 import { PackPage } from './Pack';
 import { SetupWizard } from './onboarding/SetupWizard';
 import { RulesView } from './Rules';
@@ -53,6 +53,9 @@ export const ADVANCED_NAV: NavItem[] = [
   { id: 'usage', label: 'Usage', icon: <ChartSpline size={16} /> },
 ];
 
+/** ⌘1…⌘9 follow the sidebar's own order. */
+const NAV_KEYS = navKeys([...NAV, ...ADVANCED_NAV].map((n) => n.id));
+
 export function AppShell({ initialRoute }: { initialRoute: string }) {
   const [route, setRoute] = useState(initialRoute);
   // Keep the hash in step with pushed navigation, so the window's URL always names its page.
@@ -73,13 +76,11 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
     location.hash = r;
     setRoute(r);
   };
-  // ⌘1…⌘6 and ⌘, (Ctrl elsewhere) move between pages without the mouse.
+  // ⌘1…⌘9 in sidebar order and ⌘, (Ctrl elsewhere) move between pages without the mouse.
   useEffect(() => {
     const mac = navigator.platform.toLowerCase().includes('mac');
     const onKey = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement | null;
-      const typing = !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
-      const r = navKey(e, mac, typing);
+      const r = navKey(e, NAV_KEYS, mac, isTyping(e.target));
       if (!r) return;
       e.preventDefault();
       location.hash = r;
@@ -105,9 +106,11 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
   useEffect(() => {
     if (savedOpen !== undefined) setAdvancedOpen((open) => open ?? savedOpen);
   }, [savedOpen]);
+  // Every arrival on an Advanced page (a link, a shortcut) opens the group, so
+  // the current page always shows in the sidebar.
   useEffect(() => {
     if (onAdvanced) setAdvancedOpen(true);
-  }, [onAdvanced]);
+  }, [onAdvanced, section]);
   const showAdvanced = advancedOpen ?? onAdvanced;
   const toggleAdvanced = () => {
     const open = !showAdvanced;
@@ -269,13 +272,14 @@ function NavButton({
   badgeTitle?: string;
   onClick: () => void;
 }) {
+  const shortcut = navShortcut(item.id, NAV_KEYS);
   return (
     <button
       type="button"
       className="nav-item"
       aria-current={current ? 'page' : undefined}
-      aria-keyshortcuts={navShortcut(item.id)?.replace('⌘', 'Meta+')}
-      title={navShortcut(item.id) ? `${item.label} (${navShortcut(item.id)})` : undefined}
+      aria-keyshortcuts={shortcut?.aria}
+      title={shortcut ? `${item.label} (${shortcut.label})` : undefined}
       onClick={onClick}
     >
       {item.icon}
