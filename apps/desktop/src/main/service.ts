@@ -1,4 +1,6 @@
 import { EventEmitter } from 'node:events';
+import { hostname, userInfo } from 'node:os';
+import { redactValue } from '@vigil/ai/redact';
 import { z } from 'zod';
 import {
   canChangeMode,
@@ -349,6 +351,37 @@ export class VigilCore {
       ...(rule ? { rule } : {}),
     };
   }
+
+  /**
+   * The alert as JSON for a bug report, a note or another tool. It goes
+   * through the same redaction as data sent to a model (home folders, keys,
+   * tokens, emails, this computer's user and host names), and leaves out each
+   * event's raw sensor record, which the redaction can't vouch for.
+   */
+  alertEvidence(id: string): string | null {
+    const d = this.alertDetail(id);
+    if (!d) return null;
+    const { alert, events, actions, proposals, rule } = d;
+    const evidence = {
+      alert,
+      rule: rule
+        ? { id: rule.id, name: rule.name, version: rule.version, mode: rule.mode }
+        : undefined,
+      events: events.map(({ raw: _raw, ...e }) => e),
+      actions,
+      proposals,
+    };
+    return JSON.stringify(redactValue(evidence, this.evidenceRedaction()), null, 2);
+  }
+
+  /** Whose names the copied evidence hides. Overridable for tests. */
+  evidenceRedaction = (): { username?: string; hostname?: string } => {
+    try {
+      return { username: userInfo().username, hostname: hostname() };
+    } catch {
+      return { hostname: hostname() };
+    }
+  };
 
   rules(): RuleView[] {
     const counts = this.store.ruleMatchCounts(this.now() - RULE_REVIEW_DAYS * DAY);

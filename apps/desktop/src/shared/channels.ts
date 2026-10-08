@@ -3,6 +3,7 @@ export const CALL_NAMES = [
   'getStatus',
   'listAlerts',
   'getAlertDetail',
+  'alertEvidence',
   'decide',
   'reopen',
   'clearNoticed',

@@ -535,4 +535,25 @@ describe('alert detail', () => {
     core.detector!.engine._setMode('download-pipe-to-shell', 'shadow');
     expect(core.alertDetail(alert.id)?.rule?.mode).toBe('shadow');
   });
+  it('copies the evidence redacted, without raw sensor records', async () => {
+    const { core } = setup();
+    core.evidenceRedaction = () => ({ username: 'alice', hostname: 'alices-mbp' });
+    const rule = makeRule({ id: 'download-pipe-to-shell', mode: 'alert', severity: 'medium' });
+    const event: SensorEvent = {
+      ...exec('/Users/alice/bin/tool'),
+      raw: { secret: 'kept out' },
+    };
+    if (event.kind === 'process.exec') {
+      event.process.args = ['tool', '--token=hunter2hunter2', 'alice@alices-mbp.local'];
+    }
+    const alert = await core.alerts.raise({ rule, events: [event], actions: [] });
+    expect(core.alertDetail(alert.id)?.events[0]?.raw).toBeDefined();
+    const json = core.alertEvidence(alert.id)!;
+    expect(json).not.toContain('kept out');
+    expect(json).not.toContain('"raw"');
+    expect(json).not.toContain('hunter2');
+    expect(json).not.toMatch(/alice/i);
+    expect(JSON.parse(json).rule.name).toBe('Downloaded script run directly');
+    expect(core.alertEvidence('nope')).toBeNull();
+  });
 });

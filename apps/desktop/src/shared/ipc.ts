@@ -188,6 +188,7 @@ export const calls = {
   getStatus: z.tuple([]),
   listAlerts: z.tuple([z.enum(['open', 'resolved']).optional()]),
   getAlertDetail: z.tuple([Id]),
+  alertEvidence: z.tuple([Id]),
   decide: z.tuple([Id, DecisionInput]),
   reopen: z.tuple([Id]),
   clearNoticed: z.tuple([z.array(Id).min(1).max(500)]),
@@ -564,6 +565,8 @@ export interface CallResults {
   getStatus: StatusView;
   listAlerts: Alert[];
   getAlertDetail: AlertDetail | null;
+  /** The alert's evidence as redacted JSON, to paste elsewhere (VigilCore.alertEvidence). */
+  alertEvidence: string | null;
   decide: Alert;
   reopen: Alert;
   /** How many of the given alerts were cleared. */

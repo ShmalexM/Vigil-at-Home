@@ -56,6 +56,7 @@ export function registerIpc(
     getStatus: () => core.status(),
     listAlerts: (status) => core.store.listAlerts(status ? { status } : {}),
     getAlertDetail: (id) => core.alertDetail(id),
+    alertEvidence: (id) => core.alertEvidence(id),
     decide: (id, input) => core.decide(id, stripUndefined(input)),
     reopen: (id) => core.alerts.reopen(id),
     clearNoticed: (ids) => core.clearNoticed(ids),

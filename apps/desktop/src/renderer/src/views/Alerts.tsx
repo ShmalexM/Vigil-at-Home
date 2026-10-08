@@ -352,11 +352,13 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
               size="sm"
               kind="ghost"
               icon={<Copy size={13} />}
-              title="Copy the alert, its events and what was done, as JSON"
+              title="Copy the alert, its events and what was done, as JSON. Home folders, keys, tokens and your user and computer names are hidden."
               onClick={async () => {
                 try {
-                  await navigator.clipboard.writeText(evidenceJson(detail));
-                  toast({ text: 'Copied the evidence as JSON' });
+                  const json = await vigil.alertEvidence(alert.id);
+                  if (!json) throw new Error('gone');
+                  await navigator.clipboard.writeText(json);
+                  toast({ text: 'Copied the evidence as JSON, with personal details hidden' });
                 } catch {
                   toast({ text: 'Couldn’t copy to the clipboard' });
                 }
@@ -464,24 +466,6 @@ function RuleCard({
         )}
       </div>
     </Card>
-  );
-}
-
-/** The alert as JSON for a bug report, a note or another tool. */
-function evidenceJson(d: AlertDetailT): string {
-  const { alert, events, actions, proposals, rule } = d;
-  return JSON.stringify(
-    {
-      alert,
-      rule: rule
-        ? { id: rule.id, name: rule.name, version: rule.version, mode: rule.mode }
-        : undefined,
-      events,
-      actions,
-      proposals,
-    },
-    null,
-    2,
   );
 }
 
