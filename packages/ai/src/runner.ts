@@ -131,7 +131,13 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
   async function statusOf(adapter: ProviderAdapter, fresh = false): Promise<ProviderStatus> {
     const cached = statusCache.get(adapter.id);
     if (!fresh && cached && now() - cached.at < STATUS_TTL_MS) return cached.status;
-    const status = await adapter.probe();
+    let status: ProviderStatus;
+    try {
+      status = await adapter.probe();
+    } catch (err) {
+      // e.g. codesign timing out: the provider isn't usable right now.
+      status = { provider: adapter.id, state: 'error', detail: (err as Error).message };
+    }
     statusCache.set(adapter.id, { status, at: now() });
     return status;
   }
@@ -142,6 +148,20 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
       ...t,
       run: async (args) => redactValue(await t.run(args), redaction),
     }));
+  }
+
+  async function beforeDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T | 'timeout'> {
+    if (signal.aborted) return 'timeout';
+    let onAbort!: () => void;
+    const timedOut = new Promise<'timeout'>((resolve) => {
+      onAbort = () => resolve('timeout');
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([work, timedOut]);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
   }
 
   async function runWithDeadline(
@@ -253,13 +273,25 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
         const adapter = adapters.get(id);
         if (!adapter || !enabled(deps.settings, id)) continue;
         if (request.providers && !request.providers.includes(id)) continue;
-        if (adapter.canServe && !(await adapter.canServe(planOk))) continue;
-        const status = await statusOf(adapter);
-        if (status.state !== 'ready') continue;
-        const allowed =
-          (request.urgency === 'now' ? quota.allowNow(id) : quota.allowBackground(id)) &&
-          !(await overMonthlyCap(id, planOk));
-        if (!allowed) {
+        // Checking a provider (its sign-in, its binary's signature) counts
+        // against the deadline too: a check that hangs ends the run on time.
+        const ready = await beforeDeadline(
+          (async () => {
+            if (adapter.canServe && !(await adapter.canServe(planOk))) return 'skip';
+            if ((await statusOf(adapter)).state !== 'ready') return 'skip';
+            const allowed =
+              (request.urgency === 'now' ? quota.allowNow(id) : quota.allowBackground(id)) &&
+              !(await overMonthlyCap(id, planOk));
+            return allowed ? 'ready' : 'quota';
+          })(),
+          signal,
+        );
+        if (ready === 'timeout') {
+          record(id, 'timeout');
+          return { ok: false, reason: 'timeout', logId };
+        }
+        if (ready === 'skip') continue;
+        if (ready === 'quota') {
           lastReason = 'quota';
           continue;
         }

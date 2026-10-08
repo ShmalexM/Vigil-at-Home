@@ -178,6 +178,40 @@ describe('runner', () => {
     expect(result).toMatchObject({ ok: false, reason: 'timeout' });
   });
 
+  it('times out at the deadline even if checking the provider hangs', async () => {
+    const claude = fake('claude', () => ({
+      kind: 'ok',
+      json: { verdict: 'benign', summary: 'ok' },
+      audit: audit(),
+    }));
+    let release!: () => void;
+    claude.probe = () =>
+      new Promise((r) => (release = () => r({ provider: 'claude', state: 'ready' })));
+    const { runner, log } = setup([claude]);
+    const result = await runner.run({ ...request, deadlineMs: 50 });
+    expect(result).toMatchObject({ ok: false, reason: 'timeout' });
+    const logged = log.length;
+    release(); // the check returns long after; nothing more runs or is logged
+    await new Promise((r) => setTimeout(r, 10));
+    expect(claude.inputs).toHaveLength(0);
+    expect(log).toHaveLength(logged);
+  });
+
+  it('treats a provider whose check fails as not usable', async () => {
+    const claude = fake('claude', () => ({
+      kind: 'ok',
+      json: { verdict: 'benign', summary: 'ok' },
+      audit: audit(),
+    }));
+    claude.probe = () => Promise.reject(new Error('codesign timed out on /x'));
+    const { runner } = setup([claude]);
+    expect(await runner.status()).toEqual([
+      expect.objectContaining({ provider: 'claude', state: 'error' }),
+    ]);
+    expect(await runner.run(request)).toMatchObject({ ok: false });
+    expect(claude.inputs).toHaveLength(0);
+  });
+
   it('reports no_provider when nothing is set up', async () => {
     const { runner, log } = setup([]);
     expect(await runner.run(request)).toMatchObject({ ok: false, reason: 'no_provider' });

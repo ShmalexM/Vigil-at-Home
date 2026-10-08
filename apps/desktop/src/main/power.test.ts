@@ -122,27 +122,91 @@ describe('PowerPolicy', () => {
       expect(vi.getTimerCount()).toBe(0);
     });
 
-    it('wakes up after running unbroken for a while, even with nobody at the keyboard', () => {
-      vi.useFakeTimers();
-      let slept = 0;
+    function sleepyMac(idle: () => number = () => 3_600) {
       const em = new EventEmitter();
       const source = {
         isOnBatteryPower: () => false,
         getCurrentThermalState: () => 'nominal' as ThermalState,
-        getSystemIdleTime: () => 3_600,
+        getSystemIdleTime: idle,
         on: em.on.bind(em),
       } as unknown as PowerSource;
-      const clocks = { wall: () => Date.now() + slept, running: () => Date.now() };
+      // Both clocks keep counting through sleep, as on macOS; timers don't fire.
+      const clock = { slept: 0, wallStep: 0 };
+      const clocks = {
+        wall: () => Date.now() + clock.slept + clock.wallStep,
+        monotonic: () => Date.now() + clock.slept,
+      };
       const p = new PowerPolicy(source, () => 0, clocks);
-      em.emit('suspend');
-      // Dark wakes: a little running, then hours of sleep, again and again.
+      return { p, clock, emit: (e: string) => em.emit(e) };
+    }
+
+    it('wakes up after running unbroken for a while, even with nobody at the keyboard', () => {
+      vi.useFakeTimers();
+      const { p, clock, emit } = sleepyMac();
+      emit('suspend');
+      // Dark wakes: an hour of sleep, then the check fires during a short wake.
       for (let i = 0; i < 20; i++) {
+        clock.slept += 3_600_000;
         vi.advanceTimersByTime(WAKE_RECHECK_MS);
-        slept += 3_600_000;
       }
       expect(p.mode).toBe('constrained');
       // Then a real wake with nobody touching it (say, a film playing).
-      vi.advanceTimersByTime(AWAKE_UNBROKEN_MS + WAKE_RECHECK_MS);
+      vi.advanceTimersByTime(AWAKE_UNBROKEN_MS - WAKE_RECHECK_MS);
+      expect(p.mode).toBe('constrained');
+      vi.advanceTimersByTime(WAKE_RECHECK_MS);
+      expect(p.mode).toBe('normal');
+    });
+
+    it('does not add up short dark wakes into an unbroken run', () => {
+      vi.useFakeTimers();
+      const { p, clock, emit } = sleepyMac();
+      emit('suspend');
+      // Each dark wake runs long enough for two checks, then sleeps an hour.
+      for (let i = 0; i < 30; i++) {
+        clock.slept += 3_600_000;
+        vi.advanceTimersByTime(WAKE_RECHECK_MS * 2);
+      }
+      expect(p.mode).toBe('constrained');
+    });
+
+    it('still sees sleep when the wall clock steps back', () => {
+      vi.useFakeTimers();
+      const { p, clock, emit } = sleepyMac();
+      emit('suspend');
+      for (let i = 0; i < 20; i++) {
+        clock.slept += 3_600_000;
+        clock.wallStep -= 3_600_000; // e.g. a time-zone or NTP correction cancelling it out
+        vi.advanceTimersByTime(WAKE_RECHECK_MS * 2);
+      }
+      expect(p.mode).toBe('constrained');
+    });
+
+    it('only waits longer when the wall clock steps forward', () => {
+      vi.useFakeTimers();
+      const { p, clock, emit } = sleepyMac();
+      emit('suspend');
+      vi.advanceTimersByTime(WAKE_RECHECK_MS * 3);
+      clock.wallStep += 60_000;
+      vi.advanceTimersByTime(WAKE_RECHECK_MS);
+      expect(p.mode).toBe('constrained');
+      vi.advanceTimersByTime(AWAKE_UNBROKEN_MS);
+      expect(p.mode).toBe('normal');
+    });
+
+    it('counts only use of the Mac after it woke', () => {
+      vi.useFakeTimers();
+      let idle = 3_600;
+      const { p, clock, emit } = sleepyMac(() => idle);
+      emit('suspend');
+      clock.slept += 3_600_000;
+      idle = 10; // a dark wake seconds after the lid closed; no one is there
+      vi.advanceTimersByTime(WAKE_RECHECK_MS);
+      expect(p.mode).toBe('constrained');
+      idle = 3_600;
+      vi.advanceTimersByTime(WAKE_RECHECK_MS);
+      expect(p.mode).toBe('constrained');
+      idle = 5; // someone opened it
+      vi.advanceTimersByTime(WAKE_RECHECK_MS);
       expect(p.mode).toBe('normal');
     });
   });

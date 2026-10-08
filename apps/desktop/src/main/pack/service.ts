@@ -98,7 +98,9 @@ export interface PackDeps {
   /** Vigil's rules on a connector call, as a watched agent's hook would get them. */
   preflight(req: PreflightRequest): PreflightReply;
   connectors: ConnectorHub;
-  scheduler?: { every(name: string, ms: number, fn: () => Promise<void> | void): void };
+  scheduler?: {
+    every(name: string, ms: number, fn: (signal: AbortSignal) => Promise<void> | void): void;
+  };
   isBusy?: () => boolean;
   /** Where each dog writes down what it was asked, looked at and answered. */
   notebook?: Pick<Notebook, 'write' | 'list' | 'clear' | 'tally'>;
@@ -328,7 +330,7 @@ export class PackService {
   }
 
   start(): void {
-    this.o.scheduler?.every('pack-dogs', CHECK_SCHEDULES_MS, () => this.runDue());
+    this.o.scheduler?.every('pack-dogs', CHECK_SCHEDULES_MS, (signal) => this.runDue(signal));
   }
 
   // ---------------------------------------------------------------- state
@@ -991,12 +993,19 @@ export class PackService {
   }
 
   /** Scheduled jobs that are due. Skipped while the Mac is busy or on low battery. */
-  async runDue(): Promise<void> {
+  /**
+   * Run the scheduled dogs that are due, one after another. Each dog is
+   * read afresh just before it runs, since an earlier one may have taken a
+   * while; a cycle the scheduler gave up on (`signal`) starts no more dogs.
+   */
+  async runDue(signal?: AbortSignal): Promise<void> {
     if (this.o.isBusy?.()) return;
-    const at = this.now();
-    const hour = this.o.hour?.() ?? new Date(at).getHours();
-    for (const d of this.dogs()) {
-      if (d.role !== 'pack' || !d.enabled || d.schedule === 'manual') continue;
+    for (const { id } of this.dogs()) {
+      if (signal?.aborted) return;
+      const d = this.dogs().find((x) => x.id === id);
+      if (!d || d.role !== 'pack' || !d.enabled || d.schedule === 'manual') continue;
+      const at = this.now();
+      const hour = this.o.hour?.() ?? new Date(at).getHours();
       const last = d.lastReport?.at ?? d.createdAt;
       const due =
         d.schedule === 'hourly'

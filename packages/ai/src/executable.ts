@@ -56,14 +56,21 @@ export async function findExecutable(
   return undefined;
 }
 
+/** codesign can stall (e.g. on a network volume); a run's deadline shouldn't wait on it. */
+const CODESIGN_TIMEOUT_MS = 20_000;
+
 async function readTeamId(path: string): Promise<string | undefined> {
   if (process.platform !== 'darwin') return undefined;
+  const opts = { timeout: CODESIGN_TIMEOUT_MS };
   try {
-    await execFileAsync('/usr/bin/codesign', ['--verify', '--strict', path]);
-    const { stderr } = await execFileAsync('/usr/bin/codesign', ['-dv', '--verbose=2', path]);
+    await execFileAsync('/usr/bin/codesign', ['--verify', '--strict', path], opts);
+    const { stderr } = await execFileAsync('/usr/bin/codesign', ['-dv', '--verbose=2', path], opts);
     const match = /^TeamIdentifier=(\S+)$/m.exec(stderr);
     return match && match[1] !== 'not' ? match[1] : undefined;
-  } catch {
+  } catch (err) {
+    // Timed out: say so rather than cache "no team" for this binary.
+    if ((err as { killed?: boolean }).killed)
+      throw new Error(`codesign timed out on ${path}`, { cause: err });
     return undefined;
   }
 }

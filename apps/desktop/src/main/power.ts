@@ -26,23 +26,29 @@ export interface PowerSource {
 
 export const BATTERY_SLOWDOWN = 4;
 /**
- * Timers don't run while the Mac sleeps, so one that fires this long after
- * "suspend" means the Mac has run since. That alone could be a dark wake
- * (Power Nap), so it counts as awake once someone has used it within that
- * time, or once it has run without a break in sleep for AWAKE_UNBROKEN_MS
+ * Timers don't run while the Mac sleeps, so a check that fires this long
+ * after "suspend" means the Mac has run since. That alone could be a dark
+ * wake (Power Nap), so it counts as awake once someone has used it since it
+ * woke, or once it has run without a break in sleep for AWAKE_UNBROKEN_MS
  * (dark wakes are short bursts between sleeps). Then the power state is read
  * afresh, in case "resume" (or a battery or heat change) was never announced.
  * Otherwise it checks again.
+ *
+ * A break in sleep shows as a check that fires late: both clocks keep
+ * counting through sleep (on macOS, Node's monotonic clock is
+ * mach_continuous_time), and the timer only fires once the Mac runs again.
+ * Either clock running late counts, so a wall-clock step back can't hide a
+ * sleep; a step forward only makes it wait longer.
  */
 export const WAKE_RECHECK_MS = 2 * 60_000;
 export const AWAKE_UNBROKEN_MS = 10 * 60_000;
-/** More wall-clock time than running time between checks than this means it slept. */
-const SLEPT_GAP_MS = 5_000;
+/** A check this much later than due means the Mac slept in between. */
+const LATE_MS = 5_000;
 
-/** Wall-clock time (runs on during sleep) and running time (stops during sleep). */
+/** Wall-clock time and the monotonic clock; both keep counting during sleep. */
 export interface PowerClocks {
   wall: () => number;
-  running: () => number;
+  monotonic: () => number;
 }
 /** System load per core above which optional work waits: the user is busy. */
 export const BUSY_LOAD_PER_CORE = 0.8;
@@ -53,13 +59,18 @@ export class PowerPolicy extends EventEmitter<{ change: [PowerMode] }> {
   private asleep = false;
   private current: PowerMode;
   private recheck?: ReturnType<typeof setTimeout>;
-  private lastCheck = { wall: 0, running: 0 };
+  private lastCheck = { wall: 0, monotonic: 0 };
+  /** Monotonic time the Mac last came out of sleep (or "suspend" came). */
+  private awakeSince = 0;
   private unbroken = 0;
 
   constructor(
     private readonly source: PowerSource,
     private readonly load: () => number = () => loadavg()[0]! / availableParallelism(),
-    private readonly clocks: PowerClocks = { wall: Date.now, running: () => performance.now() },
+    private readonly clocks: PowerClocks = {
+      wall: Date.now,
+      monotonic: () => performance.now(),
+    },
   ) {
     super();
     this.battery = source.isOnBatteryPower();
@@ -70,6 +81,8 @@ export class PowerPolicy extends EventEmitter<{ change: [PowerMode] }> {
     source.on('suspend', () => {
       this.update(() => (this.asleep = true));
       this.unbroken = 0;
+      this.lastCheck = { wall: this.clocks.wall(), monotonic: this.clocks.monotonic() };
+      this.awakeSince = this.lastCheck.monotonic;
       this.checkWakeLater();
     });
     source.on('resume', () => {
@@ -99,7 +112,6 @@ export class PowerPolicy extends EventEmitter<{ change: [PowerMode] }> {
   }
 
   private checkWakeLater(): void {
-    this.lastCheck = { wall: this.clocks.wall(), running: this.clocks.running() };
     clearTimeout(this.recheck);
     this.recheck = setTimeout(() => this.checkWake(), WAKE_RECHECK_MS);
     this.recheck.unref?.();
@@ -107,15 +119,20 @@ export class PowerPolicy extends EventEmitter<{ change: [PowerMode] }> {
 
   private checkWake(): void {
     if (!this.asleep) return;
-    const ran = this.clocks.running() - this.lastCheck.running;
-    const passed = this.clocks.wall() - this.lastCheck.wall;
-    this.unbroken = passed - ran < SLEPT_GAP_MS ? this.unbroken + ran : 0;
-    const idle = this.source.getSystemIdleTime?.();
-    if (idle !== undefined && idle * 1000 >= WAKE_RECHECK_MS && this.unbroken < AWAKE_UNBROKEN_MS) {
-      this.checkWakeLater();
-      return;
+    const now = { wall: this.clocks.wall(), monotonic: this.clocks.monotonic() };
+    const ran = now.monotonic - this.lastCheck.monotonic;
+    const late = Math.max(ran, now.wall - this.lastCheck.wall) - WAKE_RECHECK_MS > LATE_MS;
+    this.lastCheck = now;
+    if (late) {
+      this.unbroken = 0;
+      this.awakeSince = now.monotonic;
+    } else {
+      this.unbroken += ran;
     }
-    this.reread();
+    const idle = this.source.getSystemIdleTime?.();
+    const used = idle === undefined || idle * 1000 < now.monotonic - this.awakeSince;
+    if (used || this.unbroken >= AWAKE_UNBROKEN_MS) this.reread();
+    else this.checkWakeLater();
   }
 
   /** Awake for sure: read battery and heat again rather than trusting missed events. */

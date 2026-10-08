@@ -11,9 +11,10 @@
  *
  * - A task still running after its time limit (`taskTimeoutMs`, or the
  *   task's own) gives its slot back, so one call that never returns can't
- *   stall every other job behind it. Its signal is aborted, so it can stop
- *   before writing anything late; its result, if it ever comes, is ignored
- *   and doesn't count as a run, and its job may run again.
+ *   stall every other job behind it. Its signal is aborted so it can stop
+ *   early; its result, if it ever comes, is ignored and doesn't count as a
+ *   run. A periodic job doesn't start again until that run has really
+ *   ended, so a slow run's writes never interleave with a newer run's.
  *
  * Blocking never goes through here. Blocks run inline in the alert path.
  */
@@ -143,9 +144,14 @@ export class Scheduler {
       return;
     job.busy = true;
     const opts = job.timeoutMs === undefined ? {} : { timeoutMs: job.timeoutMs };
+    // The job is free again once its run has ended, not when it timed out.
+    let started = false;
+    let ended = false;
+    let settled = false;
     this.enqueue(
       job.name,
       async (signal) => {
+        started = true;
         job.lastStart = this.now();
         try {
           await job.fn(signal);
@@ -159,6 +165,8 @@ export class Scheduler {
             job.lastEnd = this.now();
             job.runs++;
           }
+          ended = true;
+          if (settled) job.busy = false;
         }
       },
       'routine',
@@ -171,7 +179,8 @@ export class Scheduler {
         }
       })
       .finally(() => {
-        job.busy = false;
+        settled = true;
+        if (!started || ended) job.busy = false;
       });
   }
 

@@ -497,12 +497,14 @@ export class AiBridge extends EventEmitter<{
   }
 
   /**
-   * Sends one batch to the classifier and stores what comes back. A run the
-   * scheduler gave up on (`signal` aborted) writes nothing: its events go back
-   * in the queue for the next run.
+   * Sends one batch to the classifier and stores what comes back. The batch
+   * is on loan while the classifier works: if the run fails, or the
+   * scheduler gives up on it (`signal`), its events go back to the front of
+   * the queue at once, and a late answer writes nothing. Newer events make
+   * room for them, never the other way round.
    */
   async labelBatch(store: Pick<Store, 'setEventLabels'>, signal?: AbortSignal): Promise<number> {
-    if (this.labelQueue.length === 0) return 0;
+    if (this.labelQueue.length === 0 || signal?.aborted) return 0;
     const classifier = this.ai().classifier;
     if (!classifier) {
       this.labelQueue = [];
@@ -510,16 +512,28 @@ export class AiBridge extends EventEmitter<{
     }
     const batch = this.labelQueue;
     this.labelQueue = [];
-    const result = await this.busyWhile('labeller', () => classifier.classify(batch));
-    if (signal?.aborted) {
-      this.labelQueue = [...batch, ...this.labelQueue].slice(-MAX_LABEL_QUEUE);
-      return 0;
+    let onLoan = true;
+    const giveBack = (events: readonly SensorEvent[]): void => {
+      if (!onLoan) return;
+      onLoan = false;
+      const room = Math.max(0, MAX_LABEL_QUEUE - events.length);
+      this.labelQueue = [...events, ...(room ? this.labelQueue.slice(-room) : [])];
+    };
+    const onAbort = (): void => giveBack(batch);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    let result: Awaited<ReturnType<typeof classifier.classify>>;
+    try {
+      result = await this.busyWhile('labeller', () => classifier.classify(batch));
+    } catch (err) {
+      giveBack(batch);
+      throw err;
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
     }
-    // Whatever wasn't labelled goes back ahead of newer events, within the cap.
+    if (!onLoan) return 0; // given back on abort; this answer came too late
+    // Whatever wasn't labelled goes back ahead of newer events.
     const deferred = new Set(result.deferred);
-    this.labelQueue = [...batch.filter((e) => deferred.has(e.id)), ...this.labelQueue].slice(
-      -MAX_LABEL_QUEUE,
-    );
+    giveBack(batch.filter((e) => deferred.has(e.id)));
     if (!result.ok) return 0;
     const at = this.now();
     const labelled = result.labels.map((l) => ({

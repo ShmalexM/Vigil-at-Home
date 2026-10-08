@@ -340,7 +340,10 @@ describe('AiBridge event labels', () => {
   const unmatched = { checked: 21, matches: [] };
 
   function labelling(
-    answer: (ids: string[]) => { labels: string[]; deferred: string[] },
+    answer: (
+      ids: string[],
+    ) =>
+      { labels: string[]; deferred: string[] } | Promise<{ labels: string[]; deferred: string[] }>,
     as: { label: 'unusual' | 'suspicious'; score: number; by: 'model' | 'jev' } = {
       label: 'unusual',
       score: 0,
@@ -365,7 +368,7 @@ describe('AiBridge event labels', () => {
                   classify: async (events: readonly { id: string }[]) => {
                     const ids = events.map((e) => e.id);
                     sent.push(ids);
-                    const r = answer(ids);
+                    const r = await answer(ids);
                     return {
                       ok: true as const,
                       labels: r.labels.map((id) => ({
@@ -427,19 +430,67 @@ describe('AiBridge event labels', () => {
     expect(sent[0]).toHaveLength(31);
   });
 
-  it('writes nothing from a run the scheduler gave up on, and keeps its events queued', async () => {
-    const { core, ai, sent } = labelling((ids) => ({ labels: ids, deferred: [] }));
+  it('gives a batch back the moment the scheduler gives up on it, and writes nothing late', async () => {
+    let release!: () => void;
+    let round = 0;
+    const { core, ai, sent } = labelling((ids) =>
+      round++ === 0
+        ? new Promise((r) => (release = () => r({ labels: ids, deferred: [] })))
+        : { labels: ids, deferred: [] },
+    );
     ai.labelEventsFrom(core);
     const a = makeExec('/tmp/late');
     core.ingest(a, unmatched);
     core.events.flush();
     const given = new AbortController();
+    const hung = ai.labelBatch(core.store, given.signal);
+    await new Promise((r) => setImmediate(r));
     given.abort();
-    expect(await ai.labelBatch(core.store, given.signal)).toBe(0);
-    const [view] = core.store.listEventViews({}).filter((v) => v.event.id === a.id);
-    expect(view!.label).toBeUndefined();
+    // Back in the queue while the first call still hangs.
     expect(await ai.labelBatch(core.store)).toBe(1);
+    release();
+    expect(await hung).toBe(0);
     expect(sent).toEqual([[a.id], [a.id]]);
+    const labelled = core.store.listEventViews({}).filter((v) => v.label);
+    expect(labelled).toHaveLength(1);
+  });
+
+  it('gives a batch back when the classifier fails', async () => {
+    let round = 0;
+    const { core, ai } = labelling((ids) => {
+      if (round++ === 0) throw new Error('model crashed');
+      return { labels: ids, deferred: [] };
+    });
+    ai.labelEventsFrom(core);
+    core.ingest(makeExec('/tmp/once'), unmatched);
+    core.events.flush();
+    await expect(ai.labelBatch(core.store)).rejects.toThrow('model crashed');
+    expect(await ai.labelBatch(core.store)).toBe(1);
+  });
+
+  it('keeps a returned batch even when 200 newer events queued meanwhile', async () => {
+    let release!: () => void;
+    let round = 0;
+    const { core, ai, sent } = labelling((ids) =>
+      round++ === 0
+        ? new Promise((r) => (release = () => r({ labels: [], deferred: [] })))
+        : { labels: ids, deferred: [] },
+    );
+    ai.labelEventsFrom(core);
+    const first = makeExec('/tmp/first');
+    core.ingest(first, unmatched);
+    core.events.flush();
+    const given = new AbortController();
+    const hung = ai.labelBatch(core.store, given.signal);
+    await new Promise((r) => setImmediate(r));
+    for (let i = 0; i < 250; i++) core.ingest(makeExec(`/tmp/newer-${i}`), unmatched);
+    core.events.flush();
+    given.abort();
+    release();
+    await hung;
+    await ai.labelBatch(core.store);
+    expect(sent[1]).toContain(first.id);
+    expect(sent[1]!.length).toBeLessThanOrEqual(200);
   });
 
   it('puts events the model skipped back in the queue', async () => {

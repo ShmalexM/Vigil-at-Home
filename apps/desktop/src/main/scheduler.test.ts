@@ -130,26 +130,72 @@ describe('Scheduler', () => {
     expect(await after).toBe('ran');
   });
 
-  it('lets a periodic job run again after a hung run and counts the time-out', async () => {
+  it('gives a hung run’s slot back but never starts that job again while it runs', async () => {
     vi.useFakeTimers();
-    const s = new Scheduler({ taskTimeoutMs: 1_000 });
+    const s = new Scheduler({ concurrency: 1, taskTimeoutMs: 1_000 });
     let calls = 0;
     s.every(
       'stuck',
       5_000,
       () => {
         calls++;
-        return calls === 1 ? new Promise<void>(() => {}) : undefined;
+        return new Promise<void>(() => {});
       },
       true,
     );
+    let other = 0;
+    s.every('other', 5_000, () => void other++, true);
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(s.status()[0]).toMatchObject({ busy: false, timeouts: 1 });
+    expect(s.status()[0]).toMatchObject({ busy: true, timeouts: 1 });
     expect(s.status()[0]!.lastError).toMatch(/gave up waiting/);
-    await vi.advanceTimersByTimeAsync(4_000);
-    expect(calls).toBe(2);
-    expect(s.status()[0]).toMatchObject({ runs: 1, timeouts: 1 });
-    expect(s.status()[0]!.lastError).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(calls).toBe(1);
+    expect(other).toBeGreaterThan(5);
+  });
+
+  it('runs a slow periodic job once at a time, even after its time-out', async () => {
+    // A pack cycle of 14 + 14 + 14 + 1 minutes, given up on at 30 and checked
+    // every 5: the next cycle starts only after the slow one has ended.
+    vi.useFakeTimers();
+    const MIN = 60_000;
+    const s = new Scheduler({ taskTimeoutMs: 30 * MIN });
+    const ran: string[] = [];
+    let cycles = 0;
+    let running = 0;
+    let overlapped = false;
+    const step = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    s.every(
+      'pack-dogs',
+      5 * MIN,
+      async () => {
+        const first = cycles++ === 0;
+        overlapped ||= running > 0;
+        running++;
+        try {
+          for (const [dog, mins] of [
+            ['A', 14],
+            ['B', 14],
+            ['C', 14],
+            ['D', 1],
+          ] as const) {
+            if (!first && dog !== 'D') continue; // A–C are not due again
+            await step(mins * MIN);
+            ran.push(dog);
+          }
+        } finally {
+          running--;
+        }
+      },
+      true,
+    );
+    await vi.advanceTimersByTimeAsync(31 * MIN);
+    expect(s.status()[0]).toMatchObject({ busy: true, timeouts: 1 });
+    await vi.advanceTimersByTimeAsync(12 * MIN); // the slow cycle ends at 43
+    expect(ran).toEqual(['A', 'B', 'C', 'D']);
+    expect(cycles).toBe(1);
+    await vi.advanceTimersByTimeAsync(3 * MIN); // the next check, at 45
+    expect(cycles).toBe(2);
+    expect(overlapped).toBe(false);
   });
 
   it('aborts a timed-out run, and its late finish doesn’t count as a run', async () => {
@@ -172,10 +218,13 @@ describe('Scheduler', () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(seen?.aborted).toBe(true);
     expect(seen?.reason).toBeInstanceOf(TaskTimeoutError);
-    await vi.advanceTimersByTimeAsync(4_000); // runs again, quickly
-    expect(s.status()[0]).toMatchObject({ runs: 1, timeouts: 1 });
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(calls).toBe(1); // not again while the first run is still going
     finish(); // the first run returns at last
     await vi.advanceTimersByTimeAsync(0);
+    expect(s.status()[0]).toMatchObject({ runs: 0, timeouts: 1, busy: false });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(calls).toBe(2);
     expect(s.status()[0]).toMatchObject({ runs: 1, timeouts: 1 });
     expect(s.status()[0]!.lastError).toBeUndefined();
   });

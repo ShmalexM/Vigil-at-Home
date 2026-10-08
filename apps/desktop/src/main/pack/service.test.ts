@@ -402,6 +402,34 @@ describe('the pack', () => {
     expect(pack.dogs().find((d) => d.id === dog.id)?.lastReport?.ok).toBe(true);
   });
 
+  it('starts no more dogs once the scheduler gives up on a cycle, and skips one that just ran', async () => {
+    const { pack, handlers, runs } = setup();
+    const a = pack.adopt(CREATE as never);
+    const b = pack.adopt(CREATE as never);
+    const later = Date.now() + 61 * 60_000;
+    vi.useFakeTimers({ now: later, toFake: ['Date'] });
+    try {
+      const abort = new AbortController();
+      handlers.push(() => {
+        abort.abort(); // the cycle is given up on while the first dog runs
+        return { summary: 'ok', findings: [] };
+      });
+      await pack.runDue(abort.signal);
+      expect(runs).toHaveLength(1);
+      // The next cycle runs only the dog still due.
+      handlers.push(() => ({ summary: 'ok', findings: [] }));
+      await pack.runDue();
+      expect(runs).toHaveLength(2);
+      const ids = pack
+        .dogs()
+        .filter((d) => d.lastReport)
+        .map((d) => d.id);
+      expect(ids.sort()).toEqual([a.id, b.id].sort());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('talks plainly when the person turns on Plain wording', async () => {
     const { pack, handlers, runs } = setup();
     expect((await pack.view()).voice).toBe('pack');
