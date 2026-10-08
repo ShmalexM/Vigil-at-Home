@@ -2,7 +2,7 @@ import { hostname, userInfo } from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
 import { buildChildEnv } from './env.js';
 import * as ai from './index.js';
-import { buildUserPrompt } from './prompt.js';
+import { buildSystemPrompt, buildUserPrompt } from './prompt.js';
 import {
   MAX_REDACT_CHARS,
   WITHHELD,
@@ -12,6 +12,7 @@ import {
   redactField,
   redactString,
   redactValue,
+  type SerializedData,
 } from './redact.js';
 
 /** A real-shaped private key body: 64-character lines, the last shorter. */
@@ -119,9 +120,16 @@ describe('redaction', () => {
       { path: '/Users/alexm/a', n: 3, list: ['me@example.com'] },
       { ...opts, maxBytes: 1000 },
     );
-    expect(JSON.parse(serialized)).toEqual({ path: '/Users/<user>/a', n: 3, list: ['<email>'] });
-    const big = redactAndSerialize({ blob: 'x'.repeat(5000) }, { maxBytes: 200 });
-    expect(big).toMatch(/…\[truncated after \d+ bytes\]$/);
+    expect(JSON.parse(serialized.text)).toEqual({
+      path: '/Users/<user>/a',
+      n: 3,
+      list: ['<email>'],
+    });
+    expect(serialized.omitted).toBe(0);
+    // A field that doesn't fit is left out whole, and counted beside the text.
+    const big = redactAndSerialize({ blob: 'x'.repeat(5000), n: 1 }, { maxBytes: 200 });
+    expect(JSON.parse(big.text)).toEqual({ n: 1 });
+    expect(big.omitted).toBe(1);
   });
 
   it('serializes as JSON.stringify does, with an indent of one', () => {
@@ -132,8 +140,10 @@ describe('redaction', () => {
       e: Number.NaN,
       '__proto__-ish': -0,
     };
-    expect(redactAndSerialize(value, { maxBytes: 10_000 })).toBe(JSON.stringify(value, null, 1));
-    expect(redactAndSerialize(undefined, { maxBytes: 100 })).toBe('null');
+    expect(redactAndSerialize(value, { maxBytes: 10_000 }).text).toBe(
+      JSON.stringify(value, null, 1),
+    );
+    expect(redactAndSerialize(undefined, { maxBytes: 100 }).text).toBe('null');
   });
 });
 
@@ -248,6 +258,13 @@ describe('redaction, hardened', () => {
       'sshpass -p "a',
       'x: "a" ',
       '"token": 12345678,',
+      '2>x ',
+      '2> x ',
+      '2>&1 ',
+      '&>x "a" ',
+      '0000000000000000>',
+      'machine x login y password ',
+      '--token [',
     ];
     for (const size of [256 * 1024, 512 * 1024, 600 * 1024]) {
       const fill = (unit: string) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
@@ -531,7 +548,6 @@ describe('redaction, round two', () => {
         'machine x\n  login bob\n  password s3cret\n',
         'machine x\n  login bob\n  password <redacted>\n',
       ],
-      ['passphrase c0rrect', 'passphrase <redacted>'],
       ['curl -u bob:hunter2 https://x.example', 'curl -u bob:<redacted> https://x.example'],
       ['curl -ubob:hunter2 x', 'curl -ubob:<redacted> x'],
       ['curl --user=bob:hunter2 x', 'curl --user=bob:<redacted> x'],
@@ -557,6 +573,8 @@ describe('redaction, round two', () => {
     for (const [text, want] of cases) expect(redact(text)).toBe(want);
     for (const text of [
       'the password is wrong',
+      'passphrase c0rrect',
+      'rm password /etc/hosts',
       'Enter your password below',
       'password reset failed for bob',
       'curl --user-agent a:b x',
@@ -660,18 +678,22 @@ describe('redaction, round two', () => {
     expect(redact(far)).toBe(WITHHELD);
   });
 
-  it('cuts serialized output on a character, never through a marker', () => {
+  it('never cuts serialized output inside a field, a character or a marker', () => {
     const value = { a: 'é'.repeat(100), password: 'hunter2', b: 'x'.repeat(500) };
-    for (let maxBytes = 190; maxBytes < 260; maxBytes++) {
+    const whole = redactValue(value, {}) as Record<string, unknown>;
+    for (let maxBytes = 0; maxBytes < 700; maxBytes++) {
       const out = redactAndSerialize(value, { maxBytes });
-      expect(out).not.toContain('\uFFFD');
-      expect(out).not.toMatch(/<[a-z-]*\n…/);
-      expect(out).toMatch(/…\[truncated after \d+ bytes\]$/);
+      expect(Buffer.byteLength(out.text)).toBeLessThanOrEqual(Math.max(maxBytes, 4));
+      const parsed = JSON.parse(out.text) as Record<string, unknown> | null;
+      for (const [key, field] of Object.entries(parsed ?? {})) expect(field).toBe(whole[key]);
+      const kept = parsed ? Object.keys(parsed).length : 0;
+      expect(kept + out.omitted).toBe(parsed ? 3 : out.omitted ? 1 : 0);
     }
     const withheld = { a: 'x'.repeat(10), b: 'it is `id`, password=x' };
     for (let maxBytes = 20; maxBytes < 60; maxBytes++) {
-      const out = redactAndSerialize(withheld, { maxBytes });
-      expect(out).not.toMatch(/\[w[a-z: ]*\n…/);
+      const parsed = JSON.parse(redactAndSerialize(withheld, { maxBytes }).text) as object;
+      for (const field of Object.values(parsed))
+        expect([WITHHELD, 'x'.repeat(10)]).toContain(field);
     }
   });
 
@@ -905,8 +927,9 @@ describe('redaction, the five review findings', () => {
     started = performance.now();
     const serialized = redactAndSerialize({ data: nested, text }, { maxBytes: 4096 });
     expect(performance.now() - started).toBeLessThan(2000);
-    expect(Buffer.byteLength(serialized)).toBeLessThan(4096 + 64);
-    expect(serialized).toMatch(/…\[truncated after \d+ bytes\]$/);
+    expect(Buffer.byteLength(serialized.text)).toBeLessThanOrEqual(4096);
+    expect(() => JSON.parse(serialized.text) as unknown).not.toThrow();
+    expect(serialized.omitted).toBeGreaterThan(0);
   });
 });
 
@@ -1051,7 +1074,8 @@ describe('redaction, the nine findings of the second review', () => {
   it("7: reads an assignment's value to its whitespace", () => {
     expect(redact('PGPASSWORD=abc}def psql')).toBe(WITHHELD);
     expect(redact('PGPASSWORD=abc)def psql')).toBe(WITHHELD);
-    expect(redact('PGPASSWORD=abc]def psql')).toBe('PGPASSWORD=<redacted> psql');
+    expect(redact('PGPASSWORD=abc]def psql')).toBe(WITHHELD);
+    expect(redact('PGPASSWORD=abc,def psql')).toBe('PGPASSWORD=<redacted> psql');
   });
 
   it('8: withholds an oversized field whole, with no third outcome', () => {
@@ -1063,24 +1087,104 @@ describe('redaction, the nine findings of the second review', () => {
     const far = 'TOKEN=hunter2 ' + 'x '.repeat(200_000) + '# note';
     expect(far.length).toBeLessThan(MAX_REDACT_CHARS);
     expect(redactField(far)).toBe(WITHHELD);
-    // The size is noted beside the serialized data; the field is WITHHELD exactly.
-    expect(redactAndSerialize({ big, n: 1 }, { maxBytes: 10_000 })).toBe(
-      `${JSON.stringify({ big: WITHHELD, n: 1 }, null, 1)}\n…[1 field over ${MAX_REDACT_CHARS} characters withheld unread: ${big.length} characters]`,
-    );
+    // The size is reported beside the serialized data; the field is WITHHELD exactly.
+    expect(redactAndSerialize({ big, n: 1 }, { maxBytes: 10_000 })).toEqual({
+      text: JSON.stringify({ big: WITHHELD, n: 1 }, null, 1),
+      omitted: 0,
+      oversized: [big.length],
+    });
   });
 
   it('9: counts keys toward the write budget as they are written', () => {
     const stringify = vi.spyOn(JSON, 'stringify');
     try {
-      const out = redactAndSerialize({ ['a'.repeat(1_000_000)]: 1 }, { maxBytes: 32 });
-      expect(Buffer.byteLength(out)).toBeLessThan(32 + 64);
-      expect(out).toMatch(/…\[truncated after \d+ bytes\]$/);
+      const out = redactAndSerialize({ ['a'.repeat(1_000_000)]: 1, b: 2 }, { maxBytes: 32 });
+      expect(JSON.parse(out.text)).toEqual({ b: 2 });
+      expect(out.omitted).toBe(1);
       for (const [arg] of stringify.mock.calls) {
         if (typeof arg === 'string') expect(arg.length).toBeLessThanOrEqual(33);
       }
     } finally {
       stringify.mockRestore();
     }
+  });
+});
+
+describe('redaction, the four findings of the third review', () => {
+  const redact = (text: string) => redactField(text);
+  const token = 'ghp_' + 'b'.repeat(36);
+
+  it('1: reads a command after leading redirections, and the .netrc rule only in a .netrc', () => {
+    expect(redact('2>password rm -rf /tmp/demo')).toBe('2>password rm -rf /tmp/demo');
+    expect(redact('rm password "/etc/passwd"')).toBe('rm password "/etc/passwd"');
+    // A quoted token is a value, unless redirections put it in command position.
+    expect(redact(`echo "${token}"`)).toBe('echo "<github-token>"');
+    for (const prefix of ['2>x', '>x', '<x', '2>&1', '&>x', '>>x', '2> x', 'A=1 2>/dev/null']) {
+      expect(redact(`${prefix} "${token}"`), prefix).toBe(WITHHELD);
+      expect(redact(`ls; ${prefix} "${token}"`), prefix).toBe(WITHHELD);
+    }
+    // An argument that only looks like a redirection's target is not one.
+    expect(redact(`cat a2>x "${token}"`)).toBe('cat a2>x "<github-token>"');
+    const named = { username: 'whoami' };
+    expect(redactField('2>/dev/null whoami@host', named)).toBe('2>/dev/null whoami@host');
+    expect(redactField('ssh whoami@host 2>&1', named)).toBe('ssh <user>@host 2>&1');
+    expect(redact('machine example.com login bob password s3cret')).toBe(
+      'machine example.com login bob password <redacted>',
+    );
+    expect(redact('default login bob password s3cret')).toBe(
+      'default login bob password <redacted>',
+    );
+  });
+
+  it('2: treats shell glob characters as unsafe', () => {
+    for (const text of [
+      'curl --token [ab] x',
+      'PGPASSWORD=a*b psql',
+      'TOKEN=abc? x',
+      'sshpass -p a[1] ssh host',
+      '{"password":"a*b"}',
+    ]) {
+      expect(redact(text), text).toBe(WITHHELD);
+    }
+  });
+
+  it('3: never cuts inside a field, and notes omissions only beside the text', () => {
+    const out = redactAndSerialize('echo harmless; rm -rf /tmp/demo', { maxBytes: 16 });
+    expect(out).toEqual({ text: 'null', omitted: 1, oversized: [] });
+    const value = { a: 'echo harmless; rm -rf /tmp/demo', b: 1, c: [1, 'two', 'three hundred'] };
+    for (let maxBytes = 0; maxBytes < 80; maxBytes++) {
+      const fitted = redactAndSerialize(value, { maxBytes });
+      const parsed = JSON.parse(fitted.text) as Record<string, unknown> | null;
+      if (parsed === null) continue;
+      if ('a' in parsed) expect(parsed.a).toBe(value.a);
+      for (const item of (parsed.c as unknown[] | undefined) ?? []) expect(value.c).toContain(item);
+      expect(fitted.text).not.toMatch(/truncated|withheld unread/);
+    }
+    const oversized = 'x'.repeat(MAX_REDACT_CHARS + 1);
+    const withheld = redactAndSerialize({ oversized }, { maxBytes: 1000 });
+    expect(JSON.parse(withheld.text)).toEqual({ oversized: WITHHELD });
+    expect(withheld.oversized).toEqual([oversized.length]);
+  });
+
+  it('3: tells the model that omitted fields are unknown, outside the data block', () => {
+    expect(buildSystemPrompt('explain', [])).toContain(
+      'left out of the data to fit its size limit',
+    );
+    const prompt = buildUserPrompt('Explain.', { text: '{}', omitted: 2, oversized: [600_000] });
+    const close = prompt.lastIndexOf('</vigil-data');
+    expect(prompt.indexOf('2 fields were left out whole')).toBeGreaterThan(close);
+    expect(prompt).toContain('1 field was too long to read');
+    expect(buildUserPrompt('Explain.', '{}')).not.toContain('Note from Vigil');
+  });
+
+  it('4: always treats a credential flag value as a secret', () => {
+    expect(redact('sshpass -p true ssh host')).toBe('sshpass -p <redacted> ssh host');
+    expect(redact('mysql -p1234 shop')).toBe('mysql -p<redacted> shop');
+    expect(redact('cli --token yes')).toBe('cli --token <redacted>');
+    expect(redact('cli --password=1234 x')).toBe('cli --password=<redacted> x');
+    expect(redact('openssl enc -k null -in a')).toBe('openssl enc -k <redacted> -in a');
+    // A setting, not a flag, may still hold a flag-like value.
+    expect(redact('auth_token=true')).toBe('auth_token=true');
   });
 });
 
@@ -1116,6 +1220,14 @@ describe('redaction never hides a command', () => {
     '42',
     'tar',
     '-xzf',
+    // Leading redirections and fd prefixes, which a command may follow.
+    '2>/dev/null',
+    '>out.txt',
+    '2>&1',
+    '&>log.txt',
+    '>>log.txt',
+    '<in.txt',
+    '2>',
   ];
   const METAS = [';', '|', '||', '&&', '&', '>', '>>', '<', '\n', '`id`', '$(id)', ')'];
   const NAMES = [
@@ -1134,7 +1246,7 @@ describe('redaction never hides a command', () => {
 
   /** Characters a precise redaction may remove: printable ASCII no shell acts on. */
   const SAFE = `[${Array.from({ length: 0x5e }, (_, i) => String.fromCharCode(0x21 + i))
-    .filter((c) => !'"\'`$;&|<>(){}#\\'.includes(c))
+    .filter((c) => !'"\'`$;&|<>(){}#\\*?[]'.includes(c))
     .map((c) => (/[\]\\^-]/.test(c) ? `\\${c}` : c))
     .join('')}]`;
   const MARKERS = [
@@ -1338,7 +1450,7 @@ describe('redaction never hides a command', () => {
         }
         // A quoted value with a metacharacter or a blank in it, after any trigger.
         case 17: {
-          const messy = `${bare}${pick([';', '|', '&', ' ', '$(id)', '`id`', '}', '\\'])}${other}`;
+          const messy = `${bare}${pick([';', '|', '&', ' ', '$(id)', '`id`', '}', '\\', '*', '?', '[', ']'])}${other}`;
           const text = pick([
             `curl -u "bob:${messy}" https://example.invalid`,
             `sshpass -p '${messy}' ssh host`,
@@ -1353,9 +1465,31 @@ describe('redaction never hides a command', () => {
         }
         // A bare value that runs into a metacharacter before its whitespace.
         case 18: {
-          const meta = pick(['}', '{', ')', '(', '$', '\\', '<', '>', ';', '|', '&', '#', '"']);
+          const meta = pick([
+            '}',
+            '{',
+            ')',
+            '(',
+            '$',
+            '\\',
+            '<',
+            '>',
+            ';',
+            '|',
+            '&',
+            '#',
+            '"',
+            '*',
+            '?',
+            '[',
+            ']',
+          ]);
           return {
-            text: `${name}=${bare}${meta}${other} psql`,
+            text: pick([
+              `${name}=${bare}${meta}${other} psql`,
+              `curl --token ${bare}${meta}${other} x`,
+              `sshpass -p ${bare}${meta}${other} ssh host`,
+            ]),
             shown: [],
             hidden: [bare, other],
             withhold: true,
@@ -1396,6 +1530,12 @@ describe('redaction never hides a command', () => {
               `x ${token} y`,
               `ls /tmp/${token}`,
               `id;${token}`,
+              // A quoted token is in a value position, but here a command.
+              `\n2>/dev/null "${token}"`,
+              `\n2>&1 "${token}"`,
+              `\n&>log.txt "${token}"`,
+              `\n2> /tmp/x "${token}"`,
+              `\n>>log.txt FLAG=1 <in.txt '${token}'`,
             ]),
             shown: [],
             hidden: [token],
@@ -1421,7 +1561,11 @@ describe('redaction never hides a command', () => {
         case 23:
           return pick<Piece>([
             { text: `${name}="${bare}"${glued}`, shown: [`${name}="`, '"', glued], hidden: [bare] },
-            { text: `password '${bare}'`, shown: ["password '", "'"], hidden: [bare] },
+            {
+              text: `machine x login bob password '${bare}'`,
+              shown: ["machine x login bob password '", "'"],
+              hidden: [bare],
+            },
             { text: `curl -u 'bob:${bare}' x`, shown: ["curl -u 'bob:", "' x"], hidden: [bare] },
             {
               text: `<password>${bare}</password>`,
@@ -1452,7 +1596,8 @@ describe('redaction never hides a command', () => {
         }
       }
     };
-    // A user, host or email name, often glued to a metacharacter and a command.
+    // A user, host or email name, often glued to a metacharacter and a command. Each
+    // starts a line, so a redirection before it can't make its first word a target.
     const named = (): Piece => {
       const meta = pick([';', '|', '&&', '>', ')', '`id`', '$(id)', '/', '\n']);
       const word = pick(['id', 'whoami', 'curl']);
@@ -1471,19 +1616,19 @@ describe('redaction never hides a command', () => {
           };
         case 2:
           return {
-            text: `ssh alexm@Alexs-MacBook-Pro${meta}${word}`,
+            text: `\nssh alexm@Alexs-MacBook-Pro${meta}${word}`,
             shown: ['ssh', '@', meta, word],
             hidden: ['alexm', 'Alexs-MacBook-Pro'],
           };
         case 3:
           return {
-            text: `ping Alexs-MacBook-Pro.local${meta}${word}`,
+            text: `\nping Alexs-MacBook-Pro.local${meta}${word}`,
             shown: ['ping', meta, word],
             hidden: ['Alexs-MacBook-Pro'],
           };
         default:
           return {
-            text: `mail me@example.com${meta}${word}`,
+            text: `\nmail me@example.com${meta}${word}`,
             shown: ['mail', meta, word],
             hidden: ['me@example.com'],
           };
@@ -1608,7 +1753,7 @@ describe('redaction never hides a command', () => {
       for (const secret of hidden) expect(all).not.toContain(secret);
       const maxBytes = 64 + Math.floor(next() * 8192);
       const stringify = vi.spyOn(JSON, 'stringify');
-      let serialized: string;
+      let serialized: SerializedData;
       try {
         serialized = redactAndSerialize(value, { ...NAMED, maxBytes });
         // No key or string is escaped whole when only part of it could fit.
@@ -1618,12 +1763,47 @@ describe('redaction never hides a command', () => {
       } finally {
         stringify.mockRestore();
       }
-      const [body] = serialized.split('\n…[');
-      expect(Buffer.byteLength(body!)).toBeLessThanOrEqual(maxBytes);
-      expect(serialized.includes('withheld unread')).toBe(oversized > 0);
+      expect(Buffer.byteLength(serialized.text)).toBeLessThanOrEqual(maxBytes);
+      const parsed = JSON.parse(serialized.text) as Record<string, string>;
+      for (const [key, field] of Object.entries(parsed)) expect(field).toBe(redacted[key]);
+      expect(serialized.oversized).toHaveLength(oversized);
     }
     expect(oversizedSeen).toBeGreaterThan(5);
   }, 30_000);
+  it('serializes within any budget as valid JSON of whole fields, with no cut fragments', () => {
+    const next = random(0x7e57);
+    for (let run = 0; run < 400; run++) {
+      const lines = Array.from({ length: 3 }, () => generate(next).line);
+      const value = { f0: lines[0], f1: lines[1], n: run, list: lines, nested: { f2: lines[2] } };
+      const whole = redactValue(value, NAMED) as {
+        list: string[];
+        nested: { f2: string };
+      } & Record<string, unknown>;
+      const maxBytes = run < 300 ? 1 + (run % 64) : 64 + Math.floor(next() * 2048);
+      const out = redactAndSerialize(value, { ...NAMED, maxBytes });
+      expect(Buffer.byteLength(out.text)).toBeLessThanOrEqual(Math.max(maxBytes, 4));
+      const parsed = JSON.parse(out.text) as Record<string, unknown> | null;
+      if (parsed === null) continue;
+      for (const key of ['f0', 'f1', 'n']) if (key in parsed) expect(parsed[key]).toBe(whole[key]);
+      const nested = parsed.nested as { f2?: string } | undefined;
+      if (nested && 'f2' in nested) expect(nested.f2).toBe(whole.nested.f2);
+      // The list keeps whole elements, in order.
+      let at = 0;
+      for (const item of (parsed.list as string[] | undefined) ?? []) {
+        at = whole.list.indexOf(item, at) + 1;
+        expect(at, String(item)).toBeGreaterThan(0);
+      }
+      for (const field of [
+        parsed.f0,
+        parsed.f1,
+        nested?.f2,
+        ...((parsed.list as string[]) ?? []),
+      ]) {
+        if (typeof field !== 'string') continue;
+        expect(field === WITHHELD || lines.some((line) => isPrecise(line!, field))).toBe(true);
+      }
+    }
+  });
 });
 
 describe('child environment', () => {

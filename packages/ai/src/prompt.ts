@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { REDACTED, WITHHELD } from './redact.js';
+import { REDACTED, WITHHELD, type SerializedData } from './redact.js';
 import type { Purpose } from './types.js';
 
 const ROLE: Record<Purpose, string> = {
@@ -38,7 +38,9 @@ export function buildSystemPrompt(purpose: Purpose, toolNames: readonly string[]
     '',
     `Secrets in it are replaced with markers such as ${REDACTED}. A field that may hold a secret ` +
       `Vigil could not cut out exactly is replaced whole with ${WITHHELD}: treat its content as ` +
-      'unknown, never as empty or harmless, and say when that limits your answer.',
+      'unknown, never as empty or harmless, and say when that limits your answer. Fields Vigil ' +
+      'left out of the data to fit its size limit, as the note after the data block says, are ' +
+      'unknown in the same way: never read their absence as meaning they were empty or harmless.',
     '',
     `${toolNames.length === 0 ? 'You' : 'Beyond your tools, you'} cannot run commands, read or write files, or browse the web. ${tools}`,
     '',
@@ -46,14 +48,39 @@ export function buildSystemPrompt(purpose: Purpose, toolNames: readonly string[]
   ].join('\n');
 }
 
-/** Wrap data in a block whose closing tag the data cannot guess. */
-export function buildUserPrompt(instructions: string, serializedData: string): string {
+/** Vigil's own note on what it left out of the data, written outside the data block. */
+function omissionNote(data: SerializedData): string | undefined {
+  const parts: string[] = [];
+  if (data.omitted) {
+    parts.push(
+      `${data.omitted} ${data.omitted === 1 ? 'field was' : 'fields were'} left out whole to fit the size limit`,
+    );
+  }
+  if (data.oversized.length) {
+    const n = data.oversized.length;
+    parts.push(
+      `${n} ${n === 1 ? 'field was' : 'fields were'} too long to read and replaced with ${WITHHELD}`,
+    );
+  }
+  return parts.length
+    ? `Note from Vigil: ${parts.join('; ')}. Treat what they held as unknown.`
+    : undefined;
+}
+
+/**
+ * Wrap data in a block whose closing tag the data cannot guess. What Vigil
+ * left out of serialized data is noted after the block, not inside it.
+ */
+export function buildUserPrompt(instructions: string, data: string | SerializedData): string {
   const nonce = randomBytes(9).toString('base64url');
+  const serialized = typeof data === 'string' ? { text: data, omitted: 0, oversized: [] } : data;
+  const note = omissionNote(serialized);
   return [
     instructions,
     '',
     `<vigil-data id="${nonce}">`,
-    serializedData,
+    serialized.text,
     `</vigil-data id="${nonce}">`,
+    ...(note ? ['', note] : []),
   ].join('\n');
 }

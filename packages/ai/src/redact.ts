@@ -65,10 +65,17 @@ export const MAX_REDACT_CHARS = 512 * 1024;
 // ---------------------------------------------------------------------------
 // Characters, tokens and fields.
 
-/** A character a precise token may hold: printable ASCII that no shell acts on. */
+/**
+ * A character a precise token may hold: printable ASCII that no shell acts
+ * on, glob characters included.
+ */
 function isSafeCode(code: number): boolean {
   if (code <= 0x20 || code >= 0x7f) return false;
   switch (code) {
+    case 0x2a: // *
+    case 0x3f: // ?
+    case 0x5b: // [
+    case 0x5d: // ]
     case 0x22: // "
     case 0x27: // '
     case 0x60: // `
@@ -130,16 +137,45 @@ const ASSIGNMENT_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const MAX_COMMAND_LOOKBACK = 4096;
 
 /**
+ * Where the redirection that ends `word` starts, or -1: 2>x, >x, <x, >>x,
+ * 2>&1, &>x, 2> (its target in the next word). Only a redirection that is
+ * the whole word, or follows a command separator in it, counts.
+ */
+function redirectionStart(word: string): number {
+  const op = Math.max(word.lastIndexOf('>'), word.lastIndexOf('<'));
+  if (op < 0) return -1;
+  let s = op;
+  while (s > 0 && (word[s - 1] === '>' || word[s - 1] === '<')) s--;
+  if (s > 0 && word[s - 1] === '&') s--;
+  else while (s > 0 && word.charCodeAt(s - 1) >= 0x30 && word.charCodeAt(s - 1) <= 0x39) s--;
+  return s === 0 || isCommandSeparator(word.charCodeAt(s - 1)) ? s : -1;
+}
+
+/**
+ * Where the part of `word` that the shell reads before a command starts, or
+ * -1: a redirection, or a NAME=value assignment after any separator.
+ */
+function prefixStart(word: string): number {
+  const redirection = redirectionStart(word);
+  if (redirection >= 0) return redirection;
+  let segment = word.length;
+  while (segment > 0 && !isCommandSeparator(word.charCodeAt(segment - 1))) segment--;
+  return ASSIGNMENT_WORD.test(word.slice(segment)) ? segment : -1;
+}
+
+/**
  * True when a word starting at `start` could be a command the shell runs:
  * at the start of the field, a line or a pipeline stage, right after a
  * substitution or group opener, or after any number of NAME=value
- * assignments there. Quotes and blanks before it don't count. Where the
- * words before it can't be read plainly, the answer is yes.
+ * assignments and redirections there (FLAG=1 2>/dev/null cmd). Quotes and
+ * blanks before it don't count. Where the words before it can't be read
+ * plainly, the answer is yes.
  */
 function inCommandPosition(text: string, start: number): boolean {
   let i = start - 1;
   const floor = start - MAX_COMMAND_LOOKBACK;
   for (;;) {
+    if (i < floor) return true;
     const from = i;
     while (i >= 0 && isBlankOrQuote(text.charCodeAt(i))) i--;
     if (i < 0) return true;
@@ -152,16 +188,32 @@ function inCommandPosition(text: string, start: number): boolean {
     }
     if (!blank) return false;
     // The word before ends in a quote the scan can't follow back: it might
-    // end an assignment, as in NAME="a b" cmd.
+    // end an assignment, as in NAME="a b" cmd, or a redirection's target.
     if (text[i + 1] === '"' || text[i + 1] === "'") return true;
-    // The word before: an assignment keeps the command position after it.
+    // The word before, back to the blank before it.
     let w = i;
-    while (w >= 0 && !isSpace(text.charCodeAt(w)) && !isCommandSeparator(text.charCodeAt(w))) {
+    while (w >= 0 && !isSpace(text.charCodeAt(w))) {
       if (w < floor) return true;
       w--;
     }
-    if (!ASSIGNMENT_WORD.test(text.slice(w + 1, i + 1))) return false;
-    i = w;
+    const prefix = prefixStart(text.slice(w + 1, i + 1));
+    if (prefix >= 0) {
+      i = w + prefix;
+      continue;
+    }
+    // The target of a redirection written apart from it: 2> /dev/null cmd.
+    let p = w;
+    while (p >= 0 && (text[p] === ' ' || text[p] === '\t')) p--;
+    if (p < 0 || p === w) return false;
+    let q = p;
+    while (q >= 0 && !isSpace(text.charCodeAt(q))) {
+      if (q < floor) return true;
+      q--;
+    }
+    const before = text.slice(q + 1, p + 1);
+    const redirection = redirectionStart(before);
+    if (redirection < 0 || !/[<>]&?$/.test(before)) return false;
+    i = q + redirection;
   }
 }
 
@@ -301,11 +353,21 @@ function readValue(
   return marker ? undefined : { start, end };
 }
 
-/** Read a value with readValue, and add it unless it can't be a secret. */
-function addValue(text: string, at: number, password: boolean, f: Findings, closer = ''): number {
+/**
+ * Read a value with readValue, and add it unless it can't be a secret. A
+ * value given to a credential flag is always a secret: `benign` is false.
+ */
+function addValue(
+  text: string,
+  at: number,
+  password: boolean,
+  f: Findings,
+  closer = '',
+  benign = true,
+): number {
   const value = readValue(text, at, f, closer);
   if (!value) return at;
-  if (!isBenignValue(text.slice(value.start, value.end), password)) {
+  if (!benign || !isBenignValue(text.slice(value.start, value.end), password)) {
     f.token(value.start, value.end, REDACTED, RANK_KEYED);
   }
   return value.end;
@@ -676,17 +738,23 @@ function addKeyedValues(text: string, f: Findings): void {
         continue;
       }
     }
-    const end = addValue(text, at, name.password, f, argQuote);
+    // --password x, --token=x: a flag's value is the secret, whatever it is.
+    const flag = m[5] !== undefined || text[m.index + lead.length] === '-';
+    const end = addValue(text, at, name.password, f, argQuote, !flag);
     if (f.withheld) return;
     KEYED.lastIndex = Math.max(KEYED.lastIndex, end);
   }
 }
 
 // ---------------------------------------------------------------------------
-// `password hunter2`, as in .netrc, where the value follows a space. The words
-// that follow "password" in a sentence are left alone.
+// `password hunter2` in .netrc, where the value follows a space. Only text
+// with a .netrc's structure is read so, a machine or default entry with a
+// login: elsewhere, as in `rm password x`, the word after it is any word.
+// The words that follow "password" in a sentence are left alone.
 
-const PASSWORD_WORD = /(?<![A-Za-z0-9_./\\-])pass(?:word|phrase)[ \t]+/gi;
+const PASSWORD_WORD = /(?<![A-Za-z0-9_./\\-])password[ \t]+/gi;
+const NETRC_ENTRY = /(?:^|\s)(?:machine[ \t]+\S|default(?:\s|$))/;
+const NETRC_LOGIN = /(?:^|\s)login[ \t]+\S/;
 /** What can't start a value after "password ": a separator, a flag or punctuation. */
 const NOT_A_VALUE = '=:-,;&|)}]>(<{[';
 const PROSE_AFTER_PASSWORD = new Set(
@@ -706,7 +774,7 @@ const PROSE_AFTER_PASSWORD = new Set(
 );
 
 function addPasswordWords(text: string, f: Findings): void {
-  if (!/pass/i.test(text)) return;
+  if (!/password/i.test(text) || !NETRC_ENTRY.test(text) || !NETRC_LOGIN.test(text)) return;
   PASSWORD_WORD.lastIndex = 0;
   for (let m = PASSWORD_WORD.exec(text); m; m = PASSWORD_WORD.exec(text)) {
     const at = m.index + m[0].length;
@@ -760,7 +828,7 @@ function addCommandSecrets(text: string, f: Findings): void {
       for (let m = flag.exec(line); m; m = flag.global ? flag.exec(line) : null) {
         const at = c.index + m.index + m[0].length;
         if (!userPass) {
-          addValue(text, at, true, f);
+          addValue(text, at, true, f, '', false);
         } else {
           // user:password; with no colon, curl asks for the password.
           const value = readValue(text, at, f);
@@ -1509,35 +1577,26 @@ function redactWithin(
 
 // ---------------------------------------------------------------------------
 // Serialization within a byte budget. The text is written as JSON.stringify
-// with an indent of 1 writes it, and writing stops once the budget is spent,
-// so a value that would serialize to far more than maxBytes, through its
-// strings or its keys, is never written out in full.
+// with an indent of 1 writes it, but never cut inside a field: an object
+// entry or array element that doesn't fit what is left of the budget is left
+// out whole, and the rest is still tried, so the text is always valid JSON
+// and every string in it is complete. What was left out is reported beside
+// the text, never written into it. A string or key is measured by its length
+// before it is escaped, so one far over the budget is never escaped whole.
 
-class BoundedText {
-  readonly parts: string[] = [];
-  readonly max: number;
-  bytes = 0;
+/** What redactAndSerialize returns: the data, and what it leaves out. */
+export interface SerializedData {
+  /** Valid JSON, within maxBytes (at least `null` when nothing fits). */
+  readonly text: string;
+  /** Object entries and array elements left out whole to fit maxBytes. */
+  readonly omitted: number;
+  /** The length of each field withheld unread for its size. */
+  readonly oversized: readonly number[];
+}
 
-  constructor(max: number) {
-    this.max = max;
-  }
-
-  get full(): boolean {
-    return this.bytes > this.max;
-  }
-
-  write(piece: string): void {
-    if (this.full) return;
-    this.parts.push(piece);
-    this.bytes += Buffer.byteLength(piece, 'utf8');
-  }
-
-  /** A string or key, of which no more is escaped than could still fit. */
-  string(value: string): void {
-    if (this.full) return;
-    const room = this.max - this.bytes + 1;
-    this.write(JSON.stringify(value.length > room ? value.slice(0, room) : value));
-  }
+interface Fitted {
+  readonly text: string;
+  readonly bytes: number;
 }
 
 /** True for what JSON.stringify leaves out of an object, or writes as null in an array. */
@@ -1545,88 +1604,90 @@ function unwritable(value: unknown): boolean {
   return value === undefined || typeof value === 'function' || typeof value === 'symbol';
 }
 
-function writeJson(value: unknown, indent: string, out: BoundedText): void {
-  if (out.full) return;
+/**
+ * `value` as JSON in at most `room` bytes, or undefined when it can't fit.
+ * A container fits as long as its brackets do, holding the entries that fit;
+ * each one left out is counted in `omitted`.
+ */
+function fitJson(
+  value: unknown,
+  indent: string,
+  room: number,
+  omitted: { count: number },
+): Fitted | undefined {
+  if (room <= 0) return undefined;
+  let scalar: string | undefined;
   switch (typeof value) {
-    case 'string':
-      out.string(value);
-      return;
+    case 'string': {
+      // Escaping never makes a string shorter.
+      if (value.length + 2 > room) return undefined;
+      const text = JSON.stringify(value);
+      const bytes = Buffer.byteLength(text, 'utf8');
+      return bytes <= room ? { text, bytes } : undefined;
+    }
     case 'number':
-      out.write(Number.isFinite(value) ? String(value) : 'null');
-      return;
+      scalar = Number.isFinite(value) ? String(value) : 'null';
+      break;
     case 'boolean':
     case 'bigint':
-      out.write(String(value));
-      return;
-    default:
+      scalar = String(value);
       break;
+    default:
+      if (value === null || typeof value !== 'object') scalar = 'null';
   }
-  if (value === null || typeof value !== 'object') {
-    out.write('null');
-    return;
+  if (scalar !== undefined) {
+    return scalar.length <= room ? { text: scalar, bytes: scalar.length } : undefined;
   }
+  if (room < 2) return undefined;
+  const array = Array.isArray(value);
+  const empty = array ? '[]' : '{}';
+  const entries: ReadonlyArray<readonly [string | undefined, unknown]> = array
+    ? (value as unknown[]).map((item) => [undefined, unwritable(item) ? null : item] as const)
+    : Object.entries(value as object).filter(([, item]) => !unwritable(item));
+  if (!entries.length) return { text: empty, bytes: 2 };
   const inner = indent + ' ';
-  if (Array.isArray(value)) {
-    if (!value.length) return out.write('[]');
-    out.write('[');
-    value.forEach((item, i) => {
-      if (out.full) return;
-      out.write(`${i ? ',' : ''}\n${inner}`);
-      writeJson(unwritable(item) ? null : item, inner, out);
-    });
-    out.write(`\n${indent}]`);
-    return;
+  const close = `\n${indent}${array ? ']' : '}'}`;
+  let text = array ? '[' : '{';
+  let bytes = 1;
+  let written = 0;
+  for (const [key, item] of entries) {
+    const sep = `${written ? ',' : ''}\n${inner}`;
+    let avail = room - bytes - sep.length - close.length;
+    let head = '';
+    let headBytes = 0;
+    if (key !== undefined && avail > 0) {
+      // "key": , measured before the key is escaped.
+      if (key.length + 4 <= avail) {
+        head = `${JSON.stringify(key)}: `;
+        headBytes = Buffer.byteLength(head, 'utf8');
+      }
+      avail = head ? avail - headBytes : 0;
+    }
+    const piece = avail > 0 ? fitJson(item, inner, avail, omitted) : undefined;
+    if (!piece) {
+      omitted.count++;
+      continue;
+    }
+    text += sep + head + piece.text;
+    bytes += sep.length + headBytes + piece.bytes;
+    written++;
   }
-  const entries = Object.entries(value).filter(([, item]) => !unwritable(item));
-  if (!entries.length) return out.write('{}');
-  out.write('{');
-  entries.forEach(([key, item], i) => {
-    if (out.full) return;
-    out.write(`${i ? ',' : ''}\n${inner}`);
-    out.string(key);
-    out.write(': ');
-    writeJson(item, inner, out);
-  });
-  out.write(`\n${indent}}`);
-}
-
-/** How many sizes the note on oversized fields lists. */
-const MAX_LISTED_SIZES = 8;
-
-/** A note on the fields withheld unread for their size, after the serialized text. */
-function oversizedNote(sizes: readonly number[]): string {
-  if (!sizes.length) return '';
-  const listed = sizes.slice(0, MAX_LISTED_SIZES).join(', ');
-  const more = sizes.length > MAX_LISTED_SIZES ? ', …' : '';
-  const fields = sizes.length === 1 ? '1 field' : `${sizes.length} fields`;
-  return `\n…[${fields} over ${MAX_REDACT_CHARS} characters withheld unread: ${listed}${more} characters]`;
+  if (!written) return { text: empty, bytes: 2 };
+  return { text: text + close, bytes: bytes + close.length };
 }
 
 /**
- * Redact and serialize, stopping at maxBytes with a visible marker. The cut
- * never splits a character or leaves part of a redaction marker. Fields
- * withheld for their size are noted after the text.
+ * Redact and serialize within maxBytes. Every field in the text is whole:
+ * WITHHELD, or its precise redaction. Fields that don't fit are left out
+ * whole and counted; fields withheld for their size are listed. Neither note
+ * is written into the text.
  */
-export function redactAndSerialize(value: unknown, options: RedactionOptions): string {
+export function redactAndSerialize(value: unknown, options: RedactionOptions): SerializedData {
   const max = Math.max(0, options.maxBytes);
   const oversized: number[] = [];
   const redacted = redactWithin(value, options, undefined, 0, new Set(), oversized);
-  const note = oversizedNote(oversized);
-  const out = new BoundedText(max);
-  writeJson(unwritable(redacted) ? null : redacted, '', out);
-  const text = out.parts.join('');
-  if (!out.full) return text + note;
-  const buffer = Buffer.from(text, 'utf8');
-  let end = max;
-  // Back up to the first byte of a character the cut runs through.
-  while (end > 0 && (buffer[end]! & 0xc0) === 0x80) end--;
-  let cut = buffer
-    .subarray(0, end)
-    .toString('utf8')
-    .replace(/<[a-z-]{0,30}$/, '');
-  const open = cut.lastIndexOf('[');
-  if (open >= 0 && cut.length - open < WITHHELD.length && WITHHELD.startsWith(cut.slice(open))) {
-    cut = cut.slice(0, open);
-  }
-  return `${cut}\n…[truncated after ${Buffer.byteLength(cut, 'utf8')} bytes]${note}`;
+  const omitted = { count: 0 };
+  const fitted = fitJson(unwritable(redacted) ? null : redacted, '', max, omitted);
+  if (fitted) return { text: fitted.text, omitted: omitted.count, oversized };
+  return { text: 'null', omitted: redacted == null || unwritable(redacted) ? 0 : 1, oversized };
 }
