@@ -34,6 +34,10 @@ import { TEST_RULE } from './test-alert.js';
 import { WORTH_A_LOOK_RULE } from './worth-a-look.js';
 import { UsageService } from './usage.js';
 
+/** How long the Activity strip's counts are reused (see eventStats). */
+export const EVENT_STATS_TTL_MS = 5_000;
+/** How long its distinct-programs number is reused: it reads every launch of the hour. */
+export const EVENT_PROGRAMS_TTL_MS = 60_000;
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 /** The feed hears about new events at most this often, however fast they arrive. */
@@ -230,11 +234,31 @@ export class VigilCore {
     return cleared;
   }
 
+  private statsCache: { at: number; stats: EventStats } | undefined;
+  private programsCache: { at: number; n: number } | undefined;
+
+  /**
+   * The Activity strip's numbers. A busy Mac stores 200,000 events an hour
+   * while the page asks again with every batch of events, about once a
+   * second, so the counts are at most {@link EVENT_STATS_TTL_MS} old and the
+   * costly distinct-programs number at most {@link EVENT_PROGRAMS_TTL_MS}.
+   */
   eventStats(): EventStats {
-    return {
-      ...this.store.eventStats(this.now() - HOUR),
+    const now = this.now();
+    if (this.statsCache && now - this.statsCache.at < EVENT_STATS_TTL_MS) {
+      return this.statsCache.stats;
+    }
+    const since = now - HOUR;
+    if (!this.programsCache || now - this.programsCache.at >= EVENT_PROGRAMS_TTL_MS) {
+      this.programsCache = { at: now, n: this.store.programsSince(since) };
+    }
+    const stats = {
+      ...this.store.eventCounts(since),
+      programsLastHour: this.programsCache.n,
       retentionDays: EVENT_RETENTION_DAYS,
     };
+    this.statsCache = { at: now, stats };
+    return stats;
   }
 
   status(): StatusView {
