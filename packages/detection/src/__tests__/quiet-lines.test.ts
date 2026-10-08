@@ -5,11 +5,11 @@ import { macosCoreRules } from '../packs/macos-core.js';
 import { isQuietLine, runsQuietLine } from '../rules/quiet-lines.js';
 import { memoryStores } from '../state/stores.js';
 import type { Condition, DetectionEvent, DetectionRuleInput } from '../types.js';
-import { exec, REAL_LOCAL_READS, shell } from './fixtures.js';
+import { agentShell, exec, HARNESS_CWD, proc, REAL_LOCAL_READS } from './fixtures.js';
 
 const RULE = 'download-pipe-to-shell';
 const wrapped = (c: string) =>
-  `source /Users/alex/.claude/shell-snapshots/snapshot-zsh-1759-ab12.sh && eval '${c.replace(/'/g, "'\\''")}' < /dev/null && pwd -P >| /var/folders/x/T/claude-ab12-cwd`;
+  `source /Users/alex/.claude/shell-snapshots/snapshot-zsh-1759-ab12.sh && eval '${c.replace(/'/g, "'\\''")}' < /dev/null && pwd -P >| ${HARNESS_CWD}`;
 const evald = (c: string) => `eval '${c.replace(/'/g, "'\\''")}'`;
 
 /** The rule as it is on main: the same rule without the quiet-line clause. */
@@ -25,8 +25,13 @@ function withoutQuietLines(rules: DetectionRuleInput[]): DetectionRuleInput[] {
 
 const fires = (rules: DetectionRuleInput[], e: DetectionEvent) =>
   new DetectionEngine(rules, memoryStores()).evaluate(e).some((d) => d.match.ruleId === RULE);
-const ours = (c: string) => fires(macosCoreRules, exec(shell(c, 'zsh')));
-const mains = (c: string) => fires(withoutQuietLines(macosCoreRules), exec(shell(c, 'zsh')));
+const ours = (c: string) => fires(macosCoreRules, exec(agentShell(c)));
+const mains = (c: string) => fires(withoutQuietLines(macosCoreRules), exec(agentShell(c)));
+/** Our verdict and main's on one process, for argv and path checks. */
+const both = (p: ReturnType<typeof proc>) => [
+  fires(macosCoreRules, exec(p)),
+  fires(withoutQuietLines(macosCoreRules), exec(p)),
+];
 
 describe('quiet download lines', () => {
   const real = REAL_LOCAL_READS.flatMap((c) => [c, evald(c), wrapped(c)]);
@@ -35,7 +40,7 @@ describe('quiet download lines', () => {
     for (const c of real) {
       expect(isQuietLine(c), c).toBe(true);
       expect(ours(c), c).toBe(false);
-      expect(fires(linuxCoreRules, exec(shell(c, 'bash'))), c).toBe(false);
+      expect(fires(linuxCoreRules, exec(agentShell(c, '/usr/bin/bash'))), c).toBe(false);
     }
     // Main raised these (the $(curl ones), which is what the exception is for.
     expect(real.filter(mains).length).toBeGreaterThan(0);
@@ -61,6 +66,21 @@ describe('quiet download lines', () => {
         wrapped(c).replace('&& pwd -P', '; sh && pwd -P'),
         wrapped(c).replace('/Users/alex', '/Users/a b'),
         wrapped(c).replace('claude-ab12-cwd', 'claude-ab12-cwd; sh'),
+        // The snapshot outside .claude/shell-snapshots, or not named like one.
+        wrapped(c).replace('/.claude/shell-snapshots/', '/.claude/'),
+        wrapped(c).replace('/.claude/shell-snapshots/', '/Downloads/'),
+        wrapped(c).replace('/Users/alex/', '/tmp/'),
+        wrapped(c).replace('/Users/alex/', '/Users/../'),
+        wrapped(c).replace('snapshot-zsh-1759-ab12.sh', 'snapshot-zsh-1.sh'),
+        wrapped(c).replace('snapshot-zsh-1759-ab12.sh', 'snapshot-fish-1759-ab12.sh'),
+        wrapped(c).replace('snapshot-zsh-1759-ab12.sh', 'x.sh'),
+        wrapped(c).replace('snapshot-zsh-1759-ab12.sh', 'snapshot-zsh-1759-AB12.sh'),
+        // The cwd file off the harness's pattern.
+        wrapped(c).replace(HARNESS_CWD, '/var/folders/x/T/claude-ab12-cwd'),
+        wrapped(c).replace(HARNESS_CWD, '/Users/alex/claude-ab12-cwd'),
+        wrapped(c).replace(HARNESS_CWD, '/tmp/x/claude-ab12-cwd'),
+        wrapped(c).replace(HARNESS_CWD, '/tmp/claude-xyz-cwd'),
+        wrapped(c).replace(HARNESS_CWD, '/tmp/claude-ab12-cwd.sh'),
       ].filter((x) => x !== c),
     );
     for (const c of changed) {
@@ -71,13 +91,42 @@ describe('quiet download lines', () => {
     expect(ours(`x && ${REAL_LOCAL_READS[1]!.replace('127.0.0.1', 'x.test')}`)).toBe(true);
   });
 
-  it('needs the shell started as exactly <shell> -c <line>', () => {
+  it('needs a system shell started with an exact argv', () => {
     const c = REAL_LOCAL_READS[0]!;
-    expect(runsQuietLine(['zsh', '-c', c])).toBe(true);
-    expect(runsQuietLine(['/bin/zsh', '-c', '-l', c])).toBe(true);
-    expect(runsQuietLine(['zsh', '-c', c, 'extra'])).toBe(false);
-    expect(runsQuietLine(['zsh', '-x', c])).toBe(false);
-    expect(runsQuietLine(['zsh', c])).toBe(false);
+    for (const sh of ['/bin/bash', '/bin/zsh', '/bin/sh', '/usr/bin/bash', '/usr/bin/zsh']) {
+      expect(runsQuietLine(sh, [sh, '-c', c]), sh).toBe(true);
+      expect(runsQuietLine(sh, [sh, '-lc', c]), sh).toBe(true);
+      expect(runsQuietLine(sh, [sh, '-l', '-c', c]), sh).toBe(true);
+    }
+    const off = [
+      // Homebrew or home-folder shells.
+      ['/opt/homebrew/bin/bash', ['/opt/homebrew/bin/bash', '-c', c]],
+      ['/usr/local/bin/zsh', ['/usr/local/bin/zsh', '-c', c]],
+      ['/Users/alex/bin/zsh', ['/Users/alex/bin/zsh', '-c', c]],
+      // argv[0] not the program's path.
+      ['/bin/zsh', ['zsh', '-c', c]],
+      ['/bin/zsh', ['/bin/bash', '-c', c]],
+      ['/bin/zsh', ['/opt/homebrew/bin/zsh', '-c', c]],
+      // Flags joined into one argument, or in another order or spelling.
+      ['/bin/bash', ['/bin/bash', '-c -l', c]],
+      ['/bin/zsh', ['/bin/zsh', '-l -c', c]],
+      ['/bin/zsh', ['/bin/zsh', '-c', '-l', c]],
+      ['/bin/zsh', ['/bin/zsh', '-cl', c]],
+      ['/bin/zsh', ['/bin/zsh', '-x', c]],
+      ['/bin/zsh', ['/bin/zsh', c]],
+      ['/bin/zsh', ['/bin/zsh', '-c', c, 'extra']],
+      ['/bin/zsh', ['/bin/zsh', '-c', `${c} `]],
+    ] as const;
+    for (const [path, args] of off) {
+      expect(runsQuietLine(path, args), JSON.stringify(args)).toBe(false);
+      const [o, m] = both(proc({ path, args: [...args], signing: 'apple' }));
+      expect(o, JSON.stringify(args)).toBe(m);
+    }
+    // Main raises the bootstrap line, so each of these alerts.
+    const [o] = both(
+      proc({ path: '/opt/homebrew/bin/bash', args: ['/opt/homebrew/bin/bash', '-c', c] }),
+    );
+    expect(o).toBe(true);
   });
 
   // Codex's round-4 shapes. None is a quiet line, so each gets main's verdict.
