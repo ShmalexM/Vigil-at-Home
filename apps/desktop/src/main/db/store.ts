@@ -610,6 +610,14 @@ export class Store {
       : this.all(Alert, 'SELECT body FROM alerts ORDER BY created_at DESC LIMIT ?', limit);
   }
 
+  /** How many open alerts there are and when one last changed: a cheap key for caching. */
+  openAlertsMark(): string {
+    const row = this.stmt(
+      "SELECT COUNT(*) AS n, MAX(updated_at) AS at FROM alerts WHERE status = 'open'",
+    ).get() as { n: number; at: number | null };
+    return `${row.n}:${row.at ?? 0}`;
+  }
+
   /** How many alerts have this status, however many listAlerts returns. */
   countAlerts(status: Alert['status']): number {
     const row = this.stmt('SELECT COUNT(*) AS n FROM alerts WHERE status = ?').get(status) as {

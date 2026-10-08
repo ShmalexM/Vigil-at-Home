@@ -19,6 +19,7 @@ import {
   type StatusView,
 } from '../shared/ipc.js';
 import { isNoticed } from '../shared/attention.js';
+import { closableUnasked } from '../shared/piles.js';
 import { DEFAULT_APPEARANCE, type AppearanceSettings } from '../shared/themes.js';
 import { AlertService, type DecisionInput } from './alerts.js';
 import { EventLog } from './events.js';
@@ -34,6 +35,8 @@ import { TEST_RULE } from './test-alert.js';
 import { WORTH_A_LOOK_RULE } from './worth-a-look.js';
 import { UsageService } from './usage.js';
 
+/** How long staleAlerts' answer stands while no open alert changes. */
+const STALE_TTL_MS = 60_000;
 /** Open alerts looked at for staleAlerts, newest first. */
 const STALE_SCAN_LIMIT = 2000;
 /** How long the Activity strip's counts are reused (see eventStats). */
@@ -219,27 +222,38 @@ export class VigilCore {
    * Open alerts that a rule's exclusion, or the user's exception, now lets
    * off: raised before that exclusion existed (an update made the rule
    * quieter, or the user excluded the same thing from another alert). Only
-   * undecided alerts holding nothing back count, and only when the rule
-   * excuses every event the alert points to.
+   * alerts that can be closed without asking count (closableUnasked: nothing
+   * held back, no action taken or suggested), and only when the rule excuses
+   * every event the alert points to.
    */
   staleAlerts(): string[] {
     const engine = this.detector?.engine;
     if (!engine) return [];
+    // The page asks on every change; recount only when an open alert changed,
+    // or now and then for a rule or exclusion edited meanwhile.
+    const mark = this.store.openAlertsMark();
+    const now = this.now();
+    const c = this.staleCache;
+    if (c && c.mark === mark && now - c.at < STALE_TTL_MS) return c.ids;
     const out: string[] = [];
     for (const a of this.store.listAlerts({ status: 'open', limit: STALE_SCAN_LIMIT })) {
-      if (a.decision || a.containment === 'active') continue;
+      if (!closableUnasked(a)) continue;
       const events = this.store.getEvents(a.eventIds);
       if (events.length === 0) continue;
       if (events.every((e) => engine.excuses(a.ruleId, e))) out.push(a.id);
     }
+    this.staleCache = { mark, at: now, ids: out };
     return out;
   }
+
+  private staleCache: { mark: string; at: number; ids: string[] } | undefined;
 
   /**
    * Close the given alerts that {@link staleAlerts} still names. Like
    * clearNoticed it teaches the rules nothing: the exclusion already says it.
    */
   async clearStale(ids: readonly string[]): Promise<number> {
+    this.staleCache = undefined;
     const stale = new Set(this.staleAlerts());
     let cleared = 0;
     for (const id of new Set(ids)) {

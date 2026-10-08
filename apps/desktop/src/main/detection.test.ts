@@ -471,6 +471,41 @@ describe('stale open alerts', () => {
     core.store.saveAlert({ ...held, containment: 'active' });
     expect(core.staleAlerts()).toEqual([]);
   });
+
+  it('leaves alerts that carry a suggestion or a taken action', async () => {
+    const { core, store } = setup();
+    const rule = makeRule({ id: 'agent-keychain-secret', mode: 'alert', severity: 'high' });
+    const raise = () =>
+      core.alerts.raise({ rule, events: [read('Claude Code-credentials')], actions: [] });
+    const suggested = await raise();
+    store.saveAlert({
+      ...suggested,
+      ai: { provider: 'claude', at: 1, verdict: 'unsure', summary: 's', proposalIds: ['p1'] },
+    });
+    const acted = await raise();
+    store.saveAlert({ ...acted, actionIds: ['act-1'] });
+    expect(core.staleAlerts()).toEqual([]);
+    expect(await core.clearStale([suggested.id, acted.id])).toBe(0);
+    expect(store.getAlert(suggested.id)?.status).toBe('open');
+  });
+
+  it('reuses its answer until an open alert changes', async () => {
+    const { core, store } = setup();
+    const rule = makeRule({ id: 'agent-keychain-secret', mode: 'alert', severity: 'high' });
+    const a = await core.alerts.raise({
+      rule,
+      events: [read('Claude Code-credentials')],
+      actions: [],
+    });
+    const reads = vi.spyOn(store, 'getEvents');
+    expect(core.staleAlerts()).toEqual([a.id]);
+    const first = reads.mock.calls.length;
+    expect(core.staleAlerts()).toEqual([a.id]);
+    expect(reads.mock.calls.length).toBe(first);
+    const b = await core.alerts.raise({ rule, events: [read('Claude Code')], actions: [] });
+    expect([...core.staleAlerts()].sort()).toEqual([a.id, b.id].sort());
+    expect(reads.mock.calls.length).toBeGreaterThan(first);
+  });
 });
 
 describe('alert detail', () => {

@@ -34,8 +34,16 @@ export function pileUp(alerts: readonly Alert[]): Row[] {
 }
 
 function pileable(a: Alert): boolean {
+  return !!a.pile && closableUnasked(a);
+}
+
+/**
+ * An alert that can be closed in bulk without asking about it: open,
+ * undecided, holding nothing back, with no action taken or suggested (an
+ * AI suggestion would otherwise expire unseen).
+ */
+export function closableUnasked(a: Alert): boolean {
   return (
-    !!a.pile &&
     !a.decision &&
     a.status === 'open' &&
     a.containment === 'none' &&
