@@ -129,6 +129,18 @@ export class Executor {
         const nonce = this.d.approvals.request(cmd);
         return { kind: 'needs_approval', nonce, prompt: syncPrompt(weakens) };
       }
+    } else if (cmd.kind === 'self.grant') {
+      // Whether it names anything new depends on what was granted before.
+      let grants: string[];
+      try {
+        grants = this.d.fastPath?.selfLoosening(cmd) ?? [];
+      } catch (err) {
+        throw policyError(err);
+      }
+      if (grants.length && (!approval || !this.d.approvals.consume(approval, cmd))) {
+        const nonce = this.d.approvals.request(cmd);
+        return { kind: 'needs_approval', nonce, prompt: selfPrompt(grants) };
+      }
     } else if (needsApproval(cmd)) {
       // Check the release can actually happen before bothering the user.
       this.findContainment(cmd as HelperAction);
@@ -390,6 +402,14 @@ export class Executor {
         if (this.d.rules.rev !== before) await this.syncSanta();
         return { ...synced, preexec };
       }
+      case 'self.grant': {
+        if (!this.d.fastPath) throw new ActionError('failed', 'helper rules are not set up');
+        try {
+          return this.d.fastPath.grantSelf(cmd);
+        } catch (err) {
+          throw policyError(err);
+        }
+      }
       case 'detection.list.set': {
         if (!this.d.fastPath) throw new ActionError('failed', 'helper rules are not set up');
         try {
@@ -464,6 +484,13 @@ export function syncPrompt(weakens: string[]): string {
   const shown = weakens.slice(0, 3).join('; ');
   const more = weakens.length > 3 ? ` and ${weakens.length - 3} more` : '';
   return `Vigil wants to loosen its blocking rules: ${shown}${more}.`;
+}
+
+/** The password prompt for naming more of Vigil's own programs, which no rule then blocks. */
+export function selfPrompt(grants: string[]): string {
+  const shown = grants.slice(0, 3).join('; ');
+  const more = grants.length > 3 ? ` and ${grants.length - 3} more` : '';
+  return `Vigil wants to keep its blocking rules off its own programs: ${shown}${more}.`;
 }
 
 /** The Santa commands Linux can carry out: blocking or unblocking a program by hash. */

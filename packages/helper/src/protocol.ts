@@ -1,14 +1,16 @@
 // The helper's entire command surface: the response actions defined in
-// @vigil/core, four read-only queries, and the blocking rules the helper runs
-// itself and hands to Santa (detection.sync, detection.list.set). Nothing else can be asked of the
-// root process: no shell, no programs to run, no generic "execute".
+// @vigil/core, four read-only queries, the blocking rules the helper runs
+// itself and hands to Santa (detection.sync, detection.list.set), and what
+// counts as Vigil's own (self.grant). Nothing else can be asked of the root
+// process: no shell, no programs to run, no generic "execute".
 //
 // Containment actions (suspend, kill, block, quarantine, disable, Santa block
 // rules) run straight away. Release actions (core's isRelease: resume,
 // unblock, restore, enable, Santa allow or rule removal) also need the
 // user's macOS admin password, because malware running as the user could
 // otherwise drive the app and release its own block. So does a detection.sync
-// that weakens the helper's own rules (FastPath.loosening).
+// that weakens the helper's own rules, and a self.grant that names anything
+// new as Vigil's own (FastPath.loosening, FastPath.selfLoosening).
 
 import { z } from 'zod';
 import {
@@ -67,38 +69,65 @@ export const RuleExceptionSchema = z.strictObject({
   note: z.string().max(1000).optional(),
 });
 
-/**
- * The rules Vigil enforces in block mode that the helper can run itself
- * (fastpath.ts), with the user's exceptions and Vigil's own paths. The helper
- * runs them on every sensor event, so a block happens even while the app is
- * closed, and hands Santa the ones it can stop before launch (preexec.ts).
- * `lists` names each indicator list the rules use with a digest of its
- * contents; the helper answers with the lists it needs sent.
- *
- * Vigil's own programs are named three ways: `selfPaths` (install folders
- * and files), `selfImages` (a Linux AppImage by device and inode, so a rename
- * while it runs still matches) and `selfHashes` (the sha256 of the programs
- * inside that image, which no block rule may name). Only Linux AppImages send
- * the last two.
- *
- * The app runs every rule too, but only while it is open. A sync that drops
- * or changes a rule, adds an exception or names anything new as Vigil's own
- * therefore needs the admin password, like a release; one that only adds
- * rules does not. Lists may change freely: an entry a list drops keeps
- * blocking for a week.
- */
+/** A Linux AppImage by its path and device:inode. */
 export const SelfImageSchema = z.strictObject({
   path: z.string().min(1).max(1024),
   id: z.string().regex(/^\d{1,20}:\d{1,20}$/),
 });
 
+const SelfPaths = z.array(z.string().min(1).max(1024)).max(8);
+const SelfImages = z.array(SelfImageSchema).max(4);
+const SelfHashes = z.array(Digest).max(SELF_HASH_MAX_FILES);
+
+/**
+ * What the helper never pauses, kills or blocks because it is Vigil's own.
+ * Vigil's programs are named three ways: `selfPaths` (install folders and
+ * files), `selfImages` (a Linux AppImage by device and inode, so a rename
+ * while it runs still matches) and `selfHashes` (the sha256 of the programs
+ * inside that image, which no block rule may name). Only Linux AppImages send
+ * the last two.
+ *
+ * Being Vigil exempts a program from every block, so naming anything new
+ * needs the admin password. The one exemption: until the helper has taken
+ * any self grant, it may name the installer's own root-owned folder.
+ *
+ * Sent on its own, apart from the rules, so a password dialog for it never
+ * holds up the rules or the user's decisions. Replaces the whole set:
+ * dropping something asks nothing.
+ */
+export const SelfGrant = z.strictObject({
+  kind: z.literal('self.grant'),
+  selfPaths: SelfPaths,
+  selfImages: SelfImages.optional(),
+  selfHashes: SelfHashes.optional(),
+});
+export type SelfGrant = z.infer<typeof SelfGrant>;
+
+/**
+ * The rules Vigil enforces in block mode that the helper can run itself
+ * (fastpath.ts), with the user's exceptions. The helper runs them on every
+ * sensor event, so a block happens even while the app is closed, and hands
+ * Santa the ones it can stop before launch (preexec.ts). `lists` names each
+ * indicator list the rules use with a digest of its contents; the helper
+ * answers with the lists it needs sent.
+ *
+ * The app runs every rule too, but only while it is open. A sync that drops
+ * or changes a rule or adds an exception therefore needs the admin password,
+ * like a release; one that only adds rules does not. Lists may change
+ * freely: an entry a list drops keeps blocking for a week.
+ *
+ * The self fields are how apps before self.grant named Vigil's own: a sync
+ * that carries them replaces the self set too, and needs the password for
+ * anything new there, exactly as before. Without them the self set stays
+ * as it is.
+ */
 export const DetectionSync = z.strictObject({
   kind: z.literal('detection.sync'),
   rules: z.array(DetectionRule).max(64),
   exceptions: z.array(RuleExceptionSchema).max(2000),
-  selfPaths: z.array(z.string().min(1).max(1024)).max(8),
-  selfImages: z.array(SelfImageSchema).max(4).optional(),
-  selfHashes: z.array(Digest).max(SELF_HASH_MAX_FILES).optional(),
+  selfPaths: SelfPaths.optional(),
+  selfImages: SelfImages.optional(),
+  selfHashes: SelfHashes.optional(),
   lists: z.record(ListName, Digest),
 });
 export type DetectionSync = z.infer<typeof DetectionSync>;
@@ -115,7 +144,8 @@ export const DetectionListSet = z.strictObject({
 });
 export type DetectionListSet = z.infer<typeof DetectionListSet>;
 
-export type HelperCommand = HelperAction | HelperQuery | DetectionSync | DetectionListSet;
+export type HelperCommand =
+  HelperAction | HelperQuery | DetectionSync | DetectionListSet | SelfGrant;
 
 export interface HelperRequest {
   id: string;
@@ -139,12 +169,14 @@ export function isAction(cmd: HelperCommand): cmd is HelperAction {
     'events.subscribe',
     'detection.sync',
     'detection.list.set',
+    'self.grant',
   ].includes(cmd.kind);
 }
 
 /**
  * Actions that loosen protection and so need the user's admin password.
- * detection.sync depends on the rules in force, so the executor checks it.
+ * detection.sync and self.grant depend on the policy in force, so the
+ * executor checks them.
  */
 export function needsApproval(cmd: HelperCommand): boolean {
   if (!isAction(cmd)) return false;
@@ -184,7 +216,9 @@ export function parseRequest(line: string): HelperRequest | { error: string; id?
       ? DetectionSync.safeParse(env.data.command)
       : kind === 'detection.list.set'
         ? DetectionListSet.safeParse(env.data.command)
-        : HelperAction.safeParse(env.data.command);
+        : kind === 'self.grant'
+          ? SelfGrant.safeParse(env.data.command)
+          : HelperAction.safeParse(env.data.command);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     return withId(

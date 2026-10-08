@@ -38,6 +38,31 @@ export interface HelperRuleSet {
   lists: Record<string, string[]>;
 }
 
+/** What is Vigil's own, as the helper takes it in a self grant. */
+export type HelperSelfSet = Pick<HelperRuleSet, 'selfPaths' | 'selfImages' | 'selfHashes'>;
+
+/** The self set within a rule set. */
+export function selfOf(set: HelperSelfSet): HelperSelfSet {
+  return {
+    selfPaths: set.selfPaths,
+    ...(set.selfImages?.length ? { selfImages: set.selfImages } : {}),
+    ...(set.selfHashes?.length ? { selfHashes: set.selfHashes } : {}),
+  };
+}
+
+/**
+ * Whether `err` is a helper from before self.grant refusing a command it
+ * doesn't know: self.grant itself (`kind`), or rules sent without the self
+ * set it still requires (`selfPaths`).
+ */
+export function fromOlderHelper(err: unknown, field: 'kind' | 'selfPaths'): boolean {
+  return (
+    err instanceof HelperCallError &&
+    err.code === 'invalid' &&
+    err.message.startsWith(`bad command: ${field} `)
+  );
+}
+
 export interface HelperRulesOutcome {
   needLists: string[];
   preexec: PreexecOutcome | null;
@@ -168,12 +193,17 @@ export class HelperLink
    * helper asks for the admin password first; a cancelled dialog throws a
    * HelperCallError with code refused and leaves the helper's rules as they were.
    * With `hold`, that password is asked for by the next dialog instead (a
-   * release's) or by approveHeld().
+   * release's) or by approveHeld(). With `ask: false` no dialog is shown:
+   * a sync that needs the password resolves 'needs_password' and changes nothing.
+   *
+   * Vigil's own programs go to the helper apart from the rules (grantSelf).
+   * `withSelf` sends them with the rules instead, for a helper from before
+   * self.grant.
    */
   async syncRules(
     set: HelperRuleSet,
-    opts: { hold?: boolean; onHeld?: () => void } = {},
-  ): Promise<HelperRulesOutcome | null> {
+    opts: { hold?: boolean; onHeld?: () => void; ask?: boolean; withSelf?: boolean } = {},
+  ): Promise<HelperRulesOutcome | 'needs_password' | null> {
     const client = this.client;
     if (!client) return null;
     try {
@@ -184,19 +214,27 @@ export class HelperLink
         kind: 'detection.sync' as const,
         rules: set.rules,
         exceptions: set.exceptions,
-        selfPaths: set.selfPaths,
-        // Only an AppImage names these; a helper from before them refuses unknown fields.
-        ...(set.selfImages?.length ? { selfImages: set.selfImages } : {}),
-        ...(set.selfHashes?.length ? { selfHashes: set.selfHashes } : {}),
+        // Only an AppImage names images and hashes; a helper from before them refuses unknown fields.
+        ...(opts.withSelf ? selfOf(set) : {}),
         lists: digests,
       };
-      const out = await withTimeout(
-        opts.hold
-          ? client.hold<HelperRulesOutcome>(sync, opts.onHeld)
-          : client.call<HelperRulesOutcome>(sync),
-        // A sync that loosens the rules waits on the admin password, like a release.
-        RELEASE_TIMEOUT_MS,
-      );
+      let out: HelperRulesOutcome;
+      if (opts.ask === false) {
+        const tried = await withTimeout(
+          client.attempt<HelperRulesOutcome>(sync),
+          ACTION_TIMEOUT_MS,
+        );
+        if (tried === 'needsApproval') return 'needs_password';
+        out = tried.result;
+      } else {
+        out = await withTimeout(
+          opts.hold
+            ? client.hold<HelperRulesOutcome>(sync, opts.onHeld)
+            : client.call<HelperRulesOutcome>(sync),
+          // A sync that loosens the rules waits on the admin password, like a release.
+          RELEASE_TIMEOUT_MS,
+        );
+      }
       for (const name of out.needLists) {
         const entries = [...new Set(set.lists[name] ?? [])];
         const parts = Math.max(1, Math.ceil(entries.length / LIST_PART_MAX));
@@ -217,6 +255,26 @@ export class HelperLink
       return out;
     } catch (err) {
       if (!(err instanceof HelperCallError)) this.dropped(client);
+      throw err;
+    }
+  }
+
+  /**
+   * Tell the helper what is Vigil's own, so its rules never pause, kill or
+   * block it. Anything new needs the admin password, so this can wait on the
+   * dialog for as long as it stays open; nothing else waits on it. Resolves
+   * 'unsupported' from a helper from before self.grant, null while unconnected.
+   */
+  async grantSelf(set: HelperSelfSet): Promise<'applied' | 'declined' | 'unsupported' | null> {
+    const client = this.client;
+    if (!client) return null;
+    try {
+      // No timeout: the dialog may stay open, and a lost connection settles it.
+      await client.call({ kind: 'self.grant', ...selfOf(set) });
+      return 'applied';
+    } catch (err) {
+      if (fromOlderHelper(err, 'kind')) return 'unsupported';
+      if (err instanceof HelperCallError && err.code === 'refused') return 'declined';
       throw err;
     }
   }

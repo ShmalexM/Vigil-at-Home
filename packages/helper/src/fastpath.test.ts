@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +10,7 @@ import { HelperClient } from './client.js';
 import { Executor, type ActionOutcome } from './executor.js';
 import { FastPath, PolicyRefused, RETIRE_MS, type HelperRan } from './fastpath.js';
 import { Journal } from './journal.js';
-import { LIST_PART_MAX, type DetectionSync } from './protocol.js';
+import { LIST_PART_MAX, type DetectionSync, type SelfGrant } from './protocol.js';
 import { HelperServer } from './server.js';
 import { FakeSystem } from './testing/fakeSystem.js';
 
@@ -102,7 +102,7 @@ const exec = (pid: number, sha256: string, path = '/tmp/payload'): SensorEvent =
 /** What the app sends: the core pack's block rules and their lists. */
 function appSet(lists: Record<string, string[]>, exceptions: DetectionSync['exceptions'] = []) {
   const set = fastPathRules(new DetectionEngine(macosCoreRules, memoryStores()).listRules());
-  const sync: DetectionSync = {
+  const sync: DetectionSync & { selfPaths: string[] } = {
     kind: 'detection.sync',
     rules: set.rules,
     exceptions,
@@ -606,5 +606,140 @@ describe('what a sync may grant without the password', () => {
     expect(fp.self()).toEqual({ paths: [SELF], images: [image.id], hashes: [] });
     // Naming it there again is no new grant.
     expect(fp.loosening(bare({ selfPaths: [SELF, image.path], selfImages: [image] }))).toEqual([]);
+  });
+});
+
+describe('Vigil’s own programs, granted apart from the rules', () => {
+  const DOWNLOADS = '/Users/alex/Downloads/Vigil at Home.app';
+  const app = (root: string) => `${root}/Contents/MacOS/Vigil at Home`;
+  let shared: FastPath;
+  let n = 0;
+  beforeEach(() => {
+    shared = fast;
+    rulesFile = join(root, `grant-${n++}.json`);
+    fast = makeFastPath(executor);
+    fast.load();
+  });
+  afterEach(() => {
+    fast = shared;
+  });
+  const rulesOnly = () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    const { selfPaths: _, ...rest } = sync;
+    return { sync: rest as DetectionSync, lists };
+  };
+  const grant = (selfPaths: string[], more: Partial<SelfGrant> = {}): SelfGrant => ({
+    kind: 'self.grant',
+    selfPaths,
+    ...more,
+  });
+
+  it('takes the rules with no self set and keeps the one granted', async () => {
+    const { sync, lists } = rulesOnly();
+    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    expect(prompts).toEqual([]);
+    expect(fast.self().paths).toEqual([]);
+    await client.call(grant([SELF]));
+    expect(fast.self().paths).toEqual([SELF]);
+    // Rules again, without a self set: the grant stays.
+    await client.call(sync);
+    expect(fast.self().paths).toEqual([SELF]);
+    expect(prompts).toEqual([]);
+  });
+
+  it('names the installed app without the password until the first grant, rules or not', async () => {
+    // The rules may reach the helper first: that doesn't end the grace.
+    await client.call(rulesOnly().sync);
+    await client.call(grant([SELF]));
+    expect(prompts).toEqual([]);
+    // Dropping it asks nothing; naming it again now does.
+    await client.call(grant([]));
+    await expect(client.call(grant([SELF]))).rejects.toMatchObject({ code: 'refused' });
+    expect(prompts).toEqual([
+      `Vigil wants to keep its blocking rules off its own programs: never block ${SELF}.`,
+    ]);
+    // And it stays over across a restart.
+    const again = makeFastPath(executor);
+    again.load();
+    expect(again.selfLoosening(grant([SELF]))).toEqual([`never block ${SELF}`]);
+  });
+
+  it('asks for the password for anything else, even in the first grant', async () => {
+    const image = { path: '/home/alex/Apps/Vigil.AppImage', id: '2049:5501' };
+    files.set(image.path, image.id);
+    const own = 'c'.repeat(64);
+    expect(fast.selfLoosening(grant([SELF, DOWNLOADS]))).toEqual([`never block ${DOWNLOADS}`]);
+    expect(fast.selfLoosening(grant([], { selfImages: [image], selfHashes: [own] }))).toEqual([
+      `never block ${image.path}`,
+      'never block 1 of Vigil’s programs by hash',
+    ]);
+    // An AppImage that isn't the file at its path is refused before anyone is asked.
+    await expect(
+      client.call(grant([], { selfImages: [{ path: image.path, id: '2049:9999' }] })),
+    ).rejects.toMatchObject({ code: 'refused' });
+    expect(prompts).toEqual([]);
+    // A no changes nothing, and the next ask is a new dialog.
+    await expect(client.call(grant([SELF, DOWNLOADS]))).rejects.toMatchObject({ code: 'refused' });
+    expect(fast.self().paths).toEqual([]);
+    approve = true;
+    await client.call(grant([SELF, DOWNLOADS], { selfImages: [image], selfHashes: [own] }));
+    expect(fast.self()).toEqual({ paths: [SELF, DOWNLOADS], images: [image.id], hashes: [own] });
+    expect(prompts).toHaveLength(2);
+    files.clear();
+  });
+
+  it('leaves the rules in force when the grant is declined', async () => {
+    const { sync, lists } = rulesOnly();
+    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    await expect(client.call(grant([DOWNLOADS]))).rejects.toMatchObject({ code: 'refused' });
+    expect(fast.status().rules).toBe(sync.rules.length);
+    sys.processes.set(8000, { path: '/tmp/payload', started: 'T' });
+    expect((await fast.check(exec(8000, BAD))).length).toBeGreaterThan(0);
+    expect(sys.signals).toEqual([{ pid: 8000, signal: 'SIGKILL' }]);
+  });
+
+  it('protects only what was granted and the installed app while a grant waits', async () => {
+    const { sync, lists } = rulesOnly();
+    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    // The installer's folder is protected whatever was granted.
+    sys.processes.set(8100, { path: app(SELF), started: 'T' });
+    const kill = (await fast.check(exec(8100, BAD, app(SELF)))).find(
+      (r) => r.action.kind === 'process.kill',
+    );
+    expect(kill?.error).toMatch(/part of macOS or Vigil/);
+    expect(sys.signals).toEqual([]);
+    // A request nobody approved protects nothing: anything on the socket can
+    // name its own program as Vigil.
+    await expect(client.call(grant([DOWNLOADS]))).rejects.toMatchObject({ code: 'refused' });
+    sys.processes.set(8101, { path: app(DOWNLOADS), started: 'T' });
+    await fast.check(exec(8101, BAD, app(DOWNLOADS)));
+    expect(sys.signals).toEqual([{ pid: 8101, signal: 'SIGKILL' }]);
+    // Once approved, it is.
+    approve = true;
+    await client.call(grant([DOWNLOADS]));
+    sys.signals.length = 0;
+    sys.processes.set(8102, { path: app(DOWNLOADS), started: 'T' });
+    expect(await fast.check(exec(8102, BAD, app(DOWNLOADS)))).toEqual([]);
+    expect(sys.signals).toEqual([]);
+  });
+
+  it('still takes an older app’s rules and self set together, asking as before', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    // The first sync naming the installed app needs nothing.
+    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    expect(prompts).toEqual([]);
+    expect(fast.self().paths).toEqual([SELF]);
+    // The same set again needs nothing; a new path asks.
+    await client.call(sync);
+    await expect(client.call({ ...sync, selfPaths: [SELF, DOWNLOADS] })).rejects.toMatchObject({
+      code: 'refused',
+    });
+    expect(prompts).toEqual([
+      `Vigil wants to loosen its blocking rules: never block ${DOWNLOADS}.`,
+    ]);
+    // A sync that carries a self set ended the grace, as a grant does.
+    expect(fast.selfLoosening(grant([]))).toEqual([]);
+    await client.call({ ...sync, selfPaths: [] });
+    expect(fast.selfLoosening(grant([SELF]))).toEqual([`never block ${SELF}`]);
   });
 });

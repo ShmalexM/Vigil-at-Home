@@ -2,8 +2,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { app, dialog, Notification, powerMonitor, safeStorage, shell } from 'electron';
-import { listDigest } from '@vigil/detection/fastpath';
-import { HelperCallError } from '@vigil/helper/client';
 import { z } from 'zod';
 import type { HelperInstallResult } from '../shared/ipc.js';
 import { AgentService } from './agents/service.js';
@@ -11,12 +9,7 @@ import { AiBridge } from './ai.js';
 import { Store } from './db/store.js';
 import { demoInstalled, seedAgentsDemo, seedDemo, startDemoFeed } from './demo.js';
 import { seedUsageDemo } from './usage-demo.js';
-import {
-  Detector,
-  type HelperSync,
-  type HelperSyncOptions,
-  type HelperSyncOutcome,
-} from './detection.js';
+import { Detector } from './detection.js';
 import {
   helperBundleDir,
   helperInstallCommand,
@@ -24,6 +17,7 @@ import {
   runHelperScript,
 } from './helper-install.js';
 import { HelperLink } from './helper.js';
+import { HelperSyncer } from './helper-sync.js';
 import { registerIpc } from './ipc.js';
 import { systemProbe } from './onboarding/checks.js';
 import { demoProbe } from './onboarding/demo.js';
@@ -366,57 +360,32 @@ function start(): void {
   // Sensor events arrive through the helper, which reads Santa's and osquery's logs as root.
   helper.on('event', (e) => void core.handleEvent(e));
   const checkHealth = () => reportHealth(core.sensors, probe);
-  // Re-sent on every connection and whenever the rules, exceptions or lists change.
-  let helperRulesSent: string | undefined;
-  // A set the user declined to approve (a loosening needs their password). Not
-  // asked again until the rules change, so the health timer never re-prompts.
-  let helperRulesDeclined: string | undefined;
-  // The helper runs the blocking rules it can on its own, so blocks happen
-  // even while the app is closed, and hands Santa the pre-launch ones.
-  let helperRulesSync: Promise<unknown> = Promise.resolve();
-  const syncHelperRules: HelperSync = (opts = {}) => {
-    const next = helperRulesSync.then(() => sendHelperRules(opts));
-    helperRulesSync = next;
-    return next;
-  };
   // An AppImage's programs are hashed once, in the background. The helper
-  // gets them with the image in its first sync, so a new image asks for the
-  // password once rather than twice.
+  // gets them with the image in its first self grant, so a new image asks for
+  // the password once rather than twice.
   const selfHashed = self.mount
     ? hashSelf(self.mount)
         .then((hashes) => core.detector?.setSelfHashes(hashes))
         .catch((err: unknown) => console.warn('[self] could not hash Vigil’s programs:', err))
     : Promise.resolve();
-  const sendHelperRules = async (opts: HelperSyncOptions): Promise<HelperSyncOutcome> => {
-    await selfHashed;
-    if (!core.detector) return 'unavailable';
-    const set = core.detector.helperRules();
-    const lists = Object.entries(set.lists).map(([l, entries]) => [l, listDigest(entries)]);
-    const key = JSON.stringify({ ...set, lists });
-    if (key === helperRulesSent) return 'applied';
-    if (key === helperRulesDeclined && !opts.byUser) return 'declined';
-    try {
-      const how = opts.hold ? { hold: true, ...(opts.onHeld ? { onHeld: opts.onHeld } : {}) } : {};
-      if (!(await helper.syncRules(set, how))) return 'unavailable';
-      helperRulesSent = key;
-      return 'applied';
-    } catch (err) {
-      if (err instanceof HelperCallError && err.code === 'refused') {
-        helperRulesDeclined = key;
-        return 'declined';
-      }
-      console.warn('[helper rules] could not update the helper:', err);
-      return 'unavailable';
-    }
-  };
+  // The helper runs the blocking rules it can on its own, so blocks happen
+  // even while the app is closed, and hands Santa the pre-launch ones. Re-sent
+  // on every connection and whenever the rules, exceptions or lists change;
+  // what is Vigil's own goes apart from them, so its password dialog never
+  // holds them up.
+  const helperSync = new HelperSyncer({
+    link: helper,
+    rules: () => core.detector?.helperRules(),
+    ready: selfHashed,
+    log: (msg, err) => console.warn(msg, err),
+  });
+  const syncHelperRules = helperSync.sync;
   if (core.detector) core.detector.syncHelper = syncHelperRules;
   helper.on('state', (state) => {
     void checkHealth();
     if (state === 'connected') {
       void saveSantaProfile();
-      helperRulesSent = undefined;
-      helperRulesDeclined = undefined;
-      void syncHelperRules();
+      helperSync.connected();
     }
   });
   if (HELPER_PLATFORMS.has(process.platform)) {
@@ -455,7 +424,7 @@ function start(): void {
   }
   if (perf)
     Object.assign(globalThis, {
-      vigil: { core, windows, power, agents, syncHelperRules, readyAt: Date.now() },
+      vigil: { core, windows, power, agents, syncHelperRules, helperSync, readyAt: Date.now() },
     });
   // First run opens setup; after that Vigil starts quietly in the menu bar.
   else if (!setup.finished()) windows.openMain('setup');
