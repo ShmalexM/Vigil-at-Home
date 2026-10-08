@@ -276,20 +276,39 @@ It reads no files and has no tools of its own.
 
 ### The tools
 
-| Tool                | Arguments                        | Returns                                                                               |
-| ------------------- | -------------------------------- | ------------------------------------------------------------------------------------- |
-| `vigil_status`      |                                  | protection level and reasons, sensors, rules by mode, pre-flight on and connected     |
-| `list_alerts`       | `since`, `status`, `limit`       | alerts, newest first: title, rule name, severity, time, status and explanation if any |
-| `get_alert`         | `id`                             | one alert, its explanation and the events behind it                                   |
-| `search_events`     | `kind`, `text`, `since`, `limit` | events from the last 7 days at most, newest first, with the rules they matched        |
-| `list_agents`       |                                  | the agents on this Mac, today's numbers and their latest sessions                     |
-| `get_agent_session` | `id`                             | one agent session: its process tree and latest events                                 |
+| Tool                | Arguments                                                     | Returns                                                                                      |
+| ------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `vigil_status`      |                                                               | protection level and reasons, sensors, rules by mode, pre-flight on and connected            |
+| `list_alerts`       | `since`, `status`, `limit`                                    | alerts, newest first: title, rule name, severity, time, status and explanation if any        |
+| `get_alert`         | `id`                                                          | one alert, its explanation and the events behind it                                          |
+| `search_events`     | `kind`, `text`, `agent`, `matched`, `label`, `since`, `limit` | events from the last 7 days at most, newest first, with the rules they matched and AI labels |
+| `list_agents`       |                                                               | the agents on this Mac, today's numbers and their latest sessions                            |
+| `get_agent_session` | `id`                                                          | one agent session: its process tree and latest events                                        |
 
 `since` is an ISO time or a span such as `30m`, `24h` or `7d`. `kind` is an
 event kind (`process.exec`, `file`, `agent.tool_request`, …) or a group
-(`programs`, `network`, `files`, `startup`, `system`, `agents`). A text
-search looks through the newest 10,000 events of the window and says so
-when there were more.
+(`programs`, `network`, `files`, `startup`, `system`, `agents`). `agent` is
+an agent id from `list_agents`; `matched: true` keeps only events that
+matched a rule; `label` (`unusual` or `suspicious`) keeps only events the AI
+labelled so. A text or label search looks through the newest 10,000 events
+of the window and says so when there were more.
+
+An event the AI labelled carries `aiLabel` and `aiScore`, never the label's
+reason (the model wrote it from what the event's own program wrote).
+
+Vigil's own pack (docs/pack.md) also gets three more, which watched agents
+never see, because which rules are off or only log, and where exceptions
+are, would show an agent where to look for a way around them:
+
+| Tool           | Arguments        | Returns                                                                                        |
+| -------------- | ---------------- | ---------------------------------------------------------------------------------------------- |
+| `list_rules`   | `mode`, `limit`  | the rules, busiest first: name, mode, severity, matches in the last 7 days                     |
+| `get_rule`     | `id`             | one rule: its description, mode, severity, matches in the last 7 days and how many exclusions  |
+| `list_actions` | `since`, `limit` | what Vigil did, newest first: blocks, quarantines, releases and undos, by whom and how it went |
+
+A rule is described in words only: its conditions and exclusions are never
+shown, only how many exclusions it has. An action shows what was done, to
+what, by whom (`user` or `rule`) and its status, not its free-text reason.
 
 Every result is cut to 50 rows and 64 KB and goes through the same redaction
 as the data Vigil's own AI gets: user names in `/Users/…` paths, private
@@ -303,8 +322,9 @@ keys, AWS keys, GitHub, Slack and API tokens, JWTs, passwords and tokens in
   setting or an agent, runs or undoes an action, lifts a block or answers a
   proposal.
 - **Show how a rule works.** Alerts and events name the rule that matched,
-  never its condition, exclusions or response, so an agent can't use Vigil
-  to learn how to word its commands around the rules.
+  and the pack's `get_rule` gives its description in words, never its
+  condition or exclusions, so an agent can't use Vigil to learn how to word
+  its commands around the rules.
 - **Try a command.** There is no dry-run pre-flight check. An agent that
   wants to know whether a step would be stopped has to send it as a real
   pre-flight request, which is stored and counts towards the probing alert.

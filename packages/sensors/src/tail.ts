@@ -4,8 +4,10 @@
 // It watches the file's folder so new lines arrive at once without waking
 // the CPU when nothing happens. A folder watch keeps working across rotation
 // (a watch on the file itself follows the old file, and on macOS did not
-// report appends at all). It also polls every couple of seconds in case the
-// watch misses something or the folder does not exist yet.
+// report appends at all). It also polls every couple of seconds while the
+// folder does not exist yet or the watch hasn't been seen to work, and every
+// ten once it has, in case it misses something. A poll that finds lines the
+// watch never reported puts it back on the fast poll.
 
 import { watch, type FSWatcher } from 'node:fs';
 import { open, stat } from 'node:fs/promises';
@@ -25,6 +27,8 @@ export interface TailOptions {
   from?: TailPosition | 'start' | 'end';
   /** Fallback poll interval. Changes usually arrive through the file watch well before this. */
   intervalMs?: number;
+  /** Fallback poll interval while the folder watch is working (default 5× intervalMs). */
+  watchedIntervalMs?: number;
   /** Watch the file for changes (default true). Without it, lines arrive on the fallback poll only. */
   watch?: boolean;
   /** Lines longer than this are dropped (a runaway line must not eat memory). */
@@ -40,6 +44,10 @@ export class FileTailer {
   private polling: Promise<void> | undefined;
   private pollAgain = false;
   private watcher: FSWatcher | undefined;
+  /** The watch reported a change since the last poll. */
+  private heard = false;
+  /** The watch has reported the changes polls found, so the slow poll will do. */
+  private trusted = false;
 
   constructor(private readonly opts: TailOptions) {}
 
@@ -65,6 +73,9 @@ export class FileTailer {
     }
     this.arm();
     this.schedule();
+    // What was written since a saved position (or the whole file) is read now,
+    // not at the first fallback poll.
+    if (from !== 'end') this.kick();
   }
 
   async stop(): Promise<void> {
@@ -76,11 +87,23 @@ export class FileTailer {
 
   /** Read whatever is new right now. Exposed for tests. */
   async poll(): Promise<void> {
+    const heard = this.heard;
+    this.heard = false;
     let st;
     try {
       st = await stat(this.opts.path);
     } catch {
+      // Gone, perhaps with its folder: a watch on that folder may be dead.
+      this.unwatch();
       return;
+    }
+    const changed = !this.pos || this.pos.ino !== st.ino || st.size !== this.pos.offset;
+    if (changed && this.watcher && heard !== this.trusted) {
+      // Lines the watch never mentioned mean it can't be relied on (a folder
+      // replaced under it, a stream that stopped): poll at the fast rate again.
+      this.trusted = heard;
+      clearTimeout(this.timer);
+      this.schedule();
     }
     if (!this.pos || this.pos.ino !== st.ino) {
       // New file after rotation: flush any partial line from the old one.
@@ -98,12 +121,15 @@ export class FileTailer {
     const fh = await open(this.opts.path, 'r');
     try {
       const chunkSize = 256 * 1024;
-      const buf = Buffer.alloc(chunkSize);
+      // Only the bytes read are decoded, so the buffer needn't be zeroed, and
+      // a poll that finds a few lines (the usual case) takes a few KB from
+      // Node's pool instead of a fresh 256 KB.
+      const buf = Buffer.allocUnsafe(Math.min(chunkSize, st.size - this.pos.offset));
       while (this.pos.offset < st.size) {
         const { bytesRead } = await fh.read(
           buf,
           0,
-          Math.min(chunkSize, st.size - this.pos.offset),
+          Math.min(buf.length, st.size - this.pos.offset),
           this.pos.offset,
         );
         if (bytesRead === 0) break;
@@ -162,10 +188,18 @@ export class FileTailer {
   /** Watch the file's folder; retried after each poll until the folder exists. */
   private arm(): void {
     if (!this.running || this.opts.watch === false || this.watcher) return;
+    const folder = dirname(this.opts.path);
     const name = basename(this.opts.path);
     try {
-      const w = watch(dirname(this.opts.path), { persistent: false }, (_event, file) => {
-        if (file == null || file.toString() === name) this.kick();
+      const w = watch(folder, { persistent: false }, (event, file) => {
+        const f = file?.toString();
+        if (f == null || f === name) this.heard = true;
+        // The folder itself was removed or renamed (or a rename that names
+        // nothing, which may be the folder): this watch may be dead (on Linux
+        // it never fires again, without an error), so drop it and poll at the
+        // fast rate until the next poll arms a new one.
+        if (f === basename(folder) || (f == null && event === 'rename')) this.unwatch();
+        if (f == null || f === name || !this.watcher) this.kick();
       });
       w.on('error', () => this.unwatch());
       this.watcher = w;
@@ -175,15 +209,30 @@ export class FileTailer {
   }
 
   private unwatch(): void {
-    this.watcher?.close();
+    if (!this.watcher) return;
+    this.watcher.close();
     this.watcher = undefined;
+    this.trusted = false;
+    // Back to the fast fallback poll at once, not after the slow one is due.
+    if (this.running) {
+      clearTimeout(this.timer);
+      this.schedule();
+    }
   }
 
+  /**
+   * Once the folder watch is seen to work the poll is only a safety net, so
+   * it runs less often: one wakeup every 10 s per log instead of every 2 s.
+   */
   private schedule(): void {
     if (!this.running) return;
-    this.timer = setTimeout(() => {
-      this.kick();
-      this.schedule();
-    }, this.opts.intervalMs ?? 2000);
+    const interval = this.opts.intervalMs ?? 2000;
+    this.timer = setTimeout(
+      () => {
+        this.kick();
+        this.schedule();
+      },
+      this.watcher && this.trusted ? (this.opts.watchedIntervalMs ?? interval * 5) : interval,
+    );
   }
 }

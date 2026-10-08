@@ -64,6 +64,40 @@ export const leadChat = {
   },
 };
 
+/** What people ask first, offered while the chat is empty. */
+export const STARTERS = [
+  'Is my Mac OK right now?',
+  'Anything worth a look today?',
+  'What did my coding agents do today?',
+  'Make me a dog that checks new downloads every hour',
+];
+
+/**
+ * The question about what's open on this page, when there is one. An agent
+ * route may name one session (`<id>_<session>`), and Activity's is a filter
+ * (`agent-<id>` or `session-<id>`), never one event.
+ */
+export function contextStarter(c: ChatContext | undefined): string | undefined {
+  if (!c?.selected) return undefined;
+  const sel = c.selected;
+  switch (c.page) {
+    case 'alerts':
+      return 'What’s this alert?';
+    case 'rules':
+      return 'What’s this rule?';
+    case 'agents':
+      return sel.includes('_') ? 'What happened in this session?' : 'What has this agent done?';
+    case 'activity':
+      return sel.startsWith('session-')
+        ? 'What happened in this session?'
+        : sel.startsWith('agent-')
+          ? 'What has this agent done?'
+          : undefined;
+    default:
+      return undefined;
+  }
+}
+
 /** The current state, outside React. */
 export function leadChatState(): Readonly<LeadChatState> {
   return state;

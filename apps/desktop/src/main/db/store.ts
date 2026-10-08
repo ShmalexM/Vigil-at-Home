@@ -160,6 +160,25 @@ export class Store {
     { events: number; matches: number; lastAt: number; asks: number; denies: number }
   >();
   private txDepth = 0;
+  /**
+   * countEventsSince's last answer per start time, with the newest rowid it
+   * had counted. New rows get higher rowids, so the next answer only counts
+   * rows added since; deletes drop it. The menu bar and every open window ask
+   * "checked today" after each change, and counting a busy day from scratch
+   * walks millions of index entries (30 ms and more each time).
+   *
+   * Both memos rely on every write to the events table going through this
+   * class (writeEvent and pruneEvents), which keeps them right. A raw write
+   * elsewhere would leave them stale; store.test.ts checks there is none.
+   */
+  private readonly countMemo = new Map<number, { n: number; rowid: number }>();
+  /**
+   * lastEventAt's answers, dropped when an event of that source is written or
+   * any is deleted. For a quiet sensor the query walks every newer event of
+   * the others (hundreds of ms on a full database); the health check asks
+   * every minute.
+   */
+  private readonly lastMemo = new Map<string, number | null>();
 
   constructor(private readonly db: DatabaseSync) {
     db.exec(`
@@ -267,6 +286,7 @@ export class Store {
    * the sensor's raw record); then only its outcome is filled in.
    */
   private writeEvent(e: SensorEvent, outcome?: EventOutcome): void {
+    this.lastMemo.delete(e.source);
     // The agent session and agent the event belongs to: the tracker's tag on a
     // process, or the hook's agent on a tool request (whose process is only the
     // would-be shell). The two are always set together.
@@ -312,15 +332,22 @@ export class Store {
 
   /**
    * Events since `since`, newest first, of some kinds and holding some text,
-   * for Vigil's tools for agents. Text is looked for in at most `scanRows` of
-   * the newest events in the window, so a rare word never walks a week of
-   * events on the thread that also runs detection. `partial` says the window
-   * held more events than that and fewer than `limit` matched.
+   * for Vigil's tools for agents. Text and labels are looked for in at most
+   * `scanRows` of the newest events in the window, so a rare word never walks
+   * a week of events on the thread that also runs detection. `partial` says
+   * the window held more events than that and fewer than `limit` matched.
+   * An agent and matched-only have indexes, so they narrow the window itself.
    */
   searchEvents(q: {
     since: number;
     kinds?: readonly EventKind[];
     text?: string;
+    /** Only events from this agent's sessions. */
+    agent?: string;
+    /** Only events that matched a rule. */
+    matchedOnly?: boolean;
+    /** Only events a model labelled so. */
+    label?: EventLabel['label'];
     limit: number;
     scanRows: number;
   }): { views: EventView[]; partial: boolean } {
@@ -330,20 +357,34 @@ export class Store {
       where.push(`kind IN (${q.kinds.map(() => '?').join(',')})`);
       args.push(...q.kinds);
     }
+    if (q.agent) {
+      where.push('agent_id = ?');
+      args.push(q.agent);
+    }
+    if (q.matchedOnly) where.push('matched = 1');
     const filter = where.join(' AND ');
     const window = `SELECT body, outcome, label, ts, id FROM events WHERE ${filter}
       ORDER BY ts DESC, id DESC`;
-    if (!q.text) {
+    const scanned: string[] = [];
+    const scanArgs: SQLInputValue[] = [];
+    if (q.text) {
+      scanned.push(`body LIKE ? ESCAPE '\\'`);
+      scanArgs.push(`%${q.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+    }
+    if (q.label) {
+      scanned.push(`json_extract(label, '$.label') = ?`);
+      scanArgs.push(q.label);
+    }
+    if (!scanned.length) {
       const rows = this.db.prepare(`${window} LIMIT ?`).all(...args, q.limit) as EventRow[];
       return { views: rows.map(eventView), partial: false };
     }
-    const like = `%${q.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
     const rows = this.db
       .prepare(
         `SELECT body, outcome, label FROM (${window} LIMIT ?)
-         WHERE body LIKE ? ESCAPE '\\' ORDER BY ts DESC, id DESC LIMIT ?`,
+         WHERE ${scanned.join(' AND ')} ORDER BY ts DESC, id DESC LIMIT ?`,
       )
-      .all(...args, q.scanRows, like, q.limit) as EventRow[];
+      .all(...args, q.scanRows, ...scanArgs, q.limit) as EventRow[];
     const partial =
       rows.length < q.limit &&
       this.db
@@ -404,10 +445,25 @@ export class Store {
 
   /** Events stored since `since`. */
   countEventsSince(since: number): number {
-    const row = this.stmt('SELECT COUNT(*) AS n FROM events WHERE ts >= ?').get(since) as {
-      n: number;
-    };
-    return row.n;
+    const top = Number(
+      (this.stmt('SELECT MAX(rowid) AS r FROM events').get() as { r: number | null }).r ?? 0,
+    );
+    const known = this.countMemo.get(since);
+    const row = (
+      known && known.rowid <= top
+        ? // Only the rows added since, by rowid (`+ts` keeps the ts index out of it).
+          this.stmt(
+            'SELECT COUNT(*) + ? AS n FROM events WHERE rowid > ? AND rowid <= ? AND +ts >= ?',
+          ).get(known.n, known.rowid, top, since)
+        : this.stmt('SELECT COUNT(*) AS n FROM events WHERE ts >= ? AND rowid <= ?').get(since, top)
+    ) as { n: number };
+    const n = Number(row.n);
+    // Not inside a transaction, which may still roll back what it counted.
+    if (!this.db.isTransaction) {
+      if (this.countMemo.size >= 8) this.countMemo.clear();
+      this.countMemo.set(since, { n, rowid: top });
+    }
+    return n;
   }
 
   /** When the newest event of any source arrived, or null if none yet. */
@@ -418,9 +474,15 @@ export class Store {
 
   /** When this sensor last reported anything, or null if never. */
   lastEventAt(source: string): number | null {
+    if (this.lastMemo.has(source)) return this.lastMemo.get(source)!;
     const row = this.stmt('SELECT MAX(ts) AS ts FROM events WHERE source = ?').get(source) as {
       ts: number | null;
     };
+    // Not inside a transaction, which may still roll back what it read.
+    if (!this.db.isTransaction) {
+      if (this.lastMemo.size >= 16) this.lastMemo.clear();
+      this.lastMemo.set(source, row.ts);
+    }
     return row.ts;
   }
 
@@ -492,6 +554,8 @@ export class Store {
   /** Delete events older than `before` that no alert references. Returns rows removed. */
   pruneEvents(before: number): number {
     this.sessionCounts.clear();
+    this.countMemo.clear();
+    this.lastMemo.clear();
     const res = this.stmt(
       `DELETE FROM events WHERE ts < ? AND id NOT IN (
          SELECT j.value FROM alerts, json_each(alerts.body, '$.eventIds') AS j)`,

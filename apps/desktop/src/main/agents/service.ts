@@ -85,7 +85,7 @@ import {
 } from './endpoint.js';
 import { hookFiles, hookSnippet, mcpSnippet } from './hook-snippet.js';
 import { processTableReader } from './ps.js';
-import { VigilTools, type StatusFacts } from './tools.js';
+import { VigilTools, type RuleFacts, type StatusFacts } from './tools.js';
 
 const KEY_PREFS = 'agents.prefs';
 const KEY_HOOK = 'agents.hook';
@@ -321,6 +321,9 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
       events: (ids) => o.store.getEventViews(ids),
       ruleName: (id) => o.detector.engine.getRule(id)?.name ?? o.store.getRule(id)?.name,
       searchEvents: (q) => o.store.searchEvents(q),
+      rules: () => this.ruleFacts(),
+      ruleHits: (since) => o.store.ruleMatchCounts(since),
+      actions: (limit) => o.store.listActions({ limit }),
       agents: () => this.listAgents(),
       agentSessions: (id, limit) => o.store.listAgentSessions(id, undefined, limit),
       agentSession: (id, rows) => this.sessionDetail(id, rows, rows),
@@ -556,7 +559,7 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
       endpoint: ep.state,
       ...(ep.error ? { error: ep.error } : {}),
       snippets: files ? mcpSnippet({ ...files, socketPath: ep.socketPath }) : null,
-      tools: VIGIL_TOOLS,
+      tools: VIGIL_TOOLS.filter((t) => !t.packOnly),
       calls: this.toolUse.calls,
       ...(this.toolUse.lastCallAt !== undefined ? { lastCallAt: this.toolUse.lastCallAt } : {}),
       ...(this.toolUse.lastTool !== undefined ? { lastTool: this.toolUse.lastTool } : {}),
@@ -603,7 +606,10 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
     list: () => ReturnType<VigilTools['list']>;
     call: (name: string, args: Record<string, unknown>) => ToolsReply;
   } {
-    return { list: () => this.tools.list(), call: (n, a) => this.tools.call(n, a) };
+    return {
+      list: () => this.tools.list({ pack: true }),
+      call: (n, a) => this.tools.call(n, a, { pack: true }),
+    };
   }
 
   /**
@@ -719,6 +725,20 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
   private saveToolUse(): void {
     this.o.store.setSetting(KEY_TOOLS, this.toolUse);
     this.toolUseSavedAt = this.now();
+  }
+
+  /** The rules detection runs, for list_rules and get_rule: no conditions, exclusions counted. */
+  private ruleFacts(): RuleFacts[] {
+    const exceptions = this.o.detector.stores.exceptions;
+    return this.o.detector.engine.listRules().map((r) => ({
+      id: r.id,
+      name: r.name,
+      description: r.description,
+      mode: r.effectiveMode,
+      severity: r.severity,
+      exclusions:
+        r.exclusions.length + exceptions.forRule(r.id).filter((x) => x.ruleId === r.id).length,
+    }));
   }
 
   /** What vigil_status reports. */
