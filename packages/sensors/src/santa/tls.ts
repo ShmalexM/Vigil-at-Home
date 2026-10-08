@@ -38,12 +38,16 @@
 // Who reads client.p12: santasyncservice drops from root to the user nobody
 // before syncing. This assumes it takes nobody's primary group as well
 // (macOS: uid -2, gid -2 "nobody"), as Santa's DropRootPrivileges does with
-// getpwnam("nobody")->pw_gid; nothing in this repository names another group.
+// getpwnam("nobody")->pw_gid; checked on a Mac: santasyncservice runs with
+// gid and rgid -2 (nobody).
 // Root owns the file and its folder, with group nobody and no write bit, so a
 // process running as nobody can read the identity but can't replace,
-// truncate or chmod it. Accepted: code running as nobody, working with a
-// process of the user's, could still copy the identity out and sync in
-// Santa's place. Moving the identity into the System keychain, where only
+// truncate or chmod it. Accepted: code running as nobody (other system
+// daemons such as dhcp6d, kdumpd or rpcsvchost run as that user too),
+// working with a process of the user's, could still copy the identity out
+// and sync in Santa's place. Modes are set explicitly, never from the umask:
+// nobody's supplementary groups include everyone, so the file and folder
+// must never carry other or extra group bits. Moving the identity into the System keychain, where only
 // Santa could use it, is left for later.
 //
 // Uses /usr/bin/openssl (LibreSSL on macOS), driven only with config files so
