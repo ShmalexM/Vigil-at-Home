@@ -81,6 +81,7 @@ export class VigilCore {
   private editing: RuleEditing | undefined;
   private feedPending = 0;
   private sinceCapCheck = 0;
+  private stopped = false;
   private feedTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
@@ -136,6 +137,7 @@ export class VigilCore {
   }
 
   stop(): void {
+    this.stopped = true;
     this.scheduler.stop();
     clearTimeout(this.feedTimer);
     this.events.flush();
@@ -164,6 +166,7 @@ export class VigilCore {
       this.sinceCapCheck = 0;
       // After this event's turn, so it never waits on a prune.
       setImmediate(() => {
+        if (this.stopped) return; // the store may be closed by now
         try {
           this.capDisk();
         } catch (err) {

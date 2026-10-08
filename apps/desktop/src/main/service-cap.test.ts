@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Store } from './db/store.js';
 import { DryRunExecutor } from './executor.js';
 import { VigilCore } from './service.js';
@@ -22,5 +22,15 @@ describe('VigilCore database cap', () => {
     await new Promise((r) => setImmediate(r));
     expect(store.usedBytes()).toBeLessThanOrEqual(cap);
     core.stop();
+  });
+
+  it('skips a cap check still waiting when the app quits', async () => {
+    const store = new Store(new DatabaseSync(':memory:'));
+    const core = new VigilCore(store, new DryRunExecutor(), true, Date.now, 1024);
+    const prune = vi.spyOn(store, 'pruneEventsToSize');
+    for (let i = 0; i < 10_000; i++) core.ingest(makeExec());
+    core.stop();
+    await new Promise((r) => setImmediate(r));
+    expect(prune).not.toHaveBeenCalled();
   });
 });
