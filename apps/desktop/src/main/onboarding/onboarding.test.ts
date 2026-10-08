@@ -194,13 +194,17 @@ describe('checks', () => {
   });
 
   it('prefers the small model but accepts one already installed', async () => {
-    expect(await CHECKS['ollama.model'](fakeMac({ ollama: [LOCAL_MODEL] }))).toEqual({
+    expect(await CHECKS['ollama.model'](fakeMac({ ollama: [LOCAL_MODEL] }))).toMatchObject({
       ok: true,
-      detail: LOCAL_MODEL,
+      detail: expect.stringContaining(LOCAL_MODEL),
     });
-    expect((await CHECKS['ollama.model'](fakeMac({ ollama: ['llama3.2:3b'] }))).detail).toContain(
-      'llama3.2:3b',
+    expect((await CHECKS['ollama.model'](fakeMac({ ollama: ['gemma3:1b'] }))).detail).toContain(
+      'gemma3:1b',
     );
+    // A big model explains alerts but the labeller never picks it, so the step isn't done.
+    const big = await CHECKS['ollama.model'](fakeMac({ ollama: ['hermes-local:quality'] }));
+    expect(big.ok).toBe(false);
+    expect(big.detail).toMatch(/hermes-local:quality.*labelling events needs a small model/);
     expect((await CHECKS['ollama.model'](fakeMac({ ollama: [] }))).ok).toBe(false);
     expect((await CHECKS.ollama(fakeMac({ ollama: 'down' }))).ok).toBe(false);
   });

@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { accessSync, constants, existsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, totalmem } from 'node:os';
+import { pickClassifierModel } from '@vigil/ai';
 import { join } from 'node:path';
 import type { CheckId } from '../../shared/setup.js';
 import { FAPOLICYD_ALLOW_RULES, LOCAL_MODEL, LOCAL_MODEL_SMALL } from './plan.js';
@@ -26,6 +27,8 @@ export interface Probe {
   home: string;
   /** Which computer is being checked; defaults to a Mac. */
   platform?: NodeJS.Platform;
+  /** Total memory, which decides the labelling models Vigil will pick; defaults to this machine's. */
+  memoryBytes?: number;
 }
 
 export const SANTA_SYNC_PORT = 47821;
@@ -122,11 +125,26 @@ export const CHECKS: Record<CheckId, (p: Probe) => Promise<CheckResult>> = {
     return tags ? { ok: true } : { ok: false, detail: 'Nothing answers on 127.0.0.1:11434' };
   },
 
+  /**
+   * Labelling only ever uses one of @vigil/ai's small models, so this says
+   * which one, the same way the labeller picks it. A big model the user
+   * already has explains alerts, but doesn't stand in for the small one.
+   */
   'ollama.model': async (p) => {
     const names = (await ollamaModels(p)) ?? [];
     const ours = [LOCAL_MODEL, LOCAL_MODEL_SMALL].find((m) => names.includes(m));
-    if (ours) return { ok: true, detail: ours };
-    if (names.length) return { ok: true, detail: `Using ${names[0]} (already installed)` };
+    if (ours) return { ok: true, detail: `${ours}, which labels events` };
+    const picked = pickClassifierModel(
+      names.map((name) => ({ name })),
+      p.memoryBytes ?? totalmem(),
+    );
+    if (picked) return { ok: true, detail: `${picked}, already installed, labels events` };
+    if (names.length) {
+      return {
+        ok: false,
+        detail: `${names.length === 1 ? names[0] : `${names.length} models`} already installed can explain alerts, but labelling events needs a small model`,
+      };
+    }
     return { ok: false };
   },
 
