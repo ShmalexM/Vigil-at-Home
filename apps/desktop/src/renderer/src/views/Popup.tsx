@@ -5,6 +5,7 @@ import { DecisionControls } from '../components/Decision';
 import { Shield } from '../components/Shield';
 import { Button, Chip, IconButton, SeverityMark, StatusMark } from '../components/ui';
 import { describeAction, headline, timeAgo } from '../format';
+import { needsDecision } from '../../../shared/attention';
 
 /**
  * The always-on-top detection popup. It appears without taking focus, says
@@ -31,13 +32,14 @@ export function Popup({ initialId }: { initialId: string }) {
 
   const [detail] = useLive(() => vigil.getAlertDetail(id), id);
   const [status] = useLive(() => vigil.getStatus());
-  const [open] = useLive(() => vigil.listAlerts('open'));
 
   if (!detail) return null;
   const { alert, actions, proposals } = detail;
   const pending = proposals.filter((p) => p.status === 'pending');
-  const others = (open ?? []).filter((a) => a.id !== alert.id && !a.decision).length;
   const contained = alert.containment === 'active';
+  // The same count as Needs you everywhere else: decisions only, a pile once.
+  const others = Math.max(0, (status?.needsYou ?? 0) - (needsDecision(alert) ? 1 : 0));
+  const simulated = !!status?.dryRun && contained;
   const decided = !!alert.decision;
 
   return (
@@ -50,7 +52,7 @@ export function Popup({ initialId }: { initialId: string }) {
       <div className="row spread">
         <div className="row">
           <Shield height={20} />
-          <span className="t-h3">{headline(alert)}</span>
+          <span className="t-h3">{headline(alert, simulated)}</span>
           <span className="t-small">· {timeAgo(alert.createdAt)}</span>
         </div>
         <IconButton
@@ -65,7 +67,7 @@ export function Popup({ initialId }: { initialId: string }) {
       <div className="col" style={{ gap: 6 }}>
         <div className="row">
           <SeverityMark severity={alert.severity} />
-          {status?.dryRun && contained && (
+          {simulated && (
             <Chip
               tone="fair"
               title="The Vigil helper is not installed, so nothing was actually changed"
@@ -86,7 +88,11 @@ export function Popup({ initialId }: { initialId: string }) {
       {(actions.length > 0 || pending.length > 0) && (
         <div className="col" style={{ gap: 6 }}>
           <span className="t-label">
-            {actions.length > 0 ? 'What Vigil did' : 'Vigil suggests'}
+            {actions.length === 0
+              ? 'Vigil suggests'
+              : status?.dryRun
+                ? 'What Vigil would have done'
+                : 'What Vigil did'}
           </span>
           {actions
             .filter((r) => !r.undoes)

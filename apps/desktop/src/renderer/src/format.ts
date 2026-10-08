@@ -140,8 +140,10 @@ export function describeEvent(e: SensorEvent): string {
   }
 }
 
-export function headline(a: Alert): string {
-  if (a.containment === 'active') return 'Vigil blocked something';
+/** `simulated`: the helper isn't installed, so nothing was actually blocked. */
+export function headline(a: Alert, simulated = false): string {
+  if (a.containment === 'active')
+    return simulated ? 'Vigil would have blocked this' : 'Vigil blocked something';
   if (a.containment === 'released') return 'Released by you';
   return 'Vigil needs you';
 }
