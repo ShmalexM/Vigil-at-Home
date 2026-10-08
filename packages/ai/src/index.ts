@@ -26,6 +26,7 @@ export {
 } from './settings.js';
 export { createAiRunner, jsonSchemaFor, type AiRunner, type AiRunnerDeps } from './runner.js';
 export { readTool } from './tools.js';
+export { REDACTED, WITHHELD, redactArgv, redactField } from './redact.js';
 export type {
   SpendingDay,
   SpendingLimits,

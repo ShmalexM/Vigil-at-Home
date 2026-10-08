@@ -15,6 +15,12 @@ type NameOptions = Omit<RedactionOptions, 'maxBytes'>;
 export const REDACTED = '<redacted>';
 
 /**
+ * What a whole field is replaced with when a secret in it can't be cut out
+ * exactly. Visible, so no one reads the field as harmless or empty.
+ */
+export const WITHHELD = '[withheld: may contain a secret]';
+
+/**
  * The longest string redactString returns, give or take the redaction the
  * cut lands in. Text past it is dropped with a visible marker, so a hostile
  * or runaway input can't make redaction slow.
@@ -27,142 +33,111 @@ export const MAX_REDACT_CHARS = 512 * 1024;
  */
 const CUT_MARGIN = 64 * 1024;
 
-// How redaction works. Every rule below finds spans of the text, each the
-// extent of one secret value, and nothing is replaced until all are found.
-// settle() then holds every span to one invariant before it is applied: a
-// span never covers a shell metacharacter (; | & < > newline, backtick, $(
-// or )) that the shell would act on. Redacted text is what an AI reviewer
-// reads to judge an alert, so attacker-written text must not be able to
-// hide the command that follows a secret. Where quoting is in doubt the
-// span stops at the first metacharacter: the tail of an odd secret may
-// show, a pipeline never hides.
+// How redaction works. Redacted text is what an AI reviewer reads to judge an
+// alert, so attacker-written text must never be able to make a redaction hide
+// a command. Every field has exactly one of two outcomes:
 //
-// JSON is read as JSON: an object or array that parses is redacted by key
-// and serialized again, never matched with a pattern.
+// - Precise: each secret is a single token in a plain value position
+//   (NAME=value, a known flag's value, a header value, a JSON string from a
+//   clean parse, a known token format), made only of characters no shell
+//   acts on, not in command position, in a field with no comment, backtick
+//   or heredoc. Only those tokens are replaced; every other character stays,
+//   in order. A real private key's base64 lines are the one multi-line case.
+// - Withheld: anything else a rule takes for a possible secret replaces the
+//   whole field with WITHHELD. Dropping a field visibly can't make a command
+//   look harmless.
+//
+// A field is the string being redacted; in structured data, each string.
 //
 // Every pattern here must run in time linear in its input: no unbounded
 // repetition that can be retried from many start positions, and no nested
 // quantifiers. redact.test.ts times each on adversarial input.
 
 // ---------------------------------------------------------------------------
-// The shell's view of the text.
+// Characters, tokens and fields.
 
-function isMetaAt(text: string, i: number): boolean {
-  switch (text.charCodeAt(i)) {
-    case 0x0a: // \n
-    case 0x0d: // \r
+/** A character a precise token may hold: printable ASCII that no shell acts on. */
+function isSafeCode(code: number): boolean {
+  if (code <= 0x20 || code >= 0x7f) return false;
+  switch (code) {
+    case 0x22: // "
+    case 0x27: // '
+    case 0x60: // `
+    case 0x24: // $
     case 0x3b: // ;
-    case 0x7c: // |
     case 0x26: // &
+    case 0x7c: // |
     case 0x3c: // <
     case 0x3e: // >
-    case 0x60: // `
+    case 0x28: // (
     case 0x29: // )
-      return true;
-    case 0x24: // $(
-      return text.charCodeAt(i + 1) === 0x28;
-    default:
+    case 0x7b: // {
+    case 0x7d: // }
+    case 0x23: // #
+    case 0x5c: // \
       return false;
+    default:
+      return true;
   }
+}
+
+function isSafeToken(text: string, start: number, end: number): boolean {
+  if (end <= start) return false;
+  for (let i = start; i < end; i++) if (!isSafeCode(text.charCodeAt(i))) return false;
+  return true;
 }
 
 function isSpace(code: number): boolean {
   return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d || code === 0x0c;
 }
 
-function isAlnum(code: number): boolean {
-  return (
-    (code >= 0x30 && code <= 0x39) ||
-    (code >= 0x41 && code <= 0x5a) ||
-    (code >= 0x61 && code <= 0x7a)
-  );
-}
-
 /**
- * The index of the quote that closes the one at `open`, or -1. Single quotes
- * have no escapes in a shell; $'...' and double quotes do.
+ * True when a word starting at `start` could be a command the shell runs:
+ * at the start of the field, a line or a pipeline stage, or right after a
+ * substitution or group opener. Quotes and blanks before it don't count.
  */
-function closingQuote(text: string, open: number): number {
-  const q = text.charCodeAt(open);
-  const escapes = q === 0x22 || (open > 0 && text.charCodeAt(open - 1) === 0x24);
-  if (!escapes) return text.indexOf("'", open + 1);
-  for (let i = open + 1; i < text.length; i++) {
+function inCommandPosition(text: string, start: number): boolean {
+  let i = start - 1;
+  while (i >= 0) {
     const c = text.charCodeAt(i);
-    if (c === 0x5c) i++;
-    else if (c === q) return i;
+    if (c === 0x20 || c === 0x09 || c === 0x22 || c === 0x27) i--;
+    else break;
   }
-  return -1;
+  if (i < 0) return true;
+  switch (text.charCodeAt(i)) {
+    case 0x0a: // \n
+    case 0x0d: // \r
+    case 0x3b: // ;
+    case 0x7c: // |
+    case 0x26: // &
+    case 0x28: // (
+    case 0x29: // )
+    case 0x60: // `
+    case 0x7b: // {
+    case 0x7d: // }
+    case 0x21: // !
+      return true;
+    default:
+      return false;
+  }
 }
 
-/**
- * Mark each metacharacter the shell would act on: those outside quotes, and
- * those inside quotes the scan can't vouch for. A quoted run is trusted only
- * when it closes on its own line, holds no command substitution, and isn't an
- * apostrophe in prose (a quote after a letter, with spaces inside). Quotes
- * pair as the shell pairs them, so what follows a doubtful run is read as
- * the shell reads it.
- */
-function scanShell(text: string): Uint8Array {
-  const n = text.length;
-  const loose = new Uint8Array(n);
-  let i = 0;
-  while (i < n) {
-    const c = text.charCodeAt(i);
-    if (c === 0x5c) {
-      // An escaped character is literal, but a line break stays one.
-      const next = text[i + 1];
-      if (next === '\n' || next === '\r') loose[i + 1] = 1;
-      i += 2;
-      continue;
-    }
-    if (c === 0x27 || c === 0x22) {
-      const close = closingQuote(text, i);
-      const end = close < 0 ? n : close;
-      let sure = true;
-      let spaced = false;
-      let metas = false;
-      // Escaped characters count too: an escaped line break still breaks the
-      // line, and command substitution in double quotes still runs.
-      for (let j = i + 1; j < end; j++) {
-        const d = text.charCodeAt(j);
-        if (d === 0x0a || d === 0x0d) sure = false;
-        if (d === 0x20 || d === 0x09) spaced = true;
-        if (isMetaAt(text, j)) {
-          metas = true;
-          if (c === 0x22 && (d === 0x60 || d === 0x24)) sure = false;
-        }
-      }
-      // An apostrophe in prose: don't ... it's.
-      if (spaced && i > 0 && isAlnum(text.charCodeAt(i - 1))) sure = false;
-      // Left open to the end of the text: trusted only with nothing to hide.
-      if (close < 0 && metas) sure = false;
-      if (!sure) for (let j = i + 1; j < end; j++) if (isMetaAt(text, j)) loose[j] = 1;
-      i = end + 1;
-      continue;
-    }
-    if (isMetaAt(text, i)) loose[i] = 1;
-    i++;
-  }
-  return loose;
-}
+/** A comment, a backtick or a heredoc: text whose shell reading can't be vouched for. */
+const HAZARD = /[#`]|<</;
 
-// ---------------------------------------------------------------------------
-// Spans, and the invariant every span is held to.
-
-interface Span {
+/** What a rule found: a replacement, or a reason to withhold the field. */
+interface Finding {
   readonly start: number;
-  end: number;
+  readonly end: number;
   /** What the span is replaced with. */
-  with: string;
+  readonly with: string;
   /** The higher wins where spans overlap. */
-  rank: number;
-  /** A YAML block or a private key, which may run over several lines. */
-  readonly lines: boolean;
-  /** Grown by joining another span: confined again. */
-  joined: boolean;
+  readonly rank: number;
+  /** The field can't be redacted precisely. */
+  readonly withhold: boolean;
 }
 
-/** User, host and email names: dropped where they overlap a secret. */
+/** User, host and email names: privacy, not secrets, and dropped where they overlap one. */
 const RANK_NAME = 0;
 const RANK_BASE64 = 1;
 const RANK_KEYED = 2;
@@ -170,135 +145,41 @@ const RANK_KEYED = 2;
 const RANK_FORMAT = 3;
 const RANK_KEY = 4;
 
-function span(start: number, end: number, replacement: string, rank: number, lines = false): Span {
-  return { start, end, with: replacement, rank, lines, joined: false };
-}
+class Findings {
+  readonly list: Finding[] = [];
+  readonly text: string;
 
-const KEY_MARKER_LINE = /^-----(?:BEGIN|END) [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----$/;
-const PEM_HEADER_LINE =
-  /^(?:Proc-Type|DEK-Info|Version|Comment|Hash|Charset):[ \t][^;|&<>`$()'"]*$/;
-
-/**
- * A line that may sit inside a multi-line value: one token of base64 or the
- * like, a `- item` of one, a PEM header, or a key's BEGIN or END line. A line
- * that could be a command never is.
- */
-function isBlockLine(text: string, from: number, to: number): boolean {
-  let line = text.slice(from, to).trim();
-  if (!line) return true;
-  for (let i = 0; i < line.length; i++) {
-    const c = line.charCodeAt(i);
-    if (isMetaAt(line, i) || c === 0x22 || c === 0x27) return false;
+  constructor(text: string) {
+    this.text = text;
   }
-  if (KEY_MARKER_LINE.test(line) || PEM_HEADER_LINE.test(line)) return true;
-  if (line.startsWith('- ')) line = line.slice(2).trimStart();
-  return !/\s/.test(line);
-}
 
-/**
- * Hold a span to the invariant: it ends before the first metacharacter the
- * shell would act on and, for a multi-line value, before the first line that
- * isn't one of its own. False when nothing is left of it.
- */
-function confine(s: Span, text: string, loose: Uint8Array): boolean {
-  let end = s.end;
-  if (s.lines && /[\r\n]/.test(text.slice(s.start, end))) {
-    let lineStart = s.start;
-    for (let i = s.start; i <= end; i++) {
-      if (i < end && text.charCodeAt(i) !== 0x0a) continue;
-      if (!isBlockLine(text, lineStart, i)) {
-        end = lineStart;
-        break;
-      }
-      lineStart = i + 1;
-    }
-  } else {
-    for (let i = s.start; i < end; i++) {
-      if (loose[i]) {
-        end = i;
-        break;
-      }
+  /** A secret token: replaced when it can be cut out exactly, else the field is withheld. */
+  token(start: number, end: number, replacement: string, rank: number): void {
+    if (end <= start) return;
+    const precise = isSafeToken(this.text, start, end) && !inCommandPosition(this.text, start);
+    this.list.push({ start, end, with: replacement, rank, withhold: !precise });
+  }
+
+  /** A secret that can't be cut out exactly. */
+  withhold(at: number): void {
+    this.list.push({ start: at, end: at, with: '', rank: RANK_KEY, withhold: true });
+  }
+
+  /** A run its rule has already proven safe to replace, such as a private key's body. */
+  block(start: number, end: number, replacement: string, rank: number): void {
+    this.list.push({ start, end, with: replacement, rank, withhold: false });
+  }
+
+  /** A user, host or email name: replaced only where that can't hide anything. */
+  name(start: number, end: number, replacement: string): void {
+    if (isSafeToken(this.text, start, end)) {
+      this.list.push({ start, end, with: replacement, rank: RANK_NAME, withhold: false });
     }
   }
-  while (end > s.start && isSpace(text.charCodeAt(end - 1))) end--;
-  s.end = end;
-  return end > s.start;
-}
 
-function byStart(a: Span, b: Span): number {
-  return a.start - b.start || b.end - a.end;
-}
-
-/** Sort by start; the rules mostly find spans in order already. */
-function sortSpans(spans: Span[]): Span[] {
-  for (let i = 1; i < spans.length; i++) {
-    if (byStart(spans[i - 1]!, spans[i]!) > 0) return spans.sort(byStart);
+  push(finding: Finding): void {
+    this.list.push(finding);
   }
-  return spans;
-}
-
-/**
- * Join overlapping spans, given in order of their start; where secrets
- * overlap, the higher rank names the whole.
- */
-function mergeOverlaps(spans: readonly Span[]): Span[] {
-  const out: Span[] = [];
-  for (const s of spans) {
-    const last = out[out.length - 1];
-    if (last && s.start < last.end) {
-      if (s.end > last.end) {
-        last.end = s.end;
-        last.joined = true;
-      }
-      if (s.rank > last.rank) {
-        last.rank = s.rank;
-        last.with = s.with;
-      }
-    } else {
-      out.push(s);
-    }
-  }
-  return out;
-}
-
-/**
- * Settle the spans the rules found into the replacements to apply, in order:
- * each confined, none inside a JSON region (whose own replacement stands), and
- * none overlapping another.
- */
-function settle(text: string, loose: Uint8Array, found: Span[], json: Span[]): Span[] {
-  sortSpans(json);
-  const secrets: Span[] = [];
-  const names: Span[] = [];
-  sortSpans(found);
-  let r = 0;
-  for (const s of found) {
-    while (r < json.length && json[r]!.end <= s.start) r++;
-    const region = json[r];
-    if (region && region.start <= s.start) continue;
-    if (region && region.start < s.end) s.end = region.start;
-    if (!confine(s, text, loose)) continue;
-    (s.rank === RANK_NAME ? names : secrets).push(s);
-  }
-  // Confining a union again only ever shortens it.
-  const kept = mergeOverlaps(secrets).filter((s) => !s.joined || confine(s, text, loose));
-  let k = 0;
-  const shown = mergeOverlaps(names).filter((s) => {
-    while (k < kept.length && kept[k]!.end <= s.start) k++;
-    return !(k < kept.length && kept[k]!.start < s.end);
-  });
-  return shown.length || json.length ? sortSpans([...kept, ...shown, ...json]) : kept;
-}
-
-function render(text: string, spans: readonly Span[], end: number): string {
-  let out = '';
-  let last = 0;
-  for (const s of spans) {
-    if (s.start >= end) break;
-    out += text.slice(last, s.start) + s.with;
-    last = s.end;
-  }
-  return out + text.slice(last, end);
 }
 
 // ---------------------------------------------------------------------------
@@ -342,104 +223,108 @@ const FORMATS: ReadonlyArray<readonly [RegExp, string]> = [
 ];
 
 /**
- * The span of a match: its last group that took part, which every pattern
+ * The extent of a match: its last group that took part, which every pattern
  * with groups ends on, or else the whole match.
  */
-function matchSpan(m: RegExpExecArray, replacement: string, rank: number, offset = 0): Span {
+function matchRange(m: RegExpExecArray, offset = 0): readonly [number, number] {
   const end = offset + m.index + m[0].length;
   let g = m.length - 1;
   while (g > 0 && m[g] === undefined) g--;
-  return span(end - m[g]!.length, end, replacement, rank);
+  return [end - m[g]!.length, end];
 }
 
 /** Text without one of these holds none of the formats above. */
 const FORMAT_HINT =
   /AKIA|ASIA|gh[pousr]_|github_pat_|sk-|xox|xapp-|hooks\.slack|eyJ|[sr]k_|AIza|npm_|glpat-|whsec_|hf_|SG\.|ya29\.|shp|do[opr]_v1|pypi-|signature=|sig=|bearer|basic|:\/\//i;
 
-function addFormats(text: string, spans: Span[]): void {
+function addFormats(text: string, f: Findings): void {
   if (!FORMAT_HINT.test(text)) return;
   for (const [pattern, replacement] of FORMATS) {
     pattern.lastIndex = 0;
     for (let m = pattern.exec(text); m; m = pattern.exec(text)) {
-      spans.push(matchSpan(m, replacement, RANK_FORMAT));
+      const [start, end] = matchRange(m);
+      f.token(start, end, replacement, RANK_FORMAT);
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// Private keys. A key is its BEGIN line, then lines of base64 (and the PEM or
-// armor headers), then its END line. Only lines that can be part of a key are
-// hidden, so a fake BEGIN line can't hide the commands written after it.
+// Private keys. Only a real one is redacted in place: its BEGIN and END lines
+// each alone on their line, and between them nothing but base64 lines of the
+// standard 64 characters, the last shorter. Anything else that names a
+// private key withholds the field, so a fake key can't hide the lines in it.
 
-const KEY_BEGIN = /-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----/g;
-const KEY_END = /-----END [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----/y;
-// Newlines, also as JSON escapes, and indentation.
-const KEY_SEP = /(?:[ \t\r\n]|\\r|\\n){0,64}/y;
-const KEY_HEADER =
-  /(?:Proc-Type|DEK-Info|Version|Comment|Hash|Charset):[ \t]*[^\r\n\\|;&$`]{0,100}/y;
-// A line of base64; a slash may be escaped in JSON.
-const KEY_LINE = /(?:[A-Za-z0-9+=]|\\?\/){1,8192}/y;
-const KEY_CHECKSUM = /=[A-Za-z0-9+/]{4}/y;
-/** Key lines are 64 or 70 characters, but for the last. */
-const MIN_FULL_KEY_LINE = 40;
+const KEY_BEGIN = /-----BEGIN ([A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?)-----/g;
+const KEY_LINE = /^[A-Za-z0-9+/]{1,64}={0,2}$/;
+const KEY_LINE_LENGTH = 64;
 const MAX_KEY_LINES = 512;
+/** DER (an ASN.1 SEQUENCE) or OpenSSH's own format. */
+const KEY_BODY_START = /^(?:M|b3BlbnNzaC1rZXktdjE)/;
 
-function stickyLength(pattern: RegExp, text: string, at: number): number {
-  pattern.lastIndex = at;
-  return pattern.exec(text)?.[0].length ?? 0;
+/** The bounds of the line holding `at`, trimmed of blanks and a carriage return. */
+function trimmedLine(text: string, from: number): { start: number; end: number; next: number } {
+  const newline = text.indexOf('\n', from);
+  const next = newline < 0 ? text.length : newline;
+  let start = from;
+  let end = next;
+  while (start < end && (text[start] === ' ' || text[start] === '\t')) start++;
+  while (
+    end > start &&
+    (text[end - 1] === ' ' || text[end - 1] === '\t' || text[end - 1] === '\r')
+  ) {
+    end--;
+  }
+  return { start, end, next };
 }
 
-/**
- * Where the key whose BEGIN line ends at `from` ends: at its END line when
- * only key lines lead there, else after its last line that is surely a key's.
- */
-function keyBodyEnd(text: string, from: number): number {
-  let pos = from;
-  let body = false;
-  for (let lines = 0; lines < MAX_KEY_LINES; lines++) {
-    const at = pos + stickyLength(KEY_SEP, text, pos);
-    const endLine = stickyLength(KEY_END, text, at);
-    if (endLine) return at + endLine;
-    const header = body ? 0 : stickyLength(KEY_HEADER, text, at);
-    const line = header || stickyLength(KEY_LINE, text, at);
-    if (!line) break;
-    if (!header) body = true;
-    pos = at + line;
-  }
-  // No END line: only full lines, and a short last one where a checksum or
-  // the end of the text shows it is the last.
-  let end = from;
-  pos = from;
-  body = false;
-  for (let lines = 0; lines < MAX_KEY_LINES; lines++) {
-    const at = pos + stickyLength(KEY_SEP, text, pos);
-    if (!body) {
-      const header = stickyLength(KEY_HEADER, text, at);
-      if (header) {
-        pos = end = at + header;
-        continue;
-      }
+/** The body of the key whose BEGIN line `m` matched, when it is a real key. */
+function keyBody(text: string, m: RegExpExecArray): { start: number; end: number } | undefined {
+  let before = m.index - 1;
+  while (before >= 0 && (text[before] === ' ' || text[before] === '\t')) before--;
+  if (before >= 0 && text[before] !== '\n') return undefined;
+  const header = trimmedLine(text, m.index);
+  if (header.end !== m.index + m[0].length || header.next >= text.length) return undefined;
+  const endLine = `-----END ${m[1]}-----`;
+  let pos = header.next + 1;
+  let start = -1;
+  let end = -1;
+  let total = 0;
+  let short = false;
+  for (let lines = 0; lines <= MAX_KEY_LINES; lines++) {
+    const line = trimmedLine(text, pos);
+    const length = line.end - line.start;
+    if (length === endLine.length && text.startsWith(endLine, line.start)) {
+      return start >= 0 && total % 4 === 0 ? { start, end } : undefined;
     }
-    const line = stickyLength(KEY_LINE, text, at);
-    if (!line) break;
-    if (line < MIN_FULL_KEY_LINE) {
-      const next = at + line + stickyLength(KEY_SEP, text, at + line);
-      const last = stickyLength(KEY_CHECKSUM, text, next) > 0 || (body && next === text.length);
-      if (!last) break;
-    }
-    body = true;
-    pos = end = at + line;
+    // Only the last line may be short or padded.
+    if (short || length > KEY_LINE_LENGTH) return undefined;
+    const content = text.slice(line.start, line.end);
+    if (!KEY_LINE.test(content)) return undefined;
+    if (start < 0 && !KEY_BODY_START.test(content)) return undefined;
+    // A line with no capital and no padding could be a command or a path:
+    // base64 almost never writes one.
+    if (!/[A-Z=]/.test(content)) return undefined;
+    short = length < KEY_LINE_LENGTH || content.endsWith('=');
+    if (start < 0) start = line.start;
+    end = line.end;
+    total += length;
+    if (line.next >= text.length) return undefined;
+    pos = line.next + 1;
   }
-  return end;
+  return undefined;
 }
 
-function addPrivateKeys(text: string, spans: Span[]): void {
+function addPrivateKeys(text: string, f: Findings): void {
   if (!text.includes('PRIVATE KEY')) return;
   KEY_BEGIN.lastIndex = 0;
   for (let m = KEY_BEGIN.exec(text); m; m = KEY_BEGIN.exec(text)) {
-    const end = keyBodyEnd(text, m.index + m[0].length);
-    spans.push(span(m.index, end, '<private-key>', RANK_KEY, true));
-    KEY_BEGIN.lastIndex = end;
+    const body = keyBody(text, m);
+    if (!body) {
+      f.withhold(m.index);
+      return;
+    }
+    f.block(body.start, body.end, '<private-key>', RANK_KEY);
+    KEY_BEGIN.lastIndex = body.end;
   }
 }
 
@@ -596,6 +481,9 @@ function isBenignNumber(value: number, passwordName: boolean): boolean {
   return !passwordName && Number.isInteger(value) && Math.abs(value) < 10_000;
 }
 
+/** A value already redacted. */
+const MARKER = /^<[a-z-]+>$/;
+
 // ---------------------------------------------------------------------------
 // Values by name: PGPASSWORD=x, "password": "x", x-api-key: x, --token x.
 
@@ -609,68 +497,63 @@ function isBenignNumber(value: number, passwordName: boolean): boolean {
 const KEYED =
   /(?<![A-Za-z0-9_.-])(?:(["']?)-{0,2}(_*[A-Za-z][A-Za-z0-9_.-]*)(["']?)[ \t]*(===|==|=>|:=|[=:])[ \t]*|--([A-Za-z][A-Za-z0-9_-]*)[ \t]+(?=[^\s-]|-(?![-\s]|[A-Za-z](?:\s|$))))/g;
 const AUTH_SCHEME = /(?:Bearer|Basic|Token|Digest|Negotiate|NTLM|AWS4-HMAC-SHA256)[ \t]+/iy;
-// `hunter2`. A backtick value with spaces is a command, left to be read; the
-// backticks of a one-word value stay in view.
-const BACKTICK_WORD = /`[^`\s;|&<>$()'"]{1,256}`/y;
-const MARKER = /^<[a-z-]+>$/;
+
+/** Where a bare value ends, whatever the context: the shell's own word breaks. */
+const VALUE_STOPS = ';&|<>)';
+/** What may follow a quoted value without joining more text to it. */
+const QUOTE_FOLLOWERS = ',;&|)}]<>';
 
 function matchAt(pattern: RegExp, text: string, at: number): string {
   pattern.lastIndex = at;
   return pattern.exec(text)?.[0] ?? '';
 }
 
+/** A value, unless it is empty, already redacted or can't be a secret. */
+function addSecret(
+  text: string,
+  start: number,
+  end: number,
+  password: boolean,
+  f: Findings,
+  benign = true,
+): void {
+  const value = text.slice(start, end);
+  if (MARKER.test(value) || (benign ? isBenignValue(value, password) : value === '')) return;
+  f.token(start, end, REDACTED, RANK_KEYED);
+}
+
 /**
- * The end of the quoted string that opens at `at`: past its closing quote, or
- * at the end of the line when it has none there. Only double quotes escape.
+ * Add the value that starts at `at`: a quoted string closed on its line and
+ * followed by nothing joined to it, or a bare run up to a blank, one of the
+ * shell's word breaks, or one of `stops`. Returns where the value ends.
  */
-function quotedEnd(text: string, at: number): number {
-  const q = text.charCodeAt(at);
-  for (let i = at + 1; i < text.length; i++) {
-    const c = text.charCodeAt(i);
-    if (c === q) return i + 1;
-    if (c === 0x0a || c === 0x0d) return i;
-    if (c === 0x5c && q === 0x22) i++;
-  }
-  return text.length;
-}
-
-/** The end of a shell word from `at`: bare text and quoted strings, joined. */
-function wordEnd(text: string, at: number, stops: string): number {
-  let i = at;
-  while (i < text.length) {
-    const c = text.charCodeAt(i);
-    if (c === 0x27 || c === 0x22) {
-      i = quotedEnd(text, i);
-      continue;
+function addValue(text: string, at: number, stops: string, password: boolean, f: Findings): number {
+  const q = text[at];
+  if (q === '"' || q === "'") {
+    let close = at + 1;
+    while (close < text.length && text[close] !== q && text[close] !== '\n') close++;
+    if (text[close] !== q) {
+      f.withhold(at);
+      return close;
     }
-    if (isSpace(c) || isMetaAt(text, i) || stops.includes(text[i]!)) break;
-    if (c === 0x5c) {
-      if (i + 1 >= text.length || text[i + 1] === '\n' || text[i + 1] === '\r') break;
-      i++;
+    const after = close + 1;
+    if (after < text.length && !isSpace(text.charCodeAt(after))) {
+      if (!QUOTE_FOLLOWERS.includes(text[after]!)) {
+        f.withhold(at);
+        return after;
+      }
     }
-    i++;
+    addSecret(text, at + 1, close, password, f);
+    return after;
   }
-  return i;
-}
-
-/** The end of a bare value from `at`, which stops at a quote too. */
-function bareEnd(text: string, at: number, stops: string): number {
-  let i = at;
-  while (i < text.length) {
-    const c = text.charCodeAt(i);
-    if (isSpace(c) || isMetaAt(text, i) || c === 0x27 || c === 0x22 || stops.includes(text[i]!)) {
-      break;
-    }
-    i++;
+  let end = at;
+  while (end < text.length) {
+    const c = text[end]!;
+    if (isSpace(text.charCodeAt(end)) || VALUE_STOPS.includes(c) || stops.includes(c)) break;
+    end++;
   }
-  return i;
-}
-
-function unquote(value: string): string {
-  const q = value[0];
-  return (q === '"' || q === "'") && value.length >= 2 && value.endsWith(q)
-    ? value.slice(1, -1)
-    : value;
+  addSecret(text, at, end, password, f);
+  return end;
 }
 
 // ---------------------------------------------------------------------------
@@ -679,71 +562,41 @@ function unquote(value: string): string {
 //   password:            private_key: |           tokens:
 //     hunter2              LS0tLS1CRUdJTi...        - abc
 //
-// The value lines must each be one token: a line that could be a command
-// ends the block.
+// A value written over several lines can't be told from the commands after
+// it, so it always withholds the field.
 
 const BLOCK_SCALAR = /[|>][-+]?[1-9]?[-+]?[ \t]*(?=\r?\n)/y;
-const MAPPING_LINE = /["']?[A-Za-z0-9_.-]{1,64}["']?[ \t]*:(?:[ \t]|\r?$)/;
+const MAPPING_LINE = /["']?[A-Za-z0-9_.-]{1,64}["']?[ \t]*:(?:[ \t]|\r?\n|\r?$)/y;
 const MAX_BLOCK_LINES = 256;
 
 /**
- * The value lines after the line break at `from`: lines indented past `column`,
- * or `- item` lines at `column`. Undefined when there are none, or when they
- * are a nested mapping, whose own names are checked as the scan reaches them.
+ * True when value lines follow the line break at `from`: lines indented past
+ * `column`, or `- item` lines at `column`. A nested mapping is not a value:
+ * its own names are checked as the scan reaches them.
  */
-function indentedBlock(
-  text: string,
-  from: number,
-  column: number,
-  scalar: boolean,
-): { start: number; end: number } | undefined {
+function hasValueBlock(text: string, from: number, column: number, scalar: boolean): boolean {
   let pos = from;
-  let start = -1;
-  let end = -1;
-  let list = false;
   for (let lines = 0; lines < MAX_BLOCK_LINES; lines++) {
     if (text[pos] === '\r') pos++;
-    if (text[pos] !== '\n') break;
+    if (text[pos] !== '\n') return false;
     const lineStart = ++pos;
     while (text[pos] === ' ' || text[pos] === '\t') pos++;
+    if (pos >= text.length) return false;
+    if (text[pos] === '\n' || text[pos] === '\r') continue; // A blank line.
     const indent = pos - lineStart;
-    const contentStart = pos;
-    const newline = text.indexOf('\n', pos);
-    let lineEnd = newline < 0 ? text.length : newline;
-    if (lineEnd > contentStart && text[lineEnd - 1] === '\r') lineEnd--;
-    if (lineEnd <= contentStart) {
-      pos = lineEnd;
-      continue; // A blank line inside the block.
+    if (indent > column) {
+      MAPPING_LINE.lastIndex = pos;
+      return scalar || !MAPPING_LINE.test(text);
     }
-    const item = text[contentStart] === '-' && /[ \t\r\n]/.test(text[contentStart + 1] ?? '\n');
-    if (start < 0) {
-      if (indent > column) {
-        if (!scalar && MAPPING_LINE.test(text.slice(contentStart, lineEnd))) return undefined;
-      } else if (indent === column && item && !scalar) {
-        list = true;
-      } else {
-        return undefined;
-      }
-    } else if (indent < column || (indent === column && !(list && item))) {
-      break;
-    }
-    if (!isBlockLine(text, contentStart, lineEnd)) {
-      if (start < 0) return undefined;
-      break;
-    }
-    // `- item`: the dash stays.
-    if (start < 0) {
-      start = list ? contentStart + (text[contentStart + 1] === '\n' ? 1 : 2) : contentStart;
-    }
-    end = lineEnd;
-    pos = lineEnd;
+    const item = text[pos] === '-' && /[ \t\r\n]/.test(text[pos + 1] ?? '\n');
+    return !scalar && indent === column && item;
   }
-  return start < 0 ? undefined : { start, end };
+  return false;
 }
 
 // ---------------------------------------------------------------------------
-// Cookies: name=value pairs joined by "; ". Each value is its own span, so the
-// separators stay in view and a pair list never runs into a command.
+// Cookies: name=value pairs joined by "; ". Each value is its own token, so
+// the separators stay in view.
 
 const COOKIE_ATTRIBUTES = new Set([
   'path',
@@ -761,18 +614,17 @@ function cookieNameEnd(text: string, at: number): number {
   let i = at;
   while (i < text.length && i - at < 256) {
     const c = text.charCodeAt(i);
-    if (isSpace(c) || isMetaAt(text, i) || c === 0x3d || c === 0x2c || c === 0x22 || c === 0x27) {
-      break;
-    }
+    if (!isSafeCode(c) || c === 0x3d || c === 0x2c) break;
     i++;
   }
   return i;
 }
 
 /** Add the values of the cookie header whose value starts at `at`; returns where it ends. */
-function addCookies(text: string, at: number, spans: Span[]): number {
+function addCookies(text: string, at: number, argQuote: string, f: Findings): number {
   let pos = at;
-  if (text[pos] === '"' || text[pos] === "'") pos++;
+  let quote = argQuote;
+  if (!quote && (text[pos] === '"' || text[pos] === "'")) quote = text[pos++]!;
   for (let pairs = 0; ; pairs++) {
     const nameEnd = cookieNameEnd(text, pos);
     let valueStart = pos;
@@ -783,10 +635,13 @@ function addCookies(text: string, at: number, spans: Span[]): number {
     } else if (pairs > 0) {
       break;
     }
-    const valueEnd = bareEnd(text, valueStart, ',\\');
-    if (valueEnd > valueStart && !attribute) {
-      spans.push(span(valueStart, valueEnd, REDACTED, RANK_KEYED));
+    let valueEnd = valueStart;
+    while (valueEnd < text.length) {
+      const c = text[valueEnd]!;
+      if (isSpace(text.charCodeAt(valueEnd)) || c === ';' || c === ',' || c === quote) break;
+      valueEnd++;
     }
+    if (!attribute) addSecret(text, valueStart, valueEnd, false, f, false);
     pos = valueEnd;
     if (text[pos] !== ';') break;
     pos++;
@@ -800,7 +655,7 @@ function addCookies(text: string, at: number, spans: Span[]): number {
  * PGPASSWORD=x, "password": "x", x-api-key: x, --token x, Authorization: Bearer x.
  * One pass, each value read once.
  */
-function addKeyedValues(text: string, spans: Span[]): void {
+function addKeyedValues(text: string, f: Findings): void {
   KEYED.lastIndex = 0;
   for (let m = KEYED.exec(text); m; m = KEYED.exec(text)) {
     const name = describeName(m[2] ?? m[5]!);
@@ -813,49 +668,34 @@ function addKeyedValues(text: string, spans: Span[]): void {
     const sep = m[4] ?? ' ';
     let at = afterKey;
     if (name.authorization) at += matchAt(AUTH_SCHEME, text, at).length;
-    // "auth": { ... } — the names inside are checked on their own.
-    if (text[at] === '{' || text[at] === '[') continue;
+    // "auth": { ... } — JSON that parses is read by its keys; anything else
+    // that shape can't be cut exactly.
+    if (text[at] === '{' || text[at] === '[') {
+      f.withhold(at);
+      continue;
+    }
     if (sep === ':' && !argQuote) {
       const scalar = matchAt(BLOCK_SCALAR, text, at).length;
       if (scalar || text[at] === '\n' || text[at] === '\r') {
         const column = m.index - (text.lastIndexOf('\n', m.index - 1) + 1);
-        const block = indentedBlock(text, at + scalar, column, scalar > 0);
-        if (block) {
-          spans.push(span(block.start, block.end, REDACTED, RANK_KEYED, true));
-          KEYED.lastIndex = block.end;
-        }
+        if (hasValueBlock(text, at + scalar, column, scalar > 0)) f.withhold(at);
         continue;
       }
     }
-    if (sep === ':' && name.cookie) {
-      KEYED.lastIndex = Math.max(KEYED.lastIndex, addCookies(text, at, spans));
-      continue;
-    }
-    let start = at;
     let end: number;
-    if (argQuote) {
+    if (sep === ':' && name.cookie) {
+      end = addCookies(text, at, argQuote, f);
+    } else if (argQuote) {
       end = at;
-      while (end < text.length && text[end] !== argQuote && text[end] !== '\n') {
-        if (argQuote === '"' && text[end] === '\\') end++;
-        end++;
-      }
-      end = Math.min(end, text.length);
-    } else if (text[at] === '`') {
-      const word = matchAt(BACKTICK_WORD, text, at).length;
-      start = at + 1;
-      end = word ? at + word - 1 : start;
-    } else if ((sep === '=' || sep === ' ') && !lead) {
-      // A shell assignment or flag: the value is the whole shell word, so
-      // 'abc'"def" and abc,def are one value.
-      end = wordEnd(text, at, '}]');
-    } else if (text[at] === '"' || text[at] === "'") {
-      end = quotedEnd(text, at);
+      while (end < text.length && text[end] !== argQuote && text[end] !== '\n') end++;
+      if (text[end] === argQuote) addSecret(text, at, end, name.password, f);
+      else f.withhold(at);
     } else {
-      end = bareEnd(text, at, ',}]');
+      // A shell assignment or flag ends where the shell word does, so
+      // abc,def is one value.
+      const shell = (sep === '=' || sep === ' ') && !lead;
+      end = addValue(text, at, shell ? '}]' : ',}]', name.password, f);
     }
-    const bare = unquote(text.slice(start, end));
-    if (end <= start || MARKER.test(bare) || isBenignValue(bare, name.password)) continue;
-    spans.push(span(start, end, REDACTED, RANK_KEYED));
     KEYED.lastIndex = Math.max(KEYED.lastIndex, end);
   }
 }
@@ -883,13 +723,14 @@ const PROSE_AFTER_PASSWORD = new Set(
     .split(/\s+/),
 );
 
-function addPasswordWords(text: string, spans: Span[]): void {
+function addPasswordWords(text: string, f: Findings): void {
   if (!/pass/i.test(text)) return;
   PASSWORD_WORD.lastIndex = 0;
   for (let m = PASSWORD_WORD.exec(text); m; m = PASSWORD_WORD.exec(text)) {
     const value = m[1]!;
     if (PROSE_AFTER_PASSWORD.has(value.toLowerCase()) || isBenignValue(value, true)) continue;
-    spans.push(matchSpan(m, REDACTED, RANK_KEYED));
+    const [start, end] = matchRange(m);
+    f.token(start, end, REDACTED, RANK_KEYED);
   }
 }
 
@@ -916,7 +757,7 @@ const MYSQL_GLUED_PASSWORD = /\s-p([^\s-]\S*)/g;
 
 const COMMAND_HINT = /curl|sshpass|docker|openssl|mysql|mariadb/;
 
-function addCommandSecrets(text: string, spans: Span[]): void {
+function addCommandSecrets(text: string, f: Findings): void {
   if (!COMMAND_HINT.test(text)) return;
   const each = (command: RegExp, flag: RegExp, when?: (c: string) => boolean) => {
     command.lastIndex = 0;
@@ -925,7 +766,14 @@ function addCommandSecrets(text: string, spans: Span[]): void {
       if (when && !when(line)) continue;
       flag.lastIndex = 0;
       for (let m = flag.exec(line); m; m = flag.global ? flag.exec(line) : null) {
-        spans.push(matchSpan(m, REDACTED, RANK_KEYED, c.index));
+        let [start, end] = matchRange(m, c.index);
+        // A quoted value: the quotes stay.
+        const q = text[start];
+        if ((q === '"' || q === "'") && end - start >= 2 && text[end - 1] === q) {
+          start++;
+          end--;
+        }
+        f.token(start, end, REDACTED, RANK_KEYED);
       }
     }
   };
@@ -944,21 +792,22 @@ const XML_ELEMENT =
 const XML_KEYED_ATTRIBUTE =
   /\b(?:key|name)=(["'])([^"'\n<>]{1,128})\1\s+value=(["'])([^"'\n]*)(?=\3)/gi;
 
-function addXml(text: string, spans: Span[]): void {
+function addXml(text: string, f: Findings): void {
   if (!text.includes('<')) return;
   XML_ELEMENT.lastIndex = 0;
   for (let m = XML_ELEMENT.exec(text); m; m = XML_ELEMENT.exec(text)) {
     const [local, body] = [m[2]!, m[4]!];
     if (isCredentialName(local) && !isBenignValue(body.trim(), isPasswordName(local))) {
       const end = m.index + m[0].length - m[1]!.length - 3;
-      spans.push(span(end - body.length, end, REDACTED, RANK_KEYED));
+      f.token(end - body.length, end, REDACTED, RANK_KEYED);
     }
   }
   XML_KEYED_ATTRIBUTE.lastIndex = 0;
   for (let m = XML_KEYED_ATTRIBUTE.exec(text); m; m = XML_KEYED_ATTRIBUTE.exec(text)) {
     const [key, value] = [m[2]!, m[4]!];
     if (isCredentialName(key) && !isBenignValue(value, isPasswordName(key))) {
-      spans.push(matchSpan(m, REDACTED, RANK_KEYED));
+      const [start, end] = matchRange(m);
+      f.token(start, end, REDACTED, RANK_KEYED);
     }
   }
 }
@@ -989,11 +838,11 @@ function mostlyPrintable(text: string): boolean {
 /** True when decoded text names a secret: a credential name with a value, or a known format. */
 function namesSecret(text: string): boolean {
   if (DECODED_SECRET.test(text)) return true;
-  const found: Span[] = [];
+  const found = new Findings(text);
   addFormats(text, found);
-  if (found.length) return true;
+  if (found.list.length) return true;
   addKeyedValues(text, found);
-  return found.length > 0;
+  return found.list.length > 0;
 }
 
 function hidesSecret(run: string): boolean {
@@ -1011,152 +860,256 @@ function hidesSecret(run: string): boolean {
   return false;
 }
 
-function addBase64(text: string, spans: Span[]): void {
+function addBase64(text: string, f: Findings): void {
   BASE64_RUN.lastIndex = 0;
   for (let m = BASE64_RUN.exec(text); m; m = BASE64_RUN.exec(text)) {
     if (hidesSecret(m[0])) {
-      spans.push(span(m.index, m.index + m[0].length, '<base64-secret>', RANK_BASE64));
+      f.token(m.index, m.index + m[0].length, '<base64-secret>', RANK_BASE64);
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// JSON. Each object or array in the text that parses is redacted by key with
-// redactValue and serialized again, so a value under a credential key is
-// replaced whatever its shape, and nothing beside it is touched. One that
-// doesn't parse, has a key twice (which parsing would hide), nests too deep,
-// or holds a metacharacter the shell would act on is left to the text rules,
-// which are held to the shell's reading: '{"token":"x'; id; '"}' parses, but
-// the shell runs the id.
+// JSON. Each object or array in the text that parses cleanly is read by its
+// keys: a string or number under a credential key is a secret whatever the
+// shape around it, and every other string is read as a field of its own, with
+// what it finds mapped back to the text as written. Nothing is serialized
+// again, so the text keeps its size and layout. JSON with a key twice (which
+// a parser would hide) or nested past MAX_DEPTH withholds the field.
 
 /** How deep JSON found in a string, inside JSON found in a string, is read. */
 const MAX_TEXT_DEPTH = 4;
-/** Deeper than this, a value is replaced whole rather than walked. */
+/** Deeper than this, a value is withheld rather than walked. */
 const MAX_DEPTH = 64;
 
-interface Bracketed {
-  /** Past the closing bracket, or -1 when the brackets don't balance. */
+type Secret = { readonly password: boolean };
+
+interface JsonString {
+  /** The content, between the quotes. */
+  readonly start: number;
   readonly end: number;
-  /** Where the scan stopped. */
-  readonly stop: number;
-  /** Object members, counted as keys followed by a colon. */
-  readonly members: number;
-  readonly strings: boolean;
+  readonly escaped: boolean;
+  readonly secret: Secret | undefined;
 }
 
-const closers = new Uint8Array(MAX_DEPTH);
+interface JsonRead {
+  /** Past the value, or -1 when it doesn't parse. */
+  readonly end: number;
+  /** Where the read stopped. */
+  readonly stop: number;
+  /** No key twice in an object, and nested no deeper than MAX_DEPTH. */
+  readonly clean: boolean;
+  readonly strings: JsonString[];
+  /** Numbers under a credential key, as [start, end]. */
+  readonly numbers: Array<readonly [number, number]>;
+}
 
-/**
- * Read the brackets that open at `open` to the one that closes them, minding
- * strings. Brackets nested deeper than redactValue walks are not JSON to it.
- */
-function bracketed(text: string, open: number): Bracketed {
-  let depth = 0;
-  let members = 0;
-  let strings = false;
-  let key = false;
-  for (let i = open; i < text.length; i++) {
+const JSON_NUMBER = /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/y;
+const JSON_LITERAL = /true|false|null/y;
+const JSON_ESCAPE = /\\(?:["\\/bfnrt]|u[0-9A-Fa-f]{4})/y;
+
+function skipJsonSpace(text: string, i: number): number {
+  for (; i < text.length; i++) {
     const c = text.charCodeAt(i);
-    if (c === 0x22) {
-      strings = true;
-      for (i++; i < text.length; i++) {
-        const d = text.charCodeAt(i);
-        if (d === 0x5c) i++;
-        else if (d === 0x22) break;
-        else if (d < 0x20) return { end: -1, stop: i, members, strings };
+    if (c !== 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d) break;
+  }
+  return i;
+}
+
+/** Past the closing quote of the JSON string that opens at `at`, or -1; and whether it escapes. */
+function jsonStringEnd(text: string, at: number): { end: number; escaped: boolean } {
+  let escaped = false;
+  for (let i = at + 1; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 0x22) return { end: i + 1, escaped };
+    if (c < 0x20) break;
+    if (c === 0x5c) {
+      JSON_ESCAPE.lastIndex = i;
+      if (!JSON_ESCAPE.test(text)) break;
+      escaped = true;
+      i = JSON_ESCAPE.lastIndex - 1;
+    }
+  }
+  return { end: -1, escaped };
+}
+
+interface Frame {
+  readonly object: boolean;
+  readonly secret: Secret | undefined;
+  readonly keys: Set<string> | undefined;
+}
+
+/** Read the JSON value that opens at `open`, iteratively, so depth costs no stack. */
+function readJson(text: string, open: number): JsonRead {
+  const frames: Frame[] = [];
+  const strings: JsonString[] = [];
+  const numbers: Array<readonly [number, number]> = [];
+  let clean = true;
+  let i = open;
+  // What is known of the value about to be read.
+  let secret: Secret | undefined;
+  let keepNumber = false;
+  const fail = (stop: number): JsonRead => ({ end: -1, stop, clean, strings, numbers });
+
+  /** Read an object's key and its colon; false when they don't parse. */
+  const readKey = (frame: Frame): boolean => {
+    i = skipJsonSpace(text, i);
+    if (text.charCodeAt(i) !== 0x22) return false;
+    const { end, escaped } = jsonStringEnd(text, i);
+    if (end < 0) return false;
+    const key = escaped ? (JSON.parse(text.slice(i, end)) as string) : text.slice(i + 1, end - 1);
+    if (frame.keys!.has(key)) clean = false;
+    frame.keys!.add(key);
+    i = skipJsonSpace(text, end);
+    if (text.charCodeAt(i) !== 0x3a) return false;
+    i++;
+    const parent = frame.secret;
+    const name = describeName(key);
+    secret =
+      parent || name.credential
+        ? { password: !!parent?.password || (parent ? isPasswordName(key) : name.password) }
+        : undefined;
+    keepNumber = !!parent && hasNonSecretSuffix(key);
+    return true;
+  };
+
+  for (;;) {
+    // A value.
+    i = skipJsonSpace(text, i);
+    const c = text.charCodeAt(i);
+    let opened = false;
+    if (c === 0x7b || c === 0x5b) {
+      const object = c === 0x7b;
+      const frame: Frame = { object, secret, keys: object ? new Set() : undefined };
+      frames.push(frame);
+      if (frames.length > MAX_DEPTH) clean = false;
+      i = skipJsonSpace(text, i + 1);
+      if (text.charCodeAt(i) === (object ? 0x7d : 0x5d)) {
+        frames.pop();
+        i++;
+      } else {
+        opened = true;
+        keepNumber = false;
+        if (object && !readKey(frame)) return fail(i);
       }
-      key = closers[depth - 1] === 0x7d;
+    } else if (c === 0x22) {
+      const { end, escaped } = jsonStringEnd(text, i);
+      if (end < 0) return fail(i);
+      strings.push({ start: i + 1, end: end - 1, escaped, secret });
+      i = end;
+    } else {
+      const number = matchAt(JSON_NUMBER, text, i).length;
+      const length = number || matchAt(JSON_LITERAL, text, i).length;
+      if (!length) return fail(i);
+      if (number && secret && !keepNumber) {
+        if (!isBenignNumber(Number(text.slice(i, i + number)), secret.password)) {
+          numbers.push([i, i + number]);
+        }
+      }
+      i += length;
+    }
+    if (opened) continue;
+    // After a value: a comma and the next, or the end of a container.
+    for (;;) {
+      const frame = frames[frames.length - 1];
+      if (!frame) return { end: i, stop: i, clean, strings, numbers };
+      i = skipJsonSpace(text, i);
+      const d = text.charCodeAt(i);
+      if (d === 0x2c) {
+        i++;
+        if (frame.object) {
+          if (!readKey(frame)) return fail(i);
+        } else {
+          secret = frame.secret;
+          keepNumber = false;
+        }
+        break;
+      }
+      if (d !== (frame.object ? 0x7d : 0x5d)) return fail(i);
+      frames.pop();
+      i++;
+    }
+  }
+}
+
+/** A JSON string's content decoded, with where in the text each decoded unit was written. */
+function decodeJsonString(text: string, start: number, end: number) {
+  const units: string[] = [];
+  const at: number[] = [];
+  for (let i = start; i < end;) {
+    at.push(i);
+    if (text.charCodeAt(i) !== 0x5c) {
+      units.push(text[i]!);
+      i++;
       continue;
     }
-    if (c === 0x7b || c === 0x5b) {
-      if (depth >= MAX_DEPTH) return { end: -1, stop: i, members, strings };
-      closers[depth++] = c + 2;
-    } else if (c === 0x7d || c === 0x5d) {
-      if (!depth || closers[--depth] !== c) return { end: -1, stop: i, members, strings };
-      if (!depth) return { end: i + 1, stop: i + 1, members, strings };
-    } else if (c === 0x3a && key) {
-      members++;
+    const e = text[i + 1]!;
+    if (e === 'u') {
+      units.push(String.fromCharCode(parseInt(text.slice(i + 2, i + 6), 16)));
+      i += 6;
+    } else {
+      units.push(
+        ({ b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' } as Record<string, string>)[e] ?? e,
+      );
+      i += 2;
     }
-    if (!isSpace(c)) key = false;
   }
-  return { end: -1, stop: text.length, members, strings };
+  at.push(end);
+  return { value: units.join(''), at };
 }
 
-/** The keys of every object in a parsed value, or -1 when it nests too deep. */
-function countKeys(value: unknown, depth: number): number {
-  if (!value || typeof value !== 'object') return 0;
-  if (depth >= MAX_DEPTH) return -1;
-  let count = 0;
-  const items = Array.isArray(value) ? value : Object.values(value);
-  if (!Array.isArray(value)) count += items.length;
-  for (const item of items) {
-    const inner = countKeys(item, depth + 1);
-    if (inner < 0) return -1;
-    count += inner;
+/** Add what each string of a clean read holds, as found in the text. */
+function addJsonFindings(
+  text: string,
+  read: JsonRead,
+  options: NameOptions,
+  depth: number,
+  f: Findings,
+): void {
+  for (const s of read.strings) {
+    if (s.secret) {
+      if (!s.escaped) {
+        addSecret(text, s.start, s.end, s.secret.password, f);
+      } else {
+        const value = JSON.parse(text.slice(s.start - 1, s.end + 1)) as string;
+        if (!MARKER.test(value) && !isBenignValue(value, s.secret.password)) f.withhold(s.start);
+      }
+      continue;
+    }
+    if (s.end === s.start) continue;
+    if (!s.escaped) {
+      const field = text.slice(s.start, s.end);
+      if (!mayHoldSecret(field, options)) continue;
+      for (const x of analyze(field, options, depth + 1)) {
+        f.push({ ...x, start: x.start + s.start, end: x.end + s.start });
+      }
+      continue;
+    }
+    const { value, at } = decodeJsonString(text, s.start, s.end);
+    if (!mayHoldSecret(value, options)) continue;
+    for (const x of analyze(value, options, depth + 1)) {
+      const start = at[x.start]!;
+      const end = at[x.end]!;
+      // Written with escapes: what the text shows isn't what was found.
+      if (x.withhold || text.slice(start, end).includes('\\')) f.withhold(s.start);
+      else f.push({ ...x, start, end });
+    }
   }
-  return count;
-}
-
-/**
- * Serialize redacted JSON in the original's layout. A quote, backtick or
- * dollar sign the original only wrote escaped stays escaped, so the text
- * around it reads as it did.
- */
-function reserialize(value: unknown, original: string): string {
-  let space: string | number = 0;
-  if (original.includes('\n')) {
-    const indent = /\n([ \t]+)\S/.exec(original)?.[1];
-    space = indent?.includes('\t') ? '\t' : indent ? Math.min(indent.length, 10) : 2;
-  }
-  let out = JSON.stringify(value, null, space);
-  for (const [char, escape] of [
-    ["'", '\\u0027'],
-    ['`', '\\u0060'],
-    ['$', '\\u0024'],
-  ] as const) {
-    if (!original.includes(char) && out.includes(char)) out = out.split(char).join(escape);
-  }
-  return out;
-}
-
-function redactJson(slice: string, members: number, options: NameOptions, depth: number) {
-  // Nothing in it to redact: no need to parse it. Escapes are parsed, as
-  // \u0070assword is password.
-  if (!mayHoldSecret(slice, options)) return slice;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(slice);
-  } catch {
-    return undefined;
-  }
-  if (!parsed || typeof parsed !== 'object' || countKeys(parsed, 0) !== members) return undefined;
-  const before = changes;
-  const redacted = redactWithin(parsed, options, undefined, 0, new Set(), depth + 1);
-  return changes === before ? slice : reserialize(redacted, slice);
+  for (const [start, end] of read.numbers) f.token(start, end, REDACTED, RANK_KEYED);
 }
 
 /**
- * True when the shell would act on a metacharacter in text[from, to). A line
- * break doesn't count: in JSON that parses, it can only sit between values.
- */
-function actsInShell(text: string, loose: Uint8Array, from: number, to: number): boolean {
-  for (let i = from; i < to; i++) {
-    if (loose[i] && text[i] !== '\n' && text[i] !== '\r') return true;
-  }
-  return false;
-}
-
-/**
- * Add a span for each JSON object or array in the text. A failed candidate is
- * retried one character on while the work stays within a few passes over the
- * text, then skipped whole, so brackets that never balance stay linear.
+ * Read each JSON object or array in the text, adding what it holds and
+ * recording where it is. A failed candidate is retried one character on
+ * while the work stays within a few passes over the text, then skipped
+ * whole, so brackets that never balance stay linear.
  */
 function addJson(
   text: string,
-  loose: () => Uint8Array,
   options: NameOptions,
   depth: number,
-  spans: Span[],
+  f: Findings,
+  regions: number[],
 ): void {
   const budget = 2 * text.length + 64 * 1024;
   let work = 0;
@@ -1165,25 +1118,29 @@ function addJson(
     let open = i;
     while (open < text.length && text[open] !== '{' && text[open] !== '[') open++;
     if (open >= text.length) return;
-    const scan = bracketed(text, open);
-    work += scan.stop - open;
-    if (scan.end > 0 && scan.strings && !actsInShell(text, loose(), open, scan.end)) {
-      work += scan.end - open;
-      const replacement = redactJson(text.slice(open, scan.end), scan.members, options, depth);
-      if (replacement !== undefined) {
-        spans.push(span(open, scan.end, replacement, Infinity));
-        i = scan.end;
-        continue;
+    const read = readJson(text, open);
+    if (read.end > 0) {
+      if (!read.clean) {
+        if (mayHoldSecret(text.slice(open, read.end), options)) {
+          f.withhold(open);
+          return;
+        }
+      } else {
+        regions.push(open, read.end);
+        addJsonFindings(text, read, options, depth, f);
       }
+      i = read.end;
+      continue;
     }
-    i = work < budget ? open + 1 : Math.max(open + 1, scan.stop);
+    work += read.stop - open;
+    i = work < budget ? open + 1 : Math.max(open + 1, read.stop);
   }
 }
 
 // ---------------------------------------------------------------------------
 // User, host and email names.
 
-const HOME = /\/(?:Users|home)\/([^/\s"']+)/g;
+const HOME = /\/(?:Users|home)\/([^/\s"'`$;&|<>(){}#\\]+)/g;
 const EMAIL = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}\.[A-Za-z]{2,63}/g;
 
 function escapeRegExp(text: string): string {
@@ -1212,12 +1169,12 @@ export function localNames(): { username?: string; hostname?: string } {
   };
 }
 
-function addNames(text: string, options: NameOptions, spans: Span[]): void {
+function addNames(text: string, options: NameOptions, f: Findings): void {
   const each = (pattern: RegExp, replacement: string) => {
     pattern.lastIndex = 0;
     for (let m = pattern.exec(text); m; m = pattern.exec(text)) {
-      const s = matchSpan(m, replacement, RANK_NAME);
-      if (s.end > s.start) spans.push(s);
+      const [start, end] = matchRange(m);
+      if (end > start) f.name(start, end, replacement);
       else pattern.lastIndex++;
     }
   };
@@ -1263,6 +1220,101 @@ function mayHoldSecret(text: string, options: NameOptions): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// A field: every rule's findings, then one of the two outcomes.
+
+function byStart(a: Finding, b: Finding): number {
+  return a.start - b.start || b.end - a.end;
+}
+
+/** Drop findings that start inside a JSON region, given as start, end pairs in order. */
+function outsideRegions(found: Finding[], regions: readonly number[]): Finding[] {
+  found.sort(byStart);
+  const out: Finding[] = [];
+  let r = 0;
+  for (const x of found) {
+    while (r < regions.length && regions[r + 1]! <= x.start) r += 2;
+    if (r < regions.length && regions[r]! <= x.start) continue;
+    out.push(x);
+  }
+  return out;
+}
+
+/** What every rule finds in a field. */
+function analyze(text: string, options: NameOptions, depth: number): Finding[] {
+  if (!mayHoldSecret(text, options)) return [];
+  const rules = new Findings(text);
+  addPrivateKeys(text, rules);
+  addFormats(text, rules);
+  addCommandSecrets(text, rules);
+  addXml(text, rules);
+  addKeyedValues(text, rules);
+  addPasswordWords(text, rules);
+  addBase64(text, rules);
+  addNames(text, options, rules);
+  const json = new Findings(text);
+  const regions: number[] = [];
+  if (depth < MAX_TEXT_DEPTH && (text.includes('{') || text.includes('['))) {
+    addJson(text, options, depth, json, regions);
+  }
+  // Inside JSON, the JSON reading stands.
+  const found = regions.length ? outsideRegions(rules.list, regions) : rules.list;
+  found.push(...json.list);
+  if (found.some((x) => x.rank > RANK_NAME) && HAZARD.test(text)) {
+    found.push({ start: 0, end: 0, with: '', rank: RANK_KEY, withhold: true });
+  }
+  return found;
+}
+
+/**
+ * The replacements to apply, in order and none overlapping: where secrets
+ * overlap, the higher rank names the whole, and names give way to secrets.
+ */
+function settle(found: Finding[]): Finding[] {
+  found.sort(byStart);
+  const secrets: Array<{ start: number; end: number; with: string; rank: number }> = [];
+  const names: Finding[] = [];
+  for (const x of found) {
+    if (x.rank === RANK_NAME) {
+      names.push(x);
+      continue;
+    }
+    const last = secrets[secrets.length - 1];
+    if (last && x.start < last.end) {
+      last.end = Math.max(last.end, x.end);
+      if (x.rank > last.rank) {
+        last.rank = x.rank;
+        last.with = x.with;
+      }
+    } else {
+      secrets.push({ ...x });
+    }
+  }
+  const out: Finding[] = [];
+  let s = 0;
+  let lastName = -1;
+  for (const n of names) {
+    while (s < secrets.length && secrets[s]!.end <= n.start) s++;
+    if (s < secrets.length && secrets[s]!.start < n.end) continue;
+    if (n.start < lastName) continue;
+    out.push(n);
+    lastName = n.end;
+  }
+  if (!out.length) return secrets.map((x) => ({ ...x, withhold: false }));
+  return [...secrets.map((x) => ({ ...x, withhold: false })), ...out].sort(byStart);
+}
+
+function render(text: string, spans: readonly Finding[], end: number): string {
+  let out = '';
+  let last = 0;
+  for (const s of spans) {
+    if (s.start >= end) break;
+    out += text.slice(last, s.start) + s.with;
+    last = s.end;
+  }
+  return out + text.slice(last, end);
+}
+
+// ---------------------------------------------------------------------------
 // The cut for over-long input, made after redaction.
 
 /** How far back the cut looks for whitespace before it settles for punctuation. */
@@ -1294,7 +1346,7 @@ function isBoundary(code: number): boolean {
  * whitespace, or else to punctuation), so no secret the rules didn't know is
  * left with its head on one side and only a tail to see.
  */
-function cutPoint(text: string, spans: readonly Span[]): number {
+function cutPoint(text: string, spans: readonly Finding[]): number {
   const limit = MAX_REDACT_CHARS;
   let floor = 0;
   for (const s of spans) {
@@ -1310,83 +1362,76 @@ function cutPoint(text: string, spans: readonly Span[]): number {
   return floor;
 }
 
-function redactText(input: string, options: NameOptions, depth: number): string {
+function redactText(input: string, options: NameOptions): string {
   const clipped = input.length > MAX_REDACT_CHARS;
   if (!clipped && !mayHoldSecret(input, options)) return input;
   const text = clipped ? input.slice(0, MAX_REDACT_CHARS + CUT_MARGIN) : input;
-  let shell: Uint8Array | undefined;
-  const loose = () => (shell ??= scanShell(text));
-  const json: Span[] = [];
-  if (depth < MAX_TEXT_DEPTH) addJson(text, loose, options, depth, json);
-  const found: Span[] = [];
-  addPrivateKeys(text, found);
-  addFormats(text, found);
-  addCommandSecrets(text, found);
-  addXml(text, found);
-  addKeyedValues(text, found);
-  addPasswordWords(text, found);
-  addBase64(text, found);
-  addNames(text, options, found);
-  const spans = found.length || json.length ? settle(text, loose(), found, json) : found;
+  const found = analyze(text, options, 0);
+  if (found.some((x) => x.withhold)) return WITHHELD;
+  const spans = found.length ? settle(found) : found;
   const end = clipped ? cutPoint(text, spans) : text.length;
   const out = render(text, spans, end);
   return end < input.length ? `${out}…[truncated ${input.length - end} characters]` : out;
 }
 
+/**
+ * Redact one field: its secrets cut out exactly, or the whole field replaced
+ * with WITHHELD when that can't be done without the risk of hiding a command.
+ */
 export function redactString(input: string, options: NameOptions): string {
-  return redactText(input, options, 0);
+  return redactText(input, options);
+}
+
+/** redactString for a field such as one line of evidence, by default with no local names. */
+export function redactField(text: string, options: NameOptions = {}): string {
+  return redactText(text, options);
+}
+
+/** A command's arguments, each its own field: one withheld argument leaves the rest in view. */
+export function redactArgv(argv: readonly string[], options: NameOptions = {}): string[] {
+  return argv.map((arg) => redactText(arg, options));
 }
 
 /**
  * Redact every string in a JSON-like value. Keys are kept. A value under a
  * credential-named key (password, x-api-key, authToken, ...) is replaced
- * whatever it looks like; when that value is an object or array, its shape is
- * kept and every string and number inside it is replaced, booleans and null
- * aside, and numbers under names like expires_at. A value nested too deep, a
- * cycle, or one that throws when read is replaced whole.
+ * whatever it looks like: with REDACTED when it is one plain token, else
+ * WITHHELD. When that value is an object or array, its shape is kept and
+ * every string and number inside it is replaced, booleans and null aside,
+ * and numbers under names like expires_at. A value nested too deep, a cycle,
+ * or one that throws when read is withheld whole.
  */
 export function redactValue(value: unknown, options: NameOptions): unknown {
-  return redactWithin(value, options, undefined, 0, new Set(), 0);
-}
-
-/** Counts the values redactWithin changes, so a caller can tell nothing was. */
-let changes = 0;
-
-function changed<T>(value: T): T {
-  changes++;
-  return value;
+  return redactWithin(value, options, undefined, 0, new Set());
 }
 
 /** `secret` is set under a credential-named key: true when it names a password. */
 function redactWithin(
   value: unknown,
   options: NameOptions,
-  secret: { password: boolean } | undefined,
+  secret: Secret | undefined,
   depth: number,
   ancestors: Set<object>,
-  textDepth: number,
 ): unknown {
   if (secret) {
     if (typeof value === 'string') {
-      return isBenignValue(value, secret.password) ? value : changed(REDACTED);
+      if (isBenignValue(value, secret.password) || MARKER.test(value) || value === WITHHELD) {
+        return value;
+      }
+      return isSafeToken(value, 0, value.length) ? REDACTED : WITHHELD;
     }
     if (typeof value === 'number') {
-      return isBenignNumber(value, secret.password) ? value : changed(REDACTED);
+      return isBenignNumber(value, secret.password) ? value : REDACTED;
     }
-    if (typeof value === 'bigint') return changed(REDACTED);
+    if (typeof value === 'bigint') return REDACTED;
   }
-  if (typeof value === 'string') {
-    const out = redactText(value, options, textDepth);
-    return out === value ? value : changed(out);
-  }
+  if (typeof value === 'string') return redactText(value, options);
   if (!value || typeof value !== 'object') return value;
-  if (depth >= MAX_DEPTH || ancestors.has(value)) return changed(REDACTED);
+  if (depth >= MAX_DEPTH || ancestors.has(value)) return WITHHELD;
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
-      return value.map((item) =>
-        redactWithin(item, options, secret, depth + 1, ancestors, textDepth),
-      );
+      return value.map((item) => redactWithin(item, options, secret, depth + 1, ancestors));
     }
     const out: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value)) {
@@ -1399,7 +1444,7 @@ function redactWithin(
           secret || name.credential
             ? { password: !!secret?.password || (secret ? isPasswordName(key) : name.password) }
             : undefined;
-        redacted = redactWithin(item, options, keyed, depth + 1, ancestors, textDepth);
+        redacted = redactWithin(item, options, keyed, depth + 1, ancestors);
       }
       if (key === '__proto__') {
         // Kept as a key, not taken for the prototype.
@@ -1416,27 +1461,114 @@ function redactWithin(
     return out;
   } catch {
     // A getter or proxy that throws: nothing of it is passed on.
-    return changed(REDACTED);
+    return WITHHELD;
   } finally {
     ancestors.delete(value);
   }
 }
 
+// ---------------------------------------------------------------------------
+// Serialization within a byte budget. The text is written as JSON.stringify
+// with an indent of 1 writes it, and writing stops once the budget is spent,
+// so a value that would serialize to far more than maxBytes is never written
+// out in full.
+
+class BoundedText {
+  readonly parts: string[] = [];
+  readonly max: number;
+  bytes = 0;
+
+  constructor(max: number) {
+    this.max = max;
+  }
+
+  get full(): boolean {
+    return this.bytes > this.max;
+  }
+
+  write(piece: string): void {
+    if (this.full) return;
+    this.parts.push(piece);
+    this.bytes += Buffer.byteLength(piece, 'utf8');
+  }
+
+  /** A string, of which no more is escaped than could still fit. */
+  string(value: string): void {
+    const room = this.max - this.bytes + 1;
+    this.write(JSON.stringify(value.length > room ? value.slice(0, room) : value));
+  }
+}
+
+/** True for what JSON.stringify leaves out of an object, or writes as null in an array. */
+function unwritable(value: unknown): boolean {
+  return value === undefined || typeof value === 'function' || typeof value === 'symbol';
+}
+
+function writeJson(value: unknown, indent: string, out: BoundedText): void {
+  if (out.full) return;
+  switch (typeof value) {
+    case 'string':
+      out.string(value);
+      return;
+    case 'number':
+      out.write(Number.isFinite(value) ? String(value) : 'null');
+      return;
+    case 'boolean':
+    case 'bigint':
+      out.write(String(value));
+      return;
+    default:
+      break;
+  }
+  if (value === null || typeof value !== 'object') {
+    out.write('null');
+    return;
+  }
+  const inner = indent + ' ';
+  if (Array.isArray(value)) {
+    if (!value.length) return out.write('[]');
+    out.write('[');
+    value.forEach((item, i) => {
+      if (out.full) return;
+      out.write(`${i ? ',' : ''}\n${inner}`);
+      writeJson(unwritable(item) ? null : item, inner, out);
+    });
+    out.write(`\n${indent}]`);
+    return;
+  }
+  const entries = Object.entries(value).filter(([, item]) => !unwritable(item));
+  if (!entries.length) return out.write('{}');
+  out.write('{');
+  entries.forEach(([key, item], i) => {
+    if (out.full) return;
+    out.write(`${i ? ',' : ''}\n${inner}${JSON.stringify(key)}: `);
+    writeJson(item, inner, out);
+  });
+  out.write(`\n${indent}}`);
+}
+
 /**
- * Redact and serialize, cutting the text at maxBytes with a visible marker.
- * The cut never splits a character or leaves half a redaction marker.
+ * Redact and serialize, stopping at maxBytes with a visible marker. The cut
+ * never splits a character or leaves part of a redaction marker.
  */
 export function redactAndSerialize(value: unknown, options: RedactionOptions): string {
-  const text = JSON.stringify(redactValue(value, options), null, 1) ?? 'null';
-  const bytes = Buffer.byteLength(text, 'utf8');
-  if (bytes <= options.maxBytes) return text;
+  const max = Math.max(0, options.maxBytes);
+  const redacted = redactValue(value, options);
+  const out = new BoundedText(max);
+  writeJson(unwritable(redacted) ? null : redacted, '', out);
+  const text = out.parts.join('');
+  if (!out.full) return text;
   const buffer = Buffer.from(text, 'utf8');
-  let end = Math.max(0, options.maxBytes);
+  let end = max;
   // Back up to the first byte of a character the cut runs through.
   while (end > 0 && (buffer[end]! & 0xc0) === 0x80) end--;
-  const cut = buffer
+  let cut = buffer
     .subarray(0, end)
     .toString('utf8')
     .replace(/<[a-z-]{0,30}$/, '');
-  return `${cut}\n…[truncated ${bytes - Buffer.byteLength(cut, 'utf8')} bytes]`;
+  const open = cut.lastIndexOf('[');
+  if (open >= 0 && cut.length - open < WITHHELD.length && WITHHELD.startsWith(cut.slice(open))) {
+    cut = cut.slice(0, open);
+  }
+  return `${cut}\n…[truncated after ${Buffer.byteLength(cut, 'utf8')} bytes]`;
 }
