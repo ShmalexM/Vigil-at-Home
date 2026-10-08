@@ -415,6 +415,22 @@ describe('built-in rule pack', () => {
   });
 });
 
+describe('rules still learning', () => {
+  it('says which rules only record while the baseline is learned', () => {
+    const view = (installedAt: number) =>
+      setup({ installedAt })
+        .core.rules()
+        .find((v) => v.rule.id === 'persistence-first-seen');
+    const learning = view(Date.now());
+    expect(learning?.learningUntil).toBeGreaterThan(Date.now());
+    expect(view(1)?.learningUntil).toBeUndefined();
+    const plain = setup({ installedAt: Date.now() })
+      .core.rules()
+      .find((v) => v.rule.id === 'download-pipe-to-shell');
+    expect(plain?.learningUntil).toBeUndefined();
+  });
+});
+
 describe('stale open alerts', () => {
   /** The read a real Mac raised hourly before the excuse covered it (2026-10-08). */
   const read = (service: string): SensorEvent => {

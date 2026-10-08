@@ -1,6 +1,6 @@
 import type { RuleMode } from '@vigil/core';
-import { BellRing, ChevronDown, ChevronRight, Pencil, Plus, Search } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { BellRing, ChevronDown, ChevronRight, Hourglass, Pencil, Plus, Search } from 'lucide-react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { RuleView } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
 import { HoldButton } from '../components/HoldButton';
@@ -159,7 +159,8 @@ function RuleRow({
   editing: boolean;
   onEdit: (on: boolean) => void;
 }) {
-  const { rule, matches } = view;
+  const { rule, matches, learningUntil } = view;
+  const controlsId = useId();
   const toast = useToast();
   const [confirmBlock, setConfirmBlock] = useState(false);
   const [open, setOpen] = useState(false);
@@ -167,7 +168,8 @@ function RuleRow({
   useEffect(() => {
     if (editing) ref.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
   }, [editing]);
-  const interrupts = interruptLevel(rule);
+  const learning = learningUntil !== undefined;
+  const interrupts = interruptLevel(rule, learning);
   // A tool rule answers Claude Code's hook: its modes are Record, Ask and Deny.
   const tool = isToolRule(rule);
 
@@ -199,7 +201,13 @@ function RuleRow({
         type="button"
         className="row rule-row rule-head"
         aria-expanded={expanded}
-        onClick={() => (editing ? onEdit(false) : setOpen(!open))}
+        aria-controls={expanded ? controlsId : undefined}
+        aria-label={`${rule.name}, ${modeLabel(rule, rule.mode)}`}
+        onClick={() => {
+          // Collapsing closes the editor too, however the row was opened.
+          if (expanded && editing) onEdit(false);
+          setOpen(!expanded);
+        }}
       >
         <div className="col grow" style={{ gap: 2, minWidth: 0 }}>
           <div className="row">
@@ -209,6 +217,14 @@ function RuleRow({
             {!tool && interrupts === 'popup' && (
               <span className="rule-interrupts" title={INTERRUPT_TEXT.popup.long}>
                 <BellRing size={12} aria-hidden /> {INTERRUPT_TEXT.popup.short}
+              </span>
+            )}
+            {learning && rule.mode !== 'shadow' && rule.mode !== 'disabled' && (
+              <span
+                className="rule-interrupts"
+                title={`Only records until ${new Date(learningUntil).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}, while Vigil learns what is normal on this computer.`}
+              >
+                <Hourglass size={12} aria-hidden /> Learning
               </span>
             )}
           </div>
@@ -236,7 +252,7 @@ function RuleRow({
         </span>
       </button>
       {expanded && (
-        <div className="row rule-controls">
+        <div className="row rule-controls" id={controlsId}>
           <span className="t-label">Mode</span>
           <Segmented
             label={`Mode for ${rule.name}`}

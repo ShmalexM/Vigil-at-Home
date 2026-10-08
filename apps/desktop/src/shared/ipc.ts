@@ -382,6 +382,11 @@ export interface RuleView {
   rule: Rule;
   /** Matches in the last 14 days (the detection engine's replay window), all modes. */
   matches: number;
+  /**
+   * Set while the rule compares against a baseline Vigil is still learning:
+   * until then it only records, whatever its mode says.
+   */
+  learningUntil?: number;
 }
 
 /** Everything the rule editor shows for one rule. */

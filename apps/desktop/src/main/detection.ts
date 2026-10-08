@@ -394,11 +394,16 @@ export class Detector {
   }
 
   /** Every rule the engine runs, with the mode it actually applies. */
-  rules(): Array<{ rule: Rule; mode: RuleMode }> {
-    return this.engine.listRules().map(({ effectiveMode, ...r }) => ({
-      rule: coreRule(r as DetectionRule),
-      mode: effectiveMode,
-    }));
+  rules(): Array<{ rule: Rule; mode: RuleMode; learningUntil?: number }> {
+    const now = this.now();
+    return this.engine.listRules().map(({ effectiveMode, ...r }) => {
+      const learningUntil = this.engine.learningEnds(r.id, now);
+      return {
+        rule: coreRule(r as DetectionRule),
+        mode: effectiveMode,
+        ...(learningUntil !== undefined ? { learningUntil } : {}),
+      };
+    });
   }
 
   /**

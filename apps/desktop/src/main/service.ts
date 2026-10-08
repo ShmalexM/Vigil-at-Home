@@ -352,9 +352,10 @@ export class VigilCore {
 
   rules(): RuleView[] {
     const counts = this.store.ruleMatchCounts(this.now() - RULE_REVIEW_DAYS * DAY);
-    const engine = (this.detector?.rules() ?? []).map(({ rule, mode }) => ({
+    const engine = (this.detector?.rules() ?? []).map(({ rule, mode, learningUntil }) => ({
       rule: { ...rule, mode },
       matches: counts.get(rule.id) ?? 0,
+      ...(learningUntil !== undefined ? { learningUntil } : {}),
     }));
     const own = this.store
       .listRules()

@@ -240,6 +240,16 @@ export class DetectionEngine {
     return [...this.byId.values()].map((c) => ({ ...c.rule, effectiveMode: this.modeOf(c.rule) }));
   }
 
+  /**
+   * Until when a rule only records, whatever its mode, because it compares
+   * against a baseline Vigil is still learning. Undefined once learned, or for
+   * a rule that has no baseline.
+   */
+  learningEnds(ruleId: string, now: number): number | undefined {
+    const c = this.byId.get(ruleId);
+    return c?.usesBaseline && now < this.learningUntil ? this.learningUntil : undefined;
+  }
+
   modeOf(rule: DetectionRule): RuleMode {
     return this.stores.ruleState.get(rule.id)?.mode ?? rule.mode;
   }

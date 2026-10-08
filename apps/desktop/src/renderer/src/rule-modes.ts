@@ -156,14 +156,19 @@ type SeverityName = keyof typeof SEVERITY_RANK;
  * How a rule's new alerts reach the user: a popup, the menu-bar badge, or
  * only the Alerts list. Mirrors notifyLevel in main/alerts.ts (not imported,
  * to keep the main process out of the renderer); a test keeps them in step.
- * A repeat or a burst of the same thing interrupts once either way.
+ * A repeat or a burst of the same thing interrupts once either way. While
+ * the rule's baseline is still being learned (`learning`), the engine only
+ * records its matches, so nothing interrupts.
  */
-export function interruptLevel(rule: {
-  mode: RuleMode;
-  fidelity: 'low' | 'medium' | 'high';
-  severity: SeverityName;
-}): 'popup' | 'badge' | 'silent' | 'none' {
-  if (rule.mode === 'disabled' || rule.mode === 'shadow') return 'none';
+export function interruptLevel(
+  rule: {
+    mode: RuleMode;
+    fidelity: 'low' | 'medium' | 'high';
+    severity: SeverityName;
+  },
+  learning = false,
+): 'popup' | 'badge' | 'silent' | 'none' {
+  if (rule.mode === 'disabled' || rule.mode === 'shadow' || learning) return 'none';
   if (rule.mode === 'block') return 'popup';
   const sev = SEVERITY_RANK[rule.severity];
   if (rule.fidelity === 'high' && sev >= SEVERITY_RANK.medium) return 'popup';

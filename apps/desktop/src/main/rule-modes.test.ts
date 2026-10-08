@@ -14,6 +14,11 @@ describe('interruptLevel', () => {
           expect(interruptLevel({ mode, severity, fidelity })).toBe(notifyLevel(rule));
         }
   });
+  it('never interrupts while the baseline is being learned', () => {
+    expect(interruptLevel({ mode: 'block', severity: 'critical', fidelity: 'high' }, true)).toBe(
+      'none',
+    );
+  });
   it('never interrupts for shadow or off', () => {
     expect(interruptLevel({ mode: 'shadow', severity: 'critical', fidelity: 'high' })).toBe('none');
     expect(interruptLevel({ mode: 'disabled', severity: 'critical', fidelity: 'high' })).toBe(
