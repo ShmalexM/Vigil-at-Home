@@ -5,9 +5,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import type { AddressInfo } from 'node:net';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { Readable } from 'node:stream';
 import { RuleStore } from './santa/ruleStore.js';
 import {
   HttpError,
+  logSafe,
+  MAX_LOGGED_URL,
   MAX_SYNC_SESSIONS,
   SantaSyncServer,
   SYNC_SESSION_TTL_MS,
@@ -379,5 +383,31 @@ describe('unfinished syncs', () => {
     clock = 7_000;
     s.dispatch('postflight', 'm', {});
     expect(s.lastSyncAt).toBe(6_000);
+  });
+});
+
+describe('request logging', () => {
+  it('logs the request path on one line, bounded', async () => {
+    const lines: string[] = [];
+    const s = new SantaSyncServer({ store: new RuleStore(), log: (m) => lines.push(m) });
+    const req = Object.assign(Readable.from([]), {
+      method: 'POST',
+      url: `/nowhere\r\n[vigil-helper] forged line\u001b[2J${'x'.repeat(5000)}`,
+      headers: {},
+    }) as unknown as IncomingMessage;
+    await new Promise<void>((resolve) => {
+      const res = { writeHead: () => res, end: () => resolve() } as unknown as ServerResponse;
+      s.handler(req, res);
+    });
+    expect(lines).toHaveLength(1);
+    for (const c of ['\r', '\n', '\u001b']) expect(lines[0]).not.toContain(c);
+    expect(lines[0]).toContain('/nowhere[vigil-helper] forged line[2J');
+    expect(lines[0]!.length).toBeLessThan(MAX_LOGGED_URL + 100);
+  });
+
+  it('strips control characters and truncates', () => {
+    expect(logSafe('/a\u0000b\u007fc\u0085d e')).toBe('/abcde');
+    expect(logSafe('y'.repeat(MAX_LOGGED_URL + 1))).toBe(`${'y'.repeat(MAX_LOGGED_URL)}...`);
+    expect(logSafe('/preflight/M1')).toBe('/preflight/M1');
   });
 });

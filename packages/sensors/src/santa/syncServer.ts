@@ -72,6 +72,16 @@ interface SyncSession {
 export const MAX_SYNC_SESSIONS = 4;
 export const SYNC_SESSION_TTL_MS = 10 * 60 * 1000;
 
+/** Longest request line part written to the log; anyone local can send one. */
+export const MAX_LOGGED_URL = 200;
+
+/** A client-sent string as it may appear in the log: one line, bounded. */
+export function logSafe(text: string): string {
+  // eslint-disable-next-line no-control-regex -- stripping them is the point
+  const clean = text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '');
+  return clean.length > MAX_LOGGED_URL ? `${clean.slice(0, MAX_LOGGED_URL)}...` : clean;
+}
+
 const ROUTE_RE = /^\/(preflight|eventupload|ruledownload|postflight)\/([^/?#]{1,128})\/?$/;
 
 export class HttpError extends Error {
@@ -114,7 +124,9 @@ export class SantaSyncServer {
       })
       .catch((err: unknown) => {
         const status = err instanceof HttpError ? err.status : 500;
-        this.opts.log?.(`santa sync ${req.method} ${req.url} failed: ${(err as Error).message}`);
+        this.opts.log?.(
+          `santa sync ${logSafe(req.method ?? '')} ${logSafe(req.url ?? '')} failed: ${(err as Error).message}`,
+        );
         res.writeHead(status, { 'content-type': 'text/plain' });
         res.end(status === 500 ? 'internal error' : (err as Error).message);
       });
