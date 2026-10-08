@@ -27,6 +27,7 @@ import { realProcess } from '../evidence';
 import { actorLabel, clock, describeAction, describeEvent, timeAgo, timeOfDay } from '../format';
 import { matchText } from '../rule-modes';
 import { parseActivityParam, VIGIL_CONNECTOR, VIGIL_SELF } from './agents-format';
+import { appendOlder } from './activity-rows';
 import { PageHead } from './AppShell';
 import { onRovingKeyDown } from '../components/roving';
 
@@ -127,8 +128,9 @@ const PAGE = 100;
 
 /** Matches TEXT_SEARCH_WINDOW_MS in shared/ipc.ts (not imported, to keep zod out of the renderer). */
 const SEARCH_WINDOW_MS = 24 * 60 * 60 * 1000;
-/** Matches EVENT_STATS_TTL_MS in main/service.ts. */
+/** Match EVENT_STATS_TTL_MS and EVENT_PROGRAMS_TTL_MS in main/service.ts. */
 const STATS_TTL_MS = 5_000;
+const PROGRAMS_TTL_MS = 60_000;
 
 function EventFeed({
   filter,
@@ -142,6 +144,8 @@ function EventFeed({
   const [text, setText] = useState('');
   const [paused, setPaused] = useState(false);
   const [rows, setRows] = useState<EventView[]>();
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
   const [more, setMore] = useState(false);
   /** With a search: how far back it has looked so far. */
   const [searchedTo, setSearchedTo] = useState<number>();
@@ -195,20 +199,21 @@ function EventFeed({
   }, [key, feed, text]);
 
   // New events arrive in batches at most once a second. Main reuses the
-  // numbers for a few seconds, so they are asked for once more after the
-  // last batch: otherwise a quiet Mac would keep showing ones from before it.
+  // counts for a few seconds and the programs number for a minute, so they
+  // are asked for again once each has expired after the last batch:
+  // otherwise a quiet Mac would keep showing numbers from before it.
   useEffect(() => {
-    let again: ReturnType<typeof setTimeout> | undefined;
+    let again: ReturnType<typeof setTimeout>[] = [];
     const off = vigil.on('events', (n) => {
       reloadStats();
-      clearTimeout(again);
-      again = setTimeout(reloadStats, STATS_TTL_MS + 250);
+      again.forEach(clearTimeout);
+      again = [STATS_TTL_MS, PROGRAMS_TTL_MS].map((ms) => setTimeout(reloadStats, ms + 250));
       if (pausedRef.current) setWaiting((w) => w + n);
       else load();
     });
     return () => {
       off();
-      clearTimeout(again);
+      again.forEach(clearTimeout);
     };
   }, [load, reloadStats]);
 
@@ -232,7 +237,12 @@ function EventFeed({
     });
     // Filters changed while it loaded: these rows belong to the old ones.
     if (!current()) return;
-    setRows([...(rows ?? []), ...r]);
+    // A live refresh may have replaced the rows meanwhile: add the older page
+    // after the row it was asked from, in whatever rows are current. If that
+    // row has scrolled off the newest page, the page no longer joins on.
+    const joined = appendOlder(rowsRef.current ?? [], r, last?.event.id);
+    if (!joined) return;
+    setRows(joined);
     setMore(r.length === PAGE);
     if (searching) setSearchedTo(before - SEARCH_WINDOW_MS);
   };

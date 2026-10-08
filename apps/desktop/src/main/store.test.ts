@@ -436,6 +436,12 @@ describe('Store: agents', () => {
       // Ordering rows of equal ts by id is fine; sorting every row is not.
       expect(steps, JSON.stringify(q)).not.toContain('USE TEMP B-TREE FOR ORDER BY');
     }
+    // The whole feed pages through the ts index too, sorting only ties by id.
+    for (const q of [{ before: 5000 }, { before: 5000, beforeId: 'x' }]) {
+      const steps = plan(q).join('\n');
+      expect(steps, JSON.stringify(q)).toMatch(/USING INDEX \w*ts\w*/);
+      expect(steps, JSON.stringify(q)).not.toContain('USE TEMP B-TREE FOR ORDER BY');
+    }
     // The agent comes from the event's own tag, and a tool request's agent.
     s.insertEvents([
       { event: tagged(S1, 1100, 7), outcome: quiet },
