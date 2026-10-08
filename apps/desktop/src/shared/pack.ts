@@ -96,6 +96,8 @@ export interface DogReport {
   }[];
   /** The AI that ran it. */
   provider?: string;
+  /** The run used a tool, or read a report that did: the summary could hold anyone's text. */
+  tainted?: boolean;
 }
 
 /** Vigil's built-in AI helpers, shown as pack dogs. Their jobs and tools are fixed. */

@@ -234,9 +234,26 @@ describe('the pack', () => {
     await pack.say('have Pip check Desktop too');
     expect(pack.dogs().find((d) => d.id === dog.id)!.job).toBe('Check Desktop too.');
 
+    // A report from a run that used no tool doesn't hold anyone else's text.
     pack.clearChat();
     handlers.push(() => ({ summary: 'All quiet', findings: [] }));
     await pack.runDog(dog.id);
+    expect(pack.dogs().find((d) => d.id === dog.id)!.lastReport!.tainted).toBe(false);
+    handlers.push(() => ({
+      reply: 'Done.',
+      actions: [{ kind: 'update', dogId: dog.id, job: 'Check Desktop and Documents.' }],
+    }));
+    await pack.say('add Documents');
+    expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done' });
+
+    // One that used a tool does.
+    pack.clearChat();
+    handlers.push(async (req) => {
+      await tool(req, 'search_events').run({});
+      return { summary: 'Two new files', findings: [] };
+    });
+    await pack.runDog(dog.id);
+    expect(pack.dogs().find((d) => d.id === dog.id)!.lastReport!.tainted).toBe(true);
     handlers.push(() => ({
       reply: 'Noted.',
       actions: [{ kind: 'update', dogId: dog.id, job: 'Only Downloads.' }],
@@ -250,7 +267,7 @@ describe('the pack', () => {
       note: expect.stringContaining('read data'),
     });
     expect(memory.count()).toBe(0);
-    expect(pack.dogs().find((d) => d.id === dog.id)!.job).toBe('Check Desktop too.');
+    expect(pack.dogs().find((d) => d.id === dog.id)!.job).toBe('Check Desktop and Documents.');
   });
 
   it('still sends a dog off at once in Full access when nothing was read', async () => {

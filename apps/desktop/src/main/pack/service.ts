@@ -125,6 +125,7 @@ const ReportSchema = z.object({
     }),
   ),
   provider: z.string().optional(),
+  tainted: z.boolean().optional(),
 });
 
 const DogRecord = z.object({
@@ -602,8 +603,7 @@ export class PackService {
       const readTainted =
         this.chat()
           .slice(-CONTEXT_MESSAGES - 1, -1)
-          .some((m) => m.tainted || (m.used?.length ?? 0) > 0) ||
-        this.dogs().some((d) => d.lastReport);
+          .some((m) => m.tainted || (m.used?.length ?? 0) > 0) || this.dogs().some(reportTainted);
       const tools = this.toolsFor(lead, { requestedByUser: true, used });
       const memory = this.memoryFor(tools);
       const result = await this.o.ai.run({
@@ -969,6 +969,8 @@ export class PackService {
             provider: result.provider,
           }
         : { at: this.now(), ok: false, summary: failText(result.reason), findings: [] };
+      // It read its own last report, so taint carries over from that too.
+      report.tainted = used.length > 0 || reportTainted(dog);
       this.note(
         {
           dog: id,
@@ -1434,6 +1436,16 @@ function remoteEntry(id: string, name: string, t: RemoteTool): ToolEntry {
     serverHint: t.readOnlyHint,
     inputSchema: t.inputSchema,
   };
+}
+
+/**
+ * Whether a dog's last report could hold someone else's text: its run used a
+ * tool, or read a report that did. Reports from before this was recorded
+ * count when the dog has any tools.
+ */
+function reportTainted(d: Dog): boolean {
+  if (!d.lastReport) return false;
+  return d.lastReport.tainted ?? d.tools.length > 0;
 }
 
 function failText(reason: string): string {
