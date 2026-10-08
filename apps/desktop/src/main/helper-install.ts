@@ -125,17 +125,116 @@ export function helperMatch(
   return { installed: same ? 'current' : 'outdated', bundle };
 }
 
+/** The files each script reads, the script first, relative to the helper folder. */
+export function helperScriptFiles(
+  kind: 'install' | 'uninstall',
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  if (platform === 'linux') {
+    return kind === 'uninstall'
+      ? ['linux/uninstall.sh']
+      : [
+          'linux/install.sh',
+          'node',
+          'helper.mjs',
+          'linux/vigil-helper',
+          'linux/vigil-helper.service',
+          'linux/com.vigilathome.helper.policy',
+        ];
+  }
+  return kind === 'uninstall'
+    ? ['uninstall.sh']
+    : ['install.sh', 'node', 'helper.mjs', 'vigil-helper', 'com.vigilathome.helper.plist'];
+}
+
+const hashCache = new Map<string, { key: string; hex: string }>();
+
+function fileSha256(path: string): string {
+  const st = statSync(path);
+  const key = `${st.size}:${st.mtimeMs}:${st.ino}`;
+  const hit = hashCache.get(path);
+  if (hit?.key === key) return hit.hex;
+  const hex = createHash('sha256').update(readFileSync(path)).digest('hex');
+  hashCache.set(path, { key, hex });
+  return hex;
+}
+
+/**
+ * One digest over the listed files, the same one {@link rootStageScript}
+ * computes as root: each file's SHA-256 on its own line, as `sha256sum` and
+ * `shasum` print it for standard input, then the SHA-256 of those lines.
+ */
+export function helperDigest(dir: string, files: readonly string[]): string {
+  const lines = files.map((f) => `${fileSha256(join(dir, f))}  -\n`).join('');
+  return createHash('sha256').update(lines).digest('hex');
+}
+
+/**
+ * The shell script root runs to install or remove the helper. Anything
+ * running as the user can change files in a user-owned folder, so root never
+ * runs the script where it finds it: it copies the listed files into a fresh
+ * folder only root can write, checks them against the digest the app computed
+ * from its own copy, and runs the script from there. Arguments: the folder to
+ * copy from, the script, the digest, then the files.
+ */
+export function rootStageScript(platform: NodeJS.Platform = process.platform): string {
+  const hash = platform === 'linux' ? 'sha256sum' : '/usr/bin/shasum -a 256';
+  // Never follow a link; on macOS copy the data only, not extended attributes.
+  const copy = platform === 'linux' ? 'cp -P' : 'cp -P -X';
+  return [
+    'set -eu',
+    'src=$1; run=$2; want=$3; shift 3',
+    // A fixed root-owned, sticky parent: a folder made in the user's own
+    // TMPDIR could be renamed away and replaced by its owner.
+    't=$(mktemp -d /tmp/vigil-helper.XXXXXXXX)',
+    'trap \'rm -rf "$t"\' EXIT',
+    // Plain files only, never links: a FIFO or a link to a device would hang root or fill the disk.
+    `for f; do [ -f "$src/$f" ] && [ ! -h "$src/$f" ] || { echo "Missing $f" >&2; exit 1; }; case $f in */*) mkdir -p "$t/\${f%/*}";; esac; ${copy} "$src/$f" "$t/$f"; [ -f "$t/$f" ] && [ ! -h "$t/$f" ] || exit 1; done`,
+    `got=$(for f; do ${hash} < "$t/$f"; done | ${hash})`,
+    '[ "${got%% *}" = "$want" ] || { echo "The helper files changed while installing, so nothing was changed." >&2; exit 1; }',
+    'sh "$t/$run"',
+  ].join('; ');
+}
+
+/**
+ * How root starts {@link rootStageScript}: with an empty environment, so
+ * nothing the user set (PATH, TMPDIR, NODE_OPTIONS, PERL5OPT…) reaches the
+ * programs root runs.
+ */
+const ROOT_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
+
+export const ROOT_SHELL = ['/usr/bin/env', '-i', `PATH=${ROOT_PATH}`, '/bin/sh', '-c'] as const;
+
+/** The arguments after `sh -c <rootStageScript>` that run `kind` from `from`. */
+function stageArgs(
+  dir: string,
+  from: string,
+  kind: 'install' | 'uninstall',
+  platform: NodeJS.Platform,
+): string[] {
+  const files = helperScriptFiles(kind, platform);
+  return ['vigil-helper-setup', from, files[0]!, helperDigest(dir, files), ...files];
+}
+
 /** The Terminal command that installs the helper, for the setup wizard. */
 export function helperInstallCommand(
   dir = helperBundleDir(),
   platform: NodeJS.Platform = process.platform,
 ): string | undefined {
   if (!dir) return undefined;
-  // Linux: root can't read an AppImage's mount, so copy the helper out first,
-  // as runWithPkexec does; `sh` runs the script whatever its permissions.
-  if (platform === 'linux')
-    return `d=$(mktemp -d) && cp -R ${shellQuote(dir)}/. "$d" && sudo sh "$d/linux/install.sh"`;
-  return `sudo ${shellQuote(helperScript(dir, 'install', platform))}`;
+  const run = (from: string) => {
+    const [name, src, ...rest] = stageArgs(dir, from, 'install', platform);
+    return `sudo ${ROOT_SHELL.join(' ')} ${shellQuote(rootStageScript(platform))} ${name} ${src} ${rest.map(shellQuote).join(' ')}`;
+  };
+  try {
+    // Linux: root can't read an AppImage's mount, so copy the helper out first,
+    // as runWithPkexec does.
+    if (platform === 'linux')
+      return `d=$(mktemp -d) && cp -R ${shellQuote(dir)}/. "$d" && ${run('"$d"')}`;
+    return run(shellQuote(dir));
+  } catch {
+    return undefined; // a file the script needs is missing from this build
+  }
 }
 
 const PROMPTS = {
@@ -147,19 +246,19 @@ const PROMPTS = {
 } as const;
 
 /**
- * The osascript arguments that run one of the bundled scripts as root. macOS
- * shows its own password dialog. The script path goes in as an argument and
- * through AppleScript's `quoted form of`, so no path can break out of it.
+ * The osascript arguments that run a command as root. macOS shows its own
+ * password dialog. The command goes in as an argument, already quoted for the
+ * shell, never inside the AppleScript, so no path can break out of it.
  */
-export function adminScriptArgs(script: string, kind: keyof typeof PROMPTS): string[] {
+export function adminScriptArgs(command: string, kind: keyof typeof PROMPTS): string[] {
   return [
     '-e',
     'on run argv',
     '-e',
-    `do shell script (quoted form of item 1 of argv) with prompt ${JSON.stringify(PROMPTS[kind])} with administrator privileges`,
+    `do shell script (item 1 of argv) with prompt ${JSON.stringify(PROMPTS[kind])} with administrator privileges`,
     '-e',
     'end run',
-    script,
+    command,
   ];
 }
 
@@ -170,7 +269,8 @@ export type RunFile = (
 
 const runFile: RunFile = (file, args) =>
   new Promise((resolve) =>
-    execFile(file, args, { timeout: 3 * 60_000 }, (err, stdout, stderr) =>
+    // An empty environment: macOS's admin dialog hands it to root's shell.
+    execFile(file, args, { timeout: 3 * 60_000, env: { PATH: ROOT_PATH } }, (err, stdout, stderr) =>
       resolve({
         code: err ? (typeof err.code === 'number' ? err.code : 1) : 0,
         stdout: String(stdout),
@@ -191,17 +291,25 @@ const FROM_TERMINAL = {
 /**
  * Linux: run the script as root through pkexec, which shows the desktop's own
  * password dialog. An AppImage's files sit on a FUSE mount that root can't
- * read, so the helper files are copied to a private temporary folder first.
+ * read, so the helper files are copied to a temporary folder first; root
+ * checks its own copy of them against the digest of the app's files.
  */
 async function runWithPkexec(
   kind: 'install' | 'uninstall',
   dir: string,
   run: RunFile,
 ): Promise<HelperInstallResult> {
+  let digested: string[];
   const stage = mkdtempSync(join(tmpdir(), 'vigil-helper-'));
   try {
+    digested = stageArgs(dir, stage, kind, 'linux');
     cpSync(dir, stage, { recursive: true });
-    const out = await run(PKEXEC, ['/bin/sh', helperScript(stage, kind, 'linux')]);
+  } catch {
+    rmSync(stage, { recursive: true, force: true });
+    return { ok: false, error: 'This build of Vigil is missing some of the helper’s files' };
+  }
+  try {
+    const out = await run(PKEXEC, [...ROOT_SHELL, rootStageScript('linux'), ...digested]);
     if (out.code === 0) return { ok: true };
     if (out.missing) {
       return {
@@ -252,14 +360,24 @@ export async function runHelperScript(
   return !r.ok && r.error !== 'cancelled' && command ? { ...r, command } : r;
 }
 
-/** macOS: run the script as root through osascript's administrator dialog. */
+/**
+ * macOS: run the script as root through osascript's administrator dialog.
+ * Root runs only its own checked copy of the scripts (see rootStageScript).
+ */
 async function viaOsascript(
   kind: 'install' | 'update' | 'uninstall',
   dir: string,
   run: RunFile,
 ): Promise<HelperInstallResult> {
   const script = kind === 'uninstall' ? 'uninstall' : 'install';
-  const out = await run('/usr/bin/osascript', adminScriptArgs(join(dir, `${script}.sh`), kind));
+  let command: string;
+  try {
+    const args = stageArgs(dir, dir, script, 'darwin').map(shellQuote).join(' ');
+    command = `${ROOT_SHELL.join(' ')} ${shellQuote(rootStageScript('darwin'))} ${args}`;
+  } catch {
+    return { ok: false, error: 'This build of Vigil is missing some of the helper’s files' };
+  }
+  const out = await run('/usr/bin/osascript', adminScriptArgs(command, kind));
   if (out.code === 0) return { ok: true };
   // osascript reports a closed password dialog as error -128.
   if (/-128/.test(out.stderr)) return { ok: false, error: 'cancelled' };

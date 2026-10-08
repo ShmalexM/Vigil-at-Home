@@ -204,11 +204,15 @@ export function isLinuxPackage(name: string, arch: string): boolean {
   return tags.some((t) => name.endsWith(`-${t}`));
 }
 
-/** Only ever open github.com links from the releases list. */
+/** Only ever open links to this project's own pages on github.com. */
 function isGitHub(url: string): boolean {
   try {
     const u = new URL(url);
-    return u.protocol === 'https:' && u.hostname === 'github.com';
+    return (
+      u.protocol === 'https:' &&
+      u.hostname === 'github.com' &&
+      u.pathname.toLowerCase().startsWith('/shmalexm/vigil-at-home/')
+    );
   } catch {
     return false;
   }

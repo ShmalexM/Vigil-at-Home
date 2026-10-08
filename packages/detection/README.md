@@ -166,11 +166,13 @@ await feeds.run(); // fetches only the sources that are due
 feeds.status(); // per source: entries, last fetch, last error, stale
 ```
 
-| Source (default, CC0)               | List                | Every | Notes                                                |
+| Source (default, abuse.ch terms)    | List                | Every | Notes                                                |
 | ----------------------------------- | ------------------- | ----- | ---------------------------------------------------- |
 | Feodo Tracker recommended blocklist | `known_bad_ips`     | 6 h   | Confirmed botnet command servers                     |
 | URLhaus hostfile                    | `known_bad_domains` | 6 h   | Hosts currently serving malware                      |
 | MalwareBazaar recent SHA-256 export | `known_bad_sha256`  | 1 h   | Only the last 48 h, so entries are kept for 180 days |
+
+abuse.ch makes these free for not-for-profit use under its [terms of use](https://abuse.ch/terms-of-use/); the Feodo Tracker list is also CC0.
 
 Feeds can trigger automatic blocks, so the importer distrusts them:
 

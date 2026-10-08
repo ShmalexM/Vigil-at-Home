@@ -102,7 +102,6 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               <ChevronRight size={14} aria-hidden />
             </button>
           </div>
-          {pack && <PackDiary pack={pack} />}
           {status.reasons.length > 0 && (
             // One line: the Protection card below lists every layer, so the list isn't repeated here.
             <div className="row wrap home-why" style={{ gap: 8 }}>
@@ -139,6 +138,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               </span>
             </div>
           )}
+          {pack && <PackDiary pack={pack} />}
         </Card>
       )}
 

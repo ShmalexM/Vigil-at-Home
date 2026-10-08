@@ -47,7 +47,7 @@ import {
 import { VigilCore } from './service.js';
 import { UpdateChecker } from './updates.js';
 import { wantsX11 } from './display.js';
-import { Windows } from './windows.js';
+import { restrictWebContents, Windows } from './windows.js';
 
 app.setName('Vigil at Home');
 
@@ -96,6 +96,7 @@ function failedToStart(err: unknown): void {
 function start(): void {
   // Menu-bar app: no Dock icon until the main window opens.
   app.dock?.hide();
+  restrictWebContents();
 
   const dataDir = app.getPath('userData');
   mkdirSync(dataDir, { recursive: true });

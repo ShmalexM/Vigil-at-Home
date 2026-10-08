@@ -46,6 +46,14 @@ export const EVENT_RETENTION_DAYS = 30;
  * rule replay needs.
  */
 export const DEFAULT_MAX_DB_BYTES = 1024 * 1024 * 1024;
+/**
+ * Also check the cap after this many stored events, not only hourly: a busy
+ * Mac (900,000 events a day) passes the cap in hours, and the hourly job
+ * waits on the scheduler, which holds routine work while the Mac is hot and
+ * starts its hour again at every launch. A check is two PRAGMAs; only a
+ * database over the cap pays for a prune.
+ */
+const CAP_CHECK_EVENTS = 10_000;
 /** Same window the detection engine replays AI-drafted rules over before approval. */
 export const RULE_REVIEW_DAYS = 14;
 
@@ -73,6 +81,8 @@ export class VigilCore {
   onIngest: ((event: SensorEvent, outcome: EventOutcome | undefined) => void) | undefined;
   private editing: RuleEditing | undefined;
   private feedPending = 0;
+  private sinceCapCheck = 0;
+  private stopped = false;
   private feedTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
@@ -123,14 +133,20 @@ export class VigilCore {
       true,
     );
     this.scheduler.every('cap-disk', HOUR, () => {
-      this.store.pruneEventsToSize(this.maxDbBytes);
+      this.capDisk();
     });
   }
 
   stop(): void {
+    this.stopped = true;
     this.scheduler.stop();
     clearTimeout(this.feedTimer);
     this.events.flush();
+  }
+
+  /** Drop the oldest events no alert needs until the database is under its cap. */
+  capDisk(): number {
+    return this.store.pruneEventsToSize(this.maxDbBytes);
   }
 
   /** Slow or hold routine work to match the Mac's power state. */
@@ -147,6 +163,18 @@ export class VigilCore {
    */
   ingest(event: SensorEvent, outcome?: EventOutcome): void {
     this.events.add(event, outcome);
+    if (++this.sinceCapCheck >= CAP_CHECK_EVENTS) {
+      this.sinceCapCheck = 0;
+      // After this event's turn, so it never waits on a prune.
+      setImmediate(() => {
+        if (this.stopped) return; // the store may be closed by now
+        try {
+          this.capDisk();
+        } catch (err) {
+          console.error('[events] could not keep the database under its cap:', err);
+        }
+      });
+    }
     this.onIngest?.(event, outcome);
     this.feedPending++;
     this.feedTimer ??= setTimeout(() => {
