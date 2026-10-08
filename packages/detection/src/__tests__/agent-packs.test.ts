@@ -649,9 +649,32 @@ describe('agent rule packs', () => {
         parentPath: parent.path,
       });
     const own = (service: string) => ['-a', 'alexmargaris', '-w', '-s', service];
+    /** Claude Code's signature as Santa's EXEC line reports it (a team ID, no signing ID). */
+    const ANTHROPIC = { teamId: 'Q6L2SF6YDW' };
+    /** And as codesign reports it, with the signing ID. */
+    const ANTHROPIC_FULL = {
+      teamId: 'Q6L2SF6YDW',
+      signingId: 'Q6L2SF6YDW:com.anthropic.claude-code',
+    };
+    // Claude Code here is the signed program, as on the real Mac.
+    const claude = agentTree(CLAUDE_BIN, { basePid: 92_000, root: ANTHROPIC });
+    const { sh } = claude;
+    const claudeFull = agentTree(CLAUDE_BIN, { basePid: 93_000, root: ANTHROPIC_FULL });
+    const claudeBare = agentTree(CLAUDE_BIN, {
+      basePid: 93_500,
+      root: { ...ANTHROPIC, signingId: 'com.anthropic.claude-code' },
+    });
+    /** An MCP server this Claude Code started through npx. */
+    const mcpServer = claude.exec(
+      NODE,
+      ['node', `${home}/.npm/_npx/1f2e/node_modules/.bin/mcp-server-filesystem`, home],
+      claude.exec('/opt/homebrew/bin/npx', ['npx', '-y', '@modelcontextprotocol/server-filesystem'])
+        .process,
+      { signing: 'developer_id' },
+    );
     const appCopy = agentTree(
       `${home}/Library/Application Support/Claude/claude-code/2.1.286/f2326db61802/claude.app/Contents/MacOS/claude`,
-      { basePid: 91_000, args: ['claude'] },
+      { basePid: 91_000, args: ['claude'], root: ANTHROPIC },
     );
     const codex = agentTree('/opt/homebrew/bin/codex', { basePid: 90_000, args: ['codex'] });
 
@@ -663,6 +686,8 @@ describe('agent rule packs', () => {
         'Claude Code-934f7517',
       ]) {
         expect(fired(security(claude, own(service)))).not.toContain('agent-keychain-secret');
+        expect(fired(security(claudeFull, own(service)))).not.toContain('agent-keychain-secret');
+        expect(fired(security(claudeBare, own(service)))).not.toContain('agent-keychain-secret');
         expect(fired(security(appCopy, own(service)))).not.toContain('agent-keychain-secret');
         // Vigil's own helper runs Claude Code too; that is still Claude Code signing in.
         expect(fired(security(helper, own(service)))).not.toContain('agent-keychain-secret');
@@ -723,15 +748,65 @@ describe('agent rule packs', () => {
         expect(fired(e), JSON.stringify(procOf(e)?.args)).toContain('agent-keychain-secret');
     });
 
+    it('alerts on the same read when the Claude Code that asks is not the signed one', () => {
+      const READ =
+        'security find-generic-password -a "alexmargaris" -w -s "Claude Code-credentials"';
+      const bareSh = (tree: ReturnType<typeof agentTree>, parent = tree.root.process) =>
+        tree.exec('/bin/sh', ['/bin/sh', '-c', READ], parent);
+      // Tagged claude-code by path or name alone: no signature, another team, another program
+      // of Anthropic's team, or a program named claude anywhere.
+      const fakes = [
+        agentTree(CLAUDE_BIN, { basePid: 94_000 }),
+        agentTree(CLAUDE_BIN, { basePid: 94_100, root: { teamId: 'ABCDE12345' } }),
+        agentTree(CLAUDE_BIN, {
+          basePid: 94_200,
+          root: { teamId: 'Q6L2SF6YDW', signingId: 'Q6L2SF6YDW:com.anthropic.other' },
+        }),
+        agentTree('/tmp/x/claude', { basePid: 94_300, root: { signing: 'unsigned' } }),
+      ];
+      for (const t of fakes) {
+        expect(procOf(t.root)?.agent?.id).toBe('claude-code');
+        for (const e of [
+          security(t, own('Claude Code-credentials')),
+          bareSh(t),
+          bareSh(t, { ...t.root.process, path: CLAUDE_BIN }),
+        ])
+          expect(fired(e), JSON.stringify(procOf(e))).toContain('agent-keychain-secret');
+      }
+      // The signed Claude Code ran another program in between (a version-named copy
+      // nobody signed, a shell): what that program starts is not Claude Code asking.
+      const planted = claude.exec(
+        `${home}/.local/share/claude/versions/9.9.9`,
+        ['9.9.9'],
+        claude.root.process,
+        {
+          signing: 'unsigned',
+        },
+      );
+      expect(procOf(planted)?.agent?.id).toBe('claude-code');
+      const viaShell = sh('true');
+      for (const e of [
+        security(claude, own('Claude Code-credentials'), planted.process),
+        bareSh(claude, planted.process),
+        claude.exec('/bin/sh', ['/bin/sh', '-c', READ], planted.process, {
+          parentPath: CLAUDE_BIN,
+        }),
+        bareSh(claude, viaShell.process),
+      ])
+        expect(fired(e), JSON.stringify(procOf(e))).toContain('agent-keychain-secret');
+    });
+
     describe('Claude Code reading its sign-in from a version-named copy (2026-10-08)', () => {
       // As a real Mac stored it: the native CLI 2.1.283 started another 2.1.283,
       // which ran `sh -c security …` (and the security it became); no parent path.
       const ancestors = ['2.1.283', '2.1.283', '-zsh', 'login'];
-      const tag = (depth: number, id = 'claude-code') => ({
-        id,
-        session: '0123456789abcdef',
-        depth,
-      });
+      const tag = (
+        depth: number,
+        id = 'claude-code',
+        signature: { teamId?: string; signingId?: string } = id === 'claude-code'
+          ? { teamId: 'Q6L2SF6YDW' }
+          : {},
+      ) => ({ id, session: '0123456789abcdef', depth, ...signature });
       const shRead = (command: string, over: Partial<DetectionProcessRef> = {}) =>
         exec(
           proc({
@@ -783,6 +858,15 @@ describe('agent rule packs', () => {
           secRead(own('Claude Code-credentials'), { parentPath: '/tmp/2.1.283' }),
           // Another agent's tree, or no agent at all.
           secRead(own('Claude Code-credentials'), { agent: tag(2, 'codex') }),
+          // The same shapes under a Claude Code that is not the signed one.
+          shRead(READ, { agent: tag(2, 'claude-code', {}) }),
+          secRead(own('Claude Code-credentials'), { agent: tag(2, 'claude-code', {}) }),
+          secRead(own('Claude Code-credentials'), {
+            agent: tag(2, 'claude-code', { teamId: 'ABCDE12345' }),
+          }),
+          secRead(own('Claude Code-credentials'), {
+            agent: tag(2, 'claude-code', { teamId: 'Q6L2SF6YDW', signingId: 'Q6L2SF6YDW:x' }),
+          }),
           // An ancestor that isn't a version number.
           secRead(own('Claude Code-credentials'), { ancestors: ['python3', '2.1.283'] }),
           // A Bash tool step asking for it: wrapped, so not the bare read.

@@ -103,6 +103,9 @@ const PROCESS_FIELDS = [
   'agent.id',
   'agent.session',
   'agent.depth',
+  // The agent root's signature, while the parent has it too (see AgentTag).
+  'agent.teamId',
+  'agent.signingId',
 ].map((f) => `process.${f}`);
 
 /** Every path a rule may reference, for the linter and the AI's rule guide. */

@@ -225,11 +225,43 @@ function mergeAncestors(
 }
 
 function childOf(t: AgentTag | undefined): AgentTag | undefined {
-  return t && { id: t.id, session: t.session, depth: Math.min(t.depth + 1, MAX_DEPTH) };
+  return t && { ...t, depth: Math.min(t.depth + 1, MAX_DEPTH) };
 }
 
 function sameTag(a: AgentTag | undefined, b: AgentTag | undefined): boolean {
-  return a === b || (!!a && !!b && a.id === b.id && a.session === b.session && a.depth === b.depth);
+  return (
+    a === b ||
+    (!!a &&
+      !!b &&
+      a.id === b.id &&
+      a.session === b.session &&
+      a.depth === b.depth &&
+      a.teamId === b.teamId &&
+      a.signingId === b.signingId)
+  );
+}
+
+/** The root's signature on a session's first tag, when its launch reported one. */
+function rootTag(id: string, session: string, n: Node): AgentTag {
+  const t: AgentTag = { id, session, depth: 0 };
+  if (n.teamId !== undefined) t.teamId = n.teamId;
+  if (n.signingId !== undefined) t.signingId = n.signingId;
+  return t;
+}
+
+/**
+ * The tag `n` hands its children (one level down once childOf adds it). The
+ * root's signature goes on only while `n` itself has it: the root, or a copy
+ * of the same signed program it started. A shell or any other program in
+ * between, or a re-exec into something else, drops it, so a child's
+ * `teamId` always means its parent is the signed agent program.
+ */
+function passOn(n: Node | undefined): AgentTag | undefined {
+  const t = n?.tag;
+  if (!t || (t.teamId === undefined && t.signingId === undefined)) return t;
+  if (n.teamId === t.teamId && n.signingId === t.signingId) return t;
+  const { teamId: _t, signingId: _s, ...rest } = t;
+  return rest;
 }
 
 /** `sh -c`, `zsh -lc` and the like: how agents run a command. */
@@ -306,7 +338,7 @@ export class AgentTracker {
       const parent = p.ppid !== undefined && p.ppid > 0 ? this.get(p.ppid) : undefined;
       if (parent) {
         const anc = [parent.name, ...(parent.ancestors ?? [])].slice(0, MAX_ANCESTORS);
-        return this.withTree(e, childOf(parent.tag), anc);
+        return this.withTree(e, childOf(passOn(parent)), anc);
       }
     }
     // Reading ps again helps a process Vigil doesn't know, or a reused pid (a new
@@ -395,8 +427,9 @@ export class AgentTracker {
       let inherited: AgentTag | undefined;
       if (parent && parent !== n && !visiting.has(parent) && hops < MAX_DEPTH) {
         visiting.add(n);
-        inherited = visit(parent, hops + 1);
+        visit(parent, hops + 1);
         visiting.delete(n);
+        inherited = passOn(parent);
         n.parentTag = inherited;
       } else {
         // The parent is gone (or the chain loops): trust what it was, while that agent is still watched.
@@ -489,8 +522,8 @@ export class AgentTracker {
       this.setProgram(n, p, m);
       this.insert(n);
       this.setAncestors(n);
-      n.parentTag = parent?.tag;
-      n.tag = this.resolve(n, identity, childOf(parent?.tag));
+      n.parentTag = passOn(parent);
+      n.tag = this.resolve(n, identity, childOf(n.parentTag));
     }
 
     // What the sensor hub knows of the chain is what its children will carry too.
@@ -539,7 +572,8 @@ export class AgentTracker {
     if (!identity?.watch || identity.status !== 'active' || identity.id === base?.id) return base;
     if (n.seeded) this.reuseStart(n, identity.id);
     const session = sessionId(identity.id, n.pid, n.startedAt);
-    if (n.tag?.depth === 0 && n.tag.session === session) return n.tag;
+    const tag = rootTag(identity.id, session, n);
+    if (n.tag?.depth === 0 && n.tag.session === session) return sameTag(tag, n.tag) ? n.tag : tag;
     const s: SessionStart = {
       id: session,
       agentId: identity.id,
@@ -550,7 +584,7 @@ export class AgentTracker {
     };
     if (base) s.parentSession = base.session;
     this.announce(s);
-    return { id: identity.id, session, depth: 0 };
+    return tag;
   }
 
   private identityOf(n: Node, m: CompiledAgentMatcher): AgentIdentity | undefined {
@@ -592,9 +626,15 @@ export class AgentTracker {
     const before = this.identityOf(n, m);
     // ps matched it by argv[0] (an npm Claude Code's process title, say): it stays that agent.
     if (before && n.tag?.depth === 0 && n.tag.id === before.id) n.wasAgent = before.id;
+    const signed = [n.teamId, n.signingId];
     this.setProgram(n, { path: p.path, args: n.args, teamId: p.teamId, signingId: p.signingId }, m);
     delete n.psPath;
-    if (this.identityOf(n, m)?.id !== before?.id) this.retag();
+    // A changed signature changes what the tag hands down (see passOn) too.
+    if (
+      this.identityOf(n, m)?.id !== before?.id ||
+      (n.tag && (signed[0] !== n.teamId || signed[1] !== n.signingId))
+    )
+      this.retag();
   }
 
   /**

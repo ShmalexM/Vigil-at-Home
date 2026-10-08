@@ -110,6 +110,8 @@ export function agentTree(
     tracker?: Partial<TrackerOptions>;
     /** The root is a connector Vigil (`tracker.self`) started for the pack. */
     connector?: boolean;
+    /** More of the root's launch, e.g. its signature. */
+    root?: Partial<DetectionProcessRef>;
   } = {},
 ) {
   const tracker = new AgentTracker({ matcher: catalog, ...opts.tracker });
@@ -120,7 +122,7 @@ export function agentTree(
       ev({ kind: 'process.exec', process: proc({ ...p, pid: next++, ppid }) }) as ExecEvent,
     );
   const root = launch(
-    { path: agentPath, args: opts.args ?? ['claude'], signing: 'developer_id' },
+    { path: agentPath, args: opts.args ?? ['claude'], signing: 'developer_id', ...opts.root },
     // A shell in the user's terminal, which the tracker has not seen (or Vigil, for a connector).
     opts.connector ? opts.tracker!.self!.pid : 501,
   );

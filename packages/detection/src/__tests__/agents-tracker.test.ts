@@ -60,6 +60,51 @@ describe('agent tracker', () => {
     });
   });
 
+  it('hands the root’s signature down only while the parent has it', () => {
+    const { t, launch } = tracker();
+    const signed = { teamId: 'Q6L2SF6YDW', signingId: 'Q6L2SF6YDW:com.anthropic.claude-code' };
+    const root = launch(CLAUDE_BIN, 501, signed);
+    expect(root.process.agent).toMatchObject({ depth: 0, ...signed });
+    // A copy of the same signed program keeps it, and so does what it starts.
+    const copy = launch(CLAUDE_BIN, root.process.pid, signed);
+    const sec = launch('/usr/bin/security', copy.process.pid, { signing: 'apple' });
+    expect(sec.process.agent).toMatchObject({ depth: 2, ...signed });
+    // A shell gets it from the agent; what the shell starts does not.
+    const sh = launch('/bin/sh', root.process.pid);
+    expect(sh.process.agent).toMatchObject(signed);
+    const under = launch('/usr/bin/security', sh.process.pid);
+    expect(under.process.agent).toEqual({
+      id: 'claude-code',
+      session: root.process.agent!.session,
+      depth: 2,
+    });
+    // An unsigned copy at the native install's path is tagged claude-code but hands nothing down.
+    const planted = launch('/Users/alex/.local/share/claude/versions/9.9.9', root.process.pid);
+    expect(planted.process.agent).toMatchObject({ id: 'claude-code', depth: 1, ...signed });
+    expect(launch('/usr/bin/security', planted.process.pid).process.agent?.teamId).toBeUndefined();
+    // A root with no signature has none to hand down; retag keeps all of this.
+    const bare = launch(CLAUDE_BIN, 502);
+    expect(bare.process.agent?.teamId).toBeUndefined();
+    t.retag();
+    expect(t.lookup(under.process.pid)?.tag?.teamId).toBeUndefined();
+    expect(t.lookup(sec.process.pid)?.tag).toMatchObject(signed);
+  });
+
+  it('gives a root found by ps its signature once a sensor reports it', () => {
+    const { t } = tracker();
+    t.seed([
+      { pid: 4000, ppid: 501, startedAt: T0, path: 'claude' },
+      { pid: 4001, ppid: 4000, startedAt: T0, path: '/bin/sh' },
+    ]);
+    expect(t.lookup(4000)?.tag).toMatchObject({ id: 'claude-code', depth: 0 });
+    expect(t.lookup(4001)?.tag?.teamId).toBeUndefined();
+    t.observe(
+      fileOpen(proc({ pid: 4000, ppid: 501, path: CLAUDE_BIN, teamId: 'Q6L2SF6YDW' }), '/tmp/x'),
+    );
+    expect(t.lookup(4000)?.tag?.teamId).toBe('Q6L2SF6YDW');
+    expect(t.lookup(4001)?.tag?.teamId).toBe('Q6L2SF6YDW');
+  });
+
   it('reports each session once, with its root', () => {
     const { t, sessions, launch } = tracker();
     const claude = launch(CLAUDE_BIN, 501);
