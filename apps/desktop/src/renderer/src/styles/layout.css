@@ -358,6 +358,9 @@ body.transparent {
   color: var(--tx1);
   cursor: pointer;
 }
+.feed-line > svg {
+  flex: none;
+}
 .feed-line:hover {
   background: var(--bg2);
 }
@@ -379,7 +382,8 @@ body.transparent {
 }
 .feed-row .chip {
   flex: none;
-  max-width: 260px;
+  /* At narrow widths the event's own line keeps most of the row. */
+  max-width: min(260px, 32%);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

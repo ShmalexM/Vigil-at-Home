@@ -1,6 +1,7 @@
 import type { Alert, SensorEvent } from '@vigil/core';
-import { Bell, BookOpen, RotateCcw, Sparkles } from 'lucide-react';
+import { Bell, BookOpen, Copy, ListChecks, RotateCcw, Sparkles, VolumeX } from 'lucide-react';
 import { Fragment, useEffect, useRef, useState } from 'react';
+import type { AlertDetail as AlertDetailT } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
 import { DecisionControls, type Decided } from '../components/Decision';
 import { NotebookSheet } from '../components/Notebook';
@@ -11,7 +12,8 @@ import { toolRequestFields } from '../components/ToolRequestFields';
 import { Button, Card, Chip, SectionHead, SeverityMark, StatusMark } from '../components/ui';
 import { evidenceSub, isHookRequest, realProcess, STOPPED_ANSWER } from '../evidence';
 import { actorLabel, clock, describeAction, describeEvent, seenTimes, timeAgo } from '../format';
-import { modeLabel } from '../rule-modes';
+import { helperNote, PASSWORD_CANCELLED } from '../format';
+import { modeLabel, quieterMode } from '../rule-modes';
 import { ExcludeFromAlert } from '../components/ExcludeFromAlert';
 import { useAgentLinks, type AgentLinks } from './Activity';
 import { PageHead } from './AppShell';
@@ -286,24 +288,34 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
       )}
 
       <Card>
-        <SectionHead title="Evidence" sub={evidenceSub(events)} />
+        <SectionHead
+          title="Evidence"
+          sub={evidenceSub(events)}
+          right={
+            <Button
+              size="sm"
+              kind="ghost"
+              icon={<Copy size={13} />}
+              title="Copy the alert, its events and what was done, as JSON"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(evidenceJson(detail));
+                  toast({ text: 'Copied the evidence as JSON' });
+                } catch {
+                  toast({ text: 'Couldn’t copy to the clipboard' });
+                }
+              }}
+            >
+              Copy
+            </Button>
+          }
+        />
         {events.map((e) => (
           <EventBlock key={e.id} event={e} links={links} />
         ))}
       </Card>
 
-      {rule && (
-        <Card tight>
-          <div className="row">
-            <span className="t-label">Rule</span>
-            <span className="grow t-h3">{rule.name}</span>
-            <Chip>{modeLabel(rule, rule.mode)}</Chip>
-            <Chip>{rule.fidelity} fidelity</Chip>
-            {rule.origin === 'ai' && <Chip tone="ai">AI-drafted</Chip>}
-          </div>
-          <span className="t-small">{rule.description}</span>
-        </Card>
-      )}
+      {rule && <RuleCard alert={alert} rule={rule} go={go} />}
 
       {events[0] && (
         <ExcludeFromAlert
@@ -314,6 +326,106 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
         />
       )}
     </div>
+  );
+}
+
+/** How the alert reached the user, as its notify level says. */
+const REACHED: Record<Alert['notify'], { text: string; title: string }> = {
+  popup: { text: 'Popped up', title: 'This alert showed a popup' },
+  badge: { text: 'Badge only', title: 'This alert added to the menu-bar badge, without a popup' },
+  silent: { text: 'Quiet', title: 'This alert only landed here: no popup, no badge' },
+};
+
+/**
+ * The rule behind an alert: a link to it, how its alert reached the user,
+ * and, for a rule that alerts too often, the way to turn it down to Shadow
+ * (Record), where its matches still show in Activity.
+ */
+function RuleCard({
+  alert,
+  rule,
+  go,
+}: {
+  alert: Alert;
+  rule: NonNullable<AlertDetailT['rule']>;
+  go: (r: string) => void;
+}) {
+  const toast = useToast();
+  const quieter = quieterMode(rule);
+  const reached = REACHED[alert.notify];
+  const quiet = async () => {
+    if (!quieter) return;
+    const before = rule.mode;
+    const { helper } = await vigil.setRuleMode(rule.id, quieter);
+    if (helper === 'declined') {
+      toast({ text: `${rule.name}: ${PASSWORD_CANCELLED}` });
+      return;
+    }
+    toast({
+      text: `${rule.name}: ${modeLabel(rule, quieter)}. It stops alerting and keeps logging matches in Activity.${helperNote(helper)}`,
+      undo: () => void vigil.setRuleMode(rule.id, before),
+    });
+  };
+  return (
+    <Card tight>
+      <div className="row" style={{ flexWrap: 'wrap' }}>
+        <span className="t-label">Rule</span>
+        <span className="grow t-h3">{rule.name}</span>
+        <Chip>{modeLabel(rule, rule.mode)}</Chip>
+        <Chip>{rule.fidelity} fidelity</Chip>
+        <Chip title={reached.title}>{reached.text}</Chip>
+        {rule.origin === 'ai' && <Chip tone="ai">AI-drafted</Chip>}
+      </div>
+      <span className="t-small">{rule.description}</span>
+      <div className="row" style={{ flexWrap: 'wrap' }}>
+        <Button
+          size="sm"
+          kind="ghost"
+          icon={<ListChecks size={13} />}
+          onClick={() => go(`rules/${rule.id}`)}
+        >
+          Open rule
+        </Button>
+        <Button
+          size="sm"
+          kind="ghost"
+          icon={<Bell size={13} />}
+          title="Every event this rule matched, newest first"
+          onClick={() => go(`activity/rule-${rule.id}`)}
+        >
+          Its matches in Activity
+        </Button>
+        {quieter && (
+          <Button
+            size="sm"
+            kind="ghost"
+            icon={<VolumeX size={13} />}
+            title={`Too noisy? ${modeLabel(rule, quieter)} only logs what this rule matches; it raises no alert.`}
+            onClick={() => void quiet()}
+          >
+            Only log this rule
+          </Button>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+/** The alert as JSON for a bug report, a note or another tool. */
+function evidenceJson(d: AlertDetailT): string {
+  const { alert, events, actions, proposals, rule } = d;
+  return JSON.stringify(
+    {
+      alert,
+      rule: rule
+        ? { id: rule.id, name: rule.name, version: rule.version, mode: rule.mode }
+        : undefined,
+      events,
+      actions,
+      proposals,
+    },
+    null,
+    2,
   );
 }
 

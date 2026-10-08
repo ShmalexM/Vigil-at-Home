@@ -74,7 +74,7 @@ export function ActivityView({
 }) {
   const [tab, setTab] = useState<Tab>('sees');
   const filter = parseActivityParam(selected);
-  const filtered = !!(filter.agent || filter.session);
+  const filtered = !!(filter.agent || filter.session || filter.rule);
   const links = useAgentLinks(go);
   // A link to an agent's activity always lands on the feed.
   useEffect(() => {
@@ -106,7 +106,7 @@ export function ActivityView({
           What Vigil did
         </button>
       </div>
-      {tab === 'sees' ? <EventFeed filter={filter} links={links} /> : <ActionLog />}
+      {tab === 'sees' ? <EventFeed filter={filter} links={links} /> : <ActionLog go={go} />}
     </div>
   );
 }
@@ -132,7 +132,7 @@ function EventFeed({
   filter,
   links,
 }: {
-  filter: { agent?: string; session?: string };
+  filter: { agent?: string; session?: string; rule?: string };
   links: AgentLinks;
 }) {
   const [group, setGroup] = useState<EventGroup | 'all'>('all');
@@ -153,6 +153,7 @@ function EventFeed({
     ...(text.trim() ? { text: text.trim() } : {}),
     ...(filter.agent ? { agent: filter.agent } : {}),
     ...(filter.session ? { agentSession: filter.session } : {}),
+    ...(filter.rule ? { rule: filter.rule } : {}),
     limit: PAGE,
   };
   const queryRef = useRef(query);
@@ -249,9 +250,13 @@ function EventFeed({
             onChange={(e) => setText(e.target.value)}
           />
         </label>
-        {(filter.agent || filter.session) && (
+        {(filter.agent || filter.session || filter.rule) && (
           <span className="chip accent filter-chip">
-            {filter.agent ? `Agent: ${links.nameOf(filter.agent)}` : 'One agent session'}
+            {filter.rule
+              ? `Rule: ${ruleName(rows, filter.rule)}`
+              : filter.agent
+                ? `Agent: ${links.nameOf(filter.agent)}`
+                : 'One agent session'}
             <button
               type="button"
               aria-label="Show every event"
@@ -327,6 +332,15 @@ function EventFeed({
       </span>
     </div>
   );
+}
+
+/** A rule's name from the feed's own matches, so the filter chip needs no rule list. */
+function ruleName(rows: EventView[] | undefined, id: string): string {
+  for (const r of rows ?? []) {
+    const m = r.outcome?.matches.find((x) => x.ruleId === id);
+    if (m) return m.ruleName;
+  }
+  return id;
 }
 
 const count = (n: number | undefined) => (n === undefined ? '…' : n.toLocaleString());
@@ -546,11 +560,31 @@ function EventFields({
   }
   fields.push([
     'Rules',
-    outcome
-      ? outcome.matches.length
-        ? matchText(outcome, tool, ', ')
-        : `Checked by ${outcome.checked}, none matched`
-      : 'Not checked by any rule',
+    outcome ? (
+      outcome.matches.length ? (
+        links.go ? (
+          <span key="rules" className="row" style={{ flexWrap: 'wrap', gap: 6 }}>
+            {outcome.matches.map((m) => (
+              <button
+                key={m.ruleId}
+                type="button"
+                className="more-link"
+                title={`Open the rule ${m.ruleName}`}
+                onClick={() => links.go?.(`rules/${m.ruleId}`)}
+              >
+                {matchText({ checked: outcome.checked, matches: [m] }, tool, '')}
+              </button>
+            ))}
+          </span>
+        ) : (
+          matchText(outcome, tool, ', ')
+        )
+      ) : (
+        `Checked by ${outcome.checked}, none matched`
+      )
+    ) : (
+      'Not checked by any rule'
+    ),
   ]);
   return (
     <dl className="feed-fields">
@@ -579,7 +613,7 @@ function signingLabel(s: string, team?: string): string {
 
 // ---------------------------------------------------------------- what Vigil did
 
-function ActionLog() {
+function ActionLog({ go }: { go?: ((route: string) => void) | undefined }) {
   const [actions] = useLive(() => vigil.listActions());
   const toast = useToast();
   return (
@@ -608,6 +642,16 @@ function ActionLog() {
               {r.result?.error ? ` · ${r.result.error}` : ''}
             </span>
           </div>
+          {r.alertId && go && (
+            <button
+              type="button"
+              className="more-link nowrap"
+              title="Open the alert this action answered"
+              onClick={() => go(`alerts/${r.alertId}`)}
+            >
+              Alert
+            </button>
+          )}
           <Chip tone={r.actor === 'user' ? 'accent' : r.actor === 'ai' ? 'ai' : undefined}>
             {actorLabel(r.actor)}
           </Chip>
@@ -619,8 +663,13 @@ function ActionLog() {
               size="sm"
               kind="ghost"
               onClick={async () => {
-                await vigil.undoAction(r.id);
-                toast({ text: `Undone: ${describeAction(r.action)}` });
+                const out = await vigil.undoAction(r.id);
+                toast({
+                  text:
+                    out.status === 'done'
+                      ? `Undone: ${describeAction(r.action)}`
+                      : `Couldn’t undo: ${describeAction(r.action)}. It’s still in force.`,
+                });
               }}
             >
               Undo

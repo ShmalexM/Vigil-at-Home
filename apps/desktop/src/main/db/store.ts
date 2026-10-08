@@ -97,7 +97,14 @@ export function eventViewsQuery(
     where.push(`kind IN (${kinds.map(() => '?').join(',')})`);
     args.push(...kinds);
   }
-  if (q.matchedOnly) where.push('matched = 1');
+  if (q.matchedOnly || q.rule) where.push('matched = 1');
+  if (q.rule) {
+    // Walks the partial index on matched events, so only events some rule matched are read.
+    where.push(
+      `EXISTS (SELECT 1 FROM json_each(outcome, '$.matches') m WHERE json_extract(m.value, '$.ruleId') = ?)`,
+    );
+    args.push(q.rule);
+  }
   if (q.agentSession) {
     where.push('agent_session = ?');
     args.push(q.agentSession);

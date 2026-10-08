@@ -146,6 +146,8 @@ export const EventQuery = z.object({
   agent: AgentId.optional(),
   /** Only events from one agent session. */
   agentSession: AgentSessionId.optional(),
+  /** Only events this rule matched, in any mode. */
+  rule: z.string().min(1).max(100).optional(),
 });
 export type EventQuery = z.infer<typeof EventQuery>;
 

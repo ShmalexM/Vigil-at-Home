@@ -164,6 +164,15 @@ describe('Store', () => {
     expect(s.listEventViews().map((v) => v.event.ts)).toEqual([3000, 2000, 1000]);
     expect(s.listEventViews({ group: 'network' })).toHaveLength(1);
     expect(s.listEventViews({ matchedOnly: true }).map((v) => v.event.id)).toEqual([b.id]);
+    // One rule's matches, for an alert's "its matches in Activity".
+    expect(s.listEventViews({ rule: 'r1' }).map((v) => v.event.id)).toEqual([b.id]);
+    expect(s.listEventViews({ rule: 'r2' })).toHaveLength(0);
+    const { sql } = eventViewsQuery({ rule: 'r1' }, 10_000);
+    const db = (s as unknown as { db: DatabaseSync }).db;
+    const steps = (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all('r1', 200) as { detail: string }[])
+      .map((r) => r.detail)
+      .join('\n');
+    expect(steps).toContain('events_matched_ts');
     expect(s.listEventViews({ text: 'safari' }, 5000).map((v) => v.event.id)).toEqual([a.id]);
     // % and _ are literal, not wildcards.
     expect(s.listEventViews({ text: '100%_' }, 5000).map((v) => v.event.id)).toEqual([b.id]);
