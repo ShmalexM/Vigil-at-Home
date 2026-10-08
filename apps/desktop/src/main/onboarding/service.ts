@@ -209,6 +209,9 @@ export class OnboardingService extends EventEmitter<{ changed: [] }> {
         };
       } else if (r?.ok) {
         view = { ...base, state: 'done', ...(r.detail ? { detail: r.detail } : {}) };
+      } else if (r?.waiting) {
+        // Nothing to do but wait; calm, and no banner.
+        view = { ...base, state: 'waiting', ...(r.detail ? { detail: r.detail } : {}) };
       } else if ((d.after ?? []).some((id) => defs.some((x) => x.id === id) && !doneIds.has(id))) {
         view = { ...base, state: 'waiting' };
       } else if (!d.commands.length && !d.manual?.length) {

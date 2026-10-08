@@ -14,7 +14,16 @@ export interface CheckResult {
    * so in its title and is offered once outside Setup.
    */
   again?: string;
+  /**
+   * Not done yet, and nothing for the user to do: Vigil is waiting for
+   * something to happen by itself (Santa's first sync). Shown as waiting,
+   * with `detail`, never as a banner.
+   */
+  waiting?: boolean;
 }
+
+/** Shown on the Santa profile step until Santa first syncs its rules with its certificate. */
+export const SANTA_FIRST_SYNC = 'Waiting for Santa’s first sync';
 
 /** Shown when Santa syncs with Vigil on a profile that predates its client certificate. */
 export const SANTA_REINSTALL = 'Reinstall the Santa profile to finish securing Santa';
@@ -33,7 +42,12 @@ export interface Probe {
   /** Ask the running helper for its status over its socket; true when it answers. */
   helperAnswers?(): Promise<boolean>;
   /** What the helper says about Santa's client certificate (helper.status), or null. */
-  helperSanta?(): Promise<{ clientCertRequired?: boolean; clientCertIssued?: boolean } | null>;
+  helperSanta?(): Promise<{
+    clientCertRequired?: boolean;
+    clientCertIssued?: boolean;
+    /** When Santa last finished a rule sync with its certificate; null if it never has. */
+    lastAuthRuleSyncAt?: number | null;
+  } | null>;
   home: string;
   /** Which computer is being checked; defaults to a Mac. */
   platform?: NodeJS.Platform;
@@ -103,6 +117,12 @@ export const CHECKS: Record<CheckId, (p: Probe) => Promise<CheckResult>> = {
         detail:
           'Santa gets its rules from Vigil, but its profile is from before Santa had its own certificate, so another program on this Mac could still sync in its place. Installing the new profile replaces the old one.',
       };
+    }
+    // Done only once Santa has synced its rules with its certificate: the
+    // profile pointing at Vigil proves nothing about Santa reaching it.
+    // Older helpers don't report it (undefined), and are taken at their word.
+    if (cert?.clientCertRequired && cert.lastAuthRuleSyncAt === null) {
+      return { ok: false, waiting: true, detail: SANTA_FIRST_SYNC };
     }
     return {
       ok: true,

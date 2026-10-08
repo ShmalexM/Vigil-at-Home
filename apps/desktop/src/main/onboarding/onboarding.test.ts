@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { memoryStore } from '../testing.js';
-import { CHECKS, HELPER_SOCKET, SANTA_REINSTALL, type Probe } from './checks.js';
+import { CHECKS, HELPER_SOCKET, SANTA_FIRST_SYNC, SANTA_REINSTALL, type Probe } from './checks.js';
 import { KeyStore, type Cipher } from './keys.js';
 import {
   FAPOLICYD_ALLOW_RULES,
@@ -201,6 +201,30 @@ describe('checks', () => {
     expect((await check(null)).ok).toBe(true);
   });
 
+  it('waits for Santa’s first rule sync with its certificate before the profile step is done', async () => {
+    const check = (cert: {
+      clientCertRequired?: boolean;
+      clientCertIssued?: boolean;
+      lastAuthRuleSyncAt?: number | null;
+    }) =>
+      CHECKS['santa.profile']({
+        ...fakeMac({
+          bins: ['/usr/local/bin/santactl'],
+          runs: santaOk('https://127.0.0.1:47821/'),
+        }),
+        helperSanta: async () => cert,
+      });
+    const fresh = { clientCertIssued: true, clientCertRequired: true };
+    expect(await check({ ...fresh, lastAuthRuleSyncAt: null })).toEqual({
+      ok: false,
+      waiting: true,
+      detail: SANTA_FIRST_SYNC,
+    });
+    expect((await check({ ...fresh, lastAuthRuleSyncAt: 1_000 })).ok).toBe(true);
+    // A helper that doesn't report it yet is taken at its word.
+    expect((await check(fresh)).ok).toBe(true);
+  });
+
   it('counts the helper only when it answers on its socket', async () => {
     const mac = (answers: boolean) => ({
       ...fakeMac({ files: [HELPER_SOCKET] }),
@@ -380,6 +404,38 @@ describe('OnboardingService', () => {
     // Santa presented its certificate: done.
     required = true;
     expect(await step()).toMatchObject({ state: 'done', title: 'Connect Santa to Vigil' });
+  });
+
+  it('shows the Santa profile step as calmly waiting until Santa’s first sync', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vigil-setup-'));
+    let lastAuthRuleSyncAt: number | null = null;
+    const svc = new OnboardingService({
+      store: memoryStore(),
+      keys: new KeyStore(join(dir, 'k.json'), testCipher()),
+      probe: {
+        ...fakeMac({
+          files: [HELPER_SOCKET],
+          bins: ['/usr/local/bin/santactl'],
+          runs: santaOk('https://127.0.0.1:47821/'),
+        }),
+        helperAnswers: async () => true,
+        helperSanta: async () => ({
+          clientCertIssued: true,
+          clientCertRequired: true,
+          lastAuthRuleSyncAt,
+        }),
+      },
+      supported: true,
+      plan: () => ({ santaProfilePath: '/Users/me/Vigil Santa.mobileconfig' }),
+    });
+    svc.setMode('local');
+    const step = async () => (await svc.view(true)).steps.find((s) => s.id === 'santa-profile')!;
+    const waiting = await step();
+    expect(waiting).toMatchObject({ state: 'waiting', detail: SANTA_FIRST_SYNC });
+    // No banner: nothing for the user to do.
+    expect(waiting.banner).toBeUndefined();
+    lastAuthRuleSyncAt = Date.now();
+    expect((await step()).state).toBe('done');
   });
 
   it('finishes without choosing an AI, and can be run again', async () => {

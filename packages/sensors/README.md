@@ -49,7 +49,8 @@ is its sync server on the same Mac:
   Until the user reinstalls the profile, `helper.status` reports
   `clientCertRequired: false`; `clientCertSeenAt` is when Santa last presented the
   pinned certificate, and `lastRuleSyncAt` / `lastAuthRuleSyncAt` when it last finished
-  a sync that applied its rules (with the certificate, for the second).
+  a sync that applied its rules (with the certificate, for the second). Setup counts
+  Santa as connected only after that first authenticated sync.
 - **One identity store.** The CA, server and client certificates, the PKCS#12 file, its
   password, the pin, the previous pin, revoked pins and the required flag are written
   together into a new `versions/<id>/` folder, and a `current` link is switched to it
