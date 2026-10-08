@@ -326,6 +326,20 @@ try {
     link.connect = (s) => Client.connect(s, approver);
   }, HELPER);
 
+  // The app runs from a temporary folder here, not /Applications, so its
+  // first sync names a path outside the installer's as Vigil's own, which
+  // needs the password. That sync went out before the approver above, so
+  // reconnect and send the rules again through it.
+  await main(() => globalThis.vigil.core.executor.reconnect());
+  const reconnected = await waitUntil(
+    () => main(() => globalThis.vigil.core.executor.state === 'connected'),
+    40000,
+    250,
+  );
+  check('app reconnected with the approver', reconnected);
+  const synced = await main(() => globalThis.vigil.core.detector.syncHelper({ byUser: true }));
+  check("the helper took the app's rules", synced === 'applied', { synced });
+
   // Record when the popup is placed on screen, from the main process.
   await main(() => {
     const w = globalThis.vigil.windows;
