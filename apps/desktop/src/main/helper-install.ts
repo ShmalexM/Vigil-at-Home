@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileId } from '@vigil/core/self';
+import { fileId, insideInstalledRoot } from '@vigil/core/self';
 import type { HelperInstallResult } from '../shared/ipc.js';
 
 const hasHelper = (dir: string) =>
@@ -141,10 +141,7 @@ export function inInstallerFolder(
   platform: NodeJS.Platform = process.platform,
   app: AppIdentity = thisApp(),
 ): boolean {
-  const target = appPinTarget(platform, app);
-  return platform === 'linux'
-    ? target.startsWith('/opt/Vigil at Home/')
-    : target.toLowerCase().startsWith('/applications/vigil at home.app/');
+  return insideInstalledRoot(appPinTarget(platform, app), platform);
 }
 
 /**

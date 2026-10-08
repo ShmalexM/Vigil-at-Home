@@ -3,7 +3,7 @@
 // expected executable path or start time, and suspend records the identity
 // so resume can check it again.
 
-import { selfRoots, underSelfRoot } from '@vigil/core/self';
+import { insideInstalledRoot, selfRoots, underSelfRoot } from '@vigil/core/self';
 import type { System } from '../system.js';
 import type { Platform } from '../platform.js';
 import { protectionFor } from '../config.js';
@@ -42,8 +42,11 @@ export async function identifyProcess(
 }
 
 export function isProtectedProcess(path: string, platform: Platform = 'darwin'): boolean {
-  return protectionFor(platform).processPrefixes.some(
-    (p) => path === p.replace(/\/$/, '') || path.startsWith(p),
+  return (
+    insideInstalledRoot(path, platform) ||
+    protectionFor(platform).processPrefixes.some(
+      (p) => path === p.replace(/\/$/, '') || path.startsWith(p),
+    )
   );
 }
 

@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { installedRoots } from '@vigil/core/self';
 import { hostPlatform, type Platform } from './platform.js';
 
 export interface HelperPaths {
@@ -124,7 +125,7 @@ export const PROTECTED_PROCESS_PREFIXES = [
   '/Library/SystemExtensions/',
   '/Library/PrivilegedHelperTools/vigil-helper',
   '/Applications/Vigil.app/',
-  '/Applications/Vigil at Home.app/',
+  // The installer's own folder is checked by insideInstalledRoot (process.ts).
 ];
 
 /**
@@ -203,7 +204,7 @@ export const LINUX_PROTECTED_PROCESS_PREFIXES = [
   '/usr/bin/osqueryd',
   '/opt/osquery/',
   '/usr/libexec/vigil-helper',
-  '/opt/Vigil at Home/',
+  // The installer's own folder is checked by insideInstalledRoot (process.ts).
 ];
 
 /**
@@ -212,7 +213,7 @@ export const LINUX_PROTECTED_PROCESS_PREFIXES = [
  * password (FastPath `installed`); nothing else.
  */
 export function installedSelf(platform: Platform = 'darwin'): string[] {
-  return platform === 'linux' ? ['/opt/Vigil at Home'] : ['/Applications/Vigil at Home.app'];
+  return installedRoots(platform);
 }
 
 export interface Protection {

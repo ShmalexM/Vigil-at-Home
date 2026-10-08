@@ -13,6 +13,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { insideInstalledRoot } from '@vigil/core/self';
 import {
   adminScriptArgs,
   appPinFile,
@@ -337,6 +338,17 @@ describe('helper install', () => {
     // Folder names compare without case on macOS, as the disk does.
     const lower = { ...app, execPath: '/applications/vigil at home.app/Contents/MacOS/x' };
     expect(helperMatch(dir, 'darwin', root, lower).installed).toBe('current');
+    // The same test the helper uses for its pin and for stopping processes.
+    for (const execPath of [
+      app.execPath,
+      lower.execPath,
+      '/APPLICATIONS/VIGIL AT HOME.APP/Contents/MacOS/Vigil at Home',
+      '/Users/a/Downloads/Vigil at Home.app/Contents/MacOS/Vigil at Home',
+      '/Applications/Vigil at Home Evil.app/Contents/MacOS/Vigil at Home',
+    ])
+      expect(inInstallerFolder('darwin', { execPath, env: {} }), execPath).toBe(
+        insideInstalledRoot(execPath, 'darwin'),
+      );
   });
 
   it('asks for a helper update when a Downloads app is pinned to another build', () => {
@@ -386,6 +398,11 @@ describe('helper install', () => {
     // A .deb install needs no pin: its folder is root-owned and protected already.
     const deb = { execPath: '/opt/Vigil at Home/vigil-at-home', env: {} };
     expect(inInstallerFolder('linux', deb)).toBe(true);
+    // Linux paths keep their case, as the helper compares them: another folder needs a pin.
+    expect(
+      inInstallerFolder('linux', { ...deb, execPath: '/opt/vigil at home/vigil-at-home' }),
+    ).toBe(false);
+    expect(inInstallerFolder('linux', { ...deb, execPath: '/opt/Vigil at Home' })).toBe(true);
     expect(appPinned('linux', deb, mkdtempSync(join(tmpdir(), 'empty-')))).toBe(true);
     expect(helperMatch(dir, 'linux', root, deb).installed).toBe('none');
   });

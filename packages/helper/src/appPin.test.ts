@@ -18,6 +18,7 @@ import { Journal } from './journal.js';
 import type { HelperCommand } from './protocol.js';
 import type { BinaryName, RunResult } from './system.js';
 import { FapolicydBlocks } from './commands/fapolicyd.js';
+import { isProtectedProcess } from './commands/process.js';
 import { FakeSystem } from './testing/fakeSystem.js';
 import { FakeLinuxSystem } from './testing/fakeLinuxSystem.js';
 
@@ -278,6 +279,29 @@ describe('the app pinned at install (macOS)', () => {
       code: 'refused',
     });
     expect(codesigns()).toEqual([]);
+  });
+
+  it('treats the installer’s folder alike for the pin and for stopping, in any case', async () => {
+    writePin(pinFile, { platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
+    const ex = new Executor(executorDeps(sys));
+    let pid = 800;
+    for (const app of [
+      '/applications/vigil at home.app/Contents/MacOS/Vigil at Home',
+      '/APPLICATIONS/Vigil At Home.app/Contents/MacOS/Vigil at Home',
+    ]) {
+      sys.code.set(app, [CDHASH, app]);
+      expect(await pinFor(sys, app, { installed: INSTALLED_MAC }), app).toBeUndefined();
+      expect(isProtectedProcess(app, 'darwin'), app).toBe(true);
+      sys.processes.set(++pid, { path: app, started: STARTED });
+      await expect(ex.execute({ kind: 'process.kill', pid, path: app })).rejects.toMatchObject({
+        code: 'refused',
+      });
+    }
+    expect(sys.signals).toEqual([]);
+    expect(codesigns()).toEqual([]);
+    // Linux paths keep their case: another folder there is not the installer's.
+    expect(isProtectedProcess('/opt/Vigil at Home/vigil-at-home', 'linux')).toBe(true);
+    expect(isProtectedProcess('/opt/vigil at home/vigil-at-home', 'linux')).toBe(false);
   });
 
   describe('re-pinned by an approved self grant', () => {

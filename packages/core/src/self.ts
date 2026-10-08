@@ -50,6 +50,31 @@ export function underSelfRoot(
   return roots.some((s) => p === s || p.startsWith(`${s}/`));
 }
 
+/**
+ * Where the installer puts Vigil, root-owned: the macOS app bundle, or the
+ * Linux package's folder. `platform` is a Node platform name; anything that
+ * isn't Linux is treated as macOS.
+ */
+export function installedRoots(platform: string): string[] {
+  return platform === 'linux' ? ['/opt/Vigil at Home'] : ['/Applications/Vigil at Home.app'];
+}
+
+/**
+ * Whether `path` is inside the installer's own folder (or is it): the one
+ * test for "protected by path already", shared by the helper's pin, the
+ * helper's process protection and the app's "no pin needed" check, so they
+ * never disagree. Compared without case on macOS, whose disks ignore it,
+ * and with case on Linux. `roots` defaults to {@link installedRoots}.
+ */
+export function insideInstalledRoot(
+  path: string,
+  platform: string,
+  roots: readonly string[] = installedRoots(platform),
+): boolean {
+  const caseless = platform !== 'linux';
+  return underSelfRoot(selfRoots(roots, caseless), path, caseless);
+}
+
 /** A file's identity, `<device>:<inode>`. It stays the same when the file is renamed. */
 export function fileId(dev: bigint | number, ino: bigint | number): string {
   return `${dev}:${ino}`;

@@ -32,7 +32,7 @@ import { chmodSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { FileHasher } from '@vigil/sensors';
-import { selfRoots, underSelfRoot, type SelfImage } from '@vigil/core/self';
+import { insideInstalledRoot, type SelfImage } from '@vigil/core/self';
 import type { System } from './system.js';
 import type { ProcessIdentity } from './commands/process.js';
 import { runsFromSelfImage } from './commands/selfImage.js';
@@ -112,8 +112,7 @@ const sha256Of = (p: string) => new FileHasher({ maxBytes: 4 * 1024 ** 3 }).sha2
  * already protects by path: an app there is never pinned.
  */
 function inInstalled(sys: System, installed: readonly string[], path: string): boolean {
-  const caseless = sys.platform !== 'linux';
-  return underSelfRoot(selfRoots(installed, caseless), path, caseless);
+  return insideInstalledRoot(path, sys.platform ?? 'darwin', installed);
 }
 
 export interface PinOptions {
