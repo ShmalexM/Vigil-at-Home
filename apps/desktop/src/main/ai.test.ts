@@ -27,7 +27,11 @@ function keys(saved: Partial<Record<ApiKeyProvider, string>> = {}): KeySource {
 }
 
 /** A runner that answers every explain request, and logs it like the real one. */
-function fakeAi(opts: VigilAiOptions, calls: RunRequest<unknown>[]): VigilAi {
+function fakeAi(
+  opts: VigilAiOptions,
+  calls: RunRequest<unknown>[],
+  signInUrl = 'https://example.test/sign-in',
+): VigilAi {
   const statuses: ProviderStatus[] = opts.settings.order.map((provider) => ({
     provider,
     state: opts.settings[provider].enabled ? 'ready' : 'disabled',
@@ -37,7 +41,7 @@ function fakeAi(opts: VigilAiOptions, calls: RunRequest<unknown>[]): VigilAi {
     listApiModels: async () => [],
     status: async () => statuses,
     signIn: async () => ({
-      url: 'https://example.test/sign-in',
+      url: signInUrl,
       completed: Promise.resolve(true),
       cancel() {},
     }),
@@ -84,6 +88,7 @@ function setup(
     saved?: Partial<Record<ApiKeyProvider, string>>;
     mode?: SetupMode;
     executor?: ActionExecutor;
+    signInUrl?: string;
   } = {},
 ) {
   const store = memoryStore();
@@ -100,7 +105,7 @@ function setup(
     openExternal: async (url) => void opened.push(url),
     create: (opts) => {
       made.push(opts);
-      return fakeAi(opts, calls);
+      return fakeAi(opts, calls, o.signInUrl);
     },
     now: () => NOW,
   });
@@ -304,6 +309,18 @@ describe('AiBridge view', () => {
     expect(await ai.signIn('codex')).toEqual({ ok: true });
     expect(opened).toEqual(['https://example.test/sign-in']);
     expect((await ai.signIn('jev')).ok).toBe(false);
+  });
+
+  it('never opens a sign-in link that is not https', async () => {
+    for (const url of [
+      'file:///Applications/Calculator.app',
+      'http://example.test/',
+      'not a url',
+    ]) {
+      const { ai, opened } = setup({ signInUrl: url });
+      expect(await ai.signIn('codex')).toMatchObject({ ok: false });
+      expect(opened).toEqual([]);
+    }
   });
 
   it('passes plan limits and the key cap to the Usage page', async () => {

@@ -28,6 +28,109 @@ export interface CompiledCondition {
 }
 
 /**
+ * Most unbounded quantifiers (`*`, `+`, `{n,}`) on near-anything atoms (`.`,
+ * `[^...]`, or a group holding one) one regex may have. Each can take any
+ * share of the subject, so a few in a row backtrack polynomially. Counted per
+ * lookaround, since a lookaround is matched on its own.
+ */
+export const MAX_BROAD_QUANTIFIERS = 3;
+
+interface RegexGroup {
+  /** A lookaround: it matches once and never backtracks into what follows. */
+  look: boolean;
+  /** Has `|` itself or in a group inside it. */
+  alt: boolean;
+  /** Has a `*`, `+` or `{...}` quantifier inside it, at any depth. */
+  quant: boolean;
+  /** Has a near-anything atom inside it. */
+  broad: boolean;
+  /** Broad quantifiers so far in this group's lookaround (or the whole pattern). */
+  scope: { broad: number };
+}
+
+/** The structural part of regexProblem: walks the pattern once, tracking groups. */
+function regexShapeProblem(pattern: string): string | undefined {
+  const group = (look: boolean, scope = { broad: 0 }): RegexGroup => ({
+    look,
+    alt: false,
+    quant: false,
+    broad: false,
+    scope,
+  });
+  const stack: RegexGroup[] = [group(false)];
+  // The atom just read, for the quantifier that may follow it.
+  let atom: { group?: RegexGroup; broad: boolean } | undefined;
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]!;
+    const top = stack[stack.length - 1]!;
+    if (c === '\\') {
+      atom = { broad: false };
+      i++;
+    } else if (c === '[') {
+      let j = i + 1;
+      const negated = pattern[j] === '^';
+      if (negated) j++;
+      let negatedShorthand = false; // [\s\S], [\w\W]
+      for (; j < pattern.length && pattern[j] !== ']'; j++) {
+        if (pattern[j] !== '\\') continue;
+        j++;
+        if (/[SWD]/.test(pattern[j] ?? '')) negatedShorthand = true;
+      }
+      atom = { broad: negated || negatedShorthand };
+      top.broad ||= atom.broad;
+      i = j;
+    } else if (c === '(') {
+      const look = /^\(\?<?[=!]/.test(pattern.slice(i, i + 4));
+      stack.push(look ? group(true) : group(false, top.scope));
+      // Skip the group's prefix ((?:, (?=, (?<!, (?<name>) so its `?` is not read as a quantifier.
+      if (pattern[i + 1] === '?') {
+        let j = i + 2;
+        while (j < pattern.length && !':=!>'.includes(pattern[j]!)) j++;
+        i = j;
+      }
+      atom = undefined;
+    } else if (c === ')') {
+      // An unbalanced `)` is left for the RegExp constructor to report.
+      const g = stack.length > 1 ? stack.pop()! : top;
+      const parent = stack[stack.length - 1]!;
+      if (!g.look) {
+        parent.alt ||= g.alt;
+        parent.quant ||= g.quant;
+        parent.broad ||= g.broad;
+      }
+      atom = { group: g, broad: !g.look && g.broad };
+    } else if (c === '|') {
+      top.alt = true;
+      atom = undefined;
+    } else {
+      const q = /^(?:[*+?]|\{(\d+)(,(\d*))?\})/.exec(pattern.slice(i));
+      if (!q) {
+        atom = { broad: c === '.' };
+        top.broad ||= atom.broad;
+        continue;
+      }
+      i += q[0].length - 1;
+      if (pattern[i + 1] === '?') i++; // lazy
+      const unbounded = c === '*' || c === '+' || q[3] === '';
+      // `?`, `{0,1}` and `{n}` do not repeat a choice; `{n,m}` does.
+      const repeats = unbounded || (q[3] !== undefined && Number(q[3]) > 1);
+      if (atom?.group && repeats) {
+        // A group containing a quantifier, itself repeated: (a+)+, ((.*))*, (a|b+){2,}.
+        // An optional group like (sudo\s+)? is fine.
+        if (atom.group.quant) return 'regex has a nested quantifier';
+        // Repeated alternatives that can match the same text: (a|a)*, (?:x|xy)+.
+        if (atom.group.alt) return 'regex repeats a group that has alternatives';
+      }
+      if (unbounded && atom?.broad && ++top.scope.broad > MAX_BROAD_QUANTIFIERS)
+        return `regex has more than ${MAX_BROAD_QUANTIFIERS} open-ended wildcards like .* or [^x]+`;
+      if (c !== '?') top.quant = true;
+      atom = undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Rejects patterns that can backtrack catastrophically. This is a conservative
  * syntactic check, not a proof; together with MAX_SUBJECT_LENGTH it keeps any
  * single regex test cheap.
@@ -35,11 +138,8 @@ export interface CompiledCondition {
 export function regexProblem(pattern: string): string | undefined {
   if (pattern.length > MAX_REGEX_LENGTH) return `regex longer than ${MAX_REGEX_LENGTH} characters`;
   if (/\\[1-9]|\\k</.test(pattern)) return 'regex uses a backreference';
-  // A group containing a quantifier, itself repeated without bound: (a+)+, (.*)*, (a|b+){2,}.
-  // An optional group like (sudo\s+)? is fine.
-  if (/\((?:[^()\\]|\\.)*[+*}](?:[^()\\]|\\.)*\)(?:[+*]|\{\d+,\d*\})/.test(pattern)) {
-    return 'regex has a nested quantifier';
-  }
+  const shape = regexShapeProblem(pattern);
+  if (shape) return shape;
   try {
     new RegExp(pattern);
   } catch (err) {
@@ -52,9 +152,100 @@ function escapeRegex(s: string): string {
   return s.replace(/[.+^${}()|[\]\\]/g, '\\$&');
 }
 
+/** Most `*` or `**` one glob may have, once runs of them are merged. */
+export const MAX_GLOB_WILDCARDS = 4;
+/**
+ * Most wildcards in one glob that can stop at many places in the path: any
+ * but the last, except a `*` with a `/` before the next wildcard (it can only
+ * stop at that `/`). Each one multiplies the work of a failed match by up to
+ * the path's length.
+ */
+export const MAX_GLOB_OPEN_WILDCARDS = 1;
+
+type GlobToken =
+  | { kind: 'text'; src: string; slash: boolean }
+  | { kind: 'one' } // ?
+  | { kind: 'star'; min: number } // *, plus any ? next to it
+  | { kind: 'any' } // **
+  | { kind: 'dirs' }; // **/
+
+// Split a glob (after any `~/`) into tokens, merging runs of wildcards that
+// would otherwise compete for the same characters: `***` is `**`, `**/**/` is
+// `**/`, `**/**` is `**`, and `*?*?` is one `*` of at least two characters.
+function globTokens(glob: string): GlobToken[] {
+  const out: GlobToken[] = [];
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i]!;
+    const last = out[out.length - 1];
+    if (c === '*') {
+      let n = 1;
+      while (glob[i + n] === '*') n++;
+      i += n - 1;
+      if (n === 1) {
+        let min = 0;
+        while (out[out.length - 1]?.kind === 'one') {
+          out.pop();
+          min++;
+        }
+        const prev = out[out.length - 1];
+        if (prev?.kind === 'star') prev.min += min;
+        else out.push({ kind: 'star', min });
+      } else if (glob[i + 1] === '/') {
+        i++;
+        if (last?.kind !== 'dirs') out.push({ kind: 'dirs' });
+      } else if (last?.kind === 'dirs') {
+        out[out.length - 1] = { kind: 'any' };
+      } else if (last?.kind !== 'any') {
+        out.push({ kind: 'any' });
+      }
+    } else if (c === '?') {
+      if (last?.kind === 'star') last.min++;
+      else out.push({ kind: 'one' });
+    } else if (last?.kind === 'text') {
+      last.src += escapeRegex(c);
+      last.slash ||= c === '/';
+    } else {
+      out.push({ kind: 'text', src: escapeRegex(c), slash: c === '/' });
+    }
+  }
+  return out;
+}
+
+function isWildcard(t: GlobToken): boolean {
+  return t.kind === 'star' || t.kind === 'any' || t.kind === 'dirs';
+}
+
+/**
+ * Rejects globs that can take too long to match: too many wildcards, or
+ * more than one that can stop anywhere (`**a**b**`). Paths are at most
+ * MAX_SUBJECT_LENGTH long, so this keeps any single glob test cheap.
+ */
+export function globProblem(glob: string): string | undefined {
+  const tokens = globTokens(glob.startsWith('~/') ? glob.slice(2) : glob);
+  const wild = tokens.filter(isWildcard).length;
+  if (wild > MAX_GLOB_WILDCARDS)
+    return `glob has ${wild} wildcards (* or **), more than ${MAX_GLOB_WILDCARDS}`;
+  let open = 0;
+  let seen = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (!isWildcard(t) || ++seen === wild) continue;
+    let slash = false;
+    for (let j = i + 1; j < tokens.length && !isWildcard(tokens[j]!); j++) {
+      const n = tokens[j]!;
+      if (n.kind === 'text' && n.slash) slash = true;
+    }
+    if (t.kind !== 'star' || !slash) open++;
+  }
+  if (open > MAX_GLOB_OPEN_WILDCARDS)
+    return `glob has ${open} wildcards that can stop anywhere in the path, more than ${MAX_GLOB_OPEN_WILDCARDS} (the last wildcard, and a * with a / after it, do not count)`;
+  return undefined;
+}
+
 /**
  * Path globs. `**` crosses directories, `*` and `?` do not, and a leading `~`
  * means any user's home folder. Case-insensitive by default because APFS is.
+ * Rules check globProblem first; this only builds the regex.
  */
 export function globToRegExp(glob: string, ignoreCase = true): RegExp {
   let src = '';
@@ -64,25 +255,12 @@ export function globToRegExp(glob: string, ignoreCase = true): RegExp {
     src += '(?:/Users/[^/]+|/home/[^/]+|/root)/';
     rest = rest.slice(2);
   }
-  for (let i = 0; i < rest.length; i++) {
-    const c = rest[i]!;
-    if (c === '*') {
-      if (rest[i + 1] === '*') {
-        if (rest[i + 2] === '/') {
-          src += '(?:.*/)?'; // `**/` also matches zero directories
-          i += 2;
-        } else {
-          src += '.*';
-          i += 1;
-        }
-      } else {
-        src += '[^/]*';
-      }
-    } else if (c === '?') {
-      src += '[^/]';
-    } else {
-      src += escapeRegex(c);
-    }
+  for (const t of globTokens(rest)) {
+    if (t.kind === 'text') src += t.src;
+    else if (t.kind === 'one') src += '[^/]';
+    else if (t.kind === 'star') src += t.min ? `[^/]{${t.min},}` : '[^/]*';
+    else if (t.kind === 'any') src += '.*';
+    else src += '(?:.*/)?'; // `**/` also matches zero directories
   }
   return new RegExp(`^${src}$`, ignoreCase ? 'i' : '');
 }
@@ -157,7 +335,11 @@ function compileMatch(c: FieldTest): Predicate {
     case 'contains':
       return (e) => anyString(e, (s) => nvalues.some((v) => norm(clip(s)).includes(v)));
     case 'glob': {
-      const res = values.map((g) => globToRegExp(g, c.nocase !== false));
+      const res = values.map((g) => {
+        const problem = globProblem(g);
+        if (problem) throw new Error(`${c.field}: ${problem}`);
+        return globToRegExp(g, c.nocase !== false);
+      });
       return (e) => anyString(e, (s) => res.some((r) => r.test(clip(s))));
     }
     case 'regex': {
