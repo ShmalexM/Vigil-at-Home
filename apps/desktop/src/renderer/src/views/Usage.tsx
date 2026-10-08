@@ -30,6 +30,8 @@ import {
   elapsedShare,
   remainingPercent,
   type LimitPace,
+  costNote,
+  estimateNote,
 } from './usage-format';
 
 type Metric = 'cost' | 'tokens' | 'limits';
@@ -169,14 +171,6 @@ export function UsageView() {
 
 // ---------------------------------------------------------------- cost and tokens
 
-/**
- * A provider whose price is only Claude Code's estimate at API prices: priced,
- * but none of it charged to a key (the plan covers it). Local models are free,
- * not estimated.
- */
-const planEstimate = (p: { costUsd: number; billedUsd: number }) =>
-  p.costUsd > 0 && p.billedUsd === 0;
-
 function CostSection({
   report,
   metric,
@@ -205,14 +199,12 @@ function CostSection({
               {formatCount(totals.runs)} {totals.runs === 1 ? 'run' : 'runs'}
               {metric === 'cost' && (
                 <>
-                  {usesBilled
-                    ? ` · ${formatUsd(totals.billedUsd)} billed to your keys, the rest at API prices`
-                    : ' · at API prices, nothing billed'}
+                  {` · ${costNote(totals)}`}
                   <span
                     className="usage-info"
                     tabIndex={0}
                     title={[
-                      'Claude Code reports what each run would cost at API prices; your plan is not charged per run.',
+                      'Claude Code reports what each run would cost at API prices. On a claude.ai plan that isn’t charged per run; on another login Vigil can’t tell.',
                       ...(usesBilled
                         ? [
                             'Jev, cloud API keys and Codex on an OpenAI key show what you were billed.',
@@ -251,8 +243,8 @@ function CostSection({
                     {metric === 'cost'
                       ? p.unpricedRuns === p.runs
                         ? 'Unpriced'
-                        : p.provider === 'ollama'
-                          ? 'Free'
+                        : p.provider === 'ollama' && p.costUsd === 0 && p.unpricedRuns === 0
+                          ? 'Local, free'
                           : formatUsd(p.costUsd)
                       : formatTokens(p.totalTokens)}
                   </span>
@@ -261,7 +253,7 @@ function CostSection({
                   {metric === 'cost'
                     ? `${p.unpricedRuns === p.runs ? 'Unpriced' : `${formatPercent(shareOf)} of cost`} · ${formatTokens(p.totalTokens)} tokens`
                     : `${formatPercent(shareOf)} of tokens · ${p.unpricedRuns === p.runs ? 'unpriced' : formatUsd(p.costUsd)}`}
-                  {metric === 'cost' && planEstimate(p) && ' · at API prices, not charged'}
+                  {metric === 'cost' && estimateNote(p) && ` · ${estimateNote(p)}`}
                   {p.failed > 0 && (
                     <span
                       className="usage-failed"

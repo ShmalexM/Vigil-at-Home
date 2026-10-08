@@ -102,20 +102,24 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
 
   /**
    * Whether a run on this provider is charged to one of the user's keys: the
-   * Cloud API, Jev, Codex on an OpenAI key, and Claude unless this run goes to
-   * the user's plan.
+   * Cloud API, Jev, Codex on an OpenAI key, and Claude on the key saved in
+   * Vigil. A Claude run on the CLI's own login is not charged on a claude.ai
+   * plan; for any other login (a Console login pays per token) it is
+   * undefined, so the Usage page never claims it wasn't charged.
    */
-  function billsKey(id: ProviderId, planOk: boolean): boolean {
+  function billsKey(id: ProviderId, planOk: boolean): boolean | undefined {
     switch (id) {
       case 'api':
       case 'jev':
         return true;
       case 'codex':
         return deps.settings.codex.mode === 'apiKey';
-      case 'claude':
-        return (
-          !(planOk && deps.settings.claude.allowPlan) && deps.settings.claude.mode === 'apiKey'
-        );
+      case 'claude': {
+        const onSavedKey =
+          !(planOk && deps.settings.claude.allowPlan) && deps.settings.claude.mode === 'apiKey';
+        if (onSavedKey) return true;
+        return claudeLoginBills(statusCache.get('claude')?.status.account);
+      }
       default:
         return false;
     }
@@ -124,7 +128,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
   /** One cap for everything Vigil charges to the user's keys this month, all providers together. */
   async function overMonthlyCap(id: ProviderId, planOk: boolean): Promise<boolean> {
     const cap = deps.settings.quota.apiKeyMonthlyCapUsd;
-    if (cap === undefined || !deps.spentThisMonthUsd || !billsKey(id, planOk)) return false;
+    if (cap === undefined || !deps.spentThisMonthUsd || billsKey(id, planOk) !== true) return false;
     return (await deps.spentThisMonthUsd()) >= cap;
   }
 
@@ -241,10 +245,14 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
           ...(detail ? { detail } : {}),
           ...(usage ? { usage } : {}),
           ...(usage?.model ? { model: usage.model } : {}),
-          ...(provider !== null ? { billed: billsKey(provider, planOk) } : {}),
+          ...billedField(provider, planOk),
         });
       };
 
+      const billedField = (provider: ProviderId | null, ok: boolean) => {
+        const billed = provider === null ? undefined : billsKey(provider, ok);
+        return billed === undefined ? {} : { billed };
+      };
       const planOk = mayUsePlan(request);
       let lastReason: RunFailureReason = 'no_provider';
       let lastDetail: string | undefined;
@@ -326,4 +334,14 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
       };
     },
   };
+}
+
+/**
+ * Whether Claude Code's own login charges per run, from `claude auth status`'s
+ * authMethod. A claude.ai login is a plan, so no. Any other method (a Console
+ * login, an API key or key helper) may pay per token, and Vigil doesn't know
+ * every name Claude Code uses, so it says it can't tell rather than guess.
+ */
+export function claudeLoginBills(authMethod: string | undefined): false | undefined {
+  return authMethod === 'claude.ai' ? false : undefined;
 }

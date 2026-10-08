@@ -1,4 +1,4 @@
-import type { UsageProvider } from '../../../shared/usage';
+import type { UsageProvider, UsageTotals } from '../../../shared/usage';
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -121,4 +121,36 @@ export function niceScale(peak: number, count: number): { max: number; ticks: nu
   const ticks: number[] = [];
   for (let value = 0; value <= max + step * 1e-6; value += step) ticks.push(value);
   return { max, ticks };
+}
+
+type CostTotals = Pick<UsageTotals, 'costUsd' | 'billedUsd' | 'billedUnpricedRuns' | 'loginUsd'>;
+
+/**
+ * The headline's note on what the total is: what was billed to the user's
+ * keys (and whether some of it has no price), and that the rest is Claude
+ * Code's estimate at API prices. It says "not charged" only when Vigil knows
+ * the run went to a plan.
+ */
+export function costNote(t: CostTotals): string {
+  const parts: string[] = [];
+  if (t.billedUsd > 0) parts.push(`${formatUsd(t.billedUsd)} billed to your keys`);
+  if (t.billedUnpricedRuns > 0)
+    parts.push(
+      `${formatCount(t.billedUnpricedRuns)} billed ${t.billedUnpricedRuns === 1 ? 'run' : 'runs'} at a cost Vigil can’t see`,
+    );
+  const rest = t.costUsd - t.billedUsd;
+  if (rest > 0)
+    parts.push(
+      t.loginUsd > 0
+        ? `${parts.length ? 'the rest ' : ''}at API prices, on your Claude login`
+        : `${parts.length ? 'the rest ' : ''}at API prices, not charged`,
+    );
+  if (parts.length === 0) return t.costUsd > 0 ? 'API estimate' : 'nothing billed';
+  return parts.join(', ');
+}
+
+/** A provider's note when its price is only an estimate: not charged on a plan, else unknown. */
+export function estimateNote(p: CostTotals): string | undefined {
+  if (!(p.costUsd > 0 && p.billedUsd === 0)) return undefined;
+  return p.loginUsd > 0 ? 'at API prices, on your Claude login' : 'at API prices, not charged';
 }
