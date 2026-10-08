@@ -34,6 +34,27 @@ describe('EventLog', () => {
     expect(store.getEvent(e.id)).not.toHaveProperty('raw');
   });
 
+  it('keeps the whole event when an alert stores it after a trimmed copy', () => {
+    const store = memoryStore();
+    const log = new EventLog(store);
+    const base = makeExec();
+    const script = 'start ' + 'x'.repeat(3000) + ' MIDDLE ' + 'y'.repeat(3000) + ' end';
+    const e = { ...base, process: { ...base.process, args: ['/bin/sh', '-c', script] } };
+    log.add(e, { checked: 3, matches: [] });
+    log.flush();
+    const trimmed = store.getEvent(e.id);
+    expect(trimmed?.kind === 'process.exec' && trimmed.process.args?.[2]).not.toContain('MIDDLE');
+    // Worth a look raises an alert on the live event a little later.
+    store.insertEvent(e);
+    const full = store.getEvent(e.id);
+    expect(full?.kind === 'process.exec' && full.process.args?.[2]).toBe(script);
+    // And a later trimmed copy never replaces the whole one.
+    log.add(e, { checked: 3, matches: [] });
+    log.flush();
+    const still = store.getEvent(e.id);
+    expect(still?.kind === 'process.exec' && still.process.args?.[2]).toBe(script);
+  });
+
   it('skips invalid events without losing the rest of the batch', () => {
     const store = memoryStore();
     const log = new EventLog(store);

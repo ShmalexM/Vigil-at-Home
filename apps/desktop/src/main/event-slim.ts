@@ -52,6 +52,17 @@ const ARG_HEAD = 768;
 const ARG_TAIL = 192;
 
 /** The arguments as stored: the same array when nothing is long. */
+const isHighSurrogate = (c: number) => c >= 0xd800 && c <= 0xdbff;
+
+/** Keep the start and end of a long argument, never splitting an emoji's surrogate pair. */
+function trimArg(a: string): string {
+  let head = ARG_HEAD;
+  if (isHighSurrogate(a.charCodeAt(head - 1))) head--;
+  let tail = a.length - ARG_TAIL;
+  if (isHighSurrogate(a.charCodeAt(tail - 1))) tail++;
+  return `${a.slice(0, head)}…[${tail - head} characters not stored]…${a.slice(tail)}`;
+}
+
 export function storedArgs(args: string[]): string[] {
   let total = 0;
   let long = false;
@@ -64,10 +75,7 @@ export function storedArgs(args: string[]): string[] {
   let used = 0;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
-    const kept =
-      a.length > MAX_STORED_ARG
-        ? `${a.slice(0, ARG_HEAD)}…[${a.length - ARG_HEAD - ARG_TAIL} characters not stored]…${a.slice(-ARG_TAIL)}`
-        : a;
+    const kept = a.length > MAX_STORED_ARG ? trimArg(a) : a;
     if (used + kept.length > MAX_STORED_ARGS && out.length > 0) {
       out.push(`…[${args.length - i} more arguments not stored]`);
       break;

@@ -252,3 +252,16 @@ describe('slimForStorage', () => {
     expect(e.process.ancestors).toEqual(ancestors);
   });
 });
+
+describe('storedArgs', () => {
+  it('never splits an emoji where it trims', () => {
+    for (let shift = 0; shift < 2; shift++) {
+      const a = 'a'.repeat(767 + shift) + '🐕'.repeat(1000) + 'b'.repeat(191 + shift);
+      const [kept] = storedArgs([a]);
+      expect(kept).toMatch(/characters not stored/);
+      expect(kept!.isWellFormed()).toBe(true);
+      const n = Number(/\[(\d+) characters/.exec(kept!)![1]);
+      expect(kept!.length - kept!.indexOf(']…') - 2 + kept!.indexOf('…[') + n).toBe(a.length);
+    }
+  });
+});

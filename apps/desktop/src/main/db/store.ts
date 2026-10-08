@@ -264,7 +264,9 @@ export class Store {
 
   /**
    * An event may already be stored (an alert saves its events at once, with
-   * the sensor's raw record); then only its outcome is filled in.
+   * the sensor's raw record); then only its outcome is filled in. The fuller
+   * of the two copies is kept: the event log stores a trimmed copy, and an
+   * alert raised later (worth a look) brings the whole event.
    */
   private writeEvent(e: SensorEvent, outcome?: EventOutcome): void {
     // The agent session and agent the event belongs to: the tracker's tag on a
@@ -278,6 +280,7 @@ export class Store {
       `INSERT INTO events (id, ts, kind, source, body, outcome, matched, agent_session, agent_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
+         body = CASE WHEN length(excluded.body) > length(body) THEN excluded.body ELSE body END,
          outcome = COALESCE(excluded.outcome, outcome),
          matched = CASE WHEN excluded.outcome IS NULL THEN matched ELSE excluded.matched END,
          agent_session = COALESCE(agent_session, excluded.agent_session),
