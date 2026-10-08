@@ -65,7 +65,7 @@ export function AiSection() {
     }
   }, []);
   useEffect(() => void load(), [load]);
-  // Home's "Turn AI back on" opens Settings at this card.
+  // Home’s "Open AI settings" opens Settings at this card.
   const card = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (location.hash === '#settings/ai') card.current?.scrollIntoView({ block: 'start' });
@@ -193,15 +193,17 @@ export function AiSection() {
           {view.off && (
             <div className="row" style={{ flexWrap: 'wrap', gap: 8 }} role="status">
               <span className="ai-sub grow">{view.off}.</span>
-              <Button
-                size="sm"
-                onClick={async () => {
-                  await vigil.turnAiBackOn();
-                  await load();
-                }}
-              >
-                Turn AI back on
-              </Button>
+              {view.offAction && (
+                <Button
+                  size="sm"
+                  onClick={async () => {
+                    await vigil.turnAiBackOn();
+                    await load();
+                  }}
+                >
+                  {view.offAction}
+                </Button>
+              )}
             </div>
           )}
           <h4 className="ai-group">Explains alerts</h4>

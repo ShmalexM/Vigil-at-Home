@@ -89,15 +89,18 @@ describe('AI prefs', () => {
     // A later change to one switch keeps the rest.
     ai.setPrefs({ claudePlan: true });
     expect(make().prefs()).toMatchObject({ ...providers(SEPT_28), claudePlan: true });
-    expect(make().repairPrefs()).toBe(false);
-    expect(make().prefs()).toMatchObject(providers(SEPT_28));
   });
 
-  it('switches back on, once, the AI apps it used when it finds them all off', () => {
+  it('never switches AI back on by itself, and its button names what it turns on', async () => {
     const { ai, make } = bridge({ prefs: OCT_8, used: ['jev', 'ollama', 'claude'] });
-    expect(ai.offNotice()).toMatch(/Every AI app is switched off/);
-    expect(ai.repairPrefs()).toBe(true);
-    const after = make().prefs();
+    // A deliberate opt-out looks the same as an accidental one: nothing changes on start.
+    expect(providers(make().prefs())).toEqual(providers(OCT_8));
+    const fix = ai.offFix();
+    expect(fix?.notice).toMatch(/Every AI app is switched off/);
+    // His plan switch was on, so the notice says the plan comes back with Claude.
+    expect(fix?.notice).toMatch(/Claude plan/);
+    expect(fix?.label).toBe('Turn on Claude, Ollama and Jev');
+    const after = ai.turnBackOn();
     expect(providers(after)).toEqual({
       claude: true,
       codex: false,
@@ -108,31 +111,15 @@ describe('AI prefs', () => {
     // The plan stays the user's own choice, and labelling as it was.
     expect(after).toMatchObject({ claudePlan: true, labelling: true, codexUses: 'subscription' });
     expect(make().offNotice()).toBeUndefined();
-
-    // Switching everything off afterwards sticks: the repair never runs again.
-    const later = make();
-    later.setPrefs({ claude: false, ollama: false, jev: false });
-    expect(make().repairPrefs()).toBe(false);
-    expect(providers(make().prefs())).toEqual({
-      claude: false,
-      codex: false,
-      api: false,
-      ollama: false,
-      jev: false,
-    });
+    // The button does nothing once nothing is wrong.
+    expect(providers(make().turnBackOn())).toEqual(providers(after));
   });
 
   it('never switches on the Claude plan, and uses setup’s mode when nothing ran yet', () => {
-    const { ai, make } = bridge({ prefs: { ...OCT_8, claudePlan: false }, mode: 'local' });
-    expect(ai.repairPrefs()).toBe(true);
-    expect(make().prefs()).toMatchObject({ ollama: true, claude: false, claudePlan: false });
-  });
-
-  it('leaves prefs with any AI app on alone, and labelling off with all apps off', () => {
-    expect(bridge({ prefs: { ...OCT_8, jev: true } }).ai.repairPrefs()).toBe(false);
-    const off = bridge({ prefs: { ...OCT_8, labelling: false }, used: ['jev'] });
-    expect(off.ai.repairPrefs()).toBe(false);
-    expect(off.make().prefs().jev).toBe(false);
+    const { ai } = bridge({ prefs: { ...OCT_8, claudePlan: false }, mode: 'local' });
+    expect(ai.offFix()?.notice).not.toMatch(/Claude plan/);
+    expect(ai.offFix()?.label).toBe('Turn on Ollama');
+    expect(ai.turnBackOn()).toMatchObject({ ollama: true, claude: false, claudePlan: false });
   });
 
   it('says when labelling is on but nothing that labels is switched on', () => {
@@ -140,17 +127,28 @@ describe('AI prefs', () => {
       prefs: { ...OCT_8, codex: true, claudePlan: false },
       saved: { typesafe: 'ts-1234' },
     });
+    // Outside cloud mode Codex doesn't label; Ollama does, for free.
     expect(ai.offNotice()).toMatch(/no AI app that labels events/);
-    ai.setPrefs({ jev: true });
+    expect(ai.offFix()?.label).toBe('Label with Ollama');
+    expect(ai.turnBackOn()).toMatchObject({ ollama: true, codex: true, jev: false });
     expect(ai.offNotice()).toBeUndefined();
-    // "Turn AI back on" uses the same choice as the repair.
-    ai.setPrefs({ jev: false, codex: false });
-    expect(providers(ai.turnBackOn())).toEqual({
-      claude: true,
-      codex: true,
-      api: true,
-      ollama: true,
-      jev: true,
+    ai.setPrefs({ ollama: false, jev: true });
+    expect(ai.offNotice()).toBeUndefined();
+  });
+
+  it('in cloud mode, counts what the cloud runner labels with, and lets the user pick', () => {
+    const codex = bridge({ prefs: { ...OCT_8, codex: true }, mode: 'cloud' });
+    expect(codex.ai.offNotice()).toBeUndefined();
+    const api = bridge({
+      prefs: { ...OCT_8, api: true },
+      mode: 'cloud',
+      saved: { openai: 'sk-1234' },
     });
+    expect(api.ai.offNotice()).toBeUndefined();
+    const ollamaOnly = bridge({ prefs: { ...OCT_8, ollama: true }, mode: 'cloud' });
+    const fix = ollamaOnly.ai.offFix();
+    expect(fix?.notice).toMatch(/no AI app that labels events.*Pick one/);
+    expect(fix?.label).toBeUndefined();
+    expect(providers(ollamaOnly.ai.turnBackOn())).toEqual(providers({ ...OCT_8, ollama: true }));
   });
 });

@@ -230,10 +230,7 @@ function start(): void {
     busyReason: () => power.busyReason(),
     openExternal: (url) => shell.openExternal(url),
   });
-  if (!demo) {
-    core.usage.setLimitsSource(() => ai.limits());
-    ai.repairPrefs();
-  }
+  if (!demo) core.usage.setLimitsSource(() => ai.limits());
   core.aiNotice = () => ai.offNotice();
   ai.on('changed', () => windows.broadcast('changed'));
   ai.explainAlertsFrom(core);

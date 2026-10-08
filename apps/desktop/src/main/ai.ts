@@ -46,8 +46,26 @@ import { isKeyBilled } from '../shared/usage.js';
 const KEY_PREFS = 'ai.prefs';
 const KEY_PINS = 'ai.pins';
 /** Set once the one-time check for prefs with every AI switched off has run. */
-const KEY_PREFS_REPAIRED = 'ai.prefs.repairedAt';
 const PROVIDER_PREFS = ['claude', 'codex', 'api', 'ollama', 'jev'] as const;
+const PROVIDER_LABEL: Record<(typeof PROVIDER_PREFS)[number], string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  api: 'the API connection',
+  ollama: 'Ollama',
+  jev: 'Jev',
+};
+
+/** "a", "a and b", "a, b and c". */
+function listWords(words: string[]): string {
+  return words.length < 2
+    ? (words[0] ?? 'AI')
+    : `${words.slice(0, -1).join(', ')} and ${words.at(-1)}`;
+}
+
+function offView(fix: { notice: string; label?: string } | undefined): Partial<AiView> {
+  if (!fix) return {};
+  return { off: fix.notice, ...(fix.label ? { offAction: fix.label } : {}) };
+}
 /** An explanation for a popup should be there by the time the user reads it. */
 const EXPLAIN_NOW_DEADLINE_MS = 90_000;
 const EXPLAIN_BACKGROUND_DEADLINE_MS = 180_000;
@@ -203,9 +221,9 @@ export class AiBridge extends EventEmitter<{
   }
 
   /**
-   * Which AI apps to switch back on: the ones Vigil's runs have used, or
-   * else the ones setup's mode allows. Never the Claude plan, which stays
-   * the user's own opt-in.
+   * Which AI apps the "Turn on" button switches back on: the ones Vigil's
+   * runs have used, or else the ones setup's mode allows. Never the Claude
+   * plan switch, which stays the user's own opt-in.
    */
   private providersToRestore(): Partial<Record<(typeof PROVIDER_PREFS)[number], boolean>> {
     const used = new Set(this.o.store.aiRunProviders());
@@ -218,47 +236,60 @@ export class AiBridge extends EventEmitter<{
   }
 
   /**
-   * Once: prefs with every AI app off but labelling on is what Vigil found on
-   * Macs whose AI stopped without the user turning it off. Those apps go back
-   * on (see providersToRestore). Runs once, so a user who later switches
-   * everything off keeps it that way.
+   * When the switches leave the AI unable to work, in words, and the one
+   * change the user's button makes: every app off, or labelling on with
+   * nothing that labels. Vigil never makes this change on its own, since a
+   * deliberate opt-out looks the same as an accidental one. From prefs,
+   * setup's mode and the saved keys only, so it is cheap enough for Home.
    */
-  repairPrefs(): boolean {
-    if (this.o.store.getSetting(KEY_PREFS_REPAIRED, z.number().nullable(), null) !== null)
-      return false;
-    this.o.store.setSetting(KEY_PREFS_REPAIRED, this.now());
+  offFix(): { notice: string; label?: string; patch?: AiPrefsPatch } | undefined {
     const p = this.prefs();
-    if (!p.labelling || PROVIDER_PREFS.some((k) => p[k])) return false;
-    this.setPrefs(this.providersToRestore());
-    console.warn('[ai] every AI app was off with labelling on; switched back on what was used');
-    return true;
-  }
-
-  /** The user's "Turn AI back on" (Home, Settings › AI). */
-  turnBackOn(): AiView['prefs'] {
-    return this.setPrefs(this.providersToRestore());
+    const mode = this.o.mode();
+    if (PROVIDER_PREFS.every((k) => !p[k])) {
+      const patch = this.providersToRestore();
+      const names = PROVIDER_PREFS.filter((k) => patch[k]).map((k) => PROVIDER_LABEL[k]);
+      return {
+        notice:
+          'Every AI app is switched off, so new alerts aren’t explained and events aren’t labelled' +
+          (patch.claude && p.claudePlan
+            ? '. Turning Claude back on also uses your Claude plan again for explanations you ask for'
+            : ''),
+        label: `Turn on ${listWords(names)}`,
+        patch,
+      };
+    }
+    if (!p.labelling || this.canLabel(p)) return undefined;
+    const notice = 'Event labelling is on, but no AI app that labels events is switched on';
+    // Outside cloud mode Ollama labels on this computer, at no cost. In cloud
+    // mode each labeller needs a key or a subscription, so the user picks one.
+    return mode === 'cloud'
+      ? { notice: `${notice}. Pick one under “Labels events no rule matched”` }
+      : { notice, label: 'Label with Ollama', patch: { ollama: true } };
   }
 
   /**
-   * When the AI can't work at all because of the switches, in words: every
-   * app off, or labelling on with nothing that labels. From prefs, setup's
-   * mode and the saved keys only, so it is cheap enough for Home.
+   * Whether anything switched on can label, by the same choice
+   * @vigil/ai's classifier makes: in cloud mode the cloud runner (Claude on
+   * an API key, Codex, the API connection) or Jev; otherwise Ollama, Claude
+   * Haiku on an API key, or Jev.
    */
-  offNotice(): string | undefined {
-    const p = this.prefs();
-    const mode = this.o.mode();
-    if (PROVIDER_PREFS.every((k) => !p[k]))
-      return 'Every AI app is switched off, so new alerts aren’t explained and events aren’t labelled';
-    if (!p.labelling) return undefined;
+  private canLabel(p: AiPrefs): boolean {
+    const mode = this.o.mode() ?? 'both';
     const saved = this.o.keys.list();
-    const cloud = mode !== 'local';
-    const canLabel =
-      (p.ollama && mode !== 'cloud') ||
-      (cloud && p.claude && !!saved.anthropic) ||
-      (cloud && p.jev && (!!saved.typesafe || (p.api && !!saved.openrouter)));
-    return canLabel
-      ? undefined
-      : 'Event labelling is on, but no AI app that labels events is switched on';
+    const haiku = mode !== 'local' && p.claude && !!saved.anthropic;
+    const jev = mode !== 'local' && p.jev && (!!saved.typesafe || (p.api && !!saved.openrouter));
+    if (mode === 'cloud') return haiku || jev || p.codex || (p.api && !!this.apiConnection());
+    return p.ollama || haiku || jev;
+  }
+
+  offNotice(): string | undefined {
+    return this.offFix()?.notice;
+  }
+
+  /** The user's button under the notice (Settings › AI): makes exactly the change it names. */
+  turnBackOn(): AiView['prefs'] {
+    const patch = this.offFix()?.patch;
+    return patch ? this.setPrefs(patch) : this.prefs();
   }
 
   /** The OpenAI-style API connection, from whichever key the user saved. */
@@ -469,7 +500,7 @@ export class AiBridge extends EventEmitter<{
       ...(api ? { api: { name: api.name, last4: api.last4 } } : {}),
       anthropicKey: !!saved.anthropic,
       jevVia,
-      ...(this.offNotice() ? { off: this.offNotice()! } : {}),
+      ...offView(this.offFix()),
       checkedAt: this.now(),
     };
   }

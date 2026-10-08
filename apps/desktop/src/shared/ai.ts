@@ -94,6 +94,8 @@ export interface AiView {
   jevVia: 'openrouter' | 'typesafe' | null;
   /** Set when the switches leave the AI unable to work (AiBridge.offNotice). */
   off?: string;
+  /** What the button under that notice switches on, when one change fixes it. */
+  offAction?: string;
   checkedAt: number;
 }
 
