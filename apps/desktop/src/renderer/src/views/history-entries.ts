@@ -1,4 +1,6 @@
 import type { ActionRecord, Alert } from '@vigil/core';
+import { responseProvenance } from '../decision';
+import { simulatedNote } from '../format';
 
 /** How far back History looks. Older detail stays under Advanced › Activity. */
 export const DAYS = 30;
@@ -8,11 +10,26 @@ export type Entry =
   | { kind: 'alert'; at: number; alert: Alert; actions: ActionRecord[] }
   | { kind: 'action'; at: number; record: ActionRecord };
 
-/** What happened to a handled alert, in one short sentence. */
-export function outcome(a: Alert): string {
-  if (a.containment === 'active') return 'Still blocked';
+/**
+ * What happened to a handled alert, in one short sentence. Worded from what
+ * its actions really did (responseProvenance, as the popup is), so a
+ * simulated or unrecorded block is never told as a real one.
+ */
+export function outcome(a: Alert, actions: readonly ActionRecord[]): string {
+  const response = responseProvenance(actions);
+  const note = simulatedNote(response);
+  if (a.containment === 'active') {
+    if (response === 'real') return 'Still blocked';
+    if (response === 'simulated') return 'Would have been blocked (simulated)';
+    if (response === 'mixed') return 'Still blocked (partly simulated)';
+    return 'Vigil acted (may have been simulated)';
+  }
   const v = a.decision?.verdict;
-  if (v === 'malicious') return 'You kept it blocked';
+  if (v === 'malicious') {
+    if (response === 'real') return 'You kept it blocked';
+    if (response === 'mixed') return 'You kept it blocked (partly simulated)';
+    return `You marked it malicious${note ? ` (${note})` : ''}`;
+  }
   if (v === 'benign' || v === 'expected') {
     return a.containment === 'released' ? 'You allowed it' : 'You marked it fine';
   }
@@ -72,7 +89,7 @@ export function filterEntries(
             e.alert.summary,
             e.alert.subject?.label ?? '',
             e.alert.subject?.path ?? '',
-            outcome(e.alert),
+            outcome(e.alert, e.actions),
             ...e.actions.map(describe),
           ]
         : [describe(e.record), e.record.reason]

@@ -214,9 +214,11 @@ export class VigilCore {
    * "Those were me" on the Noticed list. Only alerts that are still Noticed
    * (shared/attention.ts) are cleared, so this can never release a block or
    * dismiss something that asked for a decision. It doesn't teach the rules
-   * either: one tap on a pile shouldn't quietly turn a rule off.
+   * either: one tap on a pile shouldn't quietly turn a rule off. With
+   * `upTo`, an alert last seen after it is left too, checked again just
+   * before each one is cleared, so a repeat folded in mid-clear keeps it.
    */
-  async clearNoticed(ids: readonly string[]): Promise<number> {
+  async clearNoticed(ids: readonly string[], upTo?: number): Promise<number> {
     let cleared = 0;
     for (const id of new Set(ids)) {
       const alert = this.store.getAlert(id);
@@ -224,6 +226,7 @@ export class VigilCore {
       // for a look of its own, so a bulk tap never quietly expires a suggestion.
       if (!alert || !isNoticed(alert) || !untouched(alert)) continue;
       if (this.store.hasPendingProposal(id)) continue;
+      if (upTo !== undefined && (alert.repeats?.lastAt ?? alert.createdAt) > upTo) continue;
       await this.alerts.decide(id, {
         verdict: 'expected',
         release: false,
@@ -245,7 +248,7 @@ export class VigilCore {
       .listAlerts({ status: 'open', limit: -1 })
       .filter((a) => isNoticed(a) && untouched(a) && (a.repeats?.lastAt ?? a.createdAt) <= at)
       .map((a) => a.id);
-    return this.clearNoticed(ids);
+    return this.clearNoticed(ids, at);
   }
 
   eventStats(): EventStats {

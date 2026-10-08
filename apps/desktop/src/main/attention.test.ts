@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { Action, Alert } from '@vigil/core';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { isNoticed, needsDecision } from '../shared/attention.js';
 import { Store } from './db/store.js';
 import { DryRunExecutor } from './executor.js';
@@ -148,6 +148,24 @@ describe('VigilCore', () => {
     expect(await core.clearNoticedUpTo(opened)).toBe(0);
     expect(store.getAlert(first.id)?.decision).toBeUndefined();
     expect(await core.clearNoticedUpTo(now)).toBe(1);
+  });
+
+  it('leaves an alert whose repeat arrives while the bulk clear runs', async () => {
+    const { core, store } = setup();
+    const repeats = (lastAt: number) => ({ key: 'k', count: 1, lastAt });
+    store.saveAlert(alert({ id: 'a', createdAt: 1, repeats: repeats(1) }));
+    store.saveAlert(alert({ id: 'b', createdAt: 2, repeats: repeats(2) }));
+    const decide = core.alerts.decide.bind(core.alerts);
+    vi.spyOn(core.alerts, 'decide').mockImplementation(async (id, input) => {
+      const out = await decide(id, input);
+      // The other one repeats after the cut-off while this decision lands.
+      const other = store.getAlert(id === 'a' ? 'b' : 'a')!;
+      if (!other.decision) store.saveAlert({ ...other, repeats: { ...repeats(500), count: 2 } });
+      return out;
+    });
+    expect(await core.clearNoticedUpTo(300)).toBe(1);
+    expect(['a', 'b'].filter((id) => store.getAlert(id)?.decision)).toHaveLength(1);
+    expect(core.status()).toMatchObject({ noticed: 1 });
   });
 
   it('counts exactly as needsDecision and piles do', () => {

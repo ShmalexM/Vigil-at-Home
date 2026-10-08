@@ -1,6 +1,6 @@
 import type { HelperOutcome } from '../../shared/ipc';
 import type { Action, ActionRecord, Alert, SensorEvent, Severity } from '@vigil/core';
-import type { ResponseProvenance } from './decision';
+import { provenanceLabel, type ResponseProvenance } from './decision';
 
 export const severityLabel: Record<Severity, string> = {
   critical: 'Critical',
@@ -92,11 +92,13 @@ function santaNoun(t: string): string {
 /** Past tense for the log. */
 export function describeRecord(r: ActionRecord): string {
   const what = describeAction(r.action);
+  // The same mark the popup shows, so a simulation never reads as done for real.
+  const mark = provenanceLabel(r)?.toLowerCase();
   switch (r.status) {
     case 'done':
-      return what;
+      return mark ? `${what} (${mark})` : what;
     case 'undone':
-      return `${what} (undone)`;
+      return `${what} (undone${mark ? `, ${mark}` : ''})`;
     case 'pending':
       return `${what}…`;
     case 'denied':
@@ -138,6 +140,23 @@ export function describeEvent(e: SensorEvent): string {
       // `#socket` is Vigil's own stand-in, on the alert it raises when its agent socket is taken.
       if (e.tool === '#socket') return 'Another program took Vigil’s agent socket';
       return `${{ 'claude-code': 'Claude Code' }[e.agent.host]} asked to use ${e.tool}`;
+  }
+}
+
+/**
+ * How much of a response was only simulated, for a chip or after an
+ * outcome; undefined when all of it was real or nothing went through.
+ */
+export function simulatedNote(response: ResponseProvenance | undefined): string | undefined {
+  switch (response) {
+    case 'simulated':
+      return 'simulated';
+    case 'mixed':
+      return 'partly simulated';
+    case 'unknown':
+      return 'may have been simulated';
+    default:
+      return undefined;
   }
 }
 
