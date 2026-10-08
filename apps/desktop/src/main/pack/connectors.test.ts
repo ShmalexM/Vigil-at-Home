@@ -35,14 +35,19 @@ afterEach(async () => {
 });
 
 describe('connectors', () => {
-  it('closes a server that finishes connecting after it was switched off', async () => {
-    let finish: (c: unknown) => void = () => undefined;
-    let closed = false;
+  it('stops a server still connecting when it is switched off, and untags it once', async () => {
+    let aborted = false;
     const spawned: Array<[number, boolean]> = [];
     const { c } = hub({
-      connect: (_r, _s, onPid) => {
+      // A server stuck in its handshake: it only ends when told to.
+      connect: (_r, _s, onPid, signal) => {
         onPid(4242);
-        return new Promise((res) => (finish = res)) as never;
+        return new Promise((_res, rej) =>
+          signal.addEventListener('abort', () => {
+            aborted = true;
+            rej(new Error('closed'));
+          }),
+        );
       },
       spawned: (pid, running) => spawned.push([pid, running]),
     });
@@ -51,14 +56,29 @@ describe('connectors', () => {
     const listing = c.tools('slow');
     await new Promise((r) => setTimeout(r, 0));
     c.setEnabled('slow', false);
-    finish({ close: async () => void (closed = true) });
-    await expect(listing).rejects.toThrow('switched off');
-    expect(closed).toBe(true);
-    // Tagged until it really closed, and untagged once.
+    await expect(listing).rejects.toThrow();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(aborted).toBe(true);
     expect(spawned).toEqual([
       [4242, true],
       [4242, false],
     ]);
+  });
+
+  it('closes a server that finishes connecting after it was removed', async () => {
+    let finish: (c: unknown) => void = () => undefined;
+    let closed = false;
+    const { c } = hub({
+      connect: () => new Promise((res) => (finish = res)) as never,
+    });
+    open.push(c);
+    c.add({ kind: 'stdio', name: 'Slow', command: process.execPath, args: [server] });
+    const listing = c.tools('slow');
+    await new Promise((r) => setTimeout(r, 0));
+    c.remove('slow');
+    finish({ close: async () => void (closed = true) });
+    await expect(listing).rejects.toThrow('switched off');
+    expect(closed).toBe(true);
   });
 
   it('lists a stdio server’s tools, with its read-only hints, and calls them', async () => {

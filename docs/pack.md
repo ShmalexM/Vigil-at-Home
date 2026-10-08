@@ -20,11 +20,11 @@ The mode at the top of the page works like a coding agent's permission modes.
 
 Retiring a dog always asks in Let AI decide.
 
-One thing waits in every mode, Full access included: when the Lead dog's
-answer read an alert, an event or a connector, it may not retire a dog or
-point a dog that can change things anywhere (a new job, new tools, a run)
-without your OK. Text in what it read could have been written by anyone, the
-same reason memory changes from such an answer wait on a card.
+Two things wait in every mode, Full access included: handing a dog a tool
+that can change things, and any change from an answer that read an alert, an
+event, a connector, a dog's report or an earlier answer that did. Text in
+what it read could have been written by anyone, the same reason memory
+changes from such an answer wait on a card.
 
 Scheduled runs never stop to ask. Nobody is watching them, so a call that
 would need your OK is skipped, and the dog says in its report what it would
