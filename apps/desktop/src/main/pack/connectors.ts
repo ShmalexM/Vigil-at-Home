@@ -137,7 +137,7 @@ export class Connectors implements ConnectorHub {
     if (input.kind === 'stdio') this.assertNotVigil(input.command);
     const records = this.list();
     if (records.length >= 20) throw new Error('Twenty connectors is the most Vigil keeps');
-    const id = slug(input.name, new Set(records.map((r) => r.id)));
+    const id = newConnectorId(input.name, new Set(records.map((r) => r.id)));
     const secrets =
       input.kind === 'stdio' ? (input.env ?? {}) : input.token ? { token: input.token } : {};
     if (Object.keys(secrets).length > 0) {
@@ -406,16 +406,25 @@ function realOr(path: string): string {
   }
 }
 
-function slug(name: string, taken: Set<string>): string {
+/**
+ * A new connector's id: its name as a slug, then a part that is new each
+ * time (the time in hex and random hex from newId), so an id is never given
+ * twice, even to a connector removed and added again under the same name.
+ * Connectors saved before keep the ids they have.
+ */
+function newConnectorId(name: string, taken: Set<string>): string {
   const base =
     name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '')
-      .slice(0, 30) || 'connector';
-  if (base === 'vigil' || taken.has(base))
-    return `${base.slice(0, 24)}-${newId().slice(-6).toLowerCase()}`;
-  return base;
+      .slice(0, 19)
+      .replace(/-$/, '') || 'connector';
+  for (;;) {
+    const n = newId().toLowerCase();
+    const id = `${base}-${n.slice(0, 12)}${n.slice(16, 24)}`;
+    if (!taken.has(id)) return id;
+  }
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {

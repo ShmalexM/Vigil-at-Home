@@ -46,18 +46,20 @@ describe('connectors', () => {
       args: [server],
       env: { DEMO_TOKEN: 'secret-value-123' },
     });
-    expect(view).toMatchObject({ id: 'demo-issues', secrets: ['DEMO_TOKEN'], enabled: true });
+    expect(view).toMatchObject({ secrets: ['DEMO_TOKEN'], enabled: true });
+    expect(view.id).toMatch(/^demo-issues-[0-9a-f]{20}$/);
+    const id = view.id;
     // The token is in the Keychain-encrypted file, never in plain text.
     expect(readFileSync(join(dir, 'pack-secrets.json'), 'utf8')).not.toContain('secret-value-123');
 
-    const tools = await c.tools('demo-issues');
+    const tools = await c.tools(id);
     expect(tools.map((t) => [t.name, t.readOnlyHint])).toEqual([
       ['list_issues', true],
       ['create_issue', false],
     ]);
     expect(c.view()[0]).toMatchObject({ state: 'connected', tools: 2 });
     // The server got its token through the environment.
-    expect(await c.call('demo-issues', 'create_issue', { repo: 'a/b', title: 'Hi' })).toBe(
+    expect(await c.call(id, 'create_issue', { repo: 'a/b', title: 'Hi' })).toBe(
       'created a/b#2 "Hi" token=set',
     );
 
@@ -86,10 +88,15 @@ describe('connectors', () => {
   it('refuses calls to a switched-off connector and forgets secrets on removal', async () => {
     const { c, dir, records } = hub();
     open.push(c);
-    c.add({ kind: 'http', name: 'Remote', url: 'https://mcp.example.test/mcp', token: 'tok-abc' });
-    c.setEnabled('remote', false);
-    await expect(c.call('remote', 'x', {})).rejects.toThrow('switched off');
-    c.remove('remote');
+    const { id } = c.add({
+      kind: 'http',
+      name: 'Remote',
+      url: 'https://mcp.example.test/mcp',
+      token: 'tok-abc',
+    });
+    c.setEnabled(id, false);
+    await expect(c.call(id, 'x', {})).rejects.toThrow('switched off');
+    c.remove(id);
     expect(records()).toEqual([]);
     expect(readFileSync(join(dir, 'pack-secrets.json'), 'utf8')).toBe('{}');
   });
@@ -97,7 +104,40 @@ describe('connectors', () => {
   it('never takes the name vigil', () => {
     const { c } = hub();
     expect(c.add({ kind: 'http', name: 'Vigil', url: 'https://x.test/mcp' }).id).toMatch(
-      /^vigil-[a-z0-9]{6}$/,
+      /^vigil-[0-9a-f]{20}$/,
     );
+  });
+
+  it('never gives an id twice, even to a connector added again under the same name', () => {
+    const { c } = hub();
+    const ids = new Set<string>();
+    for (let i = 0; i < 5; i++) {
+      const { id } = c.add({ kind: 'http', name: 'GitHub', url: `https://x${i}.test/mcp` });
+      expect(id).toMatch(/^github-[0-9a-f]{20}$/);
+      expect(ids.has(id)).toBe(false);
+      ids.add(id);
+      if (i % 2 === 0) c.remove(id);
+    }
+    // A long name still fits the saved shape.
+    const long = c.add({
+      kind: 'http',
+      name: 'A very long connector name indeed',
+      url: 'https://y.test',
+    });
+    expect(long.id.length).toBeLessThanOrEqual(40);
+    expect(long.id).toMatch(/^[a-z0-9-]{1,40}$/);
+  });
+
+  it('keeps the id a connector was saved with', () => {
+    const saved: ConnectorRecord = {
+      id: 'github',
+      name: 'GitHub',
+      kind: 'http',
+      url: 'https://x.test/mcp',
+      secrets: [],
+      enabled: true,
+    };
+    const { c } = hub({ load: () => [saved] });
+    expect(c.view().map((v) => v.id)).toEqual(['github']);
   });
 });

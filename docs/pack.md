@@ -185,6 +185,8 @@ Connectors are your own MCP servers, added on the Pack page under Tools and conn
 
 Each connector tool gets the same four choices as Vigil's own: Follow mode, Always ask, Always allow, Off. A connector tool never counts as read-only, even when its server marks it so: MCP treats those hints as untrusted, and Vigil can't check them. The page shows the server's claim ("Server says it only reads"), but the tool still follows your permission mode, and in Let AI decide a dog given one waits for your OK. Set a tool you trust to Always allow and it is treated as read-only from then on.
 
+Each connector gets an id of its own when you add it: its name as a slug and a part that is new every time, so an id is never given twice, even to a connector you remove and add again under the same name. Tool grants, tool choices and held cards go by that id, so none carry over to a new connector. Connectors added before keep the ids they have. Vigil's rules see a connector call as `mcp__<connector id>__<tool>`.
+
 Connections close after five idle minutes.
 
 A connector runs your program, not Vigil's. Vigil tells Agent watch the server's process id as soon as it starts, so the server and everything it runs are tagged `vigil-connector` in a session of their own (shown as "A pack connector" in Activity), and every Agent watch rule applies to them. They never share the `vigil-self` tag of Vigil's own AI helpers. A command inside Vigil's own app is refused, because Vigil never blocks its own binaries.

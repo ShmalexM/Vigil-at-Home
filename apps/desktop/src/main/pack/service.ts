@@ -1887,7 +1887,7 @@ export class PackService {
 
   // ---------------------------------------------------------------- demo (development builds)
 
-  demoChat(now: number, ids: { bolt: string; pip: string; noodle: string }): void {
+  demoChat(now: number, ids: { bolt: string; pip: string; noodle: string; github?: string }): void {
     const m = (
       min: number,
       from: 'you' | 'lead',
@@ -1955,7 +1955,7 @@ export class PackService {
               id: 'demo-a3',
               kind: 'update',
               dogId: ids.noodle,
-              dog: { tools: ['vigil.search_events', 'github.create_issue'] },
+              dog: { tools: ['vigil.search_events', `${ids.github ?? 'github'}.create_issue`] },
               status: 'pending',
               note: 'It would get a tool that can change things, so it waits for your OK',
             },
