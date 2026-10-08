@@ -25,10 +25,9 @@ const COMPUTED: Record<string, FieldGetter> = {
     'process' in e ? (basename(e.process?.parentPath) ?? e.process?.ancestors?.[0]) : undefined,
   'process.commandLine': (e) => ('process' in e ? e.process?.args?.join(' ') : undefined),
   /**
-   * The command pipes curl or wget into python, perl, ruby or node, and that
-   * interpreter runs what it reads: anything but an inline program on a short
-   * data-reading allowlist (see rules/inline-code.ts). A shell's `-c` command
-   * is read as the shell would; any other process's arguments are joined.
+   * The command runs code it downloads with curl or wget (see
+   * rules/inline-code.ts). A shell's `-c` command is read on its own; any
+   * other process's arguments are joined.
    */
   'process.pipesDownloadIntoCode': (e) => {
     const args = 'process' in e ? e.process?.args : undefined;

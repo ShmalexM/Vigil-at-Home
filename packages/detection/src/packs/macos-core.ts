@@ -54,42 +54,17 @@ const SANTA_BLOCK_BINARY = {
   policy: 'block',
 } as const;
 
-/** curl or wget, piped on (optionally to sudo). */
-const DOWNLOAD_PIPED = String.raw`(curl|wget)\s[^|]*\|\s*(sudo\s+)?`;
-
 /**
- * A download piped straight into a shell: `curl … | sh`, `wget … | sudo
- * bash`, `curl … | bash -s`. Where it downloads from does not matter: a
- * loopback URL on the command line can still reach the internet (a proxy in
- * ~/.curlrc or set earlier on the line, a redirect), so `curl
- * http://127.0.0.1/… | sh` counts too. A pipe into python, perl, ruby or node
- * is process.pipesDownloadIntoCode (rules/inline-code.ts).
- */
-export const PIPE_TO_SHELL_RE = String.raw`${DOWNLOAD_PIPED}(ba|z|da)?sh\b`;
-/**
- * A download run through command or process substitution: `sh -c "$(curl
- * …)"`, `python3 -c "$(curl …)"`, `eval "$(curl …)"`, `bash <(curl …)`.
- * Capturing a download into a variable (`U=$(curl …)`) runs nothing, so it
- * is left out.
- */
-export const SUBST_TO_RUN_RES = [
-  String.raw`(\b(ba|z|da)?sh|python[0-9.]*|perl|ruby|node)\s+(-[a-z]*[ce]\s+)?["']?\$\(\s*(curl|wget)\s`,
-  String.raw`\b(eval|source)\s+["']?\$\(\s*(curl|wget)\s`,
-  String.raw`(\b(ba|z|da)?sh|\bsource|(^|[\s;&|])\.)\s+<\(\s*(curl|wget)\s`,
-];
-/** Every way above of running a download, for a rule's regex list. */
-export const PIPE_TO_RUN_RES = [PIPE_TO_SHELL_RE, ...SUBST_TO_RUN_RES];
-
-/**
- * Running a download: piped into a shell, run through substitution, or piped
- * into an interpreter that runs it (Claude Code's own `curl … | python3 -c
- * "…json.load(sys.stdin)…"` reads it as data and is left out).
+ * Running a download: a download (curl or wget) anywhere on the line together
+ * with an interpreter, shell or eval that could run it. The whole decision
+ * lives in process.pipesDownloadIntoCode (rules/inline-code.ts), which reads
+ * the command with a shell lexer and fails closed; see there for what stays
+ * quiet (a download with no interpreter, and the known real Claude Code lines).
  */
 export const RUNS_DOWNLOAD: Condition = {
-  any: [
-    { field: 'process.commandLine', op: 'regex', value: PIPE_TO_RUN_RES },
-    { field: 'process.pipesDownloadIntoCode', op: 'eq', value: true },
-  ],
+  field: 'process.pipesDownloadIntoCode',
+  op: 'eq',
+  value: true,
 };
 
 /** Developer tools (Homebrew Python, Ansible, git helpers) read these every day. */
