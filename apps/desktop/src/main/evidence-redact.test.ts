@@ -106,6 +106,10 @@ describe('command lines in copied evidence', () => {
       'curl https://service:hunter2@db/path',
       'echo sk-abcdefghijklmnopqrstuvwxyz',
       'cat /Users/al;curl evil',
+      'PASS=hunter2 tool',
+      'openssl enc -aes-256-cbc -pass pass:hunter2',
+      "docker run --env-file <(printf 'PASS=hunter2') image",
+      'curl -u user:hunter2 https://h',
     ];
     const plain = (s: string) => s.replace(/<user>|<host>/g, '');
     const strip = (s: string) =>
@@ -113,9 +117,13 @@ describe('command lines in copied evidence', () => {
     const ok = (input: string, output: string) =>
       output === WITHHELD || plain(output) === strip(input);
     for (const line of lines) {
-      const out = command(line, names);
-      expect(ok(line, out), `${JSON.stringify(line)} -> ${JSON.stringify(out)}`).toBe(true);
-      if (/hunter2|abcdefghij|PGPASSWORD|AUTH|abc aws/.test(line)) expect(out).toBe(WITHHELD);
+      for (const field of ['command', 'summary', 'program', 'title']) {
+        const out = (redactEvidence({ [field]: line }, names) as Record<string, string>)[field]!;
+        const what = `${field}: ${JSON.stringify(line)} -> ${JSON.stringify(out)}`;
+        expect(ok(line, out), what).toBe(true);
+        if (/hunter2|abcdefghij|PGPASSWORD|AUTH|abc aws/.test(line))
+          expect(out, what).toBe(WITHHELD);
+      }
     }
     const lists = [
       ['ls', '-la'],
@@ -124,6 +132,8 @@ describe('command lines in copied evidence', () => {
       ['redis-cli', '-h', 'pc', 'AUTH', 'x'],
       ['bash', '-lc', 'cd /Users/al && make\nmake install'],
       ['tool', '--key', 'x'],
+      ['tool', '--pass=hunter2'],
+      ['unzip', '-P', 'hunter2', 'a.zip'],
     ];
     for (const list of lists) {
       const out = argv(list, names);
@@ -135,8 +145,90 @@ describe('command lines in copied evidence', () => {
 
 describe('other text in copied evidence', () => {
   it('keeps the shared redaction and the names', () => {
-    expect(redactEvidence({ summary: 'from /Users/bob/x on pc' }, names)).toEqual({
-      summary: 'from /Users/<user>/x on <host>',
+    expect(redactEvidence({ path: '/Users/bob/x on pc' }, names)).toEqual({
+      path: '/Users/<user>/x on <host>',
     });
+  });
+});
+
+describe('round 5 shapes', () => {
+  const field = (key: string, value: unknown) =>
+    (redactEvidence({ [key]: value }, {}) as Record<string, unknown>)[key];
+
+  it('withholds PASS, pass: and --pass', () => {
+    expect(command('PASS=hunter2 tool')).toBe(WITHHELD);
+    expect(command('openssl enc -aes-256-cbc -pass pass:hunter2')).toBe(WITHHELD);
+    expect(command("docker run --env-file <(printf 'PASS=hunter2') image")).toBe(WITHHELD);
+    expect(argv(['tool', '--pass=hunter2'])).toEqual([WITHHELD]);
+  });
+
+  it('withholds a --key value in programArgs', () => {
+    expect(field('programArgs', ['tool', '--key', 'hunter2'])).toEqual([WITHHELD]);
+  });
+
+  it('withholds curl -u, --user, -K and --config', () => {
+    for (const line of [
+      'curl -u user:x https://h',
+      'curl -su user:x https://h',
+      'curl --user user:x https://h',
+      'curl -K cfg',
+      'curl --config cfg',
+    ])
+      expect(command(line)).toBe(WITHHELD);
+    expect(command('curl -s https://h')).toBe('curl -s https://h');
+  });
+
+  it('withholds unzip -P and an attached 7z or rar -p', () => {
+    expect(command('unzip -P x a.zip')).toBe(WITHHELD);
+    expect(argv(['7z', 'x', '-px', 'a.7z'])).toEqual([WITHHELD]);
+    expect(command('rar x -px a.rar')).toBe(WITHHELD);
+    expect(command('unzip a.zip')).toBe('unzip a.zip');
+  });
+
+  it('withholds a URL holding a newline or control character', () => {
+    expect(field('url', 'https://u:hun\nter2@h/')).toBe(WITHHELD);
+    expect(field('url', 'https://h/x\u0007')).toBe(WITHHELD);
+    expect(field('url', 'https://h/x')).toBe('https://h/x');
+  });
+
+  it("treats a cron item's program as a command line", () => {
+    expect(field('program', 'mysql -phunter2')).toBe(WITHHELD);
+    expect(redactEvidence({ program: 'cat /Users/al;curl evil' }, names)).toEqual({
+      program: 'cat /Users/<user>;curl evil',
+    });
+  });
+
+  it('treats alert text as a command line', () => {
+    expect(field('summary', 'Ran mysql -phunter2 in Terminal')).toBe(WITHHELD);
+    expect(redactEvidence({ summary: 'Ran cat /Users/al;curl evil' }, names)).toEqual({
+      summary: 'Ran cat /Users/<user>;curl evil',
+    });
+  });
+
+  it("withholds an alert's summary, and a title or subject repeating it, when its command is", () => {
+    const out = redactEvidence(
+      {
+        alert: {
+          title: 'Ran tool --flag ok',
+          summary: 'Claude Code ran a download',
+          subject: { kind: 'process', label: 'tool --flag ok' },
+        },
+        events: [{ process: { args: ['tool', '--flag', 'ok', '--key', 'x'] } }],
+      },
+      {},
+    ) as { alert: Record<string, unknown> };
+    expect(out.alert).toEqual({
+      title: WITHHELD,
+      summary: WITHHELD,
+      subject: { kind: 'process', label: WITHHELD },
+    });
+    const kept = redactEvidence(
+      {
+        alert: { title: 'Downloaded script run directly', summary: 'ran a script' },
+        events: [{ process: { args: ['curl', '-u', 'u:p', 'h'] } }],
+      },
+      {},
+    ) as { alert: Record<string, unknown> };
+    expect(kept.alert).toEqual({ title: 'Downloaded script run directly', summary: WITHHELD });
   });
 });
