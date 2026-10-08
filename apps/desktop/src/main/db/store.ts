@@ -160,6 +160,8 @@ export class Store {
     { events: number; matches: number; lastAt: number; asks: number; denies: number }
   >();
   private txDepth = 0;
+  /** Bumped on every alert write (and rollback), so callers can cache what they derive from alerts. */
+  private alertWrites = 0;
 
   constructor(private readonly db: DatabaseSync) {
     db.exec(`
@@ -216,6 +218,7 @@ export class Store {
       return out;
     } catch (err) {
       if (this.db.isTransaction) {
+        this.alertWrites++;
         this.db.exec(`ROLLBACK TO ${name}`);
         this.db.exec(`RELEASE ${name}`);
       }
@@ -572,13 +575,20 @@ export class Store {
          ON CONFLICT (id) DO UPDATE SET updated_at = excluded.updated_at, status = excluded.status,
            severity = excluded.severity, body = excluded.body`,
     ).run(a.id, a.createdAt, a.updatedAt, a.status, a.severity, a.ruleId, JSON.stringify(a));
+    this.alertWrites++;
     return a;
+  }
+
+  /** Changes whenever any alert is written. */
+  get alertsVersion(): number {
+    return this.alertWrites;
   }
 
   getAlert(id: string): Alert | undefined {
     return this.one(Alert, 'SELECT body FROM alerts WHERE id = ?', id);
   }
 
+  /** `limit` defaults to the newest 200; -1 means all of them. */
   listAlerts(opts: { status?: Alert['status']; limit?: number } = {}): Alert[] {
     const limit = opts.limit ?? 200;
     return opts.status

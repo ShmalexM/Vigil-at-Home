@@ -62,6 +62,20 @@ describe('VigilCore', () => {
     return { core, store, executor };
   }
 
+  it('counts every open alert in the status, not just the newest 200', () => {
+    const { core, store } = setup();
+    for (let i = 0; i < 250; i++) {
+      store.saveAlert(alert({ id: `n${i}`, createdAt: i, updatedAt: i }));
+      store.saveAlert(
+        alert({ id: `h${i}`, createdAt: 1000 + i, updatedAt: 1000 + i, severity: 'high' }),
+      );
+    }
+    expect(core.status()).toMatchObject({ needsYou: 250, noticed: 250 });
+    // Cached until an alert changes, then counted again.
+    store.saveAlert(alert({ id: 'n0', status: 'resolved' }));
+    expect(core.status()).toMatchObject({ needsYou: 250, noticed: 249 });
+  });
+
   it('clears only Noticed alerts and never releases a block', async () => {
     const { core, executor } = setup();
     const noticed = await core.alerts.raise({

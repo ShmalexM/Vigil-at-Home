@@ -51,11 +51,14 @@ export function computeStatus(
     }
   }
   const level: Level = poor.length ? 'poor' : fair.length ? 'fair' : 'good';
+  return { level, ...alertCounts(openAlerts), reasons: [...poor, ...fair] };
+}
+
+/** Needs you and Noticed, counted over every open alert. */
+export function alertCounts(openAlerts: readonly Alert[]): Pick<Status, 'needsYou' | 'noticed'> {
   return {
-    level,
     // A pile is one decision, so it counts once.
     needsYou: pileUp(openAlerts.filter(needsDecision)).length,
     noticed: openAlerts.filter(isNoticed).length,
-    reasons: [...poor, ...fair],
   };
 }

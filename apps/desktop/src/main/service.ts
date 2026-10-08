@@ -29,7 +29,7 @@ import { RuleEditing } from './rule-editing.js';
 import type { ActionExecutor } from './executor.js';
 import { Scheduler } from './scheduler.js';
 import { SensorRegistry } from './sensors.js';
-import { computeStatus } from './status.js';
+import { alertCounts, computeStatus } from './status.js';
 import { TEST_RULE } from './test-alert.js';
 import { WORTH_A_LOOK_RULE } from './worth-a-look.js';
 import { UsageService } from './usage.js';
@@ -237,8 +237,26 @@ export class VigilCore {
     };
   }
 
+  /** Needs you and Noticed, recounted only when an alert was written. */
+  private counted?: { version: number; counts: ReturnType<typeof alertCounts> };
+
+  /**
+   * Counts every open alert, not just the newest 200 the lists load, so Home,
+   * the menu bar and the badge agree however many have piled up.
+   */
+  private openAlertCounts(): ReturnType<typeof alertCounts> {
+    const version = this.store.alertsVersion;
+    if (this.counted?.version !== version) {
+      this.counted = {
+        version,
+        counts: alertCounts(this.store.listAlerts({ status: 'open', limit: -1 })),
+      };
+    }
+    return this.counted.counts;
+  }
+
   status(): StatusView {
-    const s = computeStatus(this.store.listAlerts({ status: 'open' }), this.sensors.list());
+    const s = { ...computeStatus([], this.sensors.list()), ...this.openAlertCounts() };
     const today = startOfDay(this.now());
     const alertView = this.alertView();
     return {
