@@ -210,8 +210,8 @@ export class Connectors implements ConnectorHub {
       }
       cursor = page.nextCursor;
     } while (cursor && out.length < MAX_TOOLS);
-    const l = this.live.get(id)!;
-    l.tools = out;
+    const l = this.live.get(id);
+    if (l) l.tools = out;
     this.o.onChange();
     return out;
   }
@@ -256,21 +256,44 @@ export class Connectors implements ConnectorHub {
       try {
         if (record.kind === 'stdio') this.assertNotVigil(record.command!);
         const secrets = this.secretsFor(id);
-        const onPid = (pid: number) => {
-          live.pid = pid;
-          this.o.spawned?.(pid, true);
+        let pid: number | undefined;
+        const onPid = (p: number) => {
+          pid = p;
+          live.pid = p;
+          this.o.spawned?.(p, true);
         };
-        const client = await withTimeout(
-          (this.o.connect ?? connectTo)(record, secrets, onPid),
-          CONNECT_MS,
-          `${record.name} didn’t answer`,
-        );
+        const ended = () => {
+          if (pid === undefined) return;
+          this.o.spawned?.(pid, false);
+          if (live.pid === pid) delete live.pid;
+        };
+        const pending = (this.o.connect ?? connectTo)(record, secrets, onPid);
+        let client: Client;
+        try {
+          client = await withTimeout(pending, CONNECT_MS, `${record.name} didn’t answer`);
+        } catch (err) {
+          // Giving up doesn't stop the server starting: close it if it still
+          // arrives, and only then stop tagging its process.
+          void pending
+            .then(
+              (c) => c.close(),
+              () => undefined,
+            )
+            .catch(() => undefined)
+            .finally(ended);
+          throw err;
+        }
+        // Switched off or removed while connecting: don't keep a server nobody will close.
+        if (!this.list().find((r) => r.id === id)?.enabled || this.live.get(id) !== live) {
+          await client.close().catch(() => undefined);
+          ended();
+          throw new Error(`${record.name} is switched off`);
+        }
         live.client = client;
         live.state = 'connected';
         delete live.error;
         return client;
       } catch (err) {
-        this.stopped(live);
         live.state = 'error';
         live.error = err instanceof Error ? err.message.slice(0, 300) : String(err);
         throw err;

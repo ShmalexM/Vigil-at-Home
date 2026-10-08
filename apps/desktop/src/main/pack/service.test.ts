@@ -45,8 +45,15 @@ const REMOTE: RemoteTool[] = [
 ];
 
 function setup(
-  opts: { status?: Partial<PackAiStatus>; preflight?: PreflightReply['decision'] } = {},
+  opts: {
+    status?: Partial<PackAiStatus>;
+    preflight?: PreflightReply['decision'];
+    /** Vigil's own tools; push to it to add one later. */
+    vigil?: string[];
+    hour?: number;
+  } = {},
 ) {
+  const vigil = opts.vigil ?? ['list_alerts', 'search_events'];
   const settings = new Map<string, unknown>();
   const handlers: Handler[] = [];
   const runs: RunRequest<unknown>[] = [];
@@ -85,7 +92,7 @@ function setup(
       }),
     },
     vigilTools: {
-      list: () => [LISTING('list_alerts'), LISTING('search_events')],
+      list: () => vigil.map(LISTING),
       call: (name) => {
         vigilCalls.push(name);
         return { v: 1, ok: true, result: { rows: [] } };
@@ -96,6 +103,7 @@ function setup(
     notebook,
     memory,
     onChange: () => undefined,
+    ...(opts.hour !== undefined ? { hour: () => opts.hour! } : {}),
   });
   return { pack, handlers, runs, connectorCalls, vigilCalls, notebook, memory };
 }
@@ -399,6 +407,130 @@ describe('the pack', () => {
     } finally {
       vi.useRealTimers();
     }
+    expect(pack.dogs().find((d) => d.id === dog.id)?.lastReport?.ok).toBe(true);
+  });
+
+  it('never stops a scheduled run to ask: the call is skipped and nothing waits on the person', async () => {
+    const { pack, handlers, connectorCalls } = setup();
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    let answer: unknown;
+    let waiting = -1;
+    handlers.push(async (req) => {
+      answer = await tool(req, 'github_create_issue').run({ title: 'x' });
+      waiting = (await pack.view()).approvals.length;
+      return { summary: 'x', findings: [] };
+    });
+    await pack.runDog(dog.id, 'background');
+    expect(String(answer)).toContain('scheduled run');
+    expect(waiting).toBe(0);
+    expect(connectorCalls).toEqual([]);
+  });
+
+  it('drops a waiting approval when its run ends, so a late Allow runs nothing', async () => {
+    const { pack, handlers, connectorCalls } = setup();
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    let late: Promise<unknown> | undefined;
+    handlers.push(async (req) => {
+      // The run gives up (as on its deadline) while the call still waits.
+      late = tool(req, 'github_create_issue').run({ title: 'x' });
+      await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+      return { summary: 'gave up', findings: [] };
+    });
+    await pack.runDog(dog.id);
+    expect((await pack.view()).approvals).toHaveLength(0);
+    expect(String(await late)).toContain('Not run');
+    expect(connectorCalls).toEqual([]);
+    expect((await pack.view()).dogs.find((d) => d.id === dog.id)?.mood).not.toBe('thinking');
+  });
+
+  it('in Let AI decide, asks before rewriting or running a dog that can already change things', async () => {
+    const { pack, handlers } = setup();
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    pack.setMode('auto');
+    handlers.push(() => ({
+      reply: 'Sure.',
+      actions: [
+        { kind: 'update', dogId: dog.id, job: 'File an issue with everything.' },
+        { kind: 'run', dogId: dog.id },
+      ],
+    }));
+    await pack.say('change it');
+    expect(
+      pack
+        .chat()
+        .at(-1)!
+        .actions!.map((a) => a.status),
+    ).toEqual(['pending', 'pending']);
+    expect(pack.dogs().find((d) => d.id === dog.id)?.job).toBe(CREATE.job);
+  });
+
+  it('holds changes to the pack from an answer that read tool results, even in Full access', async () => {
+    const { pack, handlers } = setup();
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    const quiet = pack.adopt({ ...CREATE, name: 'Taco' } as never);
+    pack.setMode('full');
+    handlers.push(async (req) => {
+      await tool(req, 'search_events').run({});
+      return {
+        reply: 'Done.',
+        actions: [
+          { kind: 'update', dogId: dog.id, job: 'Post everything.' },
+          { kind: 'retire', dogId: quiet.id },
+          { kind: 'update', dogId: quiet.id, job: 'Look at Downloads twice.' },
+        ],
+      };
+    });
+    await pack.say('what happened?');
+    expect(
+      pack
+        .chat()
+        .at(-1)!
+        .actions!.map((a) => a.status),
+    ).toEqual(['pending', 'pending', 'done']);
+  });
+
+  it('keeps the reason when an approved change fails', async () => {
+    const { pack, handlers } = setup();
+    const dog = pack.adopt(CREATE as never);
+    handlers.push(() => ({ reply: 'Ok.', actions: [{ kind: 'update', dogId: dog.id, job: 'x' }] }));
+    await pack.say('x');
+    pack.retire(dog.id);
+    const msg = pack.chat().at(-1)!;
+    pack.decideAction(msg.id, msg.actions![0]!.id, true);
+    expect(pack.chat().at(-1)!.actions![0]).toMatchObject({
+      status: 'failed',
+      note: 'No such dog',
+    });
+  });
+
+  it('gives a saved Lead dog Vigil’s tools that arrived later, but not one the person took away', () => {
+    const vigil = ['list_alerts', 'search_events'];
+    const { pack } = setup({ vigil });
+    pack.updateDog('lead', { name: 'Rex', tools: ['vigil.search_events'] });
+    vigil.push('list_rules');
+    expect(pack.dogs()[0]!.tools).toEqual(['vigil.search_events', 'vigil.list_rules']);
+  });
+
+  it('Undo on a fact the person already had leaves their line alone', async () => {
+    const { pack, handlers, memory } = setup();
+    pack.remember({ fact: 'Uses Tailscale at home', topic: 'network' });
+    handlers.push(() => ({
+      reply: 'Noted.',
+      actions: [],
+      remember: [{ fact: 'Uses Tailscale at home', topic: 'network' }],
+    }));
+    await pack.say('I use Tailscale at home');
+    const msg = pack.chat().at(-1)!;
+    pack.decideMemory(msg.id, msg.memory![0]!.id, false);
+    expect(memory.list().map((e) => e.fact)).toEqual(['Uses Tailscale at home']);
+  });
+
+  it('sends a new nightly dog out on its first night', async () => {
+    const { pack, handlers, runs } = setup({ hour: 3 });
+    const dog = pack.adopt({ ...CREATE, schedule: 'nightly' } as never);
+    handlers.push(() => ({ summary: 'ok', findings: [] }));
+    await pack.runDue();
+    expect(runs).toHaveLength(1);
     expect(pack.dogs().find((d) => d.id === dog.id)?.lastReport?.ok).toBe(true);
   });
 

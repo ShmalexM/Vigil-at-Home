@@ -57,6 +57,8 @@ const KEY_VOICE = 'pack.voice';
 const KEY_DOGS = 'pack.dogs';
 const KEY_CHAT = 'pack.chat';
 const KEY_CHOICES = 'pack.toolChoices';
+/** Vigil's own tools as of the last save, so the Lead dog gets ones added later. */
+const KEY_LEAD_SEEN = 'pack.leadToolsSeen';
 
 const MAX_PACK = 12;
 const MAX_CHAT = 200;
@@ -211,7 +213,7 @@ const LeadAnswer = z.object({
   remember: z
     .array(
       z.object({
-        fact: z.string().max(300),
+        fact: z.string().max(200),
         topic: MemoryTopic,
         replaces: z.string().max(64).optional(),
       }),
@@ -295,6 +297,17 @@ interface Runtime {
   until?: number;
 }
 
+/** One chat answer or one job run, as its tool calls see it. */
+interface RunCtx {
+  requestedByUser: boolean;
+  /** A scheduled run nobody is watching: it never waits on the person. */
+  background: boolean;
+  used: string[];
+  /** Set when the run has ended, so a late tool call or answer goes nowhere. */
+  over: boolean;
+  approvals: Set<string>;
+}
+
 interface PendingApproval {
   view: ToolApproval;
   resolve: (d: ToolDecision) => void;
@@ -357,8 +370,9 @@ export class PackService {
     // The Lead dog and the helpers are always there; the user can rename them.
     const out: Dog[] = [];
     const at = this.now();
+    const savedLead = saved.find((d) => d.role === 'lead');
     out.push(
-      saved.find((d) => d.role === 'lead') ?? {
+      (savedLead && this.withNewVigilTools(savedLead)) ?? {
         id: 'lead',
         role: 'lead',
         name: 'Scout',
@@ -372,8 +386,10 @@ export class PackService {
       },
     );
     for (const [id, h] of Object.entries(HELPERS) as [HelperId, (typeof HELPERS)[HelperId]][]) {
+      const kept = saved.find((d) => d.role === 'helper' && d.helper === id);
       out.push(
-        saved.find((d) => d.role === 'helper' && d.helper === id) ?? {
+        // A helper's job is fixed, so its wording follows the app, not the save.
+        (kept && { ...kept, job: h.job }) ?? {
           id: `helper-${id}`,
           role: 'helper',
           helper: id,
@@ -394,7 +410,29 @@ export class PackService {
 
   private saveDogs(dogs: Dog[]): void {
     this.o.save(KEY_DOGS, dogs);
+    this.o.save(
+      KEY_LEAD_SEEN,
+      this.vigilEntries().map((t) => t.key),
+    );
     this.changed();
+  }
+
+  /**
+   * A saved Lead dog keeps the tools it had, and gets Vigil's own tools that
+   * arrived since (they only read). One the person took away stays away.
+   */
+  private withNewVigilTools(lead: Dog): Dog {
+    const seen = new Set(
+      this.o.load(
+        KEY_LEAD_SEEN,
+        z.array(z.string()),
+        lead.tools.filter((k) => k.startsWith('vigil.')),
+      ),
+    );
+    const added = this.vigilEntries()
+      .map((t) => t.key)
+      .filter((k) => !seen.has(k) && !lead.tools.includes(k));
+    return added.length ? { ...lead, tools: [...lead.tools, ...added] } : lead;
   }
 
   chat(): ChatMessage[] {
@@ -581,7 +619,8 @@ export class PackService {
     this.saveChat([...this.chat(), mine]);
     const lead = this.dogs().find((d) => d.role === 'lead')!;
     this.setMood(lead.id, 'thinking', 'Thinking');
-    const used: string[] = [];
+    const ctx = this.newRun({ requestedByUser: true, background: false });
+    const used = ctx.used;
     try {
       const earlier = this.chat()
         .slice(-CONTEXT_MESSAGES - 1, -1)
@@ -598,7 +637,7 @@ export class PackService {
               }
             : {}),
         }));
-      const tools = this.toolsFor(lead, { requestedByUser: true, used });
+      const tools = this.toolsFor(lead, ctx);
       const memory = this.memoryFor(tools);
       const result = await this.o.ai.run({
         purpose: 'chat',
@@ -659,7 +698,7 @@ export class PackService {
         this.setMood(lead.id, 'error', 'Couldn’t answer', DONE_MS);
         return;
       }
-      const actions = result.value.actions.map((a) => this.consider(a));
+      const actions = result.value.actions.map((a) => this.consider(a, used.length > 0));
       // Text a tool returned could be anyone's, so an answer that used one
       // only proposes memory changes; one from the person's words alone applies them.
       const memoryChanges = this.considerMemory(result.value, used.length > 0, mine.id);
@@ -687,9 +726,25 @@ export class PackService {
       this.setMood(lead.id, 'done', 'Answered', DONE_MS);
       if ([...actions, ...memoryChanges].some((a) => a.status === 'pending'))
         this.setMood(lead.id, 'waiting', 'Waiting on you');
+    } catch (err) {
+      // Never leave the Lead dog thinking with the message unanswered.
+      this.reply({ text: failText('error'), failed: true, used });
+      this.setMood(lead.id, 'error', 'Couldn’t answer', DONE_MS);
+      console.warn('[pack] the Lead dog failed to answer:', err);
     } finally {
+      this.endRun(ctx);
       this.chatting = false;
     }
+  }
+
+  private newRun(o: { requestedByUser: boolean; background: boolean }): RunCtx {
+    return { ...o, used: [], over: false, approvals: new Set() };
+  }
+
+  /** A run is over: tool calls still waiting on the person are refused, and their cards go. */
+  private endRun(ctx: RunCtx): void {
+    ctx.over = true;
+    for (const id of ctx.approvals) this.approvals.get(id)?.resolve('deny');
   }
 
   private reply(m: Omit<ChatMessage, 'id' | 'at' | 'from'>): void {
@@ -699,7 +754,10 @@ export class PackService {
   }
 
   /** Checks one change the Lead dog asked for, then applies it or leaves it for the user. */
-  private consider(a: z.infer<typeof LeadAnswer>['actions'][number]): LeadAction {
+  private consider(
+    a: z.infer<typeof LeadAnswer>['actions'][number],
+    fromTools: boolean,
+  ): LeadAction {
     const action: LeadAction = { id: newId(this.now()), kind: a.kind, status: 'pending' };
     const dogs = this.dogs();
     if (a.kind !== 'create') {
@@ -725,9 +783,20 @@ export class PackService {
     }
     if (Object.keys(dog).length) action.dog = dog;
     const before = action.dogId ? (dogs.find((d) => d.id === action.dogId)?.tools ?? []) : [];
-    const added = (dog.tools ?? []).filter((k) => !before.includes(k));
-    const grantsWrite = added.some((k) => !this.treatedAsReadOnly(k));
-    if (gateAction(this.mode(), a.kind, grantsWrite) === 'ask') {
+    // What the dog holds once this is done: a new job, or a run, for a dog
+    // that can already change things counts the same as handing it the tool.
+    const after = a.kind === 'retire' ? [] : (dog.tools ?? before);
+    const canWrite = after.some((k) => !this.treatedAsReadOnly(k));
+    if (fromTools && (canWrite || a.kind === 'retire')) {
+      // The answer read alerts, events or connectors, whose text anyone could
+      // have written: it may not point a dog that can change things anywhere
+      // without the person, whatever the mode.
+      return {
+        ...action,
+        note: 'This answer read tool results, so this change waits for your OK',
+      };
+    }
+    if (gateAction(this.mode(), a.kind, canWrite) === 'ask') {
       return {
         ...action,
         note:
@@ -735,7 +804,7 @@ export class PackService {
             ? 'Waiting for your OK'
             : a.kind === 'retire'
               ? 'Retiring a dog always waits for your OK'
-              : 'It would get a tool that can change things, so it waits for your OK',
+              : 'The dog has a tool that can change things, so it waits for your OK',
       };
     }
     return this.apply(action);
@@ -774,8 +843,7 @@ export class PackService {
     const action = msg?.actions?.find((a) => a.id === actionId);
     if (!msg || !action || action.status !== 'pending') throw new Error('That request is gone');
     const next = approve ? this.apply(action) : { ...action, status: 'declined' as const };
-    delete next.note;
-    if (next.status === 'failed' && !approve) next.note = 'Failed';
+    if (next.status !== 'failed') delete next.note;
     msg.actions = msg.actions!.map((a) => (a.id === actionId ? next : a));
     this.saveChat(chat);
     this.settleLead();
@@ -900,6 +968,7 @@ export class PackService {
         this.o.memory!.forget(c.entryId);
         return { ...c, status: 'done' };
       }
+      const had = new Set(this.o.memory!.list().map((x) => x.id));
       const e = this.o.memory!.remember(
         { fact: c.fact, topic: c.topic },
         {
@@ -908,6 +977,8 @@ export class PackService {
           ...(c.replaces ? { replaces: c.replaces } : {}),
         },
       );
+      // Already known: it stays the person's line, so Undo here mustn't forget it.
+      if (had.has(e.id)) return { ...c, status: 'done', note: 'Already remembered' };
       return { ...c, entryId: e.id, status: 'done' };
     } catch (err) {
       return { ...c, status: 'failed', note: err instanceof Error ? err.message : String(err) };
@@ -923,9 +994,10 @@ export class PackService {
     if (this.running.has(id)) return undefined;
     this.running.add(id);
     this.setMood(id, 'thinking', 'Getting started');
-    const used: string[] = [];
+    const ctx = this.newRun({ requestedByUser: false, background: urgency === 'background' });
+    const used = ctx.used;
     try {
-      const tools = this.toolsFor(dog, { requestedByUser: false, used });
+      const tools = this.toolsFor(dog, ctx);
       const memory = this.memoryFor(tools);
       const result = await this.o.ai.run({
         purpose: 'analyze',
@@ -957,22 +1029,26 @@ export class PackService {
             provider: result.provider,
           }
         : { at: this.now(), ok: false, summary: failText(result.reason), findings: [] };
-      this.note(
-        {
-          dog: id,
-          kind: 'job',
-          ok: report.ok,
-          ask: dog.job,
-          lookedAt: used,
-          answer: report.summary,
-          reasons: [
-            ...(result.ok ? (result.value.why ?? []) : []),
-            ...report.findings.map((f) => `${f.severity}: ${f.title}`),
-          ],
-          ...(result.ok ? { provider: result.provider } : {}),
-        },
-        result.logId,
-      );
+      // A scheduled run that never reached an AI isn't a run: the card says
+      // why, but the notebook and Today the pack don't count it.
+      const reachedAi = result.ok || !['no_provider', 'quota'].includes(result.reason);
+      if (urgency === 'now' || reachedAi)
+        this.note(
+          {
+            dog: id,
+            kind: 'job',
+            ok: report.ok,
+            ask: dog.job,
+            lookedAt: used,
+            answer: report.summary,
+            reasons: [
+              ...(result.ok ? (result.value.why ?? []) : []),
+              ...report.findings.map((f) => `${f.severity}: ${f.title}`),
+            ],
+            ...(result.ok ? { provider: result.provider } : {}),
+          },
+          result.logId,
+        );
       const dogs = this.dogs();
       if (dogs.some((d) => d.id === id))
         this.saveDogs(dogs.map((d) => (d.id === id ? { ...d, lastReport: report } : d)));
@@ -985,7 +1061,11 @@ export class PackService {
         );
       else this.setMood(id, 'error', 'Couldn’t finish', DONE_MS * 2);
       return report;
+    } catch (err) {
+      this.setMood(id, 'error', 'Couldn’t finish', DONE_MS * 2);
+      throw err;
     } finally {
+      this.endRun(ctx);
       this.running.delete(id);
     }
   }
@@ -997,13 +1077,17 @@ export class PackService {
     const hour = this.o.hour?.() ?? new Date(at).getHours();
     for (const d of this.dogs()) {
       if (d.role !== 'pack' || !d.enabled || d.schedule === 'manual') continue;
-      const last = d.lastReport?.at ?? d.createdAt;
+      const last = d.lastReport;
+      const night = hour >= 1 && hour < 5;
+      // A new dog's first night is its first nightly run, and a run that
+      // failed is tried again an hour later rather than a whole period on.
+      const since = at - (last?.at ?? d.createdAt);
       const due =
-        d.schedule === 'hourly'
-          ? at - last >= HOUR
+        d.schedule === 'hourly' || (last && !last.ok)
+          ? since >= HOUR && (d.schedule !== 'nightly' || night)
           : d.schedule === 'daily'
-            ? at - last >= 24 * HOUR
-            : at - last >= 20 * HOUR && hour >= 1 && hour < 5;
+            ? since >= 24 * HOUR
+            : night && (!last || since >= 20 * HOUR);
       if (due) await this.runDog(d.id, 'background').catch(() => undefined);
     }
   }
@@ -1080,7 +1164,7 @@ export class PackService {
   }
 
   /** The tools one dog may call this run, each wrapped in the gate. */
-  private toolsFor(dog: Dog, ctx: { requestedByUser: boolean; used: string[] }): ReadTool[] {
+  private toolsFor(dog: Dog, ctx: RunCtx): ReadTool[] {
     const out: ReadTool[] = [];
     const taken = new Set<string>();
     for (const key of dog.tools) {
@@ -1109,30 +1193,41 @@ export class PackService {
     dog: Dog,
     t: ToolEntry,
     args: Record<string, unknown>,
-    ctx: { requestedByUser: boolean; used: string[] },
+    ctx: RunCtx,
   ): Promise<unknown> {
+    if (ctx.over) return 'Not run: this run has ended.';
     const argText = clip(JSON.stringify(redactValue(args, {})), 4000);
-    let decision = gateTool({
-      mode: this.mode(),
-      choice: this.choiceOf(t.key),
-      readOnly: t.readOnly,
-      rules: this.rulesFor(t, args),
-    });
+    const gate = () =>
+      gateTool({
+        mode: this.mode(),
+        choice: this.choiceOf(t.key),
+        readOnly: t.readOnly,
+        rules: this.rulesFor(t, args),
+      });
+    let decision = gate();
     if (decision.kind === 'judge') {
       this.setMood(dog.id, 'thinking', `Checking whether ${t.title} is safe`);
       decision = afterJudge(await this.judge(dog, t, argText, ctx.requestedByUser));
+      // The person may have changed the mode, the tool's choice or a rule
+      // while the AI was rating it: that wins over a "low risk".
+      const now = gate();
+      if (decision.kind === 'run' && now.kind !== 'judge') decision = now;
     }
     if (decision.kind === 'deny') return `Not run: ${decision.reason}`;
     if (decision.kind === 'ask') {
-      const answer = await this.askUser(dog, t, argText, decision.why, decision.reason);
-      if (answer === 'deny') {
-        this.setMood(dog.id, 'thinking', 'Carrying on without it');
+      // Nobody is watching a scheduled run: it never stops to ask, so the
+      // pack adds nothing to what needs the person.
+      if (ctx.background)
+        return 'Not run: this call needs the person’s OK, and this is a scheduled run, so it was skipped. Carry on without it and say in a finding what you would have done.';
+      const answer = await this.askUser(dog, t, argText, decision.why, decision.reason, ctx);
+      if (answer === 'deny' || ctx.over) {
+        if (!ctx.over) this.setMood(dog.id, 'thinking', 'Carrying on without it');
         return 'Not run: the person said no to this call. Carry on without it.';
       }
     }
     // A wait for the user or the judge can be long: check again right before
     // the call that nothing has since switched it off or a rule now stops it.
-    const stop = this.recheck(dog, t, args);
+    const stop = ctx.over ? 'this run has ended.' : this.recheck(dog, t, args);
     if (stop) return `Not run: ${stop}`;
     ctx.used.push(t.key);
     const vigil = t.source === 'vigil';
@@ -1150,7 +1245,7 @@ export class PackService {
     } catch (err) {
       return `The tool failed: ${err instanceof Error ? err.message.slice(0, 300) : String(err)}`;
     } finally {
-      this.setMood(dog.id, 'thinking', 'Thinking');
+      if (!ctx.over) this.setMood(dog.id, 'thinking', 'Thinking');
     }
   }
 
@@ -1237,7 +1332,8 @@ export class PackService {
     t: ToolEntry,
     args: string,
     why: ToolApproval['why'],
-    reason?: string,
+    reason: string | undefined,
+    ctx: RunCtx,
   ): Promise<ToolDecision> {
     const id = newId(this.now());
     this.setMood(dog.id, 'waiting', `Wants to use ${t.title}`);
@@ -1247,6 +1343,7 @@ export class PackService {
         if (!p) return;
         clearTimeout(p.timer);
         this.approvals.delete(id);
+        ctx.approvals.delete(id);
         this.changed();
         resolve(d);
       };
@@ -1266,6 +1363,7 @@ export class PackService {
         resolve: done,
         timer,
       });
+      ctx.approvals.add(id);
       this.changed();
     });
   }

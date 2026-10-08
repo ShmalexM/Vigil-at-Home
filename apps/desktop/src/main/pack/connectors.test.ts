@@ -35,6 +35,28 @@ afterEach(async () => {
 });
 
 describe('connectors', () => {
+  it('closes a server that finishes connecting after it was switched off', async () => {
+    let finish: (c: unknown) => void = () => undefined;
+    let closed = false;
+    const spawned: Array<[number, boolean]> = [];
+    const { c } = hub({
+      connect: (_r, _s, onPid) => {
+        onPid(4242);
+        return new Promise((res) => (finish = res)) as never;
+      },
+      spawned: (pid, running) => spawned.push([pid, running]),
+    });
+    open.push(c);
+    c.add({ kind: 'stdio', name: 'Slow', command: process.execPath, args: [server] });
+    const listing = c.tools('slow');
+    await new Promise((r) => setTimeout(r, 0));
+    c.setEnabled('slow', false);
+    finish({ close: async () => void (closed = true) });
+    await expect(listing).rejects.toThrow('switched off');
+    expect(closed).toBe(true);
+    expect(spawned.at(-1)).toEqual([4242, false]);
+  });
+
   it('lists a stdio server’s tools, with its read-only hints, and calls them', async () => {
     const spawned: Array<[number, boolean]> = [];
     const { c, dir } = hub({ spawned: (pid, running) => spawned.push([pid, running]) });

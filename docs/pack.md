@@ -12,13 +12,24 @@ No dog can block or allow anything on the Mac, release a block, answer a watched
 
 The mode at the top of the page works like a coding agent's permission modes.
 
-| Mode             | Changes to the pack (Lead dog)                                                          | Tool calls that can change things                                    |
-| ---------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| Ask for approval | Every change waits for your OK                                                          | You are asked                                                        |
-| Let AI decide    | Adding, changing or running a dog goes ahead if it only gets read-only tools; else asks | Your AI rates the call; only low risk goes ahead, the rest are asked |
-| Full access      | Go ahead                                                                                | Go ahead                                                             |
+| Mode             | Changes to the pack (Lead dog)                                                         | Tool calls that can change things                                    |
+| ---------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| Ask for approval | Every change waits for your OK                                                         | You are asked                                                        |
+| Let AI decide    | Adding, changing or running a dog goes ahead if it only has read-only tools; else asks | Your AI rates the call; only low risk goes ahead, the rest are asked |
+| Full access      | Go ahead                                                                               | Go ahead                                                             |
 
 Retiring a dog always asks in Let AI decide.
+
+One thing waits in every mode, Full access included: when the Lead dog's
+answer read an alert, an event or a connector, it may not retire a dog or
+point a dog that can change things anywhere (a new job, new tools, a run)
+without your OK. Text in what it read could have been written by anyone, the
+same reason memory changes from such an answer wait on a card.
+
+Scheduled runs never stop to ask. Nobody is watching them, so a call that
+would need your OK is skipped, and the dog says in its report what it would
+have done. Only runs you start (Run now, or a chat) ask, and a question still
+open when its run ends goes away with it.
 
 ## How a tool call is decided
 
@@ -43,10 +54,12 @@ flowchart TD
   judge -- low --> run
   judge -- medium, high or no answer --> ask
   ask -- Allow once --> run
-  ask -- Deny or 10 minutes pass --> refused
+  ask -- Deny, 10 minutes pass, or the run ends --> refused
 ```
 
-Right before any call goes out, Vigil checks again that the tool is still on, the dog still has it and isn't napping, the connector is still on, and no rule stops it. Waiting for you or for the AI can take minutes, and a change you made meanwhile wins.
+In a scheduled run, "You are asked" is "Skipped" instead.
+
+Right before any call goes out, Vigil checks again that the tool is still on, the dog still has it and isn't napping, the connector is still on, and no rule stops it. After the AI rates a call, the whole check runs again, so a mode or tool choice you changed while it was rating wins. Waiting for you or for the AI can take minutes, and a change you made meanwhile wins.
 
 Vigil's rules come first in every mode, Full access included. Connector calls are checked as if a watched agent's hook had asked about an MCP tool (`mcp__<connector>__<tool>`, with the arguments as the command), so the agent pre-flight rules and your own tool rules from Agents › Tool policy apply. Nothing is recorded for these checks.
 
