@@ -9,6 +9,13 @@ import {
   isCodexSignInShared,
   shareCodexSignIn,
   stopSharingCodexSignIn,
+  canRun,
+  candidatesFor,
+  jevRoute,
+  whoRuns,
+  type AiKeysSaved,
+  type AiNotRunning,
+  type AiPurpose,
   type AiSettings,
   type ExecutablePin,
   type PinStore,
@@ -45,7 +52,6 @@ import { isKeyBilled } from '../shared/usage.js';
 
 const KEY_PREFS = 'ai.prefs';
 const KEY_PINS = 'ai.pins';
-/** Set once the one-time check for prefs with every AI switched off has run. */
 const PROVIDER_PREFS = ['claude', 'codex', 'api', 'ollama', 'jev'] as const;
 const PROVIDER_LABEL: Record<(typeof PROVIDER_PREFS)[number], string> = {
   claude: 'Claude',
@@ -60,6 +66,61 @@ function listWords(words: string[]): string {
   return words.length < 2
     ? (words[0] ?? 'AI')
     : `${words.slice(0, -1).join(', ')} and ${words.at(-1)}`;
+}
+
+/** Where Settings › AI keeps each switch (Ai.tsx). */
+const EXPLAINS = '“Explains alerts”';
+const LABELS = '“Labels events no rule matched”';
+const KEY_NEEDED: Record<AiProvider, string> = {
+  claude: 'an Anthropic API key',
+  codex: 'an OpenAI API key',
+  api: 'an OpenRouter or OpenAI key',
+  ollama: 'nothing',
+  jev: 'an OpenRouter or TypeSafe key',
+};
+
+/** "Codex needs an OpenAI API key and Jev needs an OpenRouter or TypeSafe key". */
+function needsKeys(ks: readonly AiProvider[]): string {
+  return listWords(ks.map((k) => `${PROVIDER_LABEL[k]} needs ${KEY_NEEDED[k]}`));
+}
+
+/** What to set up for apps a switch alone won't start: the key, then the switch. */
+function setupHint(ks: readonly AiProvider[]): string {
+  const them = ks.length > 1 ? 'them' : 'it';
+  const where = [
+    ...(ks.some((k) => k !== 'jev') ? [EXPLAINS] : []),
+    ...(ks.includes('jev') ? [LABELS] : []),
+  ];
+  const text = `${needsKeys(ks)}: add ${them} under API keys in Setup, then turn ${them} on under ${where.join(' and ')}`;
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+const NO_RECORD = Symbol('no saved prefs');
+
+/**
+ * Saved prefs, field by field, so one bad field never discards the rest. A
+ * field that is missing (saved by an older Vigil) or unreadable takes its
+ * default, except an AI app's switch, which stays off: a bad record never
+ * turns AI on. Only with nothing saved at all do the apps start on.
+ */
+function readPrefs(read: () => unknown): AiPrefs {
+  let raw: unknown;
+  try {
+    raw = read();
+  } catch {
+    // Saved but not JSON: the switches stay off.
+    raw = undefined;
+  }
+  if (raw === NO_RECORD) return DEFAULT_AI_PREFS;
+  const saved = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const [field, schema] of Object.entries(AiPrefs.shape)) {
+    const r = schema.safeParse(saved[field]);
+    if (r.success && r.data !== undefined) out[field] = r.data;
+    else if ((PROVIDER_PREFS as readonly string[]).includes(field)) out[field] = false;
+    else if (field in DEFAULT_AI_PREFS) out[field] = DEFAULT_AI_PREFS[field as keyof AiPrefs];
+  }
+  return AiPrefs.parse(out);
 }
 
 function offView(fix: { notice: string; label?: string } | undefined): Partial<AiView> {
@@ -196,11 +257,9 @@ export class AiBridge extends EventEmitter<{
 
   prefs(): AiPrefs {
     // Read once: `consider` asks for every event.
-    if (this.cachedPrefs) return this.cachedPrefs;
-    // Prefs saved by an older Vigil lack newer switches; those take their defaults.
-    const saved = this.o.store.getSetting(KEY_PREFS, AiPrefs.partial(), {});
-    const defined = Object.fromEntries(Object.entries(saved).filter(([, v]) => v !== undefined));
-    this.cachedPrefs = AiPrefs.parse({ ...DEFAULT_AI_PREFS, ...defined });
+    this.cachedPrefs ??= readPrefs(() =>
+      this.o.store.getSetting(KEY_PREFS, z.unknown(), NO_RECORD),
+    );
     return this.cachedPrefs;
   }
 
@@ -220,19 +279,74 @@ export class AiBridge extends EventEmitter<{
     return this.prefs();
   }
 
+  /** Which keys are saved, for @vigil/ai's `canRun`. `api` is the API connection's. */
+  private savedKeys(): AiKeysSaved {
+    const saved = this.o.keys.list();
+    return {
+      anthropic: !!saved.anthropic,
+      openai: !!saved.openai,
+      api: !!this.apiConnection(),
+      typesafe: !!saved.typesafe,
+    };
+  }
+
+  /**
+   * Whether this app would serve the purpose with these switches, by
+   * @vigil/ai's own `canRun`. The API switch alone is off in `settings()`
+   * without a key, so here it counts as needing one.
+   */
+  private reachOf(
+    q: AiPrefs,
+    keys: AiKeysSaved,
+    k: AiProvider,
+    purpose: AiPurpose,
+  ): true | AiNotRunning {
+    const s = this.settings(q);
+    if (k === 'api' && q.api && !keys.api)
+      return canRun({ ...s, api: { ...s.api, enabled: true } }, keys, k, purpose);
+    return canRun(s, keys, k, purpose);
+  }
+
   /**
    * Which AI apps the "Turn on" button switches back on: the ones Vigil's
-   * runs have used, or else the ones setup's mode allows. Never the Claude
-   * plan switch, which stays the user's own opt-in.
+   * runs have used, or else every one, kept to those the mode allows and
+   * that would run on a switch alone (a key they need isn't saved by a
+   * button). Labelling on with none of them labelling adds Ollama, outside
+   * cloud mode. Never the Claude plan switch, which stays the user's own
+   * opt-in. `needs` are the ones (of those that ran before, when any did)
+   * that would run once their key is saved.
    */
-  private providersToRestore(): Partial<Record<(typeof PROVIDER_PREFS)[number], boolean>> {
+  private providersToRestore(
+    p: AiPrefs,
+    keys: AiKeysSaved,
+  ): { patch: Partial<Record<AiProvider, boolean>>; needs: AiProvider[] } {
+    const why = (k: AiProvider): true | AiNotRunning => {
+      const q = { ...p, [k]: true };
+      const explain = this.reachOf(q, keys, k, 'explain');
+      const label = this.reachOf(q, keys, k, 'label');
+      return explain === true || label === true
+        ? true
+        : explain === 'needs_setup' || label === 'needs_setup'
+          ? 'needs_setup'
+          : explain;
+    };
     const used = new Set(this.o.store.aiRunProviders());
-    const fromRuns = PROVIDER_PREFS.filter((p) => used.has(p));
-    const mode = this.o.mode();
-    const byMode = PROVIDER_PREFS.filter((p) =>
-      mode === 'local' ? p === 'ollama' : mode === 'cloud' ? p !== 'ollama' : true,
+    const fromRuns = PROVIDER_PREFS.filter((k) => used.has(k));
+    const pool: AiProvider[] = fromRuns.length ? fromRuns : [...PROVIDER_PREFS];
+    let restore = pool.filter((k) => why(k) === true);
+    // What ran before isn't allowed or usable any more: fall back to every app.
+    if (!restore.length) restore = PROVIDER_PREFS.filter((k) => why(k) === true);
+    const patch: Partial<Record<AiProvider, boolean>> = Object.fromEntries(
+      restore.map((k) => [k, true]),
     );
-    return Object.fromEntries((fromRuns.length ? fromRuns : byMode).map((p) => [p, true]));
+    if (
+      restore.length &&
+      p.labelling &&
+      !whoRuns(this.settings({ ...p, ...patch }), keys, 'label').provider &&
+      this.reachOf({ ...p, ...patch, ollama: true }, keys, 'ollama', 'label') === true
+    )
+      patch.ollama = true;
+    return { patch, needs: pool.filter((k) => why(k) === 'needs_setup') };
   }
 
   /**
@@ -240,17 +354,27 @@ export class AiBridge extends EventEmitter<{
    * change the user's button makes: every app off, or labelling on with
    * nothing that labels. Vigil never makes this change on its own, since a
    * deliberate opt-out looks the same as an accidental one. From prefs,
-   * setup's mode and the saved keys only, so it is cheap enough for Home.
+   * setup's mode and the saved keys only, by @vigil/ai's `whoRuns`, so it
+   * is cheap enough for Home and agrees with what the runner would do.
    */
   offFix(): { notice: string; label?: string; patch?: AiPrefsPatch } | undefined {
     const p = this.prefs();
-    const mode = this.o.mode();
+    const keys = this.savedKeys();
+    const mode = this.o.mode() ?? 'both';
     if (PROVIDER_PREFS.every((k) => !p[k])) {
-      const patch = this.providersToRestore();
+      const { patch, needs } = this.providersToRestore(p, keys);
       const names = PROVIDER_PREFS.filter((k) => patch[k]).map((k) => PROVIDER_LABEL[k]);
+      const notice =
+        'Every AI app is switched off, so new alerts aren’t explained and events aren’t labelled';
+      // Nothing would run on a switch alone: say what to set up, and where.
+      if (!names.length)
+        return {
+          notice: `${notice}. ${needs.length ? setupHint(needs) : `Turn one on under ${EXPLAINS}`}`,
+        };
       return {
         notice:
-          'Every AI app is switched off, so new alerts aren’t explained and events aren’t labelled' +
+          notice +
+          // `patch.claude` means the mode allows Claude.
           (patch.claude && p.claudePlan
             ? '. Turning Claude back on also uses your Claude plan again for explanations you ask for'
             : ''),
@@ -258,28 +382,28 @@ export class AiBridge extends EventEmitter<{
         patch,
       };
     }
-    if (!p.labelling || this.canLabel(p)) return undefined;
-    const notice = 'Event labelling is on, but no AI app that labels events is switched on';
+    if (!p.labelling || whoRuns(this.settings(p), keys, 'label').provider) return undefined;
+    const settings = this.settings(p);
+    // The apps switched on that would label once their key is saved.
+    const needs = candidatesFor(settings, 'label').filter(
+      (k): k is AiProvider => p[k] && this.reachOf(p, keys, k, 'label') === 'needs_setup',
+    );
+    const notice = needs.length
+      ? `Event labelling is on, but ${needsKeys(needs)} to label events. Add ${needs.length > 1 ? 'them' : 'it'} under API keys in Setup`
+      : 'Event labelling is on, but no AI app that labels events is switched on';
     // Outside cloud mode Ollama labels on this computer, at no cost. In cloud
     // mode each labeller needs a key or a subscription, so the user picks one.
-    return mode === 'cloud'
-      ? { notice: `${notice}. Pick one under “Labels events no rule matched”` }
-      : { notice, label: 'Label with Ollama', patch: { ollama: true } };
-  }
-
-  /**
-   * Whether anything switched on can label, by the same choice
-   * @vigil/ai's classifier makes: in cloud mode the cloud runner (Claude on
-   * an API key, Codex, the API connection) or Jev; otherwise Ollama, Claude
-   * Haiku on an API key, or Jev.
-   */
-  private canLabel(p: AiPrefs): boolean {
-    const mode = this.o.mode() ?? 'both';
-    const saved = this.o.keys.list();
-    const haiku = mode !== 'local' && p.claude && !!saved.anthropic;
-    const jev = mode !== 'local' && p.jev && (!!saved.typesafe || (p.api && !!saved.openrouter));
-    if (mode === 'cloud') return haiku || jev || p.codex || (p.api && !!this.apiConnection());
-    return p.ollama || haiku || jev;
+    if (mode !== 'cloud' && this.reachOf({ ...p, ollama: true }, keys, 'ollama', 'label') === true)
+      return {
+        notice: needs.length ? `${notice}, or label with Ollama on this Mac` : notice,
+        label: 'Label with Ollama',
+        patch: { ollama: true },
+      };
+    return {
+      notice: needs.length
+        ? `${notice}, or pick another app under ${EXPLAINS}`
+        : `${notice}. Pick one: Codex, Claude or the API under ${EXPLAINS}, or Jev under ${LABELS}. Claude, the API and Jev each need a key under API keys in Setup`,
+    };
   }
 
   offNotice(): string | undefined {
@@ -303,10 +427,9 @@ export class AiBridge extends EventEmitter<{
     return undefined;
   }
 
-  /** The settings @vigil/ai runs with. Built fresh each time from what's saved. */
-  settings(): AiSettings {
+  /** The settings @vigil/ai runs with. Built fresh each time from what's saved (or `prefs`). */
+  settings(prefs: AiPrefs = this.prefs()): AiSettings {
     const base = defaultAiSettings(this.o.dataDir);
-    const prefs = this.prefs();
     const api = this.apiConnection();
     const cap = prefs.monthlyCapUsd;
     return {
@@ -339,7 +462,9 @@ export class AiBridge extends EventEmitter<{
   /** The runner, rebuilt whenever the settings it was made with change. */
   ai(): VigilAi {
     const settings = this.settings();
-    const key = JSON.stringify(settings);
+    const keys = this.savedKeys();
+    // A key saved or removed changes what runs (Jev, Claude Haiku), so it rebuilds too.
+    const key = JSON.stringify({ settings, keys: this.o.keys.list() });
     if (this.instance?.key === key) return this.instance.ai;
     const keyOf = (p: ApiKeyProvider) => async () => this.o.keys.get(p)?.key;
     const api = this.apiConnection();
@@ -351,7 +476,8 @@ export class AiBridge extends EventEmitter<{
       // Codex sends this only to api.openai.com, so only an OpenAI key is offered.
       getOpenAiApiKey: keyOf('openai'),
       ...(api ? { getApiKey: keyOf(api.provider) } : {}),
-      ...(this.o.keys.list().typesafe ? { getJevApiKey: keyOf('typesafe') } : {}),
+      ...(keys.typesafe ? { getJevApiKey: keyOf('typesafe') } : {}),
+      keys,
       spentThisMonthUsd: async () => this.spentThisMonthUsd(),
       ...(this.o.isBusy ? { isBusy: this.o.isBusy } : {}),
       ...(this.o.busyReason ? { busyReason: this.o.busyReason } : {}),
@@ -461,17 +587,14 @@ export class AiBridge extends EventEmitter<{
         ? { ...providerView({ provider: 'api', state: 'disabled' }, shared), state: 'optional' }
         : providerView(s, shared, settings.codex.mode === 'apiKey'),
     );
-    // Jev isn't a runner provider; it rides on the keys.
+    // Jev isn't a runner provider; it rides on the keys, by the classifier's own route.
     const saved = this.o.keys.list();
     const api = this.apiConnection();
-    const jevVia =
+    const route =
       !settings.jev.enabled || settings.mode === 'local'
-        ? null
-        : saved.typesafe
-          ? 'typesafe'
-          : api?.provider === 'openrouter' && settings.api.enabled
-            ? 'openrouter'
-            : null;
+        ? undefined
+        : jevRoute(settings, this.savedKeys());
+    const jevVia = route?.typesafe ? 'typesafe' : route?.openrouter ? 'openrouter' : null;
     providers.push({
       provider: 'jev',
       name: NAMES.jev,

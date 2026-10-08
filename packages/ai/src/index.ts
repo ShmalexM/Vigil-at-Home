@@ -11,7 +11,8 @@ import {
 import { createJevClient } from './providers/jev.js';
 import { createOllamaAdapter } from './providers/ollama.js';
 import { createApiAdapter, type ApiModel } from './providers/openaiCompatible.js';
-import { allowedByMode, createAiRunner, type AiRunner } from './runner.js';
+import { canRun, jevRoute, type AiKeysSaved } from './reach.js';
+import { createAiRunner, type AiRunner } from './runner.js';
 import type { AiSettings } from './settings.js';
 import type { PromptLog, ProviderAdapter } from './types.js';
 
@@ -25,6 +26,17 @@ export {
   type ApiPreset,
 } from './settings.js';
 export { createAiRunner, jsonSchemaFor, type AiRunner, type AiRunnerDeps } from './runner.js';
+export {
+  allowedByMode,
+  canRun,
+  candidatesFor,
+  jevRoute,
+  whoRuns,
+  type AiKeysSaved,
+  type AiNotRunning,
+  type AiPurpose,
+  type AiReach,
+} from './reach.js';
 export { readTool } from './tools.js';
 export type {
   SpendingDay,
@@ -111,6 +123,11 @@ export interface VigilAiOptions {
   readonly busyReason?: () => 'power' | 'load' | undefined;
   /** When labelling last sent a batch, kept across rebuilt runners. */
   readonly labelClock?: { lastSentAt?: number };
+  /**
+   * Which keys are saved, for `canRun`. Unset means each key counts as saved
+   * when its reader above is given.
+   */
+  readonly keys?: AiKeysSaved;
 }
 
 export interface VigilAi extends AiRunner {
@@ -182,19 +199,16 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
             ],
             log: options.log,
           });
-    // An OpenRouter key set up as the API connection can also reach Jev.
-    const openRouterKey =
-      settings.api.enabled &&
-      !settings.pausedByVigil.includes('api') &&
-      new URL(settings.api.baseUrl).hostname === 'openrouter.ai' &&
-      options.getApiKey
-        ? options.getApiKey
-        : undefined;
-    const useJev =
-      settings.jev.enabled &&
-      allowedByMode(settings, 'jev') &&
-      !settings.pausedByVigil.includes('jev') &&
-      (options.getJevApiKey !== undefined || openRouterKey !== undefined);
+    const keys: AiKeysSaved = options.keys ?? {
+      anthropic: options.getAnthropicApiKey !== undefined,
+      openai: options.getOpenAiApiKey !== undefined,
+      api: options.getApiKey !== undefined,
+      typesafe: options.getJevApiKey !== undefined,
+    };
+    // Jev rides on its own TypeSafe key, or an OpenRouter key set up as the API connection.
+    const jevVia =
+      canRun(settings, keys, 'jev', 'label') === true ? jevRoute(settings, keys) : undefined;
+    const openRouterKey = jevVia?.openrouter ? options.getApiKey : undefined;
     const cap = settings.quota.apiKeyMonthlyCapUsd;
     const spent = options.spentThisMonthUsd;
     // Claude Haiku labels first when Claude runs on an API key: on a held-out
@@ -204,11 +218,7 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
     // It counts toward the monthly cap, and Jev then the local model take over
     // when it can't answer.
     const haiku =
-      settings.claude.enabled &&
-      settings.claude.mode === 'apiKey' &&
-      options.getAnthropicApiKey !== undefined &&
-      allowedByMode(settings, 'claude') &&
-      !settings.pausedByVigil.includes('claude')
+      canRun(settings, keys, 'claude', 'label') === true && options.getAnthropicApiKey
         ? createAiRunner({
             settings: { ...settings, order: ['claude'] },
             adapters: [
@@ -231,12 +241,12 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
     classifier = createEventClassifier({
       ...(haiku ? { first: haiku } : {}),
       runner: labelRunner,
-      ...(useJev
+      ...(jevVia
         ? {
             jev: createJevClient({
               baseUrl: settings.jev.baseUrl,
               model: settings.jev.model,
-              getApiKey: options.getJevApiKey ?? (async () => undefined),
+              getApiKey: (jevVia.typesafe && options.getJevApiKey) || (async () => undefined),
               ...(openRouterKey ? { getOpenRouterApiKey: openRouterKey } : {}),
               log: options.log,
             }),

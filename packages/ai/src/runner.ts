@@ -2,10 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { buildSystemPrompt, buildUserPrompt } from './prompt.js';
 import { QuotaTracker } from './quota.js';
+import { allowedByMode, switchedOn } from './reach.js';
 import { redactAndSerialize, redactValue } from './redact.js';
 import type { AiSettings } from './settings.js';
 import { spendingDays, spendingLimits, spendingPlans, type SpendingSnapshot } from './spending.js';
-import { LOCAL_PROVIDERS, MONTHLY_CAP_HELD, PLAN_LIMITS_HELD, mayUsePlan } from './types.js';
+import { MONTHLY_CAP_HELD, PLAN_LIMITS_HELD, mayUsePlan } from './types.js';
 import type {
   AdapterRunOutput,
   PromptLog,
@@ -66,15 +67,10 @@ export function jsonSchemaFor(output: z.ZodType): Record<string, unknown> {
   return schema;
 }
 
-/** Whether the user's local, cloud or both choice lets this provider run at all. */
-export function allowedByMode(settings: AiSettings, id: ProviderId): boolean {
-  const local = LOCAL_PROVIDERS.includes(id);
-  return settings.mode === 'both' || (settings.mode === 'local') === local;
-}
+export { allowedByMode };
 
 function enabled(settings: AiSettings, id: ProviderId): boolean {
-  if (settings.pausedByVigil.includes(id)) return false;
-  return allowedByMode(settings, id) && settings[id].enabled;
+  return switchedOn(settings, id) === undefined;
 }
 
 /** Longest a provider's probe, usage read or key lookup may take before it counts as not ready. */
