@@ -82,7 +82,7 @@ describe('filterEntries', () => {
     [
       alert('a1', now - 1000, {
         title: 'Unsigned zoom_update connected out',
-        subject: { kind: 'process', label: 'zoom_update', path: '/Users/me/Downloads/zoom_update' },
+        subject: { kind: 'process', label: 'Zoom Helper', path: '/Users/me/Downloads/zoom_update' },
       }),
       alert('a2', now - 2000, { title: 'Launch agent pipes curl' }),
     ],
@@ -100,6 +100,7 @@ describe('filterEntries', () => {
   it('matches every word, ignoring case, across title, path and actions', () => {
     expect(ids('ZOOM downloads')).toEqual(['a1']);
     expect(ids('curl')).toEqual(['a2']);
+    expect(ids('Zoom Helper')).toEqual(['a1']);
     expect(ids('pause x1')).toEqual(['x1']);
     expect(ids('zoom curl')).toEqual([]);
   });

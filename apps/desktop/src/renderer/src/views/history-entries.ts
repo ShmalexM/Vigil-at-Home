@@ -55,7 +55,7 @@ export function historyEntries(
 /**
  * The entries whose words match every word of the search, ignoring case. The
  * words are what the row shows plus what's behind it: the alert's title and
- * summary, the program's path, and each action's description.
+ * summary, its subject's name and path, and each action's description.
  */
 export function filterEntries(
   entries: Entry[],
@@ -70,6 +70,7 @@ export function filterEntries(
         ? [
             e.alert.title,
             e.alert.summary,
+            e.alert.subject?.label ?? '',
             e.alert.subject?.path ?? '',
             outcome(e.alert),
             ...e.actions.map(describe),
