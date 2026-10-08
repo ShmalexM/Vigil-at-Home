@@ -45,6 +45,9 @@ import { isKeyBilled } from '../shared/usage.js';
 
 const KEY_PREFS = 'ai.prefs';
 const KEY_PINS = 'ai.pins';
+/** Set once the one-time check for prefs with every AI switched off has run. */
+const KEY_PREFS_REPAIRED = 'ai.prefs.repairedAt';
+const PROVIDER_PREFS = ['claude', 'codex', 'api', 'ollama', 'jev'] as const;
 /** An explanation for a popup should be there by the time the user reads it. */
 const EXPLAIN_NOW_DEADLINE_MS = 90_000;
 const EXPLAIN_BACKGROUND_DEADLINE_MS = 180_000;
@@ -197,6 +200,65 @@ export class AiBridge extends EventEmitter<{
     this.cachedPrefs = undefined;
     this.emit('changed');
     return this.prefs();
+  }
+
+  /**
+   * Which AI apps to switch back on: the ones Vigil's runs have used, or
+   * else the ones setup's mode allows. Never the Claude plan, which stays
+   * the user's own opt-in.
+   */
+  private providersToRestore(): Partial<Record<(typeof PROVIDER_PREFS)[number], boolean>> {
+    const used = new Set(this.o.store.aiRunProviders());
+    const fromRuns = PROVIDER_PREFS.filter((p) => used.has(p));
+    const mode = this.o.mode();
+    const byMode = PROVIDER_PREFS.filter((p) =>
+      mode === 'local' ? p === 'ollama' : mode === 'cloud' ? p !== 'ollama' : true,
+    );
+    return Object.fromEntries((fromRuns.length ? fromRuns : byMode).map((p) => [p, true]));
+  }
+
+  /**
+   * Once: prefs with every AI app off but labelling on is what Vigil found on
+   * Macs whose AI stopped without the user turning it off. Those apps go back
+   * on (see providersToRestore). Runs once, so a user who later switches
+   * everything off keeps it that way.
+   */
+  repairPrefs(): boolean {
+    if (this.o.store.getSetting(KEY_PREFS_REPAIRED, z.number().nullable(), null) !== null)
+      return false;
+    this.o.store.setSetting(KEY_PREFS_REPAIRED, this.now());
+    const p = this.prefs();
+    if (!p.labelling || PROVIDER_PREFS.some((k) => p[k])) return false;
+    this.setPrefs(this.providersToRestore());
+    console.warn('[ai] every AI app was off with labelling on; switched back on what was used');
+    return true;
+  }
+
+  /** The user's "Turn AI back on" (Home, Settings › AI). */
+  turnBackOn(): AiView['prefs'] {
+    return this.setPrefs(this.providersToRestore());
+  }
+
+  /**
+   * When the AI can't work at all because of the switches, in words: every
+   * app off, or labelling on with nothing that labels. From prefs, setup's
+   * mode and the saved keys only, so it is cheap enough for Home.
+   */
+  offNotice(): string | undefined {
+    const p = this.prefs();
+    const mode = this.o.mode();
+    if (PROVIDER_PREFS.every((k) => !p[k]))
+      return 'Every AI app is switched off, so new alerts aren’t explained and events aren’t labelled';
+    if (!p.labelling) return undefined;
+    const saved = this.o.keys.list();
+    const cloud = mode !== 'local';
+    const canLabel =
+      (p.ollama && mode !== 'cloud') ||
+      (cloud && p.claude && !!saved.anthropic) ||
+      (cloud && p.jev && (!!saved.typesafe || (p.api && !!saved.openrouter)));
+    return canLabel
+      ? undefined
+      : 'Event labelling is on, but no AI app that labels events is switched on';
   }
 
   /** The OpenAI-style API connection, from whichever key the user saved. */
@@ -407,6 +469,7 @@ export class AiBridge extends EventEmitter<{
       ...(api ? { api: { name: api.name, last4: api.last4 } } : {}),
       anthropicKey: !!saved.anthropic,
       jevVia,
+      ...(this.offNotice() ? { off: this.offNotice()! } : {}),
       checkedAt: this.now(),
     };
   }
