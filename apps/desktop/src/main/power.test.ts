@@ -95,5 +95,25 @@ describe('PowerPolicy', () => {
       expect(modes).toEqual(['constrained', 'normal', 'constrained', 'normal']);
       expect(vi.getTimerCount()).toBe(0);
     });
+
+    it('stays asleep through a dark wake, until someone uses the Mac', () => {
+      vi.useFakeTimers();
+      let idle = 3_600;
+      const em = new EventEmitter();
+      const source = {
+        isOnBatteryPower: () => false,
+        getCurrentThermalState: () => 'nominal' as ThermalState,
+        getSystemIdleTime: () => idle,
+        on: em.on.bind(em),
+      } as unknown as PowerSource;
+      const p = new PowerPolicy(source, () => 0);
+      em.emit('suspend');
+      vi.advanceTimersByTime(WAKE_RECHECK_MS * 3); // Power Nap ran, nobody there
+      expect(p.mode).toBe('constrained');
+      idle = 5; // the lid opened, and "resume" never came
+      vi.advanceTimersByTime(WAKE_RECHECK_MS);
+      expect(p.mode).toBe('normal');
+      expect(vi.getTimerCount()).toBe(0);
+    });
   });
 });

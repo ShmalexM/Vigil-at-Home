@@ -9,9 +9,11 @@
  * - On battery the app slows periodic jobs down (`setSlowdown`): a job runs
  *   at most once every `everyMs × factor`.
  *
- * - A task still running after `taskTimeoutMs` gives its slot back, so one
- *   call that never returns can't stall every other job behind it. Its
- *   result, if it ever comes, is ignored, and its job may run again.
+ * - A task still running after its time limit (`taskTimeoutMs`, or the
+ *   task's own) gives its slot back, so one call that never returns can't
+ *   stall every other job behind it. Its signal is aborted, so it can stop
+ *   before writing anything late; its result, if it ever comes, is ignored
+ *   and doesn't count as a run, and its job may run again.
  *
  * Blocking never goes through here. Blocks run inline in the alert path.
  */
@@ -29,16 +31,26 @@ export interface JobStatus {
   timeouts: number;
 }
 
+/** A task's work. `signal` is aborted when the task is given up on. */
+export type TaskFn<T> = (signal: AbortSignal) => Promise<T> | T;
+
+export interface TaskOptions {
+  /** How long it may run before its slot is given back. Infinity for work that is always making progress. */
+  timeoutMs?: number;
+}
+
 interface Task {
   name: string;
   priority: Priority;
-  run: () => Promise<unknown>;
+  timeoutMs: number;
+  run: (signal: AbortSignal) => Promise<unknown>;
   resolve: (v: unknown) => void;
   reject: (e: unknown) => void;
 }
 
 interface Job extends JobStatus {
-  fn: () => Promise<void> | void;
+  fn: TaskFn<void>;
+  timeoutMs?: number;
   timer?: ReturnType<typeof setInterval>;
 }
 
@@ -79,13 +91,19 @@ export class Scheduler {
   }
 
   /** Run `fn` once, in the given lane. Resolves with its result. */
-  enqueue<T>(name: string, fn: () => Promise<T> | T, priority: Priority = 'routine'): Promise<T> {
+  enqueue<T>(
+    name: string,
+    fn: TaskFn<T>,
+    priority: Priority = 'routine',
+    opts: TaskOptions = {},
+  ): Promise<T> {
     if (this.stopped) return Promise.reject(new Error('Scheduler stopped'));
     return new Promise<T>((resolve, reject) => {
       const task: Task = {
         name,
         priority,
-        run: async () => fn(),
+        timeoutMs: opts.timeoutMs ?? this.taskTimeoutMs,
+        run: async (signal) => fn(signal),
         resolve: resolve as (v: unknown) => void,
         reject,
       };
@@ -101,9 +119,16 @@ export class Scheduler {
   }
 
   /** Run `fn` every `everyMs` in the routine lane. `runNow` also queues it immediately. */
-  every(name: string, everyMs: number, fn: () => Promise<void> | void, runNow = false): void {
+  every(
+    name: string,
+    everyMs: number,
+    fn: TaskFn<void>,
+    runNow = false,
+    opts: TaskOptions = {},
+  ): void {
     if (this.jobs.has(name)) throw new Error(`Job already registered: ${name}`);
     const job: Job = { name, everyMs, fn, runs: 0, busy: false, timeouts: 0 };
+    if (opts.timeoutMs !== undefined) job.timeoutMs = opts.timeoutMs;
     this.jobs.set(name, job);
     job.timer = setInterval(() => this.tick(job), everyMs);
     job.timer.unref?.();
@@ -117,19 +142,28 @@ export class Scheduler {
     if (this.slowdown > 1 && job.lastStart !== undefined && this.now() - job.lastStart < gap)
       return;
     job.busy = true;
-    this.enqueue(job.name, async () => {
-      job.lastStart = this.now();
-      try {
-        await job.fn();
-        delete job.lastError;
-      } catch (err) {
-        job.lastError = err instanceof Error ? err.message : String(err);
-        throw err;
-      } finally {
-        job.lastEnd = this.now();
-        job.runs++;
-      }
-    })
+    const opts = job.timeoutMs === undefined ? {} : { timeoutMs: job.timeoutMs };
+    this.enqueue(
+      job.name,
+      async (signal) => {
+        job.lastStart = this.now();
+        try {
+          await job.fn(signal);
+          if (!signal.aborted) delete job.lastError;
+        } catch (err) {
+          if (!signal.aborted) job.lastError = err instanceof Error ? err.message : String(err);
+          throw err;
+        } finally {
+          // A run given up on was counted then; a late finish changes nothing.
+          if (!signal.aborted) {
+            job.lastEnd = this.now();
+            job.runs++;
+          }
+        }
+      },
+      'routine',
+      opts,
+    )
       .catch((err: unknown) => {
         if (err instanceof TaskTimeoutError) {
           job.timeouts++;
@@ -173,7 +207,9 @@ export class Scheduler {
   }
 
   status(): JobStatus[] {
-    return [...this.jobs.values()].map(({ fn: _fn, timer: _timer, ...s }) => ({ ...s }));
+    return [...this.jobs.values()].map(({ fn: _fn, timer: _timer, timeoutMs: _t, ...s }) => ({
+      ...s,
+    }));
   }
 
   /** Tasks running now, timed-out ones not counted. */
@@ -197,6 +233,7 @@ export class Scheduler {
       if (!task) return;
       this.running++;
       let settled = false;
+      const abort = new AbortController();
       const done = (): boolean => {
         if (settled) return false;
         settled = true;
@@ -204,15 +241,18 @@ export class Scheduler {
         this.running--;
         return true;
       };
-      const watchdog = setTimeout(() => {
-        if (!done()) return;
-        const err = new TaskTimeoutError(task.name, this.taskTimeoutMs);
-        this.onError(task.name, err);
-        task.reject(err);
-        this.pump();
-      }, this.taskTimeoutMs);
-      watchdog.unref?.();
-      task.run().then(
+      const watchdog = Number.isFinite(task.timeoutMs)
+        ? setTimeout(() => {
+            if (!done()) return;
+            const err = new TaskTimeoutError(task.name, task.timeoutMs);
+            abort.abort(err);
+            this.onError(task.name, err);
+            task.reject(err);
+            this.pump();
+          }, task.timeoutMs)
+        : undefined;
+      watchdog?.unref?.();
+      task.run(abort.signal).then(
         (v) => {
           if (!done()) return;
           task.resolve(v);

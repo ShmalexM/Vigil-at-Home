@@ -18,6 +18,8 @@ export type ThermalState = 'unknown' | 'nominal' | 'fair' | 'serious' | 'critica
 export interface PowerSource {
   isOnBatteryPower(): boolean;
   getCurrentThermalState?(): ThermalState;
+  /** Seconds since the user last used the keyboard or mouse. */
+  getSystemIdleTime?(): number;
   on(event: 'on-ac' | 'on-battery' | 'suspend' | 'resume', fn: () => void): unknown;
   on(event: 'thermal-state-change', fn: (e: { state: ThermalState }) => void): unknown;
 }
@@ -25,8 +27,10 @@ export interface PowerSource {
 export const BATTERY_SLOWDOWN = 4;
 /**
  * Timers don't run while the Mac sleeps, so one that fires this long after
- * "suspend" means it is awake again. Then the power state is read afresh, in
- * case "resume" (or a battery or heat change) was never announced.
+ * "suspend" means the Mac has run since. That alone could be a dark wake
+ * (Power Nap), so it counts as awake only once someone has used it within
+ * that time; then the power state is read afresh, in case "resume" (or a
+ * battery or heat change) was never announced. Otherwise it checks again.
  */
 export const WAKE_RECHECK_MS = 2 * 60_000;
 /** System load per core above which optional work waits: the user is busy. */
@@ -51,9 +55,7 @@ export class PowerPolicy extends EventEmitter<{ change: [PowerMode] }> {
     source.on('on-battery', () => this.update(() => (this.battery = true)));
     source.on('suspend', () => {
       this.update(() => (this.asleep = true));
-      clearTimeout(this.recheck);
-      this.recheck = setTimeout(() => this.reread(), WAKE_RECHECK_MS);
-      this.recheck.unref?.();
+      this.checkWakeLater();
     });
     source.on('resume', () => {
       clearTimeout(this.recheck);
@@ -79,6 +81,22 @@ export class PowerPolicy extends EventEmitter<{ change: [PowerMode] }> {
     if (this.asleep || this.thermal === 'serious' || this.thermal === 'critical')
       return 'constrained';
     return this.battery ? 'saving' : 'normal';
+  }
+
+  private checkWakeLater(): void {
+    clearTimeout(this.recheck);
+    this.recheck = setTimeout(() => this.checkWake(), WAKE_RECHECK_MS);
+    this.recheck.unref?.();
+  }
+
+  private checkWake(): void {
+    if (!this.asleep) return;
+    const idle = this.source.getSystemIdleTime?.();
+    if (idle !== undefined && idle * 1000 >= WAKE_RECHECK_MS) {
+      this.checkWakeLater();
+      return;
+    }
+    this.reread();
   }
 
   /** Awake for sure: read battery and heat again rather than trusting missed events. */

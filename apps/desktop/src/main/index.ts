@@ -418,6 +418,9 @@ function start(): void {
         await syncHelperRules();
       },
       true,
+      // Each helper call has its own time limit, and a big list sync can
+      // take a while chunk by chunk: never give up on blocking rules midway.
+      { timeoutMs: Infinity },
     );
   }
 

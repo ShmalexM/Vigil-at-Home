@@ -151,4 +151,51 @@ describe('Scheduler', () => {
     expect(s.status()[0]).toMatchObject({ runs: 1, timeouts: 1 });
     expect(s.status()[0]!.lastError).toBeUndefined();
   });
+
+  it('aborts a timed-out run, and its late finish doesn’t count as a run', async () => {
+    vi.useFakeTimers();
+    const s = new Scheduler({ taskTimeoutMs: 1_000 });
+    let finish!: () => void;
+    let seen: AbortSignal | undefined;
+    let calls = 0;
+    s.every(
+      'slow',
+      5_000,
+      (signal) => {
+        calls++;
+        if (calls > 1) return;
+        seen = signal;
+        return new Promise<void>((r) => (finish = r));
+      },
+      true,
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(seen?.aborted).toBe(true);
+    expect(seen?.reason).toBeInstanceOf(TaskTimeoutError);
+    await vi.advanceTimersByTimeAsync(4_000); // runs again, quickly
+    expect(s.status()[0]).toMatchObject({ runs: 1, timeouts: 1 });
+    finish(); // the first run returns at last
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.status()[0]).toMatchObject({ runs: 1, timeouts: 1 });
+    expect(s.status()[0]!.lastError).toBeUndefined();
+  });
+
+  it('never gives up on a task with no time limit', async () => {
+    vi.useFakeTimers();
+    const s = new Scheduler({ taskTimeoutMs: 1_000 });
+    let finish!: () => void;
+    const long = s.enqueue(
+      'sync',
+      () => new Promise<string>((r) => (finish = () => r('done'))),
+      'routine',
+      {
+        timeoutMs: Infinity,
+      },
+    );
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(s.active).toBe(1);
+    finish();
+    expect(await long).toBe('done');
+    expect(s.active).toBe(0);
+  });
 });
