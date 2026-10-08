@@ -27,7 +27,7 @@ import {
   syncTlsPaths,
 } from '@vigil/sensors';
 import { Approvals } from './approval.js';
-import { repinFromGrant } from './appPin.js';
+import { pinCandidate, repinFromGrant } from './appPin.js';
 import { defaultPaths, installedSelf, SANTA_SYNC_PORT, type HelperPaths } from './config.js';
 import { Executor, type ActionOutcome } from './executor.js';
 import { FastPath } from './fastpath.js';
@@ -173,12 +173,17 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     ...(fapolicyd ? { fapolicyd } : {}),
     // The app pinned at install, never paused, stopped or blocked by hash.
     appPin: paths.appPin,
-    repin: async (grant) => {
-      const pin = await repinFromGrant(sys, grant, {
-        pinFile: paths.appPin,
-        installed: installedSelf(sys.platform),
-      });
-      if (pin) log(`pinned the app at ${pin.path}`);
+    repin: {
+      // Read before the password dialog; the approval re-pins only this code.
+      candidate: (grant) => pinCandidate(sys, grant, { installed: installedSelf(sys.platform) }),
+      commit: async (bound) => {
+        const pin = await repinFromGrant(sys, bound, {
+          pinFile: paths.appPin,
+          installed: installedSelf(sys.platform),
+        });
+        if (pin) log(`pinned the app at ${pin.path}`);
+        else log(`did not pin ${bound.source}: its code changed after the password was asked for`);
+      },
     },
   });
 

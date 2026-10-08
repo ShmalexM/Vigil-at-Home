@@ -17,11 +17,11 @@ import {
 import type { HelperAction, HelperCommand, SelfGrant } from './protocol.js';
 import { needsApproval } from './protocol.js';
 import { Journal, type JournalEntry } from './journal.js';
-import type { Approvals } from './approval.js';
 import type { System } from './system.js';
 import { PolicyRefused, type FastPath, type SelfSet } from './fastpath.js';
 import type { PreexecSync } from './preexec.js';
-import { pinnedHashes, runsPinnedApp } from './appPin.js';
+import { APPROVAL_TTL_MS, type Approvals } from './approval.js';
+import { pinnedHashes, runsPinnedApp, type PinCandidate } from './appPin.js';
 import { ActionError } from './commands/errors.js';
 import {
   identifyProcess,
@@ -78,8 +78,13 @@ export interface ExecutorDeps {
   appPin?: string;
   /** Hashes a file for the pin check; the real hasher when absent. For tests. */
   appPinSha256?: (path: string) => string | undefined;
-  /** After the password approved a self grant: re-pin the app it covers (appPin.ts repinFromGrant). */
-  repin?: (grant: SelfGrant) => Promise<void>;
+  /** Re-pins the app a self grant covers, with the grant's password (appPin.ts). */
+  repin?: {
+    /** Before the password is asked for: the app the grant would pin (pinCandidate). */
+    candidate: (grant: SelfGrant) => Promise<PinCandidate | undefined>;
+    /** After it was given: pin that app if its code is still the same (repinFromGrant). */
+    commit: (bound: PinCandidate) => Promise<void>;
+  };
 }
 
 export type ExecOutcome =
@@ -149,8 +154,26 @@ export class Executor {
       : this.d.quarantine;
   }
 
+  /** The app each pending self-grant approval re-pins (appPin.ts pinCandidate), by nonce. */
+  private readonly pinBindings = new Map<string, { bound: PinCandidate; expiresAt: number }>();
+
+  /** Bind the code `bound` names to approval `nonce`; drops bindings past their approval's life. */
+  private bindPin(nonce: string, bound: PinCandidate): void {
+    const now = this.d.sys.now();
+    for (const [n, b] of this.pinBindings) if (b.expiresAt < now) this.pinBindings.delete(n);
+    this.pinBindings.set(nonce, { bound, expiresAt: now + APPROVAL_TTL_MS });
+  }
+
+  /** The code bound to `nonce`, once: an approval is single use. */
+  private takePin(nonce: string | undefined): PinCandidate | undefined {
+    if (!nonce) return undefined;
+    const b = this.pinBindings.get(nonce);
+    this.pinBindings.delete(nonce);
+    return b?.bound;
+  }
+
   async execute(cmd: HelperCommand, approval?: string): Promise<ExecOutcome> {
-    let approvedGrant = false;
+    let bound: PinCandidate | undefined;
     // Refuse what Linux can't do before asking for a password for it.
     if (this.d.sys.platform === 'linux') checkLinuxBlock(cmd);
     if (cmd.kind === 'detection.sync') {
@@ -174,10 +197,15 @@ export class Executor {
         throw policyError(err);
       }
       if (grants.length && (!approval || !this.d.approvals.consume(approval, cmd))) {
+        this.takePin(approval);
+        // Before the dialog: the app this grant would re-pin, as its code is
+        // on disk now. The approval re-pins that code and nothing else.
+        const candidate = await this.d.repin?.candidate(cmd).catch(() => undefined);
         const nonce = this.d.approvals.request(cmd);
+        if (candidate) this.bindPin(nonce, candidate);
         return { kind: 'needs_approval', nonce, prompt: selfPrompt(grants) };
       }
-      approvedGrant = grants.length > 0;
+      if (grants.length) bound = this.takePin(approval);
     } else if (needsApproval(cmd)) {
       // Check the release can actually happen before bothering the user.
       this.findContainment(cmd as HelperAction);
@@ -187,9 +215,9 @@ export class Executor {
       }
     }
     const result = await this.run(cmd);
-    // Only a grant the password approved re-pins, never one that named nothing new.
-    if (approvedGrant && cmd.kind === 'self.grant' && this.d.repin)
-      await this.d.repin(cmd).catch(() => undefined);
+    // Only a grant the password approved re-pins, never one that named nothing
+    // new, and only the code bound to that approval.
+    if (bound && this.d.repin) await this.d.repin.commit(bound).catch(() => undefined);
     return { kind: 'done', result };
   }
 

@@ -29,7 +29,9 @@
 // sits: Vigil runs from the image's own mount, which the folder's protection
 // doesn't reach. An app outside it is re-pinned by the next
 // self grant the password approves that covers it (repinFromGrant), or else
-// by a helper update.
+// by a helper update. The grant's approval is bound to the code on disk
+// when the password was asked for (pinCandidate), and on macOS only code
+// signed with Vigil's bundle id is pinned at all.
 
 import {
   chmodSync,
@@ -47,6 +49,7 @@ import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { FileHasher } from '@vigil/sensors';
 import { insideInstalledRoot, looksLikeAppImage, type SelfImage } from '@vigil/core/self';
+import { VIGIL_BUNDLE_ID } from './config.js';
 import type { FileStat, System } from './system.js';
 import type { ProcessIdentity } from './commands/process.js';
 import { selfImageOf } from './commands/selfImage.js';
@@ -108,13 +111,23 @@ export function writePin(file: string, pin: AppPin | undefined): void {
 }
 
 /** The CDHash and Executable lines of `codesign -d -vvv` (written to stderr). */
-export function parseCodesignIdentity(
-  output: string,
-): { cdhash: string; executable?: string } | undefined {
+export function parseCodesignIdentity(output: string): CodeIdentity | undefined {
   const cdhash = /^CDHash=([0-9a-f]{40})$/m.exec(output)?.[1];
   if (!cdhash) return undefined;
+  const id: CodeIdentity = { cdhash };
   const executable = /^Executable=(\/.+)$/m.exec(output)?.[1];
-  return executable ? { cdhash, executable } : { cdhash };
+  if (executable) id.executable = executable;
+  const identifier = /^Identifier=(\S+)$/m.exec(output)?.[1];
+  if (identifier) id.identifier = identifier;
+  return id;
+}
+
+/** What codesign says about a piece of code. */
+export interface CodeIdentity {
+  cdhash: string;
+  executable?: string;
+  /** The signing identifier: the bundle id for an app bundle. */
+  identifier?: string;
 }
 
 /**
@@ -122,10 +135,7 @@ export function parseCodesignIdentity(
  * a pid, for which codesign reads the code the kernel loaded for that
  * process rather than whatever file sits at its path now.
  */
-async function codesign(
-  sys: System,
-  target: string,
-): Promise<{ cdhash: string; executable?: string } | undefined> {
+async function codesign(sys: System, target: string): Promise<CodeIdentity | undefined> {
   const r = await sys.run('codesign', ['-d', '-vvv', target], { timeoutMs: 10_000 });
   return r.code === 0 ? parseCodesignIdentity(`${r.stderr}\n${r.stdout}`) : undefined;
 }
@@ -204,6 +214,9 @@ export async function pinFor(
   const exe = id?.executable ?? path;
   if (!id || inInstalled(sys, opts.installed, exe, false))
     throw new Error(`${path} has no code signature to pin`);
+  // Only Vigil's own code is ever pinned, by the identifier it is signed with.
+  if (id.identifier !== VIGIL_BUNDLE_ID)
+    throw new Error(`${path} is not signed as ${VIGIL_BUNDLE_ID}`);
   const sha256 = hash(exe);
   if (!sha256) throw new Error(`${exe} can't be read`);
   return { platform: 'darwin', path: exe, cdhash: id.cdhash, sha256 };
@@ -213,41 +226,76 @@ export interface RepinOptions extends PinOptions {
   pinFile: string;
 }
 
+/** The app a self grant would pin: the grant path it came from, and its pin as computed then. */
+export interface PinCandidate {
+  source: string;
+  pin: AppPin;
+}
+
 /**
- * After the admin password approved a self grant: pin the app it covers, so
- * an app updated outside the installer's folder is re-pinned with the
- * grant's one prompt instead of a helper update's. What the password just
- * approved is what gets pinned: on macOS the first of the grant's paths
- * outside the installer's folder that is signed code (the app bundle; its
- * cdhash and main executable come from codesign on disk, and a path that
- * isn't code is skipped), on Linux the
- * first of its AppImages that is still the file at its path. Anything else
- * leaves the pin as it was. Returns the new pin, if any.
+ * When a self grant asks for the password, before the dialog appears: the
+ * app the grant covers, with the identity of its code on disk right now.
+ * The approval is bound to it, so what gets pinned is the code that was on
+ * disk when the user was asked (repinFromGrant). That is, on macOS the first
+ * of the grant's paths outside the installer's folder that is code signed
+ * as Vigil (the app bundle; its cdhash and main executable come from
+ * codesign on disk, and a path that isn't such code is skipped), on Linux
+ * the first of its AppImages that is still the file at its path. Code
+ * replaced before the request is out of scope. Undefined when there is none.
  */
-export async function repinFromGrant(
+export async function pinCandidate(
   sys: System,
   grant: { selfPaths: readonly string[]; selfImages?: readonly SelfImage[] | undefined },
-  opts: RepinOptions,
-): Promise<AppPin | undefined> {
+  opts: PinOptions,
+): Promise<PinCandidate | undefined> {
   const candidates =
     sys.platform === 'linux'
       ? (grant.selfImages ?? []).filter((i) => sys.fileId?.(i.path) === i.id).map((i) => i.path)
       : grant.selfPaths;
   // A grant's images are AppImages, wherever they sit.
   const appImage = sys.platform === 'linux';
-  for (const path of candidates) {
-    if (inInstalled(sys, opts.installed, path, appImage)) continue;
-    let pin: AppPin | undefined;
+  for (const source of candidates) {
+    if (inInstalled(sys, opts.installed, source, appImage)) continue;
     try {
-      pin = await pinFor(sys, path, { ...opts, appImage });
+      const pin = await pinFor(sys, source, { ...opts, appImage });
+      if (pin) return { source, pin };
     } catch {
-      continue;
+      // Not code Vigil can pin: try the next.
     }
-    if (!pin) continue;
-    writePin(opts.pinFile, pin);
-    return pin;
   }
   return undefined;
+}
+
+/** Whether two pins name the same code: same file, and the same hashes. */
+function sameCode(a: AppPin, b: AppPin): boolean {
+  if (a.platform === 'darwin' && b.platform === 'darwin')
+    return a.path === b.path && a.cdhash === b.cdhash && a.sha256 === b.sha256;
+  if (a.platform === 'linux' && b.platform === 'linux')
+    return a.path === b.path && a.image === b.image && a.sha256 === b.sha256;
+  return false;
+}
+
+/**
+ * After the admin password approved a self grant: pin the app bound to the
+ * approval (pinCandidate), so an app updated outside the installer's folder
+ * is re-pinned with the grant's one prompt instead of a helper update's.
+ * The code on disk is read again and must still be the bound code, or
+ * nothing is pinned and the pin stays as it was. Returns the new pin, if any.
+ */
+export async function repinFromGrant(
+  sys: System,
+  bound: PinCandidate,
+  opts: RepinOptions,
+): Promise<AppPin | undefined> {
+  let pin: AppPin | undefined;
+  try {
+    pin = await pinFor(sys, bound.source, { ...opts, appImage: sys.platform === 'linux' });
+  } catch {
+    return undefined;
+  }
+  if (!pin || !sameCode(pin, bound.pin)) return undefined;
+  writePin(opts.pinFile, pin);
+  return pin;
 }
 
 /** The pinned program's hashes, which no hash block may name. Reads only the pin. */

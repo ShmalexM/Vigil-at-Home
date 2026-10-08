@@ -1,22 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RuleStore } from '@vigil/sensors';
 import { Approvals } from './approval.js';
 import {
   parseCodesignIdentity,
+  pinCandidate,
   pinFor,
   readPin,
   repinFromGrant,
   writePin,
   type AppPin,
+  type PinOptions,
 } from './appPin.js';
+import { VIGIL_BUNDLE_ID } from './config.js';
 import { Executor } from './executor.js';
 import { FastPath } from './fastpath.js';
 import { Journal } from './journal.js';
 import type { HelperCommand } from './protocol.js';
-import type { BinaryName, RunResult } from './system.js';
+import type { BinaryName, RunResult, System } from './system.js';
 import { FapolicydBlocks } from './commands/fapolicyd.js';
 import { isProtectedProcess } from './commands/process.js';
 import { FakeSystem } from './testing/fakeSystem.js';
@@ -28,6 +31,17 @@ const APP_SHA = 'a'.repeat(64);
 const BUNDLE = '/Users/a/Downloads/Vigil at Home.app';
 const EXE = `${BUNDLE}/Contents/MacOS/Vigil at Home`;
 const INSTALLED_MAC = ['/Applications/Vigil at Home.app'];
+const VIGIL_ID = 'app.vigilathome.desktop';
+
+/** A self grant's whole re-pin: bound when the password is asked for, pinned once it's given. */
+async function regrant(
+  sys: System,
+  grant: Parameters<typeof pinCandidate>[1],
+  opts: PinOptions & { pinFile: string },
+): Promise<AppPin | undefined> {
+  const bound = await pinCandidate(sys, grant, opts);
+  return bound && repinFromGrant(sys, bound, opts);
+}
 
 let root: string;
 let pinFile: string;
@@ -43,6 +57,8 @@ const ok = (stdout = '', stderr = ''): RunResult => ({ code: 0, stdout, stderr }
 class MacCode extends FakeSystem {
   /** target (path or pid) → [cdhash, main executable]. */
   code = new Map<string, [string, string]>();
+  /** target → signing identifier, when not Vigil's. */
+  identifiers = new Map<string, string>();
   /** Runs while codesign looks at a pid, to stand in for the pid being reused meanwhile. */
   duringCodesign: (() => void) | undefined;
 
@@ -53,7 +69,10 @@ class MacCode extends FakeSystem {
     if (/^\d+$/.test(target)) this.duringCodesign?.();
     const c = this.code.get(target);
     return c
-      ? ok('', `Executable=${c[1]}\nIdentifier=com.vigilathome.app\nCDHash=${c[0]}\n`)
+      ? ok(
+          '',
+          `Executable=${c[1]}\nIdentifier=${this.identifiers.get(target) ?? VIGIL_ID}\nCDHash=${c[0]}\n`,
+        )
       : { code: 1, stdout: '', stderr: 'code object is not signed at all' };
   }
 }
@@ -68,10 +87,19 @@ const executorDeps = (sys: FakeSystem | FakeLinuxSystem) => ({
   appPin: pinFile,
 });
 
+it('pins by the bundle id the app is built with', () => {
+  const builder = readFileSync(
+    join(import.meta.dirname, '../../../apps/desktop/electron-builder.yml'),
+    'utf8',
+  );
+  expect(/^appId:\s*(\S+)\s*$/m.exec(builder)?.[1]).toBe(VIGIL_BUNDLE_ID);
+  expect(VIGIL_ID).toBe(VIGIL_BUNDLE_ID);
+});
+
 it('reads the cdhash and main executable codesign prints', () => {
   expect(
     parseCodesignIdentity(`Executable=${EXE}\nIdentifier=x\nCDHash=${CDHASH}\nSignature=adhoc\n`),
-  ).toEqual({ cdhash: CDHASH, executable: EXE });
+  ).toEqual({ cdhash: CDHASH, executable: EXE, identifier: 'x' });
   expect(parseCodesignIdentity('code object is not signed at all')).toBeUndefined();
 });
 
@@ -103,7 +131,7 @@ describe('codesign -d -vvv as a real Mac prints it', () => {
   ].join('\n');
 
   it('reads the inner executable and cdhash, in any line order', () => {
-    const want = { cdhash: FINDER_CDHASH, executable: FINDER_EXE };
+    const want = { cdhash: FINDER_CDHASH, executable: FINDER_EXE, identifier: 'com.apple.finder' };
     expect(parseCodesignIdentity(FINDER)).toEqual(want);
     const lines = FINDER.split('\n');
     expect(parseCodesignIdentity([...lines].reverse().join('\n'))).toEqual(want);
@@ -116,16 +144,32 @@ describe('codesign -d -vvv as a real Mac prints it', () => {
     ).toEqual(want);
   });
 
+  /** The same output for code signed as Vigil, which is all that is ever pinned. */
+  const AS_VIGIL = FINDER.replace('Identifier=com.apple.finder', `Identifier=${VIGIL_ID}`);
+
   /** codesign writing `out` to stderr, with nothing on stdout, for the bundle and its pid. */
   class StderrMac extends FakeSystem {
+    constructor(private readonly out = AS_VIGIL) {
+      super();
+    }
     override async run(bin: BinaryName, args: string[], opts: { input?: string } = {}) {
       if (bin !== 'codesign') return super.run(bin, args, opts);
       this.runs.push({ bin, args, input: opts.input });
       return [FINDER_APP, '700'].includes(args.at(-1)!)
-        ? ok('', FINDER)
+        ? ok('', this.out)
         : { code: 1, stdout: '', stderr: 'code object is not signed at all' };
     }
   }
+
+  it('never pins code signed as anything but Vigil', async () => {
+    const opts = { installed: INSTALLED_MAC, sha256: () => APP_SHA };
+    await expect(pinFor(new StderrMac(FINDER), FINDER_APP, opts)).rejects.toThrow(VIGIL_ID);
+    const noId = AS_VIGIL.replace(`Identifier=${VIGIL_ID}\n`, '');
+    await expect(pinFor(new StderrMac(noId), FINDER_APP, opts)).rejects.toThrow(VIGIL_ID);
+    const sys = new StderrMac(FINDER);
+    expect(await regrant(sys, { selfPaths: [FINDER_APP] }, { ...opts, pinFile })).toBeUndefined();
+    expect(readPin(pinFile)).toBeUndefined();
+  });
 
   it('pins from a bundle path by the inner Mach-O, read from stderr', async () => {
     const sys = new StderrMac();
@@ -144,7 +188,7 @@ describe('codesign -d -vvv as a real Mac prints it', () => {
   it('re-pins from a grant naming the bundle, and spares its pid by cdhash', async () => {
     const sys = new StderrMac();
     sys.processes.set(700, { path: FINDER_EXE, started: STARTED });
-    const pin = await repinFromGrant(
+    const pin = await regrant(
       sys,
       { selfPaths: [FINDER_APP] },
       { pinFile, installed: INSTALLED_MAC, sha256: () => APP_SHA },
@@ -323,7 +367,7 @@ describe('the app pinned at install (macOS)', () => {
   describe('re-pinned by an approved self grant', () => {
     const NEW = 'e'.repeat(40);
     const repin = (selfPaths: string[]) =>
-      repinFromGrant(
+      regrant(
         sys,
         { selfPaths },
         { pinFile, installed: INSTALLED_MAC, sha256: () => 'b'.repeat(64) },
@@ -349,30 +393,83 @@ describe('the app pinned at install (macOS)', () => {
       expect(sys.runs.filter((r) => r.args.at(-1) === app)).toEqual([]);
     });
 
-    it('happens only when the password approved a grant', async () => {
-      const asked: HelperCommand[] = [];
-      const fast = new FastPath({
-        file: join(root, 'helper-rules.json'),
-        run: async () => {
-          throw new Error('unused');
-        },
-      });
+    /** An executor wired as the daemon wires it, with the code on disk hashing to `sha()`. */
+    const grantExecutor = (sha: () => string) => {
+      const opts = { installed: INSTALLED_MAC, sha256: sha };
+      const committed: AppPin[] = [];
       const ex = new Executor({
         ...executorDeps(sys),
-        fastPath: fast,
-        repin: async (grant) => void asked.push(grant),
+        fastPath: new FastPath({
+          file: join(root, 'helper-rules.json'),
+          run: async () => {
+            throw new Error('unused');
+          },
+        }),
+        repin: {
+          candidate: (grant) => pinCandidate(sys, grant, opts),
+          commit: async (bound) => {
+            const pin = await repinFromGrant(sys, bound, { ...opts, pinFile });
+            if (pin) committed.push(pin);
+          },
+        },
       });
-      const grant: HelperCommand = { kind: 'self.grant', selfPaths: [BUNDLE] };
+      return { ex, committed };
+    };
+    const approve = async (ex: Executor, grant: HelperCommand) => {
       const ask = await ex.execute(grant);
       expect(ask.kind).toBe('needs_approval');
-      expect(asked).toEqual([]);
       const nonce = (ask as { nonce: string }).nonce;
       Approvals.writeApproval(join(root, 'approvals'), nonce);
+      return nonce;
+    };
+
+    it('happens only when the password approved a grant', async () => {
+      const { ex, committed } = grantExecutor(() => 'b'.repeat(64));
+      const grant: HelperCommand = { kind: 'self.grant', selfPaths: [BUNDLE] };
+      const nonce = await approve(ex, grant);
+      expect(committed).toEqual([]);
+      // The code was read before the dialog, from the bundle the grant names.
+      expect(codesigns()).toEqual([BUNDLE]);
       await ex.execute(grant, nonce);
-      expect(asked).toEqual([grant]);
+      expect(committed).toEqual([
+        { platform: 'darwin', path: EXE, cdhash: NEW, sha256: 'b'.repeat(64) },
+      ]);
+      expect(readPin(pinFile)).toEqual(committed[0]);
       // The same grant again names nothing new, needs no password, and re-pins nothing.
       await ex.execute(grant);
-      expect(asked).toHaveLength(1);
+      expect(committed).toHaveLength(1);
+    });
+
+    it('pins only the code that was on disk when the password was asked for', async () => {
+      const before = readPin(pinFile);
+      let sha = 'b'.repeat(64);
+      const { ex, committed } = grantExecutor(() => sha);
+      const grant: HelperCommand = { kind: 'self.grant', selfPaths: [BUNDLE] };
+      // Other code is put in place while the dialog is up: a new cdhash...
+      let nonce = await approve(ex, grant);
+      sys.code.set(BUNDLE, ['f'.repeat(40), EXE]);
+      expect((await ex.execute(grant, nonce)).kind).toBe('done');
+      expect(committed).toEqual([]);
+      expect(readPin(pinFile)).toEqual(before);
+      // ...or the same cdhash with other bytes in the executable.
+      const ex2 = grantExecutor(() => sha);
+      nonce = await approve(ex2.ex, { kind: 'self.grant', selfPaths: [BUNDLE, '/Users/a/x'] });
+      sha = 'd'.repeat(64);
+      await ex2.ex.execute({ kind: 'self.grant', selfPaths: [BUNDLE, '/Users/a/x'] }, nonce);
+      expect(ex2.committed).toEqual([]);
+      expect(readPin(pinFile)).toEqual(before);
+    });
+
+    it('pins nothing for a grant naming code not signed as Vigil', async () => {
+      const before = readPin(pinFile);
+      const other = '/Users/a/Downloads/Other.app';
+      sys.code.set(other, [NEW, `${other}/Contents/MacOS/Other`]);
+      sys.identifiers.set(other, 'com.example.other');
+      const { ex, committed } = grantExecutor(() => 'b'.repeat(64));
+      const grant: HelperCommand = { kind: 'self.grant', selfPaths: [other] };
+      await ex.execute(grant, await approve(ex, grant));
+      expect(committed).toEqual([]);
+      expect(readPin(pinFile)).toEqual(before);
     });
   });
 });
@@ -511,7 +608,7 @@ describe('the app pinned at install (Linux AppImage)', () => {
     expect(await pinFor(sys, inOpt, opts)).toEqual({ ...pin, path: inOpt, image: '2049:6601' });
     // Through an approved grant too.
     const grant = { selfPaths: [], selfImages: [{ path: inOpt, id: '2049:6601' }] };
-    expect(await repinFromGrant(sys, grant, { ...opts, pinFile })).toMatchObject({
+    expect(await regrant(sys, grant, { ...opts, pinFile })).toMatchObject({
       path: inOpt,
       image: '2049:6601',
     });
@@ -537,10 +634,10 @@ describe('the app pinned at install (Linux AppImage)', () => {
     const opts = { pinFile, installed: ['/opt/Vigil at Home'], sha256: () => APP_SHA };
     // An image that is no longer the file at its path is skipped.
     const moved = { path: '/home/alex/Old.AppImage', id: '2049:7777' };
-    expect(await repinFromGrant(sys, { selfPaths: [], selfImages: [moved] }, opts)).toBeUndefined();
+    expect(await regrant(sys, { selfPaths: [], selfImages: [moved] }, opts)).toBeUndefined();
     expect(readPin(pinFile)).toBeUndefined();
     const grant = { selfPaths: [], selfImages: [{ path: image, id: '2049:5501' }] };
-    expect(await repinFromGrant(sys, grant, opts)).toEqual(pin);
+    expect(await regrant(sys, grant, opts)).toEqual(pin);
     expect(readPin(pinFile)).toEqual(pin);
   });
 });

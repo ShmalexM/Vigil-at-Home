@@ -75,6 +75,13 @@ export function linuxPaths(supportDir = '/var/lib/vigil'): HelperPaths {
 export const SANTA_SYNC_PORT = 47821;
 
 /**
+ * The app's bundle id (appId in apps/desktop/electron-builder.yml), which
+ * codesign reports as the Identifier of Vigil's own code. On macOS only code
+ * signed with it is ever pinned (appPin.ts).
+ */
+export const VIGIL_BUNDLE_ID = 'app.vigilathome.desktop';
+
+/**
  * Paths the helper will never quarantine or unload, whoever asks. Moving
  * these could break macOS, Santa or Vigil itself. /usr/local is fine.
  */
