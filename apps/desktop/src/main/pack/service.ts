@@ -793,6 +793,7 @@ export class PackService {
         });
       let answer = said;
       const reasons = [...(v.why ?? [])];
+      const readReasons: string[] = [];
       const used: string[] = [];
       let provider = result.provider;
       let logId = result.logId;
@@ -814,7 +815,8 @@ export class PackService {
         this.reply({ text, used, tainted: true, ...(r.ok ? {} : { failed: true }) });
         answer = [said, text].filter(Boolean).join('\n\n');
         if (r.ok) {
-          reasons.push(...(r.value.why ?? []));
+          // Kept apart from the dog's own reasons: these came out of what it read.
+          readReasons.push(...(r.value.why ?? []));
           provider = r.provider;
         }
         logId = r.logId;
@@ -830,6 +832,7 @@ export class PackService {
           lookedAt: used,
           answer: answer || 'Okay.',
           reasons: reasons.slice(0, 10),
+          ...(read ? { fromOutside: true, readReasons: readReasons.slice(0, 10) } : {}),
           provider,
         },
         logId,
@@ -976,9 +979,9 @@ export class PackService {
     refs: Refs,
     used: string[],
   ): Prompt {
-    // It reads outside text, so it gets only tools that read, or that the
-    // person set to run without asking: nothing else it is steered into can
-    // change anything.
+    // It reads outside text, so it gets Vigil's own read tools only. A
+    // connector tool is never offered here, even one set to Always allow:
+    // that choice applies to the acting path, not to text anyone could write.
     const tools = this.toolsFor(lead, { requestedByUser: true, used }, new Intake(), true);
     const looked: Record<string, unknown> = {};
     for (const r of read.refs) {
@@ -1611,7 +1614,7 @@ export class PackService {
     for (const key of dog.tools) {
       const t = this.entry(key);
       if (!t || this.choiceOf(key) === 'off') continue;
-      if (readOnlyOnly && !this.treatedAsReadOnly(key)) continue;
+      if (readOnlyOnly && !(this.isVigilKey(key) && t.readOnly)) continue;
       const vigil = t.source === 'vigil';
       const name = vigil ? t.name.replace(/[^A-Za-z0-9_]/g, '_').slice(0, 60) : `tool_${++n}`;
       if (taken.has(name)) continue;

@@ -533,10 +533,10 @@ describe('the pack', () => {
         ask: 'what is this?',
         subject: { kind: 'alert', id: 'alert-123' },
         answer: 'That one is a test alert.',
-        reasons: [
-          'The person asked about the open alert',
-          'list_alerts showed it came from the Test button',
-        ],
+        // What came out of reading stays apart from the dog's own reasons.
+        reasons: ['The person asked about the open alert'],
+        fromOutside: true,
+        readReasons: ['list_alerts showed it came from the Test button'],
         provider: 'codex',
         model: 'gpt-5.5',
       });
@@ -828,7 +828,8 @@ describe('the pack', () => {
       // Vigil's own read tool only: a server's claim that its tool only reads is
       // not trusted, so neither connector tool is offered here.
       expect(runs[1]!.tools?.map((t) => t.name)).toEqual(['list_alerts']);
-      // A tool the person set to run without asking is offered.
+      // Not even a tool the person set to Always allow: that applies to the
+      // acting path only.
       pack.setToolChoice('github.list_issues', 'allow');
       handlers.push(() => ({
         reply: '',
@@ -837,7 +838,7 @@ describe('the pack', () => {
       }));
       handlers.push(() => ({ answer: 'None.' }));
       await pack.say('any issues?');
-      expect(runs[3]!.tools?.map((t) => t.name)).toEqual(['list_alerts', 'tool_1']);
+      expect(runs[3]!.tools?.map((t) => t.name)).toEqual(['list_alerts']);
     });
 
     it('keeps every connector key, title and description out of the acting prompt', async () => {

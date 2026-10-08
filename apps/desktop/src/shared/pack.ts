@@ -417,15 +417,23 @@ export interface DogNote {
   lookedAt: string[];
   answer: string;
   reasons: string[];
+  /**
+   * Set when part of the answer came from reading outside text (a report, a
+   * connector's output). That part, and `readReasons`, may hold anyone's words,
+   * so they are shown as what the dog read, not as its own reasoning.
+   */
+  fromOutside?: boolean;
+  readReasons?: string[];
   thinking?: string;
   provider?: string;
   model?: string;
 }
 
-export type DogNoteInput = Omit<DogNote, 'id' | 'at' | 'lookedAt' | 'reasons'> & {
+export type DogNoteInput = Omit<DogNote, 'id' | 'at' | 'lookedAt' | 'reasons' | 'readReasons'> & {
   lookedAt?: string[];
 
   reasons?: string[];
+  readReasons?: string[];
 };
 
 export const NoteSubject = z.object({

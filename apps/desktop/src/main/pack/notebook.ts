@@ -51,11 +51,9 @@ export class Notebook {
       ...(input.subject ? { subject: input.subject } : {}),
       lookedAt: (input.lookedAt ?? []).slice(0, LIST).map((s) => clip(s, 300)),
       answer: clip(input.answer),
-      reasons: (input.reasons ?? [])
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .slice(0, LIST)
-        .map((s) => clip(s, 600)),
+      reasons: reasonList(input.reasons),
+      ...(input.fromOutside ? { fromOutside: true } : {}),
+      ...(input.readReasons?.length ? { readReasons: reasonList(input.readReasons) } : {}),
       ...(input.thinking ? { thinking: clip(input.thinking, 4000) } : {}),
       ...(input.provider ? { provider: input.provider } : {}),
       ...(input.model ? { model: input.model } : {}),
@@ -138,4 +136,12 @@ function subjectKey(s: DogNote['subject']): string | null {
 function clip(s: string, n = TEXT): string {
   const t = s.trim();
   return t.length > n ? `${t.slice(0, n - 1)}…` : t;
+}
+
+function reasonList(list: readonly string[] | undefined): string[] {
+  return (list ?? [])
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, LIST)
+    .map((s) => clip(s, 600));
 }
