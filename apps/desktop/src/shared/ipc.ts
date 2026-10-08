@@ -451,6 +451,8 @@ export interface RuleSuggestionView {
   kind: 'new_rule' | 'tuning' | 'retire';
   createdAt: number;
   provider: string;
+  /** The Lead dog's name, when it drafted this in chat. */
+  by?: string;
   rationale: string;
   evidence: string[];
   ruleId: string;

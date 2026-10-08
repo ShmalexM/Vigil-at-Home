@@ -7,7 +7,7 @@ import type { ToolListing } from '../agents/tools.js';
 import type { ConnectorHub, ConnectorRecord, RemoteTool } from './connectors.js';
 import { PackMemory } from './memory.js';
 import { Notebook } from './notebook.js';
-import { PackService, type PackAiStatus } from './service.js';
+import { PackService, type PackAiStatus, type PackDeps } from './service.js';
 
 type Handler = (req: RunRequest<unknown>) => Promise<unknown> | unknown;
 
@@ -51,6 +51,7 @@ function setup(
     /** Vigil's own tools; push to it to add one later. */
     vigil?: string[];
     hour?: number;
+    rules?: PackDeps['rules'];
   } = {},
 ) {
   const vigil = opts.vigil ?? ['list_alerts', 'search_events'];
@@ -104,6 +105,7 @@ function setup(
     memory,
     onChange: () => undefined,
     ...(opts.hour !== undefined ? { hour: () => opts.hour! } : {}),
+    ...(opts.rules ? { rules: opts.rules } : {}),
   });
   return { pack, handlers, runs, connectorCalls, vigilCalls, notebook, memory };
 }
@@ -549,6 +551,117 @@ describe('the pack', () => {
     const biscuit = (await pack.view()).dogs.find((d) => d.helper === 'labeller');
     expect(biscuit).toMatchObject({ mood: 'sniffing', activity: 'Labelling new events' });
     expect(() => pack.setVoice('loud' as never)).toThrow();
+  });
+
+  describe('rule drafts', () => {
+    /** Stands in for the Suggested changes queue: one pending suggestion per rule. */
+    function queue() {
+      const pending = new Map<string, string>();
+      const calls: unknown[] = [];
+      const rules: NonNullable<PackDeps['rules']> = {
+        draft: (req, by) => {
+          calls.push({ req, by });
+          const ruleId = req.ruleId ?? 'unsigned-net';
+          const base = { kind: req.kind, ruleId, ruleName: 'Unsigned program online' };
+          if (ruleId === 'agent-rule')
+            return { ...base, status: 'failed', note: 'Agent rules are tuned only by you.' };
+          const had = pending.get(ruleId);
+          if (had) return { ...base, status: 'already', proposalId: had };
+          pending.set(ruleId, `p-${pending.size + 1}`);
+          return {
+            ...base,
+            change: 'Stop "Unsigned program online" matching when process.sha256 is abc',
+            status: 'waiting',
+            proposalId: pending.get(ruleId)!,
+          };
+        },
+      };
+      return { rules, calls, pending };
+    }
+    const QUIET = { kind: 'exclude', alertId: 'a1', scope: 'this_binary', why: 'It is my build.' };
+
+    it('only ever adds a suggestion, in every mode, Full access included', async () => {
+      for (const mode of ['ask', 'auto', 'full'] as const) {
+        const q = queue();
+        const { pack, handlers } = setup({ rules: q.rules });
+        pack.setMode(mode);
+        handlers.push(() => ({
+          reply: 'I suggested an exclusion. It waits for your OK under Suggested changes.',
+          actions: [],
+          ruleChanges: [QUIET],
+        }));
+        await pack.say('make this stop alerting', { page: 'alerts', selected: 'a1' });
+        const msg = pack.chat().at(-1)!;
+        expect(msg.rules).toEqual([
+          expect.objectContaining({ status: 'waiting', proposalId: 'p-1', kind: 'exclude' }),
+        ]);
+        expect(q.calls).toEqual([
+          {
+            req: { kind: 'exclude', alertId: 'a1', scope: 'this_binary', why: 'It is my build.' },
+            by: { provider: 'codex', name: 'Scout' },
+          },
+        ]);
+        // A suggestion waits on Rules, not in the chat: nothing here for the person to approve.
+        expect(msg.actions).toBeUndefined();
+        expect((await pack.view()).dogs[0]!.mood).not.toBe('waiting');
+      }
+    });
+
+    it('says why a draft was refused, and when the same one is already waiting', async () => {
+      const q = queue();
+      const { pack, handlers } = setup({ rules: q.rules });
+      handlers.push(() => ({
+        reply: 'Tried.',
+        actions: [],
+        ruleChanges: [QUIET, { kind: 'turn-down', ruleId: 'agent-rule', why: 'Too noisy.' }],
+      }));
+      await pack.say('quiet these');
+      expect(pack.chat().at(-1)!.rules).toMatchObject([
+        { status: 'waiting', proposalId: 'p-1' },
+        { status: 'failed', note: 'Agent rules are tuned only by you.' },
+      ]);
+      handlers.push(() => ({ reply: 'Again.', actions: [], ruleChanges: [QUIET] }));
+      await pack.say('make it stop');
+      expect(pack.chat().at(-1)!.rules).toMatchObject([{ status: 'already', proposalId: 'p-1' }]);
+      expect(q.pending.size).toBe(1);
+    });
+
+    it('drafts at most two changes per answer, and none without the queue', async () => {
+      const q = queue();
+      const { pack, handlers, runs } = setup({ rules: q.rules });
+      handlers.push(() => ({
+        reply: 'Lots.',
+        actions: [],
+        ruleChanges: ['r1', 'r2', 'r3', 'r4'].map((ruleId) => ({
+          kind: 'turn-down',
+          ruleId,
+          why: 'Noisy.',
+        })),
+      }));
+      await pack.say('quiet everything');
+      expect(pack.chat().at(-1)!.rules).toHaveLength(2);
+      expect(q.calls).toHaveLength(2);
+      handlers.push(() => ({ reply: 'Ok.', actions: [] }));
+      await pack.say('thanks');
+      expect(JSON.stringify(runs.at(-1)!.data)).toContain('"rule":"r1"');
+
+      const bare = setup();
+      bare.handlers.push(() => ({ reply: 'Hm.', actions: [], ruleChanges: [QUIET] }));
+      await bare.pack.say('make this stop');
+      expect(bare.pack.chat().at(-1)!.rules).toMatchObject([
+        { status: 'failed', note: 'Detection isn’t running' },
+      ]);
+    });
+
+    it('tells the Lead dog it can only suggest, and that it still cannot approve a rule', async () => {
+      const { pack, handlers, runs } = setup();
+      handlers.push(() => ({ reply: 'Hi.', actions: [] }));
+      await pack.say('hi');
+      const text = runs[0]!.instructions;
+      expect(text).toContain('approve, edit or turn off a rule');
+      expect(text).toMatch(/make this stop alerting/);
+      expect(text).toMatch(/nothing changes until the person accepts it/);
+    });
   });
 
   describe('notebooks', () => {

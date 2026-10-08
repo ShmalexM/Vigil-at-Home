@@ -8,6 +8,28 @@ The Pack page shows Vigil's own AI agents as dogs. The third-party coding agents
 
 No dog can block or allow anything on the Mac, release a block, answer a watched agent's pre-flight check, or approve or edit a rule. No tool that does any of that exists.
 
+## Quieting a noisy alert
+
+Tell the Lead dog "make this stop alerting" (on the alert, or naming it) and it can suggest a rule change. It is only a suggestion, in every permission mode, Full access included: it waits under Suggested changes on Rules, next to Duke's, until you accept it there.
+
+- **Exclude:** stop the alert's rule matching what it was about: the app by its developer signature, this exact program (by hash), this path or this network host. Vigil builds the exclusion from the alert's own event, the same way "Stop alerting on this" does; the Lead dog only picks which.
+- **Turn down:** move the rule to Shadow, where it keeps recording without alerting.
+
+Each suggestion goes through the same checks as Duke's: the 14-day replay and what it would stop catching, no exclusion that hides a program marked malicious or uses agent fields, no changes to rules about coding agents, and the same daily limit. Accepting one that loosens a blocking rule asks for the admin password, as any such change does. The Lead dog drafts at most two per answer and never repeats one that is already waiting.
+
+The chat shows a card with the change in plain words and a Review button that opens it on Rules; on Rules it says "Suggested by Scout" (the Lead dog's name). If the checks refuse a draft, the card says why. The answer may rest on alert text anyone could write, which is why only you can accept it.
+
+```mermaid
+flowchart LR
+  Y[You: make this stop alerting] --> L[Lead dog picks the alert and what to exclude]
+  L --> V[Vigil builds the change from the alert's event]
+  V --> C{Same checks as Duke's}
+  C -- refused --> F[Card says why]
+  C -- passed --> Q[Waits under Suggested changes]
+  Q -- you accept --> R[Rule changes]
+  Q -- you dismiss --> N[Nothing changes]
+```
+
 ## Permission modes
 
 The mode at the top of the page works like a coding agent's permission modes.
@@ -70,7 +92,7 @@ The Pack page sits under Advanced. Two parts of it reach the rest of the app:
 - **Scout on Home.** The Lead dog sits next to Home's status line and acts it out: relaxed when nothing needs you, ears up (the waiting pose) when something needs your decision (the Needs you count) or a protection layer has stopped, and busy while a dog's AI job runs. The status words don't change; the dog only shows them. Clicking it opens Ask.
 - **Today the pack.** Under the status line, one line per dog that did something since midnight ("Biscuit sniffed through new events 5 times"), counted from the notebooks. The wording is fixed, never written by an AI; runs that didn't finish are counted separately, and background runs that never reached an AI aren't noted. Each line opens that dog's notebook.
 - **Scout on a pile.** When Needs you holds a pile of three or more alerts (the alerts' own grouping: same rule, same agent run or program), the biggest one shows as Scout's card instead of a row: who set it off, how many times, and one button to look at them all, where "That was me, all N" and "Looks fine, all N" decide them together. Scout adds no grouping of its own and the wording is fixed.
-- **Ask.** A bar at the bottom of every page (except Pack and setup) opens a chat drawer with the Lead dog. It is closed until you open it (click the bar or press ⌘K; Esc closes it). It is the same conversation as the Pack page, sent as your own chat, so the same rules apply: a Claude plan only if you turned it on, and no dog blocks, allows or changes a rule. The drawer tells the Lead dog which page you're on and what you have selected there (an alert, a rule, an agent or one of its sessions, or Activity's filter to one agent or session), so "what's this?" works; the Lead dog reads the details with its read-only tools. Its tools are the ones listed in [agents.md](agents.md#the-tools): status, alerts, events (by agent, rule matches or Biscuit's labels), rules, what Vigil did, and agents. When you ask how to stop an alert repeating, it points you to "Stop alerting on this" on the alert or to the rule on Rules; it can't change either itself.
+- **Ask.** A bar at the bottom of every page (except Pack and setup) opens a chat drawer with the Lead dog. It is closed until you open it (click the bar or press ⌘K; Esc closes it). It is the same conversation as the Pack page, sent as your own chat, so the same rules apply: a Claude plan only if you turned it on, and no dog blocks, allows or changes a rule. The drawer tells the Lead dog which page you're on and what you have selected there (an alert, a rule, an agent or one of its sessions, or Activity's filter to one agent or session), so "what's this?" works; the Lead dog reads the details with its read-only tools. Its tools are the ones listed in [agents.md](agents.md#the-tools): status, alerts, events (by agent, rule matches or Biscuit's labels), rules, what Vigil did, and agents. When you ask it to stop an alert repeating, it suggests a change that waits under Suggested changes (see [Quieting a noisy alert](#quieting-a-noisy-alert)); it can't change a rule itself.
 
 ```mermaid
 flowchart LR
@@ -79,6 +101,7 @@ flowchart LR
   D -->|your message + page + selected id| L[Lead dog: your own chat]
   L --> T[Vigil's read-only tools]
   L -->|changes to the pack| G[Permission mode decides]
+  L -->|rule suggestions| S[Suggested changes on Rules: you accept]
 ```
 
 A half-written message stays in the box when you change pages or close the drawer. If a message doesn't reach the Lead dog, the words go back in the box with the reason. With no AI set up, neither Enter nor the starter questions send anything.

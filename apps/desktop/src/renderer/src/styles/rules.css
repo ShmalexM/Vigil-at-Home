@@ -71,6 +71,12 @@
 .suggestion:first-of-type {
   border-top: 0;
 }
+.suggestion.focused {
+  margin: 0 -10px;
+  padding: 12px 10px;
+  border-radius: 10px;
+  background: var(--ac-bg);
+}
 .suggestion .evidence {
   margin: 0;
   padding-left: 18px;

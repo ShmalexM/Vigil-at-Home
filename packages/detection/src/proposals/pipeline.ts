@@ -25,6 +25,8 @@ export interface Proposal {
   createdAt: number;
   /** Which AI provider proposed it (e.g. "claude", "codex", "ollama"). */
   provider: string;
+  /** Who asked for it outside the scheduled review: the Lead dog's name, when it drafted this in chat. */
+  by?: string;
   rationale: string;
   evidence: string[];
   /** For a new rule, the rule; for tuning, the rule as it would be after the change. */
@@ -114,6 +116,8 @@ export interface SubmitResult {
   errors: string[];
   /** Resubmitting cannot help (a budget, or the same proposal already waiting). */
   final?: boolean;
+  /** Set with `final` when the same change is already waiting: the one that waits. */
+  duplicateOf?: string;
   warnings: string[];
   replay?: ReplayReport;
 }
@@ -155,6 +159,16 @@ const MAX_NEW_RULE_ALERTS_PER_DAY = 3;
 /** Provider name on suggestions Vigil makes from the user's own answers, not an AI. */
 export const VIGIL_PROVIDER = 'vigil';
 const DAY = 86_400_000;
+export const ALREADY_WAITING = 'The same change is already waiting for the user’s review.';
+
+/** JSON with sorted keys, so two conditions that say the same thing compare equal. */
+function canonical(v: unknown): string {
+  return JSON.stringify(v, (_, x: unknown) =>
+    x && typeof x === 'object' && !Array.isArray(x)
+      ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => a.localeCompare(b)))
+      : x,
+  );
+}
 
 /**
  * The out-of-band path from AI analysis to live rules:
@@ -290,7 +304,8 @@ export class RulePipeline {
     });
   }
 
-  submitTuning(raw: unknown, provider: string): SubmitResult {
+  /** Who asked, for a proposal drafted outside the scheduled review (the Lead dog's name). */
+  submitTuning(raw: unknown, provider: string, by?: string): SubmitResult {
     const parsedInput = ProposeTuningInput.safeParse(raw);
     if (!parsedInput.success)
       return { ok: false, errors: formatZod(parsedInput.error), warnings: [] };
@@ -303,6 +318,13 @@ export class RulePipeline {
       return { ok: false, errors: [USER_TUNED_ONLY], warnings: [], final: true };
     if (exclusionHidesAgent(input.addExclusion))
       return { ok: false, errors: [AGENT_EXCLUSION], warnings: [] };
+    const same = this.waiting(
+      (p) =>
+        p.kind === 'tuning' &&
+        p.baseRuleId === base.id &&
+        canonical(p.rule.exclusions.at(-1)) === canonical(input.addExclusion),
+    );
+    if (same) return same;
     const tuned: DetectionRule = {
       ...base,
       version: base.version + 1,
@@ -316,7 +338,16 @@ export class RulePipeline {
       provider,
       rationale: input.rationale,
       evidence: input.evidence,
+      ...(by ? { by } : {}),
     });
+  }
+
+  /** A refusal pointing at a proposal already waiting that matches, if there is one. */
+  private waiting(match: (p: Proposal) => boolean): SubmitResult | undefined {
+    const p = this.store.list().find((x) => x.status === 'awaiting_review' && match(x));
+    return (
+      p && { ok: false, errors: [ALREADY_WAITING], warnings: [], final: true, duplicateOf: p.id }
+    );
   }
 
   /**
@@ -324,7 +355,7 @@ export class RulePipeline {
    * when the rule caught something confirmed malicious in the replay window,
    * so maintenance can never quietly remove real protection.
    */
-  submitRetirement(raw: unknown, provider: string): SubmitResult {
+  submitRetirement(raw: unknown, provider: string, by?: string): SubmitResult {
     const parsedInput = ProposeRetirementInput.safeParse(raw);
     if (!parsedInput.success)
       return { ok: false, errors: formatZod(parsedInput.error), warnings: [] };
@@ -345,7 +376,9 @@ export class RulePipeline {
         warnings: [],
       };
     }
-    return this.queueRetirement(base, input.toMode, input.rationale, input.evidence, provider);
+    const same = this.waiting((p) => p.kind === 'retire' && p.baseRuleId === base.id);
+    if (same) return same;
+    return this.queueRetirement(base, input.toMode, input.rationale, input.evidence, provider, by);
   }
 
   /**
@@ -380,6 +413,7 @@ export class RulePipeline {
     rationale: string,
     evidence: string[],
     provider: string,
+    by?: string,
   ): SubmitResult {
     const now = this.opts.now();
     const before = this.replay(base);
@@ -413,6 +447,7 @@ export class RulePipeline {
         toMode === 'disabled' ? undefined : toMode,
       ),
     };
+    if (by) proposal.by = by;
     this.store.put(proposal);
     return {
       ok: errors.length === 0,
@@ -431,6 +466,7 @@ export class RulePipeline {
     provider: string;
     rationale: string;
     evidence: string[];
+    by?: string;
   }): SubmitResult {
     const lint = lintRule(p.rule, {
       aiProposed: p.kind === 'new_rule',
@@ -452,6 +488,7 @@ export class RulePipeline {
       status: 'awaiting_review',
       lint,
     };
+    if (p.by) proposal.by = p.by;
     if (p.base) {
       proposal.baseRuleId = p.base.id;
       proposal.baseRuleVersion = p.base.version;

@@ -272,6 +272,31 @@ describe('AI tuning proposals', () => {
     engine.upsertRule({ ...(baseRule as object), version: 5 } as never);
     expect(() => pipeline.approve(res.proposalId!, userOrigin('rules-screen'))).toThrow(/changed/);
   });
+
+  it('does not queue the same change twice, and keeps who drafted it', () => {
+    const { pipeline, engine } = twoWeeks();
+    engine.upsertRule(baseRule);
+    const tune = { ruleId: 'unsigned-net-alert', rationale: 'Your own builds are expected.' };
+    const first = pipeline.submitTuning({ ...tune, addExclusion: narrow }, 'claude', 'Scout');
+    expect(first.ok).toBe(true);
+    expect(pipeline.get(first.proposalId!)).toMatchObject({ by: 'Scout', provider: 'claude' });
+    // The same condition with its keys in another order is the same change.
+    const again = pipeline.submitTuning(
+      { ...tune, addExclusion: { value: ['~/code/**'], op: 'glob', field: 'process.path' } },
+      'codex',
+    );
+    expect(again).toMatchObject({ ok: false, final: true, duplicateOf: first.proposalId });
+    const retire = { ruleId: 'unsigned-net-alert', toMode: 'shadow', rationale: 'Noisy.' };
+    expect(pipeline.submitRetirement({ ...retire, evidence: ['x'] }, 'claude').ok).toBe(true);
+    expect(pipeline.submitRetirement({ ...retire, evidence: ['y'] }, 'claude')).toMatchObject({
+      ok: false,
+      final: true,
+    });
+    expect(pipeline.list().filter((p) => p.status === 'awaiting_review')).toHaveLength(2);
+    // Once the first is settled, the change can be suggested again.
+    pipeline.reject(first.proposalId!, userOrigin('rules-screen'));
+    expect(pipeline.submitTuning({ ...tune, addExclusion: narrow }, 'claude').ok).toBe(true);
+  });
 });
 
 describe('AI proposals about agent rules', () => {
