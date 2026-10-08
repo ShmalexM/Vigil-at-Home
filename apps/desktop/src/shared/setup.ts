@@ -63,21 +63,38 @@ export const FeedKey = z
   .max(256)
   .regex(/^[A-Za-z0-9_-]+$/, 'Paste just the key: letters and digits, no spaces');
 
+/** One feed that takes a key, as Settings lists it. */
+export interface KeyedFeedView {
+  name: string;
+  /** Refused without a key, so off until one is added. Each feed is reported on its own. */
+  needsKey: boolean;
+}
+
 /** Which feed keys are saved. The keys themselves never leave main. */
 export interface FeedKeysView {
   saved: Record<FeedKeyName, boolean>;
   /** False when the Keychain or keyring isn't available, so keys can't be saved. */
   canSave: boolean;
-  /** A feed was refused without a key and stays off until one is added. */
-  needsKey: boolean;
+  /** The feeds that take the abuse.ch key; empty while detection isn't running. */
+  feeds: KeyedFeedView[];
 }
 
-/** The one line under the abuse.ch key: it only says feeds are off when one actually is. */
+/** The abuse.ch feeds out of the importer's status, each with its own needs-key state. */
+export function keyedFeeds(
+  statuses: readonly { name: string; keyName?: FeedKeyName; needsKey?: boolean }[],
+): KeyedFeedView[] {
+  return statuses
+    .filter((s) => s.keyName === 'abusech')
+    .map((s) => ({ name: s.name, needsKey: !!s.needsKey }));
+}
+
+/** The one line under the abuse.ch key: it only names a feed as off when that feed is. */
 export function feedKeyNote(view: FeedKeysView): string {
   if (view.saved.abusech)
     return 'URLhaus and MalwareBazaar send your key. It is free for non-commercial use.';
-  if (view.needsKey)
-    return 'URLhaus and MalwareBazaar feeds are off until you add a free abuse.ch Auth-Key.';
+  const off = view.feeds.filter((f) => f.needsKey).map((f) => f.name);
+  if (off.length)
+    return `${off.join(' and ')} ${off.length === 1 ? 'is' : 'are'} off until you add a free abuse.ch Auth-Key.`;
   return 'Optional: abuse.ch may start requiring a free key for URLhaus and MalwareBazaar. Adding one keeps those feeds working.';
 }
 

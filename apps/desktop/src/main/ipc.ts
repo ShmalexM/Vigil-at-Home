@@ -10,7 +10,7 @@ import type { PackService } from './pack/service.js';
 import type { AgentService } from './agents/service.js';
 import type { UpdateChecker } from './updates.js';
 import type { FeedKeyStore } from './onboarding/keys.js';
-import type { FeedKeysView } from '../shared/setup.js';
+import { keyedFeeds, type FeedKeysView } from '../shared/setup.js';
 import { onboardingHandlers } from './onboarding/ipc.js';
 import type { OnboardingService } from './onboarding/service.js';
 import type { VigilCore } from './service.js';
@@ -49,7 +49,7 @@ export function registerIpc(
   let ruleSuggestions: RuleSuggestions | undefined;
   const feedKeysView = (): FeedKeysView => ({
     ...feedKeys.view(),
-    needsKey: core.detector?.feedStatus().some((s) => s.needsKey) ?? false,
+    feeds: keyedFeeds(core.detector?.feedStatus() ?? []),
   });
   const suggestions = () => {
     if (!core.detector) throw new Error('Detection is not running');

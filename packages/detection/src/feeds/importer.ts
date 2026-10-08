@@ -41,7 +41,7 @@ export class MemoryFeedStateStore implements FeedStateStore {
 /** The part of the WHATWG fetch API the importer uses; the app passes globalThis.fetch. */
 export type FetchLike = (
   url: string,
-  init: { headers: Record<string, string>; signal?: AbortSignal },
+  init: { headers: Record<string, string>; signal?: AbortSignal; redirect?: 'manual' },
 ) => Promise<{
   status: number;
   headers: { get(name: string): string | null };
@@ -87,6 +87,8 @@ export interface FeedStatus {
   entries: number;
   fetchedAt?: number;
   lastError?: string;
+  /** The user key this feed can take (FeedSource.auth), if any. */
+  keyName?: FeedKeyName;
   /** Refused without a key, so off until the user adds one. Its stored entries still count. */
   needsKey?: boolean;
   /** No successful fetch for three intervals. Never set while the feed needs a key. */
@@ -96,6 +98,9 @@ export interface FeedStatus {
 
 const FEED_LISTS: readonly FeedList[] = ['known_bad_sha256', 'known_bad_domains', 'known_bad_ips'];
 const ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+/** Redirects followed for a request that carries the user's key. */
+const MAX_KEYED_REDIRECTS = 3;
 
 /**
  * Keeps the known-bad lists current. Each source's entries are kept
@@ -219,6 +224,7 @@ export class FeedImporter {
           !needsKey && (!st?.fetchedAt || now - st.fetchedAt > 3 * s.intervalHours * 3_600_000),
         nextDueAt: this.dueAt(s),
       };
+      if (s.auth) out.keyName = s.auth.key;
       if (needsKey) out.needsKey = true;
       if (st?.fetchedAt !== undefined) out.fetchedAt = st.fetchedAt;
       // An error from before the feed was refused for want of a key is no longer news.
@@ -234,6 +240,41 @@ export class FeedImporter {
       for (const e of Object.keys(this.state.get(s.id)?.entries ?? {})) union.add(e);
     }
     this.lists.replace(list, union, { source: 'feeds', updatedAt: now });
+  }
+
+  /**
+   * GET a feed. A request carrying the user's key (`keyed`) does not
+   * let fetch follow redirects: it follows up to a few itself, and only while
+   * they stay on the same https origin (scheme, host and port), so the key is
+   * only ever sent to the site it was meant for. A redirect anywhere else, or
+   * to plain http, is an error and is not requested.
+   */
+  private async get(
+    url: string,
+    headers: Record<string, string>,
+    keyed: boolean,
+  ): Promise<Awaited<ReturnType<FetchLike>>> {
+    const signal = AbortSignal.timeout(this.opts.timeoutMs);
+    if (!keyed) return this.fetch(url, { headers, signal });
+    let current = new URL(url);
+    for (let hop = 0; ; hop++) {
+      const res = await this.fetch(current.href, { headers, signal, redirect: 'manual' });
+      // An opaque redirect (status 0) hides where it goes, so it cannot be checked.
+      if (res.status === 0) throw new Error('feed redirected somewhere that cannot be checked');
+      if (!REDIRECT_STATUSES.has(res.status)) return res;
+      if (hop >= MAX_KEYED_REDIRECTS) throw new Error('feed redirected too many times');
+      const location = res.headers.get('location');
+      if (!location) throw new Error(`HTTP ${res.status} without a redirect location`);
+      let next: URL;
+      try {
+        next = new URL(location, current);
+      } catch {
+        throw new Error('feed redirected to an invalid address');
+      }
+      if (next.protocol !== 'https:' || next.origin !== current.origin)
+        throw new Error('feed redirected to another site; not following it with the key');
+      current = next;
+    }
   }
 
   private async fetchSource(s: FeedSource, now: number): Promise<FeedRunResult> {
@@ -254,7 +295,7 @@ export class FeedImporter {
     let text: string;
     let res: Awaited<ReturnType<FetchLike>>;
     try {
-      res = await this.fetch(s.url, { headers, signal: AbortSignal.timeout(this.opts.timeoutMs) });
+      res = await this.get(s.url, headers, !!(s.auth && key));
       if (res.status === 304) {
         const st: FeedState = { ...prev, fetchedAt: now, lastAttemptAt: now };
         delete st.lastError;

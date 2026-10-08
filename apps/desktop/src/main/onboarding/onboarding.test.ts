@@ -6,7 +6,7 @@ import { memoryStore } from '../testing.js';
 import { CHECKS, HELPER_SOCKET, type Probe } from './checks.js';
 import { FeedKeyStore, KeyStore, type Cipher } from './keys.js';
 import { calls } from '../../shared/ipc.js';
-import { feedKeyNote } from '../../shared/setup.js';
+import { feedKeyNote, keyedFeeds } from '../../shared/setup.js';
 import {
   FAPOLICYD_ALLOW_RULES,
   LOCAL_MODEL,
@@ -424,18 +424,34 @@ describe('feed keys', () => {
     expect(() => store(testCipher(false)).keys.set('abusech', abuseKey)).toThrow('Keychain');
   });
 
-  it('says the feeds are off only when one was refused without a key', () => {
-    const view = (saved: boolean, needsKey: boolean) => ({
+  it('says a feed is off only when that feed was refused without a key', () => {
+    const view = (saved: boolean, off: { urlhaus?: boolean; bazaar?: boolean } = {}) => ({
       saved: { abusech: saved },
       canSave: true,
-      needsKey,
+      feeds: keyedFeeds([
+        { name: 'Feodo Tracker', needsKey: false },
+        { name: 'URLhaus', keyName: 'abusech', ...(off.urlhaus ? { needsKey: true } : {}) },
+        { name: 'MalwareBazaar', keyName: 'abusech', ...(off.bazaar ? { needsKey: true } : {}) },
+      ]),
     });
-    expect(feedKeyNote(view(false, false))).toMatch(/^Optional: abuse.ch may start requiring/);
-    expect(feedKeyNote(view(false, false))).not.toMatch(/\boff\b/);
-    expect(feedKeyNote(view(false, true))).toBe(
-      'URLhaus and MalwareBazaar feeds are off until you add a free abuse.ch Auth-Key.',
+    // Only the keyed feeds are listed, each with its own state.
+    expect(view(false, { urlhaus: true }).feeds).toEqual([
+      { name: 'URLhaus', needsKey: true },
+      { name: 'MalwareBazaar', needsKey: false },
+    ]);
+    expect(feedKeyNote(view(false))).toMatch(/^Optional: abuse.ch may start requiring/);
+    expect(feedKeyNote(view(false))).not.toMatch(/\boff\b/);
+    expect(feedKeyNote(view(false, { urlhaus: true }))).toBe(
+      'URLhaus is off until you add a free abuse.ch Auth-Key.',
     );
-    expect(feedKeyNote(view(true, false))).not.toMatch(/\boff\b/);
+    expect(feedKeyNote(view(false, { bazaar: true }))).toBe(
+      'MalwareBazaar is off until you add a free abuse.ch Auth-Key.',
+    );
+    expect(feedKeyNote(view(false, { urlhaus: true, bazaar: true }))).toBe(
+      'URLhaus and MalwareBazaar are off until you add a free abuse.ch Auth-Key.',
+    );
+    expect(feedKeyNote(view(true, { urlhaus: true }))).not.toMatch(/\boff\b/);
+    expect(keyedFeeds([])).toEqual([]);
   });
 
   it('validates the feed-key IPC arguments', () => {

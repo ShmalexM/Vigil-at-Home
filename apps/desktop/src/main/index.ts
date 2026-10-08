@@ -108,11 +108,14 @@ function start(): void {
     encrypt: (s) => safeStorage.encryptString(s),
     decrypt: (b) => safeStorage.decryptString(b),
   };
+  // Accepted limit: on Linux (GNOME keyring and similar) safeStorage's key is open to any
+  // app running as the same user, so this does not keep the abuse.ch key from them. That
+  // is the platform's limit, and the key is for a free feed, so it is stored the same way.
   const feedKeys = new FeedKeyStore(join(dataDir, 'feed-keys.json'), cipher);
   const detector = new Detector(db, store, core.alerts, (e, o) => core.ingest(e, o), {
     installedAt: core.installedAt(),
     selfPaths,
-    // URLhaus and MalwareBazaar stay off until the user adds their abuse.ch key.
+    // URLhaus and MalwareBazaar send the user's abuse.ch key once they add one.
     feeds: { keys: (name) => feedKeys.get(name) },
     // What Vigil itself starts (its AI helpers) is tagged vigil-self, never a watched agent.
     selfPid: process.pid,

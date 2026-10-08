@@ -109,7 +109,7 @@ export class FeedKeyStore {
   ) {}
 
   /** Whether a feed is refused without a key comes from the importer; see ipc.ts. */
-  view(): Omit<FeedKeysView, 'needsKey'> {
+  view(): Omit<FeedKeysView, 'feeds'> {
     const file = readPrivate(this.path, FeedFile);
     return {
       saved: Object.fromEntries(FeedKeyName.options.map((n) => [n, !!file[n]])) as Record<

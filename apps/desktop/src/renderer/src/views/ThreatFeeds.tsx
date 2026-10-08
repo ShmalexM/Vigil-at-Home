@@ -9,7 +9,8 @@ import './onboarding/onboarding.css';
 /**
  * The threat feeds card. Feodo Tracker needs nothing; URLhaus and
  * MalwareBazaar take the user's own free abuse.ch Auth-Key if they add one.
- * Only if abuse.ch refuses them without a key does this say they are off.
+ * Each of those feeds is listed with its own state: it says a feed is off
+ * only when abuse.ch refused that feed without a key.
  */
 export function ThreatFeedsSection() {
   const [view, reload] = useLive(() => vigil.getFeedKeys());
@@ -52,6 +53,23 @@ export function ThreatFeedsSection() {
               {saved && <Chip tone="good">Saved</Chip>}
             </div>
             <span className="t-small">{feedKeyNote(view)}</span>
+            {view.feeds.length > 0 && (
+              <ul
+                className="col"
+                style={{ gap: 4, margin: '4px 0 0', padding: 0, listStyle: 'none' }}
+              >
+                {view.feeds.map((f) => (
+                  <li key={f.name} className="row" style={{ gap: 8 }}>
+                    <span className="t-small">{f.name}</span>
+                    {f.needsKey ? (
+                      <Chip tone="fair">Off until a key is added</Chip>
+                    ) : (
+                      <Chip>On</Chip>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
           <a
             className="btn sm ghost"

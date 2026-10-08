@@ -87,17 +87,25 @@ describe('cleanEntries', () => {
 });
 
 function fakeFetch(
-  bodies: Record<string, () => { status?: number; body?: string; etag?: string }>,
+  bodies: Record<
+    string,
+    () => { status?: number; body?: string; etag?: string; location?: string }
+  >,
 ) {
-  const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+  const calls: Array<{ url: string; headers: Record<string, string>; redirect?: string }> = [];
   const fetch: FetchLike = async (url, init) => {
-    calls.push({ url, headers: init.headers });
+    calls.push({
+      url,
+      headers: init.headers,
+      ...(init.redirect ? { redirect: init.redirect } : {}),
+    });
     const r = bodies[url];
     if (!r) throw new Error('network down');
-    const { status = 200, body = '', etag } = r();
+    const { status = 200, body = '', etag, location } = r();
+    const hdrs: Record<string, string | undefined> = { etag, location };
     return {
       status,
-      headers: { get: (n: string) => (n.toLowerCase() === 'etag' ? (etag ?? null) : null) },
+      headers: { get: (n: string) => hdrs[n.toLowerCase()] ?? null },
       text: async () => body,
     };
   };
@@ -212,6 +220,78 @@ describe('FeedImporter', () => {
     expect((await imp.run())[0]).toMatchObject({ status: 'updated', entries: 1 });
     expect(calls[0]!.headers['Auth-Key']).toBe('user-key-0123456789');
     expect(imp.status()[0]!.needsKey).toBeUndefined();
+  });
+
+  describe('redirects of a request carrying the key', () => {
+    const keyed = (url: string, fetch: FetchLike) =>
+      new FeedImporter(
+        [src({ id: 'k', url, auth: { key: 'abusech', header: 'Auth-Key' } })],
+        memoryStores().lists,
+        new MemoryFeedStateStore(),
+        { fetch, keys: () => 'user-key-0123456789' },
+      );
+
+    it('follows a same-origin https redirect and sends the key on each hop', async () => {
+      const { fetch, calls } = fakeFetch({
+        'https://k.test/ips': () => ({ status: 302, location: '/v2/ips' }),
+        'https://k.test/v2/ips': () => ({ body: '45.9.1.2' }),
+      });
+      const r = await keyed('https://k.test/ips', fetch).run();
+      expect(r[0]).toMatchObject({ status: 'updated', entries: 1 });
+      expect(calls.map((c) => c.url)).toEqual(['https://k.test/ips', 'https://k.test/v2/ips']);
+      for (const c of calls) {
+        expect(c.redirect).toBe('manual');
+        expect(c.headers['Auth-Key']).toBe('user-key-0123456789');
+      }
+    });
+
+    it('refuses a redirect to another origin without requesting it', async () => {
+      for (const location of [
+        'https://elsewhere.test/ips',
+        'https://k.test:8443/ips',
+        'https://sub.k.test/ips',
+      ]) {
+        const { fetch, calls } = fakeFetch({
+          'https://k.test/ips': () => ({ status: 301, location }),
+          [location]: () => ({ body: '45.9.1.2' }),
+        });
+        const r = await keyed('https://k.test/ips', fetch).run();
+        expect(r[0]).toMatchObject({ status: 'failed' });
+        expect(r[0]!.error).toMatch(/another site/);
+        expect(calls.map((c) => c.url)).toEqual(['https://k.test/ips']);
+      }
+    });
+
+    it('refuses a redirect down to http', async () => {
+      const { fetch, calls } = fakeFetch({
+        'https://k.test/ips': () => ({ status: 307, location: 'http://k.test/ips' }),
+        'http://k.test/ips': () => ({ body: '45.9.1.2' }),
+      });
+      const r = await keyed('https://k.test/ips', fetch).run();
+      expect(r[0]).toMatchObject({ status: 'failed' });
+      expect(calls.map((c) => c.url)).toEqual(['https://k.test/ips']);
+    });
+
+    it('stops after a few same-origin redirects', async () => {
+      const { fetch, calls } = fakeFetch({
+        'https://k.test/ips': () => ({ status: 302, location: '/ips' }),
+      });
+      const r = await keyed('https://k.test/ips', fetch).run();
+      expect(r[0]!.error).toMatch(/too many/);
+      expect(calls.length).toBeLessThanOrEqual(4);
+    });
+
+    it('leaves redirects to fetch when no key is sent', async () => {
+      const { fetch, calls } = fakeFetch({ 'https://k.test/ips': () => ({ body: '45.9.1.2' }) });
+      const imp = new FeedImporter(
+        [src({ id: 'k', url: 'https://k.test/ips', auth: { key: 'abusech', header: 'Auth-Key' } })],
+        memoryStores().lists,
+        new MemoryFeedStateStore(),
+        { fetch, keys: () => undefined },
+      );
+      await imp.run();
+      expect(calls[0]!.redirect).toBeUndefined();
+    });
   });
 
   it('fetches a keyed feed without a header when no key is saved', async () => {
