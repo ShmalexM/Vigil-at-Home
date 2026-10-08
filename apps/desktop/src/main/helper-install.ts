@@ -1,17 +1,22 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  closeSync,
+  constants,
   cpSync,
   existsSync,
+  fstatSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
   rmSync,
   statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileId, insideInstalledRoot } from '@vigil/core/self';
+import { fileId, insideInstalledRoot, looksLikeAppImage } from '@vigil/core/self';
 import type { HelperInstallResult } from '../shared/ipc.js';
 
 const hasHelper = (dir: string) =>
@@ -141,7 +146,31 @@ export function inInstallerFolder(
   platform: NodeJS.Platform = process.platform,
   app: AppIdentity = thisApp(),
 ): boolean {
-  return insideInstalledRoot(appPinTarget(platform, app), platform);
+  const target = appPinTarget(platform, app);
+  return insideInstalledRoot(target, platform, { appImage: isAppImage(platform, app, target) });
+}
+
+/**
+ * Linux: whether the app runs from an AppImage, which is never inside the
+ * installer's folder (insideInstalledRoot), so one copied into /opt is still
+ * pinned. The AppImage runtime sets APPIMAGE; the file's name or first bytes
+ * tell otherwise.
+ */
+function isAppImage(platform: NodeJS.Platform, app: AppIdentity, target: string): boolean {
+  if (platform !== 'linux') return false;
+  if (app.env['APPIMAGE'] || looksLikeAppImage(target)) return true;
+  let fd: number | undefined;
+  try {
+    fd = openSync(target, constants.O_RDONLY | constants.O_NONBLOCK);
+    if (!fstatSync(fd).isFile()) return false;
+    const head = Buffer.alloc(16);
+    const n = readSync(fd, head, 0, head.length, 0);
+    return looksLikeAppImage(target, head.subarray(0, n));
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 /**

@@ -65,14 +65,41 @@ export function installedRoots(platform: string): string[] {
  * helper's process protection and the app's "no pin needed" check, so they
  * never disagree. Compared without case on macOS, whose disks ignore it,
  * and with case on Linux. `roots` defaults to {@link installedRoots}.
+ *
+ * An AppImage (`appImage`, see {@link looksLikeAppImage}) is never inside,
+ * wherever it sits: Vigil runs from the image's FUSE mount, not from the
+ * folder, so the folder's protection doesn't reach it and it is pinned like
+ * an AppImage anywhere else. Only an unpacked install there counts.
  */
 export function insideInstalledRoot(
   path: string,
   platform: string,
-  roots: readonly string[] = installedRoots(platform),
+  opts: { roots?: readonly string[]; appImage?: boolean } = {},
 ): boolean {
+  if (opts.appImage) return false;
   const caseless = platform !== 'linux';
+  const roots = opts.roots ?? installedRoots(platform);
   return underSelfRoot(selfRoots(roots, caseless), path, caseless);
+}
+
+/**
+ * Whether a file is an AppImage, by its name (`*.AppImage`, any case) or by
+ * its first bytes (`head`, at least 11): an ELF header carrying the AppImage
+ * magic, "AI" and the image type 1 or 2, at offset 8.
+ */
+export function looksLikeAppImage(path: string, head?: Uint8Array): boolean {
+  if (/\.appimage$/i.test(path)) return true;
+  return (
+    !!head &&
+    head.length >= 11 &&
+    head[0] === 0x7f &&
+    head[1] === 0x45 &&
+    head[2] === 0x4c &&
+    head[3] === 0x46 &&
+    head[8] === 0x41 &&
+    head[9] === 0x49 &&
+    (head[10] === 1 || head[10] === 2)
+  );
 }
 
 /** A file's identity, `<device>:<inode>`. It stays the same when the file is renamed. */

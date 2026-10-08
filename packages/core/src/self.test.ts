@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   installedRoots,
   insideInstalledRoot,
+  looksLikeAppImage,
   mountContaining,
   parseMountInfo,
   runsFromMount,
@@ -39,10 +40,31 @@ describe('the installer’s own folder', () => {
   });
 
   it('takes other roots, and never one that would cover everything', () => {
-    expect(insideInstalledRoot('/srv/app/x', 'linux', ['/srv/app'])).toBe(true);
-    expect(insideInstalledRoot('/usr/bin/x', 'linux', ['/'])).toBe(false);
+    expect(insideInstalledRoot('/srv/app/x', 'linux', { roots: ['/srv/app'] })).toBe(true);
+    expect(insideInstalledRoot('/usr/bin/x', 'linux', { roots: ['/'] })).toBe(false);
     expect(installedRoots('linux')).toEqual(['/opt/Vigil at Home']);
     expect(installedRoots('darwin')).toEqual(['/Applications/Vigil at Home.app']);
+  });
+
+  it('never holds an AppImage, while an unpacked install there stays inside', () => {
+    const image = '/opt/Vigil at Home/Vigil-0.1.0.AppImage';
+    expect(insideInstalledRoot(image, 'linux')).toBe(true);
+    expect(insideInstalledRoot(image, 'linux', { appImage: true })).toBe(false);
+    expect(insideInstalledRoot('/opt/Vigil at Home', 'linux', { appImage: true })).toBe(false);
+    expect(insideInstalledRoot('/opt/Vigil at Home/vigil-at-home', 'linux')).toBe(true);
+  });
+
+  it('tells an AppImage by its name or its ELF header', () => {
+    const elf = (ai: number[]) => Uint8Array.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, ...ai]);
+    expect(looksLikeAppImage('/opt/Vigil at Home/Vigil.AppImage')).toBe(true);
+    expect(looksLikeAppImage('/opt/Vigil at Home/vigil.appimage')).toBe(true);
+    expect(looksLikeAppImage('/opt/Vigil at Home/vigil-at-home')).toBe(false);
+    expect(looksLikeAppImage('/opt/x/vigil', elf([0x41, 0x49, 2]))).toBe(true);
+    expect(looksLikeAppImage('/opt/x/vigil', elf([0x41, 0x49, 1]))).toBe(true);
+    // A plain ELF program, an unknown type, or too few bytes.
+    expect(looksLikeAppImage('/opt/x/vigil', elf([0, 0, 0]))).toBe(false);
+    expect(looksLikeAppImage('/opt/x/vigil', elf([0x41, 0x49, 3]))).toBe(false);
+    expect(looksLikeAppImage('/opt/x/vigil', elf([0x41, 0x49]))).toBe(false);
   });
 });
 

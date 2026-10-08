@@ -24,15 +24,28 @@
 // Only an app outside the installer's folder (/Applications/Vigil at
 // Home.app, /opt/Vigil at Home) is pinned: one inside it is protected by
 // path already, so it has no pin, an update in place asks for nothing, and
-// no target is ever looked up. An app outside it is re-pinned by the next
+// no target is ever looked up. An AppImage is never inside it, wherever it
+// sits: Vigil runs from the image's own mount, which the folder's protection
+// doesn't reach. An app outside it is re-pinned by the next
 // self grant the password approves that covers it (repinFromGrant), or else
 // by a helper update.
 
-import { chmodSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  readFileSync,
+  readSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { FileHasher } from '@vigil/sensors';
-import { insideInstalledRoot, type SelfImage } from '@vigil/core/self';
+import { insideInstalledRoot, looksLikeAppImage, type SelfImage } from '@vigil/core/self';
 import type { System } from './system.js';
 import type { ProcessIdentity } from './commands/process.js';
 import { runsFromSelfImage } from './commands/selfImage.js';
@@ -109,16 +122,43 @@ const sha256Of = (p: string) => new FileHasher({ maxBytes: 4 * 1024 ** 3 }).sha2
 
 /**
  * Whether `path` is inside the installer's own folder, which the helper
- * already protects by path: an app there is never pinned.
+ * already protects by path: an app there is never pinned. An AppImage never
+ * is, wherever it sits (insideInstalledRoot).
  */
-function inInstalled(sys: System, installed: readonly string[], path: string): boolean {
-  return insideInstalledRoot(path, sys.platform ?? 'darwin', installed);
+function inInstalled(
+  sys: System,
+  installed: readonly string[],
+  path: string,
+  appImage: boolean,
+): boolean {
+  return insideInstalledRoot(path, sys.platform ?? 'darwin', { roots: installed, appImage });
+}
+
+/** Linux: whether the file at `path` is an AppImage, by its name or its first bytes. */
+function isAppImage(sys: System, path: string): boolean {
+  if (sys.platform !== 'linux') return false;
+  if (looksLikeAppImage(path)) return true;
+  let fd: number | undefined;
+  try {
+    // Non-blocking, and only a regular file is read, so a FIFO never stalls the helper.
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    if (!fstatSync(fd).isFile()) return false;
+    const head = Buffer.alloc(16);
+    const n = readSync(fd, head, 0, head.length, 0);
+    return looksLikeAppImage(path, head.subarray(0, n));
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 export interface PinOptions {
   /** The installer's own folders (config installedSelf); an app there needs no pin. */
   installed: readonly string[];
   sha256?: (path: string) => string | undefined;
+  /** Linux: whether the path is an AppImage. Read from the file when not given. */
+  appImage?: boolean;
 }
 
 /**
@@ -133,7 +173,8 @@ export async function pinFor(
 ): Promise<AppPin | undefined> {
   if (!isAbsolute(path)) throw new Error(`${path} is not an absolute path`);
   const hash = opts.sha256 ?? sha256Of;
-  if (inInstalled(sys, opts.installed, path)) return undefined;
+  const appImage = opts.appImage ?? isAppImage(sys, path);
+  if (inInstalled(sys, opts.installed, path, appImage)) return undefined;
   if (sys.platform === 'linux') {
     const image = sys.fileId?.(path);
     const sha256 = hash(path);
@@ -142,7 +183,7 @@ export async function pinFor(
   }
   const id = await codesign(sys, path);
   const exe = id?.executable ?? path;
-  if (!id || inInstalled(sys, opts.installed, exe))
+  if (!id || inInstalled(sys, opts.installed, exe, false))
     throw new Error(`${path} has no code signature to pin`);
   const sha256 = hash(exe);
   if (!sha256) throw new Error(`${exe} can't be read`);
@@ -173,11 +214,13 @@ export async function repinFromGrant(
     sys.platform === 'linux'
       ? (grant.selfImages ?? []).filter((i) => sys.fileId?.(i.path) === i.id).map((i) => i.path)
       : grant.selfPaths;
+  // A grant's images are AppImages, wherever they sit.
+  const appImage = sys.platform === 'linux';
   for (const path of candidates) {
-    if (inInstalled(sys, opts.installed, path)) continue;
+    if (inInstalled(sys, opts.installed, path, appImage)) continue;
     let pin: AppPin | undefined;
     try {
-      pin = await pinFor(sys, path, opts);
+      pin = await pinFor(sys, path, { ...opts, appImage });
     } catch {
       continue;
     }

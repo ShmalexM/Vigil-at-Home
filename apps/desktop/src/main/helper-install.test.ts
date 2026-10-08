@@ -403,6 +403,15 @@ describe('helper install', () => {
       inInstallerFolder('linux', { ...deb, execPath: '/opt/vigil at home/vigil-at-home' }),
     ).toBe(false);
     expect(inInstallerFolder('linux', { ...deb, execPath: '/opt/Vigil at Home' })).toBe(true);
+    // An AppImage there is pinned like one anywhere else: it runs from its own mount.
+    const inOpt = {
+      execPath: '/tmp/.mount_Y/vigil-at-home',
+      env: { APPIMAGE: '/opt/Vigil at Home/Vigil.AppImage' },
+    };
+    expect(inInstallerFolder('linux', inOpt)).toBe(false);
+    // Or by its name, without APPIMAGE set.
+    const named = { execPath: '/opt/Vigil at Home/Vigil.AppImage', env: {} };
+    expect(inInstallerFolder('linux', named)).toBe(false);
     expect(appPinned('linux', deb, mkdtempSync(join(tmpdir(), 'empty-')))).toBe(true);
     expect(helperMatch(dir, 'linux', root, deb).installed).toBe('none');
   });

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RuleStore } from '@vigil/sensors';
@@ -427,6 +427,35 @@ describe('the app pinned at install (Linux AppImage)', () => {
     writePin(pinFile, undefined);
     await ex.execute({ kind: 'process.suspend', pid: 2000, path: `${mount}/vigil-at-home` });
     expect(sys.signals.map((s) => s.pid)).toEqual([2000, 2000]);
+  });
+
+  it('pins an AppImage inside the installer’s folder like one anywhere else', async () => {
+    const opts = { installed: ['/opt/Vigil at Home'], sha256: () => APP_SHA };
+    const inOpt = '/opt/Vigil at Home/Vigil.AppImage';
+    sys.files.set(inOpt, '2049:6601');
+    expect(await pinFor(sys, inOpt, opts)).toEqual({ ...pin, path: inOpt, image: '2049:6601' });
+    // Through an approved grant too.
+    const grant = { selfPaths: [], selfImages: [{ path: inOpt, id: '2049:6601' }] };
+    expect(await repinFromGrant(sys, grant, { ...opts, pinFile })).toMatchObject({
+      path: inOpt,
+      image: '2049:6601',
+    });
+    expect(readPin(pinFile)?.path).toBe(inOpt);
+    // Told by its first bytes, whatever it is called.
+    const dir = join(root, 'installed');
+    mkdirSync(dir);
+    const renamed = join(dir, 'vigil');
+    const head = [0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, 0x41, 0x49, 2, 0, 0, 0, 0, 0];
+    writeFileSync(renamed, Buffer.from(head));
+    sys.files.set(renamed, '2049:6602');
+    const here = { installed: [dir], sha256: () => APP_SHA };
+    expect(await pinFor(sys, renamed, here)).toMatchObject({ path: renamed, image: '2049:6602' });
+    // An unpacked install there still needs no pin.
+    const unpacked = join(dir, 'vigil-at-home');
+    writeFileSync(unpacked, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, 0, 0, 0, 0]));
+    sys.files.set(unpacked, '2049:6603');
+    expect(await pinFor(sys, unpacked, here)).toBeUndefined();
+    expect(await pinFor(sys, '/opt/Vigil at Home/vigil-at-home', opts)).toBeUndefined();
   });
 
   it('is re-pinned by an approved grant naming the image', async () => {
