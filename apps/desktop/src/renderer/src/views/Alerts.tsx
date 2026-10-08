@@ -1,5 +1,14 @@
 import type { Alert, SensorEvent } from '@vigil/core';
-import { Bell, BookOpen, Copy, ListChecks, RotateCcw, Sparkles, VolumeX } from 'lucide-react';
+import {
+  Activity,
+  Bell,
+  BookOpen,
+  Copy,
+  ListChecks,
+  RotateCcw,
+  Sparkles,
+  VolumeX,
+} from 'lucide-react';
 import { Fragment, useEffect, useRef, useState } from 'react';
 import type { AlertDetail as AlertDetailT } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
@@ -436,7 +445,7 @@ function RuleCard({
         <Button
           size="sm"
           kind="ghost"
-          icon={<Bell size={13} />}
+          icon={<Activity size={13} />}
           title="Every event this rule matched, newest first"
           onClick={() => go(`activity/rule-${rule.id}`)}
         >
