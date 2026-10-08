@@ -5,8 +5,9 @@
 // the CPU when nothing happens. A folder watch keeps working across rotation
 // (a watch on the file itself follows the old file, and on macOS did not
 // report appends at all). It also polls every couple of seconds while the
-// folder does not exist yet, and every ten once the watch works, in case it
-// misses something.
+// folder does not exist yet or the watch hasn't been seen to work, and every
+// ten once it has, in case it misses something. A poll that finds lines the
+// watch never reported puts it back on the fast poll.
 
 import { watch, type FSWatcher } from 'node:fs';
 import { open, stat } from 'node:fs/promises';
@@ -43,6 +44,10 @@ export class FileTailer {
   private polling: Promise<void> | undefined;
   private pollAgain = false;
   private watcher: FSWatcher | undefined;
+  /** The watch reported a change since the last poll. */
+  private heard = false;
+  /** The watch has reported the changes polls found, so the slow poll will do. */
+  private trusted = false;
 
   constructor(private readonly opts: TailOptions) {}
 
@@ -82,6 +87,8 @@ export class FileTailer {
 
   /** Read whatever is new right now. Exposed for tests. */
   async poll(): Promise<void> {
+    const heard = this.heard;
+    this.heard = false;
     let st;
     try {
       st = await stat(this.opts.path);
@@ -89,6 +96,14 @@ export class FileTailer {
       // Gone, perhaps with its folder: a watch on that folder may be dead.
       this.unwatch();
       return;
+    }
+    const changed = !this.pos || this.pos.ino !== st.ino || st.size !== this.pos.offset;
+    if (changed && this.watcher && heard !== this.trusted) {
+      // Lines the watch never mentioned mean it can't be relied on (a folder
+      // replaced under it, a stream that stopped): poll at the fast rate again.
+      this.trusted = heard;
+      clearTimeout(this.timer);
+      this.schedule();
     }
     if (!this.pos || this.pos.ino !== st.ino) {
       // New file after rotation: flush any partial line from the old one.
@@ -176,12 +191,14 @@ export class FileTailer {
     const folder = dirname(this.opts.path);
     const name = basename(this.opts.path);
     try {
-      const w = watch(folder, { persistent: false }, (_event, file) => {
+      const w = watch(folder, { persistent: false }, (event, file) => {
         const f = file?.toString();
-        // The folder itself was removed or renamed: this watch is dead (on
-        // Linux it never fires again, without an error), so drop it and poll
-        // at the fast rate until the next poll arms a new one.
-        if (f === basename(folder)) this.unwatch();
+        if (f == null || f === name) this.heard = true;
+        // The folder itself was removed or renamed (or a rename that names
+        // nothing, which may be the folder): this watch may be dead (on Linux
+        // it never fires again, without an error), so drop it and poll at the
+        // fast rate until the next poll arms a new one.
+        if (f === basename(folder) || (f == null && event === 'rename')) this.unwatch();
         if (f == null || f === name || !this.watcher) this.kick();
       });
       w.on('error', () => this.unwatch());
@@ -195,6 +212,7 @@ export class FileTailer {
     if (!this.watcher) return;
     this.watcher.close();
     this.watcher = undefined;
+    this.trusted = false;
     // Back to the fast fallback poll at once, not after the slow one is due.
     if (this.running) {
       clearTimeout(this.timer);
@@ -203,8 +221,8 @@ export class FileTailer {
   }
 
   /**
-   * While the folder watch works the poll is only a safety net, so it runs
-   * less often: one wakeup every 10 s per log instead of every 2 s.
+   * Once the folder watch is seen to work the poll is only a safety net, so
+   * it runs less often: one wakeup every 10 s per log instead of every 2 s.
    */
   private schedule(): void {
     if (!this.running) return;
@@ -214,7 +232,7 @@ export class FileTailer {
         this.kick();
         this.schedule();
       },
-      this.watcher ? (this.opts.watchedIntervalMs ?? interval * 5) : interval,
+      this.watcher && this.trusted ? (this.opts.watchedIntervalMs ?? interval * 5) : interval,
     );
   }
 }
