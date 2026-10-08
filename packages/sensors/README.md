@@ -27,33 +27,49 @@ is its sync server on the same Mac:
   `::1` (`SNTConfigurator.mm`, `syncBaseURL`). Vigil still uses HTTPS: anything running
   as the user could grab the port first and serve "allow" rules. A private CA
   (`tls.ts`) is pinned through Santa's `ServerAuthRootsFile`, and its key is readable
-  only by root. The folder and `ca.pem` stay world-readable, because `santasyncservice`
-  runs as `nobody` and fails every sync with a TLS error if it can't read the CA
-  (found on a real Mac with Santa 2026.8). If something else holds the port, syncs fail and Santa keeps its
-  current rules.
+  only by root. `santasyncservice` runs as `nobody` and fails every sync with a TLS
+  error if it can't read the CA (found on a real Mac with Santa 2026.8), so the CA and
+  the client identity sit in a folder `nobody` can read (below). If something else
+  holds the port, syncs fail and Santa keeps its current rules.
 - **Client certificate (mutual TLS).** The same CA signs a client certificate for
   Santa. The profile sets `ClientAuthCertificateFile` (a PKCS#12 file Santa opens
   itself, no keychain import) and `ClientAuthCertificatePassword`. The helper's sync
   server requires a client certificate from that CA and pins its SHA-256, so another
   local program can't pull the rules or confirm a sync in Santa's place. The key is
-  root-only (`client.key`); the PKCS#12 copy is owned by `nobody`, mode 0600, because
-  `santasyncservice` reads it after dropping to `nobody`. The password is not a secret
-  (it is in the profile); the file's owner and mode protect it. A profile installed
+  root-only (`client.key`); the PKCS#12 copy is owned by root with group `nobody`, mode
+  0440, in a root:`nobody` 0750 folder, because `santasyncservice` reads it after
+  dropping to `nobody` (assumed to take `nobody`'s primary group, gid -2, as Santa's
+  `DropRootPrivileges` does). `nobody` can read it but not replace, truncate or chmod it.
+  The password is not a secret (it is in the profile); the file's owner and mode protect
+  it. Code running as `nobody` could still copy the identity; moving it into the
+  keychain is left for later. A profile installed
   before this certificate existed has no client keys: the helper serves a client
   without a certificate until Santa first presents the pinned one, then requires it
-  for good (`SyncClientAuth` in the helper). Until the user reinstalls the profile,
-  `helper.status` reports `clientCertRequired: false`; `clientCertSeenAt` is when Santa
-  last presented the pinned certificate.
+  for good (`SyncClientAuth` in the helper). A new install requires it from the start.
+  Until the user reinstalls the profile, `helper.status` reports
+  `clientCertRequired: false`; `clientCertSeenAt` is when Santa last presented the
+  pinned certificate.
+- **One identity store.** The CA, server and client certificates, the PKCS#12 file, its
+  password, the pin, the previous pin, revoked pins and the required flag are written
+  together into a new `versions/<id>/` folder, and a `current` link is switched to it
+  in one rename (`ca.pem` and `client.p12`, the paths the profile names, are links into
+  `current`). First start, renewal, recovery and the required flag all go through one
+  lock in the helper (`SyncIdentityStore`), so a crash or two changes at once never
+  leave a mix. A first start that never wrote its `installed` marker starts over in the
+  strict state. If the required flag can't be saved, it stays in force and
+  `helper.status` reports `identityProblem` until a retry saves it.
 - **Renewal and recovery.** The client certificate lasts 397 days and is renewed 30 days
   before it expires, under the same file and password. `santasyncservice` builds a new
   `MOLAuthenticatingURLSession` for every sync, which opens `ClientAuthCertificateFile`
   again with `SecPKCS12Import`, so the renewed certificate is presented on the next
   sync without a new profile. The replaced certificate's pin is still taken for 30 days
-  (`client.prev.json`) for a sync already under way. When Santa can't sync anyway, the
-  helper's `santa.client.reissue` command (Home's Repair button, or
-  `sudo vigil-helper santa-reissue`) issues a new identity, drops the old pin and the
-  requirement marker, and serves a client without a certificate until Santa presents
-  the new one. Dropping the marker loosens the port, so it needs the admin password.
+  for a sync already under way. Every hour the helper reads `client.p12` back with
+  openssl and issues a new one if it doesn't hold the pinned certificate. When Santa
+  can't sync anyway, the helper's `santa.client.reissue` command (Home's Repair button,
+  or `sudo vigil-helper santa-reissue`) issues a new identity, revokes the old pins and
+  drops the requirement, serving a client without a certificate until Santa presents
+  the new one. That loosens the port, so it needs the admin password whenever the
+  certificate is required when the new identity takes over.
 - **Monitor mode.** The profile sets `ClientMode` 1: Santa enforces only explicit block
   rules, so a personal Mac keeps working. Lockdown would block every program not
   already allowed.

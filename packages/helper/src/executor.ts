@@ -8,6 +8,7 @@
 // contain.
 
 import {
+  IdentityApprovalNeeded,
   type RuleStore,
   santaProfile,
   type RulePolicy,
@@ -69,7 +70,11 @@ export interface ExecutorDeps {
    * santa.client.reissue: whether the sync port requires Santa's certificate
    * now (so the command loosens it), and the reissue itself. Absent on Linux.
    */
-  santaClientReissue?: { required(): boolean; reissue(): Promise<void> };
+  santaClientReissue?: {
+    required(): boolean;
+    /** Throws IdentityApprovalNeeded when, unapproved, it would lower the requirement. */
+    reissue(approved: boolean): Promise<void>;
+  };
   statusExtra?: () => Record<string, unknown>;
   /** Turns block rules into Santa pre-launch rules; absent in tests that don't need it. */
   preexec?: PreexecSync;
@@ -132,13 +137,24 @@ export class Executor {
       if (!this.d.santaClientReissue) throw new ActionError('invalid', 'Santa runs only on macOS');
       // Clearing the requirement lets a client without a certificate sync
       // until Santa presents the new one; with none required, nothing loosens.
-      if (
-        this.d.santaClientReissue.required() &&
-        (!approval || !this.d.approvals.consume(approval, cmd))
-      ) {
-        const nonce = this.d.approvals.request(cmd);
-        return { kind: 'needs_approval', nonce, prompt: REISSUE_PROMPT };
+      // The store decides again as the new identity takes over (Santa may
+      // present its certificate meanwhile) and refuses an unapproved one then.
+      const approved = !!approval && this.d.approvals.consume(approval, cmd);
+      const ask = (): ExecOutcome => ({
+        kind: 'needs_approval',
+        nonce: this.d.approvals.request(cmd),
+        prompt: REISSUE_PROMPT,
+      });
+      if (this.d.santaClientReissue.required() && !approved) return ask();
+      try {
+        await this.d.santaClientReissue.reissue(approved);
+      } catch (err) {
+        if (err instanceof IdentityApprovalNeeded) return ask();
+        throw err;
       }
+      // Santa opens the new file on its next sync; ask for that now.
+      await this.syncSanta();
+      return { kind: 'done', result: { mobileconfig: this.santaProfile() } };
     } else if (needsApproval(cmd)) {
       // Check the release can actually happen before bothering the user.
       this.findContainment(cmd as HelperAction);
@@ -404,12 +420,9 @@ export class Executor {
       }
       case 'santa.profile':
         return { mobileconfig: this.santaProfile() };
-      case 'santa.client.reissue': {
-        await this.d.santaClientReissue!.reissue();
-        // Santa opens the new file on its next sync; ask for that now.
-        await this.syncSanta();
-        return { mobileconfig: this.santaProfile() };
-      }
+      case 'santa.client.reissue':
+        // Handled in execute(), which owns its approval.
+        throw new ActionError('invalid', 'santa.client.reissue is handled by execute');
       case 'events.subscribe':
         // Handled by the server, which owns the connection.
         throw new ActionError('invalid', 'events.subscribe is handled by the connection');

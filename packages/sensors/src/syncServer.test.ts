@@ -1,12 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, request, type Server } from 'node:https';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import type { AddressInfo } from 'node:net';
-import { X509Certificate } from 'node:crypto';
-import { createSecureContext } from 'node:tls';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { RuleStore } from './santa/ruleStore.js';
@@ -18,17 +16,7 @@ import {
   SantaSyncServer,
   SYNC_SESSION_TTL_MS,
 } from './santa/syncServer.js';
-import {
-  CLIENT_PIN_OVERLAP_MS,
-  certFingerprint,
-  clientCertExpiresAt,
-  clientCertNeedsRenewal,
-  ensureSyncTls,
-  previousClientPin,
-  reissueClientIdentity,
-  serverCertNeedsRenewal,
-  syncTlsPaths,
-} from './santa/tls.js';
+import { SyncIdentityStore } from './santa/tls.js';
 import { SensorEvent } from '@vigil/core';
 
 const SHA_A = 'a'.repeat(64);
@@ -106,44 +94,10 @@ async function fullSync(preflightBody: Record<string, unknown> = {}) {
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'vigil-sync-'));
-  const tls = syncTlsPaths(join(dir, 'tls'));
-  expect(await ensureSyncTls(tls, 'openssl')).toBe(true);
-  expect(await ensureSyncTls(tls, 'openssl')).toBe(false); // idempotent
-  expect(serverCertNeedsRenewal(tls)).toBe(false);
-  expect(statSync(tls.caKey).mode & 0o777).toBe(0o600);
-  expect(statSync(tls.serverKey).mode & 0o777).toBe(0o600);
-  // santasyncservice runs as nobody and must reach ca.pem.
-  expect(statSync(tls.dir).mode & 0o777).toBe(0o755);
-  expect(statSync(tls.caCert).mode & 0o777).toBe(0o644);
-  expect(statSync(tls.serverCert).mode & 0o777).toBe(0o644);
-  // Santa's client identity: the key and password root-only, the PKCS#12
-  // private to its owner (nobody on a real Mac), and it holds the same pair.
-  expect(clientCertNeedsRenewal(tls)).toBe(false);
-  expect(statSync(tls.clientKey).mode & 0o777).toBe(0o600);
-  expect(statSync(tls.clientP12Password).mode & 0o777).toBe(0o600);
-  expect(statSync(tls.clientP12).mode & 0o777).toBe(0o600);
-  const clientPem = readFileSync(tls.clientCert);
-  expect(
-    new X509Certificate(clientPem).checkIssued(new X509Certificate(readFileSync(tls.caCert))),
-  ).toBe(true);
-  expect(certFingerprint(clientPem)).toMatch(/^[0-9a-f]{64}$/);
-  const password = readFileSync(tls.clientP12Password, 'utf8').trim();
-  expect(() =>
-    createSecureContext({ pfx: readFileSync(tls.clientP12), passphrase: password }),
-  ).not.toThrow();
-  // A missing PKCS#12 brings a new identity, under the same password.
-  rmSync(tls.clientP12);
-  expect(clientCertNeedsRenewal(tls)).toBe(true);
-  expect(await ensureSyncTls(tls, 'openssl')).toBe(true);
-  expect(certFingerprint(readFileSync(tls.clientCert))).not.toBe(certFingerprint(clientPem));
-  expect(readFileSync(tls.clientP12Password, 'utf8').trim()).toBe(password);
-  // A folder left at 0700 by an earlier version is repaired.
-  chmodSync(tls.dir, 0o700);
-  chmodSync(tls.caCert, 0o600);
-  expect(await ensureSyncTls(tls, 'openssl')).toBe(false);
-  expect(statSync(tls.dir).mode & 0o777).toBe(0o755);
-  expect(statSync(tls.caCert).mode & 0o777).toBe(0o644);
-  expect(statSync(tls.caKey).mode & 0o777).toBe(0o600);
+  // The identity store itself is covered in identityStore.test.ts.
+  const identity = new SyncIdentityStore(join(dir, 'tls'), { opensslBin: 'openssl' });
+  await identity.start();
+  const tls = identity.paths;
   ca = readFileSync(tls.caCert);
   store = new RuleStore(join(dir, 'rules.json'));
   sync = new SantaSyncServer({
@@ -327,52 +281,6 @@ describe('Santa sync server over pinned TLS', () => {
         policy: 'BLOCKLIST',
       }),
     ).toThrow();
-  });
-});
-
-describe("Santa's client certificate over time", () => {
-  let tlsDir: string;
-  beforeAll(async () => {
-    tlsDir = mkdtempSync(join(tmpdir(), 'vigil-client-pin-'));
-    await ensureSyncTls(syncTlsPaths(tlsDir), 'openssl');
-  });
-  afterAll(() => rmSync(tlsDir, { recursive: true, force: true }));
-
-  it('keeps taking the replaced certificate for 30 days after a renewal', async () => {
-    const tls = syncTlsPaths(tlsDir);
-    const old = certFingerprint(readFileSync(tls.clientCert));
-    const password = readFileSync(tls.clientP12Password, 'utf8');
-    expect(previousClientPin(tls)).toBeNull();
-    // About 397 days, so it is renewed while Santa keeps the same file and password.
-    expect(clientCertExpiresAt(tls)! - Date.now()).toBeGreaterThan(396 * 86_400_000);
-
-    rmSync(tls.clientP12);
-    const t0 = Date.now();
-    expect(await ensureSyncTls(tls, 'openssl')).toBe(true);
-    expect(certFingerprint(readFileSync(tls.clientCert))).not.toBe(old);
-    expect(readFileSync(tls.clientP12Password, 'utf8')).toBe(password);
-    const prev = previousClientPin(tls)!;
-    expect(prev.fingerprint).toBe(old);
-    expect(prev.until).toBeGreaterThanOrEqual(t0 + CLIENT_PIN_OVERLAP_MS - 1000);
-    expect(prev.until).toBeLessThanOrEqual(Date.now() + CLIENT_PIN_OVERLAP_MS);
-    expect(statSync(tls.clientPrevPin).mode & 0o777).toBe(0o600);
-    // And no longer once the overlap is over.
-    expect(previousClientPin(tls, prev.until + 1)).toBeNull();
-  });
-
-  it('issues a new identity on recovery without keeping the old one', async () => {
-    const tls = syncTlsPaths(tlsDir);
-    const old = certFingerprint(readFileSync(tls.clientCert));
-    const password = readFileSync(tls.clientP12Password, 'utf8').trim();
-    await reissueClientIdentity(tls, 'openssl');
-    expect(certFingerprint(readFileSync(tls.clientCert))).not.toBe(old);
-    expect(previousClientPin(tls)).toBeNull();
-    // Same file and password, so the installed profile opens the new one.
-    expect(readFileSync(tls.clientP12Password, 'utf8').trim()).toBe(password);
-    expect(() =>
-      createSecureContext({ pfx: readFileSync(tls.clientP12), passphrase: password }),
-    ).not.toThrow();
-    expect(clientCertNeedsRenewal(tls)).toBe(false);
   });
 });
 

@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   appendFileSync,
-  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -19,17 +18,17 @@ import { fastPathRules } from '@vigil/detection/fastpath';
 import type { SensorEvent } from '@vigil/sensors';
 import {
   certFingerprint,
-  ensureSyncTls,
   fileAccessPolicy,
-  previousClientPin,
-  reissueClientIdentity,
+  IdentityApprovalNeeded,
+  type IdentityStep,
+  issueClientCertificate,
   RuleStore,
+  SyncIdentityStore,
   syncTlsPaths,
 } from '@vigil/sensors';
 import { HelperClient } from './client.js';
 import { defaultPaths, type HelperPaths } from './config.js';
 import {
-  CLIENT_AUTH_MARKER,
   CLIENT_SEEN_FILE,
   createSyncHttpsServer,
   listenUnlessStopped,
@@ -122,14 +121,29 @@ function clientIdentity(tlsDir: string): { key: Buffer; cert: Buffer } {
 }
 
 /** Another client identity from the same CA, not the one the helper pinned. */
-async function sameCaIdentity(tlsDir: string): Promise<{ key: Buffer; cert: Buffer }> {
-  const copy = mkdtempSync(join(tmpdir(), 'vigil-other-client-'));
-  cpSync(tlsDir, copy, { recursive: true });
-  rmSync(join(copy, 'client.p12'));
-  await ensureSyncTls(syncTlsPaths(copy), 'openssl');
-  const id = clientIdentity(copy);
-  rmSync(copy, { recursive: true, force: true });
-  return id;
+function sameCaIdentity(tlsDir: string): Promise<{ key: Buffer; cert: Buffer }> {
+  const t = syncTlsPaths(tlsDir);
+  return issueClientCertificate({ key: readFileSync(t.caKey), cert: readFileSync(t.caCert) });
+}
+
+/** Whether the identity in use says the certificate is required, as written on disk. */
+function requiredOnDisk(tlsDir: string): boolean {
+  return (JSON.parse(readFileSync(syncTlsPaths(tlsDir).state, 'utf8')) as { required: boolean })
+    .required;
+}
+
+/** santa-sync/ as a helper from before the client certificate left it: CA and server only. */
+async function preClientCertLayout(tlsDir: string): Promise<void> {
+  const src = mkdtempSync(join(tmpdir(), 'vigil-old-layout-'));
+  try {
+    const store = new SyncIdentityStore(join(src, 'santa-sync'), { opensslBin: 'openssl' });
+    await store.start();
+    mkdirSync(tlsDir, { recursive: true });
+    for (const f of ['ca.key', 'ca.pem', 'server.key', 'server.pem'])
+      writeFileSync(join(tlsDir, f), readFileSync(join(store.paths.current, f)), { mode: 0o600 });
+  } finally {
+    rmSync(src, { recursive: true, force: true });
+  }
 }
 
 function santaPost(
@@ -168,18 +182,21 @@ function santaPost(
 
 describe('helper daemon', () => {
   it("lets Santa's sync service (running as nobody) reach the pinned CA", () => {
+    const t = syncTlsPaths(paths.tlsDir);
     expect(statSync(paths.supportDir).mode & 0o777).toBe(0o755);
     expect(statSync(paths.tlsDir).mode & 0o777).toBe(0o755);
     expect(statSync(join(paths.tlsDir, 'ca.pem')).mode & 0o777).toBe(0o644);
-    expect(statSync(join(paths.tlsDir, 'ca.key')).mode & 0o777).toBe(0o600);
-    expect(statSync(join(paths.tlsDir, 'client.key')).mode & 0o777).toBe(0o600);
-    expect(statSync(join(paths.tlsDir, 'client.p12.pass')).mode & 0o777).toBe(0o600);
-    expect(statSync(join(paths.tlsDir, 'client.p12')).mode & 0o777).toBe(0o600);
+    expect(statSync(t.caKey).mode & 0o777).toBe(0o600);
+    expect(statSync(t.clientKey).mode & 0o777).toBe(0o600);
+    expect(statSync(t.clientP12Password).mode & 0o777).toBe(0o600);
+    // Readable by its group (nobody on a Mac), writable by no one but root.
+    expect(statSync(join(paths.tlsDir, 'client.p12')).mode & 0o777).toBe(0o440);
+    expect(statSync(t.current).mode & 0o777).toBe(0o750);
   });
 
   it('serves a profile that has Santa present its client certificate', async () => {
     const r = await client!.call<{ mobileconfig: string }>({ kind: 'santa.profile' });
-    const password = readFileSync(join(paths.tlsDir, 'client.p12.pass'), 'utf8').trim();
+    const password = readFileSync(syncTlsPaths(paths.tlsDir).clientP12Password, 'utf8').trim();
     expect(r.mobileconfig).toMatch(
       /<key>ClientAuthCertificateFile<\/key>\s*<string>[^<]*\/client\.p12<\/string>/,
     );
@@ -224,6 +241,9 @@ describe('helper daemon', () => {
         syncError: null,
         clientCertRequired: true,
         clientCertIssued: true,
+        clientCertValid: true,
+        identityProblem: null,
+        installedAt: expect.any(Number),
         // The test above presented Santa's certificate, and others before it.
         clientCertSeenAt: expect.any(Number),
         clientCertExpiresAt: expect.any(Number),
@@ -367,7 +387,8 @@ describe('the Santa sync port', () => {
       seen: 0,
       refusals: [],
       accepts: (fp) => fp === fingerprint,
-      pinnedSeen() {
+      pinnedSeen(fp) {
+        expect(fp).toBe(fingerprint);
         this.seen++;
       },
       refused(reason) {
@@ -465,10 +486,7 @@ describe('the Santa sync port', () => {
       // Signed by Vigil's CA, but not the certificate the helper made for Santa.
       expect(await tryPreflight(freePort, await sameCaIdentity(paths.tlsDir))).toBe('refused');
       // From another CA altogether.
-      const elsewhere = mkdtempSync(join(tmpdir(), 'vigil-other-ca-'));
-      await ensureSyncTls(syncTlsPaths(elsewhere), 'openssl');
-      expect(await tryPreflight(freePort, clientIdentity(elsewhere))).toBe('refused');
-      rmSync(elsewhere, { recursive: true, force: true });
+      expect(await tryPreflight(freePort, await issueClientCertificate(null))).toBe('refused');
       expect(s.routed).toEqual([]);
       // Santa's own certificate.
       expect(await tryPreflight(freePort, clientIdentity(paths.tlsDir))).toBe(200);
@@ -525,12 +543,10 @@ describe('helper upgrade with a Santa profile from before the client certificate
     const dir = mkdtempSync(join(tmpdir(), 'vigil-daemon-upgrade-'));
     const upPort = port + 3000;
     const upPaths = testPaths(dir);
-    // An earlier helper made the CA and server certificate; the client
-    // identity is new in this version.
+    // An earlier helper made the CA and server certificate, flat in the
+    // folder; the client identity is new in this version.
     const t = syncTlsPaths(upPaths.tlsDir);
-    await ensureSyncTls(t, 'openssl');
-    for (const f of [t.clientKey, t.clientCert, t.clientP12, t.clientP12Password]) rmSync(f);
-    const marker = join(upPaths.tlsDir, CLIENT_AUTH_MARKER);
+    await preClientCertLayout(upPaths.tlsDir);
     const start = async () => {
       const s = new FakeSystem();
       s.console = process.getuid!() === 0 ? 501 : undefined;
@@ -565,13 +581,15 @@ describe('helper upgrade with a Santa profile from before the client certificate
       await expect(
         santaPost('preflight', {}, at(await sameCaIdentity(upPaths.tlsDir))),
       ).rejects.toThrow();
-      expect(existsSync(marker)).toBe(false);
+      expect(requiredOnDisk(upPaths.tlsDir)).toBe(false);
       // The new profile is installed and Santa presents its certificate.
       expect((await santaPost('preflight', {}, at(clientIdentity(upPaths.tlsDir)))).sync_type).toBe(
         'CLEAN',
       );
       expect(await required()).toBe(true);
-      expect(statSync(marker).mode & 0o777).toBe(0o600);
+      for (let i = 0; i < 50 && !requiredOnDisk(upPaths.tlsDir); i++)
+        await new Promise((r) => setTimeout(r, 20));
+      expect(requiredOnDisk(upPaths.tlsDir)).toBe(true);
       await expect(santaPost('preflight', {}, at())).rejects.toThrow();
 
       // And it stays required after a restart.
@@ -592,65 +610,74 @@ describe('helper upgrade with a Santa profile from before the client certificate
 });
 
 describe("Santa's client certificate pin", () => {
-  it('takes the replaced certificate until its overlap ends, and resets for recovery', async () => {
+  const setup = async () => {
     const dir = mkdtempSync(join(tmpdir(), 'vigil-pin-'));
+    const store = new SyncIdentityStore(join(dir, 'santa-sync'), { opensslBin: 'openssl' });
+    await store.start();
+    let now = Date.now();
+    const logs: string[] = [];
+    const make = () =>
+      new SyncClientAuth({
+        store,
+        seen: join(store.paths.dir, CLIENT_SEEN_FILE),
+        log: (m) => logs.push(m),
+        now: () => now,
+      });
+    return {
+      dir,
+      store,
+      logs,
+      make,
+      now: () => now,
+      advance: (ms: number) => (now += ms),
+    };
+  };
+
+  it('takes the replaced certificate until its overlap ends, and starts over on recovery', async () => {
+    const t = await setup();
     try {
-      const t = syncTlsPaths(join(dir, 'santa-sync'));
-      await ensureSyncTls(t, 'openssl');
-      const first = certFingerprint(readFileSync(t.clientCert));
-      let now = Date.now();
-      const marker = join(t.dir, CLIENT_AUTH_MARKER);
-      const seen = join(t.dir, CLIENT_SEEN_FILE);
-      const make = () =>
-        new SyncClientAuth({
-          marker,
-          seen,
-          clientCert: t.clientCert,
-          previousPin: () => previousClientPin(t, now),
-          fresh: false,
-          log: () => {},
-          now: () => now,
-        });
-      const auth = make();
+      await t.store.reissue({ approved: true });
+      const auth = t.make();
       expect(auth.required).toBe(false);
       expect(auth.seenAt).toBeNull();
+      const first = t.store.current!.pin;
 
       // Renewal: the new certificate and, for a while, the old one.
-      rmSync(t.clientP12);
-      await ensureSyncTls(t, 'openssl');
-      auth.reload();
-      const second = certFingerprint(readFileSync(t.clientCert));
+      await t.store.renew(t.now() + 380 * 86_400_000);
+      const second = t.store.current!.pin;
       expect(auth.accepts(second)).toBe(true);
       expect(auth.accepts(first)).toBe(true);
       expect(auth.accepts(BAD)).toBe(false);
 
       // Santa presenting the old one still counts as the new profile being in place.
-      auth.pinnedSeen();
+      auth.pinnedSeen(first);
       expect(auth.required).toBe(true);
-      expect(auth.seenAt).toBe(now);
+      expect(auth.seenAt).toBe(t.now());
+      await t.store.idle();
       // Kept across a restart.
-      expect(make().seenAt).toBe(now);
-      expect(make().required).toBe(true);
+      expect(t.make().seenAt).toBe(t.now());
+      expect(requiredOnDisk(t.store.paths.dir)).toBe(true);
 
-      now += 31 * 86_400_000;
+      // The renewal ran as if 380 days on; its overlap ends 30 days after that.
+      t.advance(411 * 86_400_000);
       expect(auth.accepts(first)).toBe(false);
       expect(auth.accepts(second)).toBe(true);
 
       auth.refused('no_certificate');
-      expect(auth.lastRefusal).toEqual({ at: now, reason: 'no_certificate' });
+      expect(auth.lastRefusal).toEqual({ at: t.now(), reason: 'no_certificate' });
 
-      // Recovery: the marker and the seen time go; nothing old is taken.
-      await reissueClientIdentity(t, 'openssl');
-      auth.reset();
+      // Recovery: needs approval while required; then the seen time goes and nothing old is taken.
+      await expect(auth.reissue(false)).rejects.toBeInstanceOf(IdentityApprovalNeeded);
+      await auth.reissue(true);
       expect(auth.required).toBe(false);
       expect(auth.seenAt).toBeNull();
       expect(auth.lastRefusal).toBeNull();
-      expect(existsSync(marker)).toBe(false);
-      expect(existsSync(seen)).toBe(false);
+      expect(requiredOnDisk(t.store.paths.dir)).toBe(false);
+      expect(existsSync(join(t.store.paths.dir, CLIENT_SEEN_FILE))).toBe(false);
       expect(auth.accepts(second)).toBe(false);
-      expect(auth.accepts(certFingerprint(readFileSync(t.clientCert)))).toBe(true);
+      expect(auth.accepts(t.store.current!.pin)).toBe(true);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(t.dir, { recursive: true, force: true });
     }
   });
 });
@@ -706,7 +733,7 @@ describe('recovering a Santa that cannot sync', () => {
       const after = await santa();
       expect(after.clientCertRequired).toBe(false);
       expect(after.clientCertSeenAt).toBeNull();
-      expect(existsSync(join(rePaths.tlsDir, CLIENT_AUTH_MARKER))).toBe(false);
+      expect(requiredOnDisk(rePaths.tlsDir)).toBe(false);
       // A Santa with a profile from before the certificate syncs again...
       expect((await santaPost('preflight', {}, at(false))).sync_type).toBe('CLEAN');
       // ...the old certificate is not taken...
@@ -728,6 +755,7 @@ describe('recovering a Santa that cannot sync', () => {
     const dir = mkdtempSync(join(tmpdir(), 'vigil-reissue-exec-'));
     try {
       let reissued = 0;
+      let presentDuring = false;
       const make = (sys: FakeSystem | FakeLinuxSystem) =>
         new Executor({
           sys,
@@ -744,7 +772,9 @@ describe('recovering a Santa that cannot sync', () => {
             : {
                 santaClientReissue: {
                   required: () => false,
-                  reissue: async () => {
+                  reissue: async (approved: boolean) => {
+                    // Santa presented its certificate while this ran.
+                    if (presentDuring && !approved) throw new IdentityApprovalNeeded();
                     reissued++;
                   },
                 },
@@ -753,11 +783,77 @@ describe('recovering a Santa that cannot sync', () => {
       const out = await make(new FakeSystem()).execute({ kind: 'santa.client.reissue' });
       expect(out.kind).toBe('done');
       expect(reissued).toBe(1);
+      // Required by the time the new identity would take over: the password after all.
+      presentDuring = true;
+      const late = await make(new FakeSystem()).execute({ kind: 'santa.client.reissue' });
+      expect(late).toMatchObject({ kind: 'needs_approval', prompt: expect.any(String) });
+      expect(reissued).toBe(1);
       expect(needsApproval({ kind: 'santa.client.reissue' })).toBe(false);
       await expect(
         make(new FakeLinuxSystem()).execute({ kind: 'santa.client.reissue' }),
       ).rejects.toThrow(/only on macOS/);
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('a required flag the helper cannot write down', () => {
+  it('keeps the certificate required, reports it in helper.status, and writes it on a retry', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vigil-daemon-flag-'));
+    const flagPort = port + 5000;
+    const flagPaths = testPaths(dir);
+    await preClientCertLayout(flagPaths.tlsDir);
+    let failing = false;
+    const s = new FakeSystem();
+    s.console = process.getuid!() === 0 ? 501 : undefined;
+    const stopIt = await runDaemon({
+      paths: flagPaths,
+      syncPort: flagPort,
+      sys: s,
+      log: () => {},
+      approvalOwnerUid: process.getuid!(),
+      opensslBin: 'openssl',
+      sensorBinaries: { santa: flagPaths.santaLog as string, osquery: join(dir, 'no-osqueryd') },
+      osquery: false,
+      identity: {
+        beforeStep: (step: IdentityStep) => {
+          if (failing && step === 'state') throw new Error('disk full');
+        },
+        retryMs: 50,
+      },
+    });
+    const c = await HelperClient.connect(flagPaths.socket, async () => false);
+    const at = (client: { key: Buffer; cert: Buffer } | false) => ({
+      port: flagPort,
+      tlsDir: flagPaths.tlsDir,
+      client,
+    });
+    const santa = async () =>
+      (await c.call<{ sensors: SensorHealth }>({ kind: 'helper.status' })).sensors.santa;
+    try {
+      expect((await santa()).clientCertRequired).toBe(false);
+      failing = true;
+      expect(
+        (await santaPost('preflight', {}, at(clientIdentity(flagPaths.tlsDir)))).sync_type,
+      ).toBe('CLEAN');
+      for (let i = 0; i < 50 && !(await santa()).identityProblem; i++)
+        await new Promise((r) => setTimeout(r, 20));
+      const stuck = await santa();
+      expect(stuck.identityProblem).toMatch(/Couldn’t save.*disk full/);
+      // Required anyway for as long as the helper runs.
+      expect(stuck.clientCertRequired).toBe(true);
+      await expect(santaPost('preflight', {}, at(false))).rejects.toThrow();
+      expect(requiredOnDisk(flagPaths.tlsDir)).toBe(false);
+
+      failing = false;
+      for (let i = 0; i < 100 && (await santa()).identityProblem; i++)
+        await new Promise((r) => setTimeout(r, 20));
+      expect((await santa()).identityProblem).toBeNull();
+      expect(requiredOnDisk(flagPaths.tlsDir)).toBe(true);
+    } finally {
+      c.close();
+      await stopIt();
       rmSync(dir, { recursive: true, force: true });
     }
   });
