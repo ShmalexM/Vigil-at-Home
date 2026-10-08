@@ -36,7 +36,13 @@ import { PackMemory } from './pack/memory.js';
 import { PackService } from './pack/service.js';
 import { seedPackDemo } from './pack/demo.js';
 import { PowerPolicy } from './power.js';
-import { HEALTH_CHECK_MS, macProbe, reportHealth, type HelperSensors } from './sensor-health.js';
+import {
+  AwakeClock,
+  HEALTH_CHECK_MS,
+  macProbe,
+  reportHealth,
+  type HelperSensors,
+} from './sensor-health.js';
 import { VigilCore } from './service.js';
 import { UpdateChecker } from './updates.js';
 import { wantsX11 } from './display.js';
@@ -136,8 +142,9 @@ function start(): void {
   const windows = new Windows();
   // Sensors can't report while Vigil is closed or the computer sleeps, so a
   // gap from then is not a quiet sensor.
-  let awakeSince = Date.now();
-  powerMonitor.on('resume', () => (awakeSince = Date.now()));
+  const awake = new AwakeClock(Date.now());
+  powerMonitor.on('suspend', () => awake.suspend());
+  powerMonitor.on('resume', () => awake.resume());
   const probe = {
     ...macProbe(
       (source) => store.lastEventAt(source),
@@ -145,7 +152,7 @@ function start(): void {
       async () =>
         (await helper.query<{ sensors?: HelperSensors }>('helper.status'))?.sensors ?? null,
     ),
-    awakeSince: () => awakeSince,
+    awakeMs: (since: number) => awake.awakeMs(since),
   };
 
   // A development build installs the helper that `pnpm build:helper` made.
