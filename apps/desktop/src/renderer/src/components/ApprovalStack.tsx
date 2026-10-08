@@ -18,6 +18,7 @@ const WHY: Record<ToolApproval['why'], string> = {
   mode: 'You asked to approve tools that can change things.',
   'always-ask': 'You set this tool to always ask.',
   rule: 'A Vigil rule asks about this call.',
+  'outside-text': 'This run read its last report, which could hold someone else’s text.',
   'judged-risky': 'Your AI rated this call risky.',
   'no-judge': 'No AI could rate this call, so it asks.',
 };

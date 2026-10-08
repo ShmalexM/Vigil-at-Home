@@ -24,22 +24,34 @@ export function citesReference(values: readonly string[]): boolean {
 /**
  * The names the person typed, each as they typed it: a whole name, ignoring
  * case, between non-letters. The whole name has to be there, so typing part
- * of a longer name matches nothing.
+ * of a longer name matches nothing. Longer names are matched first, and a
+ * name that only appears inside a longer name already matched there does not
+ * count: with dogs "Pip" and "Pip Two", "Retire Pip Two" names Pip Two only.
  */
 export function typedNames(
   text: string,
   dogs: readonly { id: string; name: string }[],
 ): { typed: string; dogId: string }[] {
-  const out: { typed: string; dogId: string }[] = [];
-  for (const d of dogs) {
-    const n = d.name.trim();
-    if (!n) continue;
-    const m = new RegExp(`(?:^|[^\\p{L}\\p{N}])(${escape(n)})(?=$|[^\\p{L}\\p{N}])`, 'iu').exec(
-      text,
-    );
-    if (m?.[1]) out.push({ typed: m[1], dogId: d.id });
+  const order = dogs
+    .map((d, i) => ({ id: d.id, name: d.name.trim(), i }))
+    .filter((d) => d.name)
+    .sort((a, b) => b.name.length - a.name.length || a.i - b.i);
+  const taken: { start: number; end: number; length: number }[] = [];
+  const found: { typed: string; dogId: string; i: number }[] = [];
+  for (const d of order) {
+    const r = new RegExp(`(?<=^|[^\\p{L}\\p{N}])${escape(d.name)}(?=$|[^\\p{L}\\p{N}])`, 'giu');
+    // Two dogs with the same name both match; resolveDog then picks neither.
+    const longer = taken.filter((t) => t.length > d.name.length);
+    for (const m of text.matchAll(r)) {
+      const start = m.index;
+      const end = start + m[0].length;
+      if (longer.some((t) => start < t.end && end > t.start)) continue;
+      taken.push({ start, end, length: d.name.length });
+      found.push({ typed: m[0], dogId: d.id, i: d.i });
+      break;
+    }
   }
-  return out;
+  return found.sort((a, b) => a.i - b.i).map(({ typed, dogId }) => ({ typed, dogId }));
 }
 
 /**

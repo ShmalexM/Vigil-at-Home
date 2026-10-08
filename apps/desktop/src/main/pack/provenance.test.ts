@@ -31,11 +31,38 @@ describe('mapping what the person typed to ids', () => {
   it('matches a whole dog name in any case, and never part of a longer one', () => {
     expect(typedNames('run pip now', dogs)).toEqual([{ typed: 'pip', dogId: 'dog-1' }]);
     expect(typedNames('Rename Pip Squeak', dogs)).toEqual([
+      { typed: 'Pip Squeak', dogId: 'dog-2' },
+    ]);
+    // A shorter name counts on its own only outside the longer one.
+    expect(typedNames('Pip Squeak and Pip', dogs)).toEqual([
       { typed: 'Pip', dogId: 'dog-1' },
       { typed: 'Pip Squeak', dogId: 'dog-2' },
     ]);
     expect(typedNames('Pipe it', dogs)).toEqual([]);
     expect(typedNames('Run all checks', dogs)).toEqual([]);
+  });
+
+  it('matches the longest name first, as a whole name, whatever its order in the pack', () => {
+    const pack = [
+      { id: 'dog-pip', name: 'Pip' },
+      { id: 'dog-two', name: 'Pip Two' },
+    ];
+    expect(typedNames('Retire Pip Two', pack)).toEqual([{ typed: 'Pip Two', dogId: 'dog-two' }]);
+    expect(typedNames('Retire pip two.', pack)).toEqual([{ typed: 'pip two', dogId: 'dog-two' }]);
+    expect(typedNames('Retire Pip, two of them', pack)).toEqual([
+      { typed: 'Pip', dogId: 'dog-pip' },
+    ]);
+    expect(typedNames('Retire Pip Twofold', pack)).toEqual([{ typed: 'Pip', dogId: 'dog-pip' }]);
+    // Two dogs with one name both match, so neither is picked by name alone.
+    expect(
+      typedNames('Run Pip', [
+        { id: 'a', name: 'Pip' },
+        { id: 'b', name: 'pip' },
+      ]),
+    ).toEqual([
+      { typed: 'Pip', dogId: 'a' },
+      { typed: 'Pip', dogId: 'b' },
+    ]);
   });
 
   it('matches a tool key only exactly: same case, and not inside a longer key', () => {

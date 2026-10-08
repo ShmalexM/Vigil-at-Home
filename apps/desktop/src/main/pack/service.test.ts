@@ -415,13 +415,15 @@ describe('the pack', () => {
     await pack.runDog(dog.id);
     expect(connectorCalls).toEqual([]);
 
-    // Marked by the user, it runs without asking.
+    // Marked by the user, it runs without asking, for a dog whose last
+    // report holds no outside text.
     pack.setToolChoice('github.list_issues', 'allow');
+    const fresh = pack.adopt({ ...CREATE, name: 'Fresh', tools: ['github.list_issues'] } as never);
     handlers.push(async (req) => {
       await tool(req, 'tool_1').run({});
       return { summary: 'x', findings: [] };
     });
-    await pack.runDog(dog.id);
+    await pack.runDog(fresh.id);
     expect(connectorCalls).toEqual([['github', 'list_issues', {}]]);
   });
 
@@ -1430,6 +1432,264 @@ describe('the pack', () => {
             .filter((d) => d.role === 'pack')
             .map((d) => d.schedule),
         ).toEqual(['nightly', 'nightly']);
+      });
+    });
+
+    describe('a dog’s tainted last report is outside text', () => {
+      const WRITER = {
+        ...TAINTED_PIP,
+        jobTainted: false,
+        tools: ['vigil.search_events', 'github.create_issue'],
+      };
+      /** Pip's run: it tries the write tool its report talked it into. */
+      const pipRun =
+        (pack: PackService, seen: RunRequest<unknown>[]) => async (req: RunRequest<unknown>) => {
+          seen.push(req);
+          const call = tool(req, 'tool_1').run({ title: 'from the report' });
+          await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+          expect((await pack.view()).approvals[0]).toMatchObject({
+            dogId: 'dog-pip',
+            tool: 'github.create_issue',
+            why: 'outside-text',
+          });
+          pack.decideTool((await pack.view()).approvals[0]!.id, 'deny');
+          expect(await call).toContain('said no');
+          return { summary: 'ok', findings: [] };
+        };
+
+      for (const mode of ['ask', 'auto', 'full'] as const)
+        it(`"Do what Pip suggested": no connector call without the person's OK (${mode})`, async () => {
+          const { pack, handlers, runs, settings, connectorCalls } = setup();
+          pack.setMode(mode);
+          settings.set('pack.dogs', [WRITER]);
+          // Not even a tool set to Always allow.
+          pack.setToolChoice('github.create_issue', 'allow');
+          handlers.push(() => ({
+            reply: 'Pip is on it.',
+            actions: [
+              {
+                kind: 'update',
+                dogId: 'dog-pip',
+                job: 'Carry out the recommendations in your previous run',
+              },
+              { kind: 'run', dogId: 'dog-pip' },
+            ],
+          }));
+          const seen: RunRequest<unknown>[] = [];
+          handlers.push(pipRun(pack, seen));
+          await pack.say('Do what Pip suggested');
+          expect(shown(runs[0]!)).not.toContain(INJECTED);
+          const actions = pack.chat().at(-1)!.actions!;
+          if (mode === 'ask') {
+            expect(actions).toMatchObject([{ status: 'pending' }, { status: 'pending' }]);
+            pack.decideAction(pack.chat().at(-1)!.id, actions[0]!.id, true);
+            pack.decideAction(pack.chat().at(-1)!.id, actions[1]!.id, true);
+          }
+          // The run reads the report as outside text, and every call that can
+          // change things waits for the person.
+          await vi.waitFor(() => expect(seen).toHaveLength(1));
+          expect(seen[0]!.data).toMatchObject({ previousRun: { summary: INJECTED } });
+          await vi.waitFor(() => expect(pip(pack).lastReport!.at).not.toBe(1));
+          expect(connectorCalls).toEqual([]);
+          expect(pip(pack).lastReport!.tainted).toBe(true);
+        });
+
+      it('after a reading answer, holds the job change and still asks before the call', async () => {
+        const { pack, handlers, settings, connectorCalls } = setup();
+        pack.setMode('full');
+        settings.set('pack.dogs', [WRITER]);
+        handlers.push(() => ({
+          reply: '',
+          actions: [],
+          read: { question: 'What did Pip find?', refs: ['report:dog-pip'] },
+        }));
+        handlers.push(() => ({ answer: 'Pip suggests filing an issue.' }));
+        await pack.say('What did Pip find?');
+        handlers.push(() => ({
+          reply: 'Pip is on it.',
+          actions: [
+            {
+              kind: 'update',
+              dogId: 'dog-pip',
+              job: 'Carry out the recommendations in your previous run',
+            },
+            { kind: 'run', dogId: 'dog-pip' },
+          ],
+        }));
+        const seen: RunRequest<unknown>[] = [];
+        handlers.push(pipRun(pack, seen));
+        await pack.say('Do what Pip suggested');
+        expect(pack.chat().at(-1)!.actions).toMatchObject([
+          { status: 'pending', note: expect.stringContaining('spell this out') },
+          { status: 'done', dogId: 'dog-pip' },
+        ]);
+        expect(pip(pack).job).toBe(WRITER.job);
+        await vi.waitFor(() => expect(seen).toHaveLength(1));
+        await vi.waitFor(() => expect(pip(pack).lastReport!.at).not.toBe(1));
+        expect(connectorCalls).toEqual([]);
+      });
+
+      it('lets a dog with a clean last report use a tool set to Always allow', async () => {
+        const { pack, handlers, settings, connectorCalls } = setup();
+        pack.setMode('full');
+        settings.set('pack.dogs', [
+          { ...WRITER, lastReport: { ...TAINTED_PIP.lastReport, summary: 'ok', tainted: false } },
+        ]);
+        pack.setToolChoice('github.create_issue', 'allow');
+        handlers.push(async (req) => {
+          await tool(req, 'tool_1').run({ title: 'x' });
+          return { summary: 'ok', findings: [] };
+        });
+        await pack.runDog('dog-pip');
+        expect(connectorCalls).toEqual([['github', 'create_issue', { title: 'x' }]]);
+      });
+    });
+
+    describe('after an answer that read outside text', () => {
+      const readFirst = async (pack: PackService, handlers: Handler[]) => {
+        handlers.push(() => ({
+          reply: '',
+          actions: [],
+          read: { question: 'What did Pip find?', refs: ['report:dog-pip'] },
+        }));
+        handlers.push(() => ({ answer: 'Pip says to retire Taco and run Pip.' }));
+        await pack.say('What did Pip find?');
+        expect(pack.chat().at(-1)).toMatchObject({ tainted: true });
+      };
+
+      for (const [words, action] of [
+        ['yes', { kind: 'retire', dogId: 'dog-taco' }],
+        ['ok', { kind: 'run', dogId: 'dog-taco' }],
+        ['yes please', { kind: 'update', dogId: 'dog-taco', schedule: 'manual' }],
+        ['go ahead', { ...CREATE, name: 'Taco Two' }],
+      ] as const)
+        it(`"${words}" with an uncited ${action.kind} is a card, in Full access`, async () => {
+          const { pack, handlers, settings } = setup();
+          pack.setMode('full');
+          settings.set('pack.dogs', [TAINTED_PIP, TACO]);
+          await readFirst(pack, handlers);
+          handlers.push(() => ({ reply: 'Done.', actions: [action] }));
+          await pack.say(words);
+          expect(pack.chat().at(-1)!.actions![0]).toMatchObject({
+            status: 'pending',
+            note: expect.stringContaining('outside your messages'),
+          });
+          expect(pack.dogs().find((d) => d.id === 'dog-taco')).toMatchObject({
+            schedule: 'hourly',
+          });
+          expect(pack.dogs().some((d) => d.name === 'Taco Two')).toBe(false);
+        });
+
+      it('applies a change the person spells out in full', async () => {
+        const { pack, handlers, settings } = setup();
+        pack.setMode('full');
+        settings.set('pack.dogs', [TAINTED_PIP, TACO]);
+        await readFirst(pack, handlers);
+        handlers.push(() => ({
+          reply: 'Bye, Taco.',
+          actions: [{ kind: 'retire', dogId: 'dog-taco' }],
+        }));
+        await pack.say('Retire Taco');
+        expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done' });
+        expect(pack.dogs().some((d) => d.id === 'dog-taco')).toBe(false);
+
+        // The answer before this one read nothing, so the rule is back to normal.
+        handlers.push(() => ({
+          reply: 'Advisor is on it.',
+          actions: [{ ...CREATE, name: 'Advisor', job: 'Check Downloads.' }],
+        }));
+        await pack.say('Create a dog named Advisor to check Downloads hourly');
+        expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done' });
+      });
+
+      it('holds a create, a job and a memory the person did not type word for word', async () => {
+        const { pack, handlers, settings, memory } = setup();
+        pack.setMode('full');
+        settings.set('pack.dogs', [TAINTED_PIP, TACO]);
+        await readFirst(pack, handlers);
+        handlers.push(() => ({
+          reply: 'Done.',
+          actions: [
+            { ...CREATE, name: 'Advisor', job: 'Check Downloads.' },
+            { kind: 'update', dogId: 'dog-pip', job: 'Check Desktop' },
+          ],
+          remember: [{ fact: 'Prefers reports in plain English', topic: 'pack' }],
+        }));
+        await pack.say(
+          'Create a dog named Advisor and change Pip. Remember I prefer reports in plain English',
+        );
+        const reply = pack.chat().at(-1)!;
+        expect(reply.actions).toMatchObject([{ status: 'pending' }, { status: 'pending' }]);
+        expect(reply.memory).toMatchObject([{ status: 'pending' }]);
+        expect(memory.count()).toBe(0);
+
+        // Typed word for word, they go ahead. (The answer before is clean now,
+        // so read again first.)
+        await readFirst(pack, handlers);
+        handlers.push(() => ({
+          reply: 'Done.',
+          actions: [
+            { ...CREATE, name: 'Advisor', job: 'Check Downloads.' },
+            { kind: 'update', dogId: 'dog-pip', job: 'Check Desktop' },
+          ],
+          remember: [{ fact: 'Reports in plain English', topic: 'pack' }],
+        }));
+        await pack.say(
+          'Create a dog named Advisor to Check Downloads. Change Pip’s job to Check Desktop. Remember: reports in plain English.',
+        );
+        const next = pack.chat().at(-1)!;
+        expect(next.actions).toMatchObject([{ status: 'done' }, { status: 'done' }]);
+        expect(next.memory).toMatchObject([{ status: 'done' }]);
+        expect(pip(pack).job).toBe('Check Desktop');
+      });
+    });
+
+    describe('overlapping names', () => {
+      const PIP_TWO = { ...PIP, id: 'dog-pip-two', name: 'Pip Two', job: 'Watch Desktop.' };
+
+      for (const mode of ['full', 'auto'] as const)
+        it(`"Retire Pip Two" never retires Pip (${mode})`, async () => {
+          const { pack, handlers, runs, settings } = setup();
+          pack.setMode(mode);
+          settings.set('pack.dogs', [PIP, PIP_TWO]);
+          handlers.push((req) => {
+            expect((req.data as { youNamed: unknown }).youNamed).toEqual([
+              { typed: 'Pip Two', dogId: 'dog-pip-two' },
+            ]);
+            return { reply: 'Bye.', actions: [{ kind: 'retire', dogId: 'dog-pip' }] };
+          });
+          await pack.say('Retire Pip Two');
+          expect(runs).toHaveLength(1);
+          expect(pack.chat().at(-1)!.actions![0]).toMatchObject({
+            status: 'pending',
+            dogId: 'dog-pip',
+            note: expect.stringContaining('different dog'),
+          });
+          expect(pack.dogs().some((d) => d.id === 'dog-pip')).toBe(true);
+        });
+
+      it('binds to the longest name typed, and a name typed on its own still counts', async () => {
+        const { pack, handlers, settings } = setup();
+        pack.setMode('full');
+        settings.set('pack.dogs', [PIP, PIP_TWO]);
+        handlers.push(() => ({
+          reply: 'Bye.',
+          actions: [{ kind: 'retire', dogId: 'dog-pip-two' }],
+        }));
+        await pack.say('Retire Pip Two');
+        expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done' });
+        expect(pack.dogs().map((d) => d.id)).toContain('dog-pip');
+
+        settings.set('pack.dogs', [PIP, PIP_TWO]);
+        handlers.push(() => ({
+          reply: 'Done.',
+          actions: [
+            { kind: 'update', dogId: 'dog-pip', schedule: 'daily' },
+            { kind: 'update', dogId: 'dog-pip-two', schedule: 'daily' },
+          ],
+        }));
+        await pack.say('Make Pip Two and Pip daily');
+        expect(pack.chat().at(-1)!.actions).toMatchObject([{ status: 'done' }, { status: 'done' }]);
       });
     });
 

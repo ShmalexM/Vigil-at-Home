@@ -185,7 +185,7 @@ export interface ToolApproval {
   toolTitle: string;
   /** The arguments, redacted and cut short, as the user sees them. */
   args: string;
-  why: 'mode' | 'always-ask' | 'rule' | 'judged-risky' | 'no-judge';
+  why: 'mode' | 'always-ask' | 'rule' | 'outside-text' | 'judged-risky' | 'no-judge';
   /** The rule's or the judge's reason, when there is one. */
   reason?: string;
 }
