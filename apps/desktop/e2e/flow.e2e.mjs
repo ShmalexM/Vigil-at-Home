@@ -328,16 +328,22 @@ try {
 
   // The app runs from a temporary folder here, not /Applications, so its
   // first sync names a path outside the installer's as Vigil's own, which
-  // needs the password. That sync went out before the approver above, so
-  // reconnect and send the rules again through it.
-  await main(() => globalThis.vigil.core.executor.reconnect());
-  const reconnected = await waitUntil(
-    () => main(() => globalThis.vigil.core.executor.state === 'connected'),
-    40000,
-    250,
-  );
-  check('app reconnected with the approver', reconnected);
-  const synced = await main(() => globalThis.vigil.core.detector.syncHelper({ byUser: true }));
+  // needs the password. That sync may have gone out before the approver
+  // above and opened the real dialog, which nobody can answer on a runner:
+  // close it (the sync counts as declined), then send the rules again
+  // through the approver.
+  const closeDialog = () => {
+    try {
+      execFileSync('pkill', ['-x', 'osascript'], { stdio: 'ignore' });
+    } catch {
+      // No dialog open.
+    }
+  };
+  closeDialog();
+  const closing = setInterval(closeDialog, 500);
+  const synced = await main(() =>
+    globalThis.vigil.core.detector.syncHelper({ byUser: true }),
+  ).finally(() => clearInterval(closing));
   check("the helper took the app's rules", synced === 'applied', { synced });
 
   // Record when the popup is placed on screen, from the main process.
