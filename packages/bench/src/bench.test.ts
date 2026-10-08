@@ -160,23 +160,28 @@ describe('rule scoring', () => {
     const [score] = scoreCandidates(
       [
         {
-          id: 'candidate-curl-then-run',
+          id: 'candidate-hidden-appsupport',
           version: 1,
           origin: 'user',
-          name: 'Downloaded to a file, then run',
-          description: 'curl or wget saving a file, then a shell running it on the same line.',
+          name: 'Unsigned program in a hidden Application Support folder',
+          description: 'An unsigned binary running from a dot-folder under Application Support.',
           mode: 'shadow',
           severity: 'medium',
           fidelity: 'medium',
           eventKinds: ['process.exec'],
           condition: {
-            field: 'process.commandLine',
-            op: 'regex',
-            value: ['(curl|wget)\\s[^|&;]{0,200}(&&|;)\\s*(sudo\\s+)?(/\\S+/)?(ba|z|da)?sh\\s+/'],
+            all: [
+              { field: 'process.signing', op: 'eq', value: 'unsigned' },
+              {
+                field: 'process.path',
+                op: 'glob',
+                value: ['**/Library/Application Support/.*/**'],
+              },
+            ],
           },
           response: [],
           exclusions: [],
-          reasons: ['A command downloaded code to a file and ran it with a shell.'],
+          reasons: ['An unsigned program ran from a hidden Application Support folder.'],
           tags: [],
           createdAt: START,
           updatedAt: START,
@@ -184,9 +189,10 @@ describe('rule scoring', () => {
       ],
       { days: 8, telemetry: ['sensors'] },
     );
-    // The built-in rule now catches the piped full-path shape itself (it reads the
-    // stages), so what a candidate still adds is the two-step download-then-run.
-    expect(score?.newlyCaught).toContain('curl-then-run (sensors)');
+    // The download-run rule now reads the pipe stages and separate commands itself,
+    // so the two-step download-then-run is a built-in catch; the gap a candidate
+    // still fills here is an unsigned second stage dropped in a hidden folder.
+    expect(score?.newlyCaught).toContain('curl-dropped-hidden-folder (sensors)');
     expect(score?.falsePerDay.developer.alerts).toBe(0);
   }, 30_000);
 });
