@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { ADMIN_ENV } from '@vigil/helper';
 import type { HelperInstallResult } from '../shared/ipc.js';
 
 const hasHelper = (dir: string) =>
@@ -168,14 +169,20 @@ export type RunFile = (
   args: string[],
 ) => Promise<{ code: number; stdout: string; stderr: string }>;
 
+// The scripts run as root, so osascript gets none of the session's environment
+// (NODE_OPTIONS and the like). pkexec already clears it.
 const runFile: RunFile = (file, args) =>
   new Promise((resolve) =>
-    execFile(file, args, { timeout: 3 * 60_000 }, (err, stdout, stderr) =>
-      resolve({
-        code: err ? (typeof err.code === 'number' ? err.code : 1) : 0,
-        stdout: String(stdout),
-        stderr: String(stderr),
-      }),
+    execFile(
+      file,
+      args,
+      { timeout: 3 * 60_000, ...(file === '/usr/bin/osascript' ? { env: ADMIN_ENV } : {}) },
+      (err, stdout, stderr) =>
+        resolve({
+          code: err ? (typeof err.code === 'number' ? err.code : 1) : 0,
+          stdout: String(stdout),
+          stderr: String(stderr),
+        }),
     ),
   );
 

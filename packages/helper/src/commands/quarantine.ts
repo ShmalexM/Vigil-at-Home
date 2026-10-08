@@ -47,6 +47,9 @@ export function vetPath(path: string, opts: QuarantineOptions): string {
   const protection = protectionFor(opts.platform);
   const exact = opts.protectedExact ?? protection.exact;
   const prefixes = opts.protectedPrefixes ?? protection.prefixes;
+  // macOS disks ignore case by default, so /library/... is /Library/... there.
+  const fold = (s: string) => (opts.platform === 'linux' ? s : s.toLowerCase());
+  const key = fold(path);
   const quarantineRoot = opts.quarantineDir.replace(/\/$/, '');
   // Compare against the quarantine folder's real location too, so a path that
   // reaches it through a symlink (like /var -> /private/var on macOS) is caught.
@@ -57,16 +60,15 @@ export function vetPath(path: string, opts: QuarantineOptions): string {
     // Not created yet: nothing can be inside it.
   }
   if (
-    exact.has(path) ||
-    prefixes.some(
-      (p) =>
-        path === p.replace(/\/$/, '') ||
-        path.startsWith(p.endsWith('/') ? p : p + '/') ||
-        path === p,
-    ) ||
-    quarantineRoots.some(
-      (q) => path === q || path.startsWith(q + '/') || q.startsWith(path + '/'),
-    ) ||
+    [...exact].some((e) => fold(e) === key) ||
+    prefixes.some((raw) => {
+      const p = fold(raw);
+      return key === p.replace(/\/$/, '') || key.startsWith(p.endsWith('/') ? p : p + '/');
+    }) ||
+    quarantineRoots.some((raw) => {
+      const q = fold(raw);
+      return key === q || key.startsWith(q + '/') || q.startsWith(key + '/');
+    }) ||
     protection.homes.some((re) => re.test(path))
   ) {
     throw new ActionError('refused', `${path} is protected`);
@@ -96,6 +98,14 @@ export function resolveTarget(path: string, opts: QuarantineOptions): string {
     throw new ActionError('not_found', `${path} does not exist`);
   }
   return vetPath(join(parent, basename(path)), opts);
+}
+
+function realpathOrNull(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
 }
 
 export function quarantine(
@@ -169,7 +179,12 @@ export function moveAcrossDisks(from: string, to: string): void {
   rmSync(from, { recursive: true, force: true });
 }
 
-export function restore(rec: QuarantineRecord): void {
+/**
+ * Restore moves the file back as root, so check again that the original
+ * folder is still where it was: a folder swapped for a symlink since the
+ * quarantine could otherwise send the file somewhere protected.
+ */
+export function restore(rec: QuarantineRecord, opts: QuarantineOptions): void {
   if (existsSync(rec.originalPath)) {
     throw new ActionError(
       'refused',
@@ -178,7 +193,24 @@ export function restore(rec: QuarantineRecord): void {
   }
   if (!existsSync(rec.storedPath))
     throw new ActionError('not_found', 'the quarantined copy is gone');
-  mkdirSync(dirname(rec.originalPath), { recursive: true });
+  vetPath(rec.originalPath, opts);
+  const parent = dirname(rec.originalPath);
+  if (!existsSync(parent)) {
+    // Recreate missing folders only below one that is still its real self.
+    let base = dirname(parent);
+    while (!existsSync(base)) base = dirname(base);
+    if (realpathOrNull(base) !== base) {
+      throw new ActionError('refused', `${parent} has moved; not restoring into it`);
+    }
+    try {
+      mkdirSync(parent, { recursive: true });
+    } catch {
+      throw new ActionError('failed', `could not recreate ${parent}`);
+    }
+  }
+  if (realpathOrNull(parent) !== parent) {
+    throw new ActionError('refused', `${parent} has moved; not restoring into it`);
+  }
   const isLink = lstatSync(rec.storedPath).isSymbolicLink();
   if (!isLink) chmodSync(rec.storedPath, rec.mode);
   // Only Linux quarantines ever cross disks; on macOS this is a plain rename.

@@ -69,6 +69,12 @@ export function linuxPaths(supportDir = '/var/lib/vigil'): HelperPaths {
 
 export const SANTA_SYNC_PORT = 47821;
 
+/** The only environment given to osascript when it runs something as root. */
+export const ADMIN_ENV = {
+  PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+  LANG: process.env.LANG ?? 'en_US.UTF-8',
+};
+
 /**
  * Paths the helper will never quarantine or unload, whoever asks. Moving
  * these could break macOS, Santa or Vigil itself. /usr/local is fine.
@@ -89,6 +95,8 @@ export const PROTECTED_PREFIXES = [
   // The helper's Node runtime and code, and the app itself.
   '/Library/PrivilegedHelperTools/vigil-helper.d/',
   '/Applications/Vigil at Home.app/',
+  // The helper's own state: rules, journal, Santa sync keys and the quarantine.
+  '/Library/Application Support/Vigil/',
 ];
 
 /** Exact paths that must never be moved (moving a parent of everything). */
@@ -119,6 +127,9 @@ export const PROTECTED_PROCESS_PREFIXES = [
   '/Library/PrivilegedHelperTools/vigil-helper',
   '/Applications/Vigil.app/',
   '/Applications/Vigil at Home.app/',
+  // osquery 5 and later lives in /opt/osquery; older releases in /usr/local/bin.
+  '/opt/osquery/',
+  '/usr/local/bin/osqueryd',
 ];
 
 /**
@@ -212,7 +223,7 @@ const MAC_PROTECTION: Protection = {
   prefixes: PROTECTED_PREFIXES,
   exact: PROTECTED_EXACT,
   processPrefixes: PROTECTED_PROCESS_PREFIXES,
-  homes: [/^\/Users\/[^/]+$/, /^\/Users\/[^/]+\/(Library|Desktop|Documents|Downloads)$/],
+  homes: [/^\/Users\/[^/]+$/i, /^\/Users\/[^/]+\/(Library|Desktop|Documents|Downloads)$/i],
 };
 
 const LINUX_PROTECTION: Protection = {

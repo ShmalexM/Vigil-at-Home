@@ -12,7 +12,7 @@ import type { SensorEvent } from '@vigil/sensors';
 import type { HelperCommand, HelperResponse } from './protocol.js';
 import type { HelperRan } from './fastpath.js';
 import { approvalAppleScript, pkexecArgs } from './approval.js';
-import { defaultPaths } from './config.js';
+import { ADMIN_ENV, defaultPaths } from './config.js';
 import { hostPlatform, type Platform } from './platform.js';
 
 export class HelperCallError extends Error {
@@ -36,6 +36,8 @@ export function osascriptApprover(helperExecutable = defaultPaths().helperExecut
       execFile(
         '/usr/bin/osascript',
         ['-e', approvalAppleScript(helperExecutable, [nonce, ...also], prompt)],
+        // The approve command runs as root; give it none of the session's environment.
+        { env: ADMIN_ENV },
         (err) => resolve(!err),
       );
     });

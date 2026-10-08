@@ -242,7 +242,7 @@ describe('Linux startup items', () => {
       '--user -M alex@ daemon-reload',
     ]);
 
-    await restoreLinuxPersistence(sys, rec);
+    await restoreLinuxPersistence(sys, rec, qopts());
     expect(readFileSync(path, 'utf8')).toContain('ExecStart');
     expect(sys.active.has('user:alex miner.service')).toBe(true);
   });
@@ -253,7 +253,7 @@ describe('Linux startup items', () => {
     const rec = await disableLinuxPersistence(sys, path, 'act2', qopts(), dirs(), () => PASSWD);
     expect(rec.domain).toBe('autostart');
     expect(sys.runs).toEqual([]);
-    await restoreLinuxPersistence(sys, rec);
+    await restoreLinuxPersistence(sys, rec, qopts());
     expect(existsSync(path)).toBe(true);
   });
 
@@ -271,6 +271,33 @@ describe('Linux startup items', () => {
     await expect(
       disableLinuxPersistence(sys, '/usr/lib/systemd/system/ssh.service', 'c', qopts()),
     ).rejects.toMatchObject({ code: 'invalid' });
+  });
+
+  it("refuses Vigil's and the sensors' own units before stopping anything", async () => {
+    for (const name of ['vigil-helper.service', 'osqueryd.service', 'fapolicyd.service']) {
+      const path = join(unitDir, name);
+      writeFileSync(path, '[Service]\n');
+      sys.active.add(`user:alex ${name}`);
+      await expect(
+        disableLinuxPersistence(sys, path, 'd', qopts(), dirs(), () => PASSWD),
+      ).rejects.toMatchObject({ code: 'refused' });
+      expect(existsSync(path)).toBe(true);
+    }
+    expect(sys.runs).toEqual([]);
+  });
+
+  it('vets the file before stopping its unit', async () => {
+    // A startup folder inside the quarantine: the move would be refused, so nothing is stopped.
+    const inside = join(root, 'quarantine', 'systemd', 'user');
+    mkdirSync(inside, { recursive: true });
+    const path = join(inside, 'x.service');
+    writeFileSync(path, '');
+    sys.active.add('user:alex x.service');
+    const re = new RegExp('^' + inside.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$');
+    await expect(
+      disableLinuxPersistence(sys, path, 'e', qopts(), re, () => PASSWD),
+    ).rejects.toMatchObject({ code: 'refused' });
+    expect(sys.runs).toEqual([]);
   });
 });
 

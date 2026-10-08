@@ -15,7 +15,7 @@ import { lstatSync, readFileSync } from 'node:fs';
 import type { System } from '../system.js';
 import { protectionFor } from '../config.js';
 import { ActionError } from './errors.js';
-import { quarantine, restore, type QuarantineOptions } from './quarantine.js';
+import { quarantine, resolveTarget, restore, type QuarantineOptions } from './quarantine.js';
 import type { PersistenceRecord } from './persistence.js';
 
 /** Folders whose items persistence.disable accepts on Linux. */
@@ -68,6 +68,13 @@ function scopeOf(domain: string): UnitScope {
   return domain === 'system' ? { kind: 'system' } : { kind: 'autostart' };
 }
 
+/** Units of Vigil itself and of the tools it relies on, never stopped or moved. */
+export const PROTECTED_UNITS = new Set([
+  'vigil-helper.service',
+  'osqueryd.service',
+  'fapolicyd.service',
+]);
+
 /** /etc is protected from quarantine in general; its startup folders are the exception. */
 function startupQuarantine(opts: QuarantineOptions): QuarantineOptions {
   const base = opts.protectedPrefixes ?? protectionFor('linux').prefixes;
@@ -97,6 +104,10 @@ export async function disableLinuxPersistence(
   if (dirname(path).endsWith('/autostart') !== isDesktop) {
     throw new ActionError('invalid', `${name} does not belong in ${dirname(path)}`);
   }
+  if (PROTECTED_UNITS.has(name))
+    throw new ActionError('refused', `${name} belongs to Vigil or its sensors`);
+  // Vet the file the way the quarantine will before stopping anything.
+  resolveTarget(path, startupQuarantine(opts));
   let st;
   try {
     st = lstatSync(path);
@@ -123,8 +134,12 @@ export async function disableLinuxPersistence(
   return { quarantine: q, label: name, domain: domainOf(scope), wasLoaded };
 }
 
-export async function restoreLinuxPersistence(sys: System, rec: PersistenceRecord): Promise<void> {
-  restore(rec.quarantine);
+export async function restoreLinuxPersistence(
+  sys: System,
+  rec: PersistenceRecord,
+  opts: QuarantineOptions,
+): Promise<void> {
+  restore(rec.quarantine, startupQuarantine(opts));
   const scope = scopeOf(rec.domain);
   if (scope.kind === 'autostart') return;
   const args = scopeArgs(scope);

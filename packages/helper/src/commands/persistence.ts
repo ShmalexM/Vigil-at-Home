@@ -8,6 +8,7 @@ import type { System } from '../system.js';
 import { ActionError } from './errors.js';
 import {
   quarantine,
+  resolveTarget,
   restore,
   type QuarantineOptions,
   type QuarantineRecord,
@@ -39,6 +40,23 @@ export function launchdDomain(
   return `gui/${ownerUid}`;
 }
 
+/**
+ * Launch items of Vigil itself and of the tools it relies on. They are never
+ * unloaded, whatever folder they sit in or whatever they are named on disk.
+ */
+export const PROTECTED_LABEL_PREFIXES = [
+  'com.vigilathome.',
+  'com.northpolesec.santa',
+  'com.google.santa',
+  'io.osquery.',
+  'com.facebook.osqueryd',
+];
+
+function isProtectedLabel(name: string): boolean {
+  const lower = name.toLowerCase();
+  return PROTECTED_LABEL_PREFIXES.some((p) => lower.startsWith(p));
+}
+
 async function readLabel(sys: System, path: string): Promise<string | undefined> {
   const r = await sys.run('plutil', ['-extract', 'Label', 'raw', '-o', '-', path]);
   const label = r.stdout.trim();
@@ -59,6 +77,10 @@ export async function disablePersistence(
       'only plists directly inside a LaunchAgents or LaunchDaemons folder can be disabled',
     );
   }
+  if (isProtectedLabel(basename(path)))
+    throw new ActionError('refused', `${basename(path)} belongs to Vigil or its sensors`);
+  // Vet the file the way the quarantine will before unloading anything.
+  resolveTarget(path, opts);
   let st;
   try {
     st = lstatSync(path);
@@ -69,6 +91,8 @@ export async function disablePersistence(
   readFileSync(path); // readable
 
   const label = await readLabel(sys, path);
+  if (label && isProtectedLabel(label))
+    throw new ActionError('refused', `${label} belongs to Vigil or its sensors`);
   const domain = launchdDomain(path, st.uid, sys.consoleUid());
   let wasLoaded = false;
   if (label) {
@@ -84,8 +108,12 @@ export async function disablePersistence(
   return { quarantine: q, label, domain, wasLoaded };
 }
 
-export async function restorePersistence(sys: System, rec: PersistenceRecord): Promise<void> {
-  restore(rec.quarantine);
+export async function restorePersistence(
+  sys: System,
+  rec: PersistenceRecord,
+  opts: QuarantineOptions,
+): Promise<void> {
+  restore(rec.quarantine, opts);
   if (rec.wasLoaded) {
     const r = await sys.run('launchctl', ['bootstrap', rec.domain, rec.quarantine.originalPath]);
     if (r.code !== 0) {
