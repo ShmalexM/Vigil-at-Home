@@ -74,6 +74,90 @@ it('reads the cdhash and main executable codesign prints', () => {
   expect(parseCodesignIdentity('code object is not signed at all')).toBeUndefined();
 });
 
+describe('codesign -d -vvv as a real Mac prints it', () => {
+  // The path form names the inner Mach-O in Executable=, not the .app, and
+  // everything goes to stderr. (The CDHash is padded out to its 40 digits.)
+  const FINDER_APP = '/System/Library/CoreServices/Finder.app';
+  const FINDER_EXE = `${FINDER_APP}/Contents/MacOS/Finder`;
+  const FINDER_CDHASH = '2ff5' + '0'.repeat(36);
+  const FINDER = [
+    `Executable=${FINDER_EXE}`,
+    'Identifier=com.apple.finder',
+    'Format=app bundle with Mach-O universal (x86_64 arm64e)',
+    'CodeDirectory v=20400 size=12345 flags=0x0(none) hashes=375+7 location=embedded',
+    'Platform identifier=16',
+    'Hash type=sha256 size=32',
+    `CandidateCDHash sha256=${FINDER_CDHASH}`,
+    `CandidateCDHashFull sha256=${FINDER_CDHASH}${'1'.repeat(24)}`,
+    'Hash choices=sha256',
+    `CDHash=${FINDER_CDHASH}`,
+    'Signature size=4442',
+    'Authority=Software Signing',
+    'Signed Time=Sep 1, 2026 at 00:00:00',
+    'Info.plist entries=40',
+    'TeamIdentifier=not set',
+    'Sealed Resources version=2 rules=2 files=0',
+    'Internal requirements count=1 size=68',
+    '',
+  ].join('\n');
+
+  it('reads the inner executable and cdhash, in any line order', () => {
+    const want = { cdhash: FINDER_CDHASH, executable: FINDER_EXE };
+    expect(parseCodesignIdentity(FINDER)).toEqual(want);
+    const lines = FINDER.split('\n');
+    expect(parseCodesignIdentity([...lines].reverse().join('\n'))).toEqual(want);
+    // CDHash first, Executable last.
+    const moved = lines.filter((l) => !/^(CDHash|Executable)=/.test(l));
+    expect(
+      parseCodesignIdentity(
+        [`CDHash=${FINDER_CDHASH}`, ...moved, `Executable=${FINDER_EXE}`].join('\n'),
+      ),
+    ).toEqual(want);
+  });
+
+  /** codesign writing `out` to stderr, with nothing on stdout, for the bundle and its pid. */
+  class StderrMac extends FakeSystem {
+    override async run(bin: BinaryName, args: string[], opts: { input?: string } = {}) {
+      if (bin !== 'codesign') return super.run(bin, args, opts);
+      this.runs.push({ bin, args, input: opts.input });
+      return [FINDER_APP, '700'].includes(args.at(-1)!)
+        ? ok('', FINDER)
+        : { code: 1, stdout: '', stderr: 'code object is not signed at all' };
+    }
+  }
+
+  it('pins from a bundle path by the inner Mach-O, read from stderr', async () => {
+    const sys = new StderrMac();
+    const hashed: string[] = [];
+    const sha256 = (p: string) => (hashed.push(p), APP_SHA);
+    const pin = await pinFor(sys, FINDER_APP, { installed: INSTALLED_MAC, sha256 });
+    expect(pin).toEqual({
+      platform: 'darwin',
+      path: FINDER_EXE,
+      cdhash: FINDER_CDHASH,
+      sha256: APP_SHA,
+    });
+    expect(hashed).toEqual([FINDER_EXE]);
+  });
+
+  it('re-pins from a grant naming the bundle, and spares its pid by cdhash', async () => {
+    const sys = new StderrMac();
+    sys.processes.set(700, { path: FINDER_EXE, started: STARTED });
+    const pin = await repinFromGrant(
+      sys,
+      { selfPaths: [FINDER_APP] },
+      { pinFile, installed: INSTALLED_MAC, sha256: () => APP_SHA },
+    );
+    expect(pin?.path).toBe(FINDER_EXE);
+    expect(readPin(pinFile)).toEqual(pin);
+    const ex = new Executor(executorDeps(sys));
+    await expect(
+      ex.execute({ kind: 'process.kill', pid: 700, path: FINDER_EXE }),
+    ).rejects.toMatchObject({ code: 'refused' });
+    expect(sys.signals).toEqual([]);
+  });
+});
+
 describe('the app pinned at install (macOS)', () => {
   const APP = 501;
   let sys: MacCode;
