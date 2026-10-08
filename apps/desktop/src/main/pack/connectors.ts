@@ -407,19 +407,28 @@ function realOr(path: string): string {
 }
 
 /**
+ * A connector's name as a slug: the id connectors were given before ids got
+ * a part of their own, and the name rules written then use
+ * (`mcp__<slug>__<tool>`). Never an identity: names repeat.
+ */
+export function connectorSlug(name: string): string {
+  return (
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 30) || 'connector'
+  );
+}
+
+/**
  * A new connector's id: its name as a slug, then a part that is new each
  * time (the time in hex and random hex from newId), so an id is never given
  * twice, even to a connector removed and added again under the same name.
  * Connectors saved before keep the ids they have.
  */
 function newConnectorId(name: string, taken: Set<string>): string {
-  const base =
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '')
-      .slice(0, 19)
-      .replace(/-$/, '') || 'connector';
+  const base = connectorSlug(name).slice(0, 19).replace(/-$/, '');
   for (;;) {
     const n = newId().toLowerCase();
     const id = `${base}-${n.slice(0, 12)}${n.slice(16, 24)}`;

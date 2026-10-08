@@ -5,12 +5,50 @@ import { describe, expect, it, vi } from 'vitest';
 import type { z } from 'zod';
 import type { ToolListing } from '../agents/tools.js';
 import type { ConnectorHub, ConnectorRecord, RemoteTool } from './connectors.js';
+import { DetectionEngine, decide, memoryStores, toolRequestEvent } from '@vigil/detection';
 import { PackMemory } from './memory.js';
 import { Notebook } from './notebook.js';
 import { PackService, type PackAiStatus } from './service.js';
 import type { ToolApproval, ToolDecision } from '../../shared/pack.js';
 
 type Handler = (req: RunRequest<unknown>) => Promise<unknown> | unknown;
+type PackDepsPreflight = ConstructorParameters<typeof PackService>[0]['preflight'];
+
+/**
+ * Vigil's real rule engine on pre-flight requests, as the agent service runs
+ * it for the pack: `rules` are user rules on tool requests, `exceptions` the
+ * person's "Stop alerting on this" entries.
+ */
+function realRules(
+  rules: { id: string; mode: 'block' | 'alert'; condition: unknown; exclusions?: unknown[] }[],
+  exceptions: { ruleId: string; match: Record<string, string> }[] = [],
+): PackDepsPreflight {
+  const stores = memoryStores();
+  exceptions.forEach((x, i) => stores.exceptions.add({ id: `x${i}`, createdAt: 0, ...x }));
+  const engine = new DetectionEngine(
+    rules.map((r) => ({
+      version: 1,
+      name: r.id,
+      description: '',
+      origin: 'user',
+      severity: 'high',
+      fidelity: 'high',
+      eventKinds: ['agent.tool_request'],
+      createdAt: 0,
+      updatedAt: 0,
+      reasons: ['{{tool}} matched'],
+      ...r,
+    })) as never,
+    stores,
+    { recordHistory: false },
+  );
+  let n = 0;
+  return (req, opts) =>
+    decide(
+      engine.check(toolRequestEvent(req, { id: `r${n++}`, ts: 1 }), opts),
+      (id) => engine.getRule(id)?.name ?? id,
+    );
+}
 
 const LISTING = (name: string): ToolListing => ({
   name: name as ToolListing['name'],
@@ -49,6 +87,8 @@ function setup(
   opts: {
     status?: Partial<PackAiStatus>;
     preflight?: PreflightReply['decision'];
+    /** Vigil's rules, in place of a fixed answer. */
+    rules?: PackDepsPreflight;
     remote?: RemoteTool[];
     now?: () => number;
   } = {},
@@ -100,7 +140,9 @@ function setup(
         return { v: 1, ok: true, result: { rows: [] } };
       },
     },
-    preflight: () => ({ v: 1, decision: opts.preflight ?? 'none', reason: 'A rule says so' }),
+    preflight:
+      opts.rules ??
+      (() => ({ v: 1, decision: opts.preflight ?? 'none', reason: 'A rule says so' })),
     connectors,
     notebook,
     memory,
@@ -529,6 +571,110 @@ describe('the pack', () => {
     const biscuit = (await pack.view()).dogs.find((d) => d.helper === 'labeller');
     expect(biscuit).toMatchObject({ mood: 'sniffing', activity: 'Labelling new events' });
     expect(() => pack.setVoice('loud' as never)).toThrow();
+  });
+
+  describe('Vigil’s rules on a connector with an id of its own', () => {
+    /** GitHub, removed and added again: a name slug and a part of its own. */
+    const NEW_GITHUB = { ...GITHUB, id: 'github-0199b2c4d5e6a1b2c3d4' };
+    const writer = {
+      id: 'dog-pip',
+      role: 'pack',
+      name: 'Pip',
+      breed: 'chihuahua',
+      job: 'File issues.',
+      schedule: 'manual',
+      tools: [`${NEW_GITHUB.id}.create_issue`],
+      enabled: true,
+      createdBy: 'you',
+      createdAt: 1,
+      jobTainted: false,
+      nameTainted: false,
+    };
+    /** Pip's run calls create_issue in Full access; what the gate makes of it. */
+    const callOnce = async (rules: PackDepsPreflight, choice?: 'allow') => {
+      const t = setup({ rules });
+      t.records.splice(0, 1, NEW_GITHUB);
+      t.pack.setMode('full');
+      t.settings.set('pack.dogs', [writer]);
+      if (choice) t.pack.setToolChoice(`${NEW_GITHUB.id}.create_issue`, choice);
+      let answer: unknown;
+      let approvals: unknown[] = [];
+      t.handlers.push(async (req) => {
+        const call = tool(req, 'tool_1').run({ title: 'x' });
+        await new Promise((r) => setTimeout(r, 20));
+        approvals = (await t.pack.view()).approvals;
+        for (const a of approvals as { id: string }[]) t.pack.decideTool(a.id, 'deny');
+        answer = await call;
+        return { summary: 'ok', findings: [] };
+      });
+      await t.pack.runDog('dog-pip');
+      return { answer, approvals, calls: t.connectorCalls };
+    };
+    const STOP = {
+      id: 'stop-github',
+      mode: 'block' as const,
+      condition: { field: 'tool', op: 'startsWith', value: 'mcp__github__' },
+    };
+    const ASK = {
+      id: 'ask-github',
+      mode: 'alert' as const,
+      condition: { field: 'mcpServer', op: 'eq', value: 'github' },
+    };
+
+    it('still stops a call that a stop rule written as mcp__github__ names', async () => {
+      const r = await callOnce(realRules([STOP]));
+      expect(r.answer).toContain('Not run');
+      expect(r.calls).toEqual([]);
+    });
+
+    it('still asks before a call that an ask rule on the github server names', async () => {
+      const r = await callOnce(realRules([ASK]));
+      expect(r.approvals).toMatchObject([{ why: 'rule' }]);
+      expect(r.answer).toContain('said no');
+      expect(r.calls).toEqual([]);
+    });
+
+    it('lets the call through when no rule names it', async () => {
+      const r = await callOnce(realRules([]));
+      expect(r.calls).toEqual([[NEW_GITHUB.id, 'create_issue', { title: 'x' }]]);
+    });
+
+    it('never lets a stop rule match by name, even with Always allow on the tool', async () => {
+      const r = await callOnce(realRules([STOP]), 'allow');
+      expect(r.answer).toContain('Not run');
+      expect(r.calls).toEqual([]);
+    });
+
+    it('does not apply an exception written for mcp__github__ to the new connector', async () => {
+      const r = await callOnce(
+        realRules([STOP], [{ ruleId: STOP.id, match: { tool: 'mcp__github__create_issue' } }]),
+      );
+      expect(r.answer).toContain('Not run');
+      expect(r.calls).toEqual([]);
+    });
+
+    it('does not apply a rule exclusion on the github server to the new connector', async () => {
+      const r = await callOnce(
+        realRules([{ ...ASK, exclusions: [{ field: 'mcpServer', op: 'eq', value: 'github' }] }]),
+      );
+      expect(r.approvals).toMatchObject([{ why: 'rule' }]);
+      expect(r.calls).toEqual([]);
+    });
+
+    it('applies an exception written for the connector’s own id', async () => {
+      const byId = {
+        ...STOP,
+        condition: { field: 'tool', op: 'startsWith', value: `mcp__${NEW_GITHUB.id}__` },
+      };
+      expect((await callOnce(realRules([byId]))).calls).toEqual([]);
+      const r = await callOnce(
+        realRules(
+          [byId],
+          [{ ruleId: STOP.id, match: { tool: `mcp__${NEW_GITHUB.id}__create_issue` } }],
+        ),
+      );
+      expect(r.calls).toEqual([[NEW_GITHUB.id, 'create_issue', { title: 'x' }]]);
+    });
   });
 
   describe('notebooks', () => {

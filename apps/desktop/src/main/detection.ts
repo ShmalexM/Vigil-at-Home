@@ -32,6 +32,7 @@ import {
   type EventHistory,
   type FeedImporterOptions,
   type AnalyzeRunner,
+  type CheckOptions,
   type FeedStatus,
   type FlaggedEvent,
   type Proposal,
@@ -280,7 +281,7 @@ export class Detector {
    * free: the tracker only says which agent session asked (attribution), and
    * `engine.check` leaves no trace. Rules decide deny, ask or nothing; never allow.
    */
-  preflight(req: PreflightRequest): PreflightResult {
+  preflight(req: PreflightRequest, opts?: CheckOptions): PreflightResult {
     const ts = this.now();
     const found = req.ppid !== undefined ? this.tracker.lookup(req.ppid) : undefined;
     const event = toolRequestEvent(req, {
@@ -288,7 +289,7 @@ export class Detector {
       ts,
       ...(found?.tag ? { tag: found.tag } : {}),
     });
-    const detections = this.engine.check(event);
+    const detections = this.engine.check(event, opts);
     const reply = decide(detections, (id) => this.engine.getRule(id)?.name ?? id);
     return { reply, event, detections };
   }

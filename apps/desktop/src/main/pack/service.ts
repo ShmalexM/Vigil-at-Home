@@ -46,7 +46,7 @@ import {
   type ToolView,
 } from '../../shared/pack.js';
 import type { ToolListing } from '../agents/tools.js';
-import type { ConnectorHub, RemoteTool } from './connectors.js';
+import { connectorSlug, type ConnectorHub, type RemoteTool } from './connectors.js';
 import type { Notebook } from './notebook.js';
 import { memoryTainted, type PackMemory, type PromptMemory } from './memory.js';
 import { afterJudge, gateAction, gateTool } from './gate.js';
@@ -102,7 +102,11 @@ export interface PackDeps {
     call(name: string, args: Record<string, unknown>): ToolsReply;
   };
   /** Vigil's rules on a connector call, as a watched agent's hook would get them. */
-  preflight(req: PreflightRequest): PreflightReply;
+  /**
+   * `opts.noSkipsOn` turns off exclusions and exceptions on those fields
+   * (engine.check), for the check by a connector's name (rulesFor).
+   */
+  preflight(req: PreflightRequest, opts?: { noSkipsOn?: readonly string[] }): PreflightReply;
   connectors: ConnectorHub;
   scheduler?: { every(name: string, ms: number, fn: () => Promise<void> | void): void };
   isBusy?: () => boolean;
@@ -1752,20 +1756,44 @@ export class PackService {
     }
   }
 
-  /** What Vigil's rules say about a connector call. Vigil's own tools have none. */
+  /**
+   * What Vigil's rules say about a connector call. Vigil's own tools have none.
+   *
+   * A connector's id is its own (a name slug plus a unique part), but rules
+   * written before that name it by the bare slug, `mcp__github__…`. So the
+   * call is checked twice, by `mcp__<id>__<tool>` and by
+   * `mcp__<name slug>__<tool>`, and the stricter answer wins. Rules only add
+   * friction here: the pre-flight answer is deny, ask or none, never allow
+   * (preflight.ts `decide`), so a match by name, even a lookalike's, can
+   * only make the call wait or stop. What skips a rule (a rule's exclusion,
+   * the person's "Stop alerting on this" exception) binds to the id alone:
+   * the check by name runs with exclusions and exceptions on the tool and
+   * its server turned off. Everything that grants (tool choices, a dog's
+   * tools, held answers) goes by the tool key, which holds the id.
+   */
   private rulesFor(
     t: ToolEntry,
     args: Record<string, unknown>,
   ): { decision: 'deny' | 'ask' | 'none'; reason?: string } {
     if (t.source === 'vigil') return { decision: 'none' };
-    const r = this.o.preflight({
-      v: 1,
-      method: 'preflight.check',
-      host: 'claude-code',
-      tool: `mcp__${t.source}__${t.name}`.slice(0, 128),
-      // Rules see the arguments as sent; the user sees them redacted.
-      command: clip(JSON.stringify(args), 4000),
-    });
+    const ask = (server: string, opts?: { noSkipsOn: readonly string[] }) =>
+      this.o.preflight(
+        {
+          v: 1,
+          method: 'preflight.check',
+          host: 'claude-code',
+          tool: `mcp__${server}__${t.name}`.slice(0, 128),
+          // Rules see the arguments as sent; the user sees them redacted.
+          command: clip(JSON.stringify(args), 4000),
+        },
+        opts,
+      );
+    const byId = ask(t.source);
+    const slug = connectorSlug(t.sourceName);
+    const answers =
+      slug === t.source ? [byId] : [byId, ask(slug, { noSkipsOn: ['tool', 'mcpServer'] })];
+    const rank = { none: 0, ask: 1, deny: 2 } as const;
+    const r = answers.reduce((a, b) => (rank[b.decision] > rank[a.decision] ? b : a));
     return { decision: r.decision, ...(r.reason ? { reason: r.reason } : {}) };
   }
 
