@@ -12,6 +12,7 @@
 //   --os defaults to this machine's. --dev builds for this machine only.
 
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
@@ -158,7 +159,30 @@ function devDir(arch) {
   console.log(`development helper ready in ${dir}`);
 }
 
+/**
+ * electron-builder drops Electron's and Chromium's licenses from Mac builds and
+ * only warns when an extraResources source is missing, so copy them here and
+ * fail loudly instead. electron-builder.yml ships build/electron-licenses.
+ */
+function electronLicenses() {
+  const dist = join(
+    dirname(createRequire(join(app, 'package.json')).resolve('electron/package.json')),
+    'dist',
+  );
+  const dir = join(app, 'build', 'electron-licenses');
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  for (const [from, to] of [
+    ['LICENSE', 'LICENSE.electron.txt'],
+    ['LICENSES.chromium.html', 'LICENSES.chromium.html'],
+  ]) {
+    if (!existsSync(join(dist, from))) throw new Error(`${join(dist, from)} is missing`);
+    copyFileSync(join(dist, from), join(dir, to));
+  }
+}
+
 await bundle();
+if (os === 'darwin' && !dev) electronLicenses();
 if (!skipNode) {
   for (const arch of arches) {
     await node(arch);

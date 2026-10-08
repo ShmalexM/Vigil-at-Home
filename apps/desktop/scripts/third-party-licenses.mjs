@@ -3,7 +3,7 @@
 // travel with every copy, so the packaged app ships these files instead
 // (electron-builder.yml copies build/licenses into Resources/licenses).
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, sep } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const LICENSES_DIR = join(
@@ -15,12 +15,13 @@ export const LICENSES_DIR = join(
 
 /** The package folder a bundled file came from, or undefined for our own code. */
 function packageDir(file) {
-  const path = file.replace(/^\0/, '').split('?')[0];
-  const at = path.lastIndexOf(`${sep}node_modules${sep}`);
+  // Bundlers use forward slashes on every OS; normalise Windows paths too.
+  const path = file.replace(/^\0/, '').split('?')[0].replaceAll('\\', '/');
+  const at = path.lastIndexOf('/node_modules/');
   if (at < 0) return undefined;
-  const rest = path.slice(at + 14).split(sep);
+  const rest = path.slice(at + 14).split('/');
   const parts = rest[0].startsWith('@') ? 2 : 1;
-  return path.slice(0, at + 14) + rest.slice(0, parts).join(sep);
+  return path.slice(0, at + 14) + rest.slice(0, parts).join('/');
 }
 
 function licenseText(dir) {
