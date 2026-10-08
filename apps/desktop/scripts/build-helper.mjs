@@ -132,9 +132,11 @@ async function node(arch) {
         `(after checking its signature).`,
     );
   }
-  // Reuse a cached runtime only if it came from the pinned tarball and hasn't
-  // changed since it was unpacked; anything else is downloaded again.
+  // Locally, reuse a runtime unpacked earlier if it came from the pinned
+  // tarball and hasn't changed since. CI, and so every release, always
+  // downloads and checks the tarball again, trusting nothing on disk.
   if (
+    !process.env.CI &&
     existsSync(target) &&
     existsSync(stamp) &&
     readFileSync(stamp, 'utf8') === `${name} ${expected} ${sha256(readFileSync(target))}`
