@@ -245,8 +245,9 @@ vh_switch() {
   vh_lock_check
   case $1 in '' | */* | .*) vh_die "Bad helper version: $1" ;; esac
   _v=$DEST/versions/$1
-  [ -d "$_v" ] && [ ! -L "$_v" ] && [ -f "$_v/node" ] && [ -f "$_v/helper.mjs" ] ||
+  if [ ! -d "$_v" ] || [ -L "$_v" ] || [ ! -f "$_v/node" ] || [ ! -f "$_v/helper.mjs" ]; then
     vh_die "$_v is not a complete helper."
+  fi
   _tmp=$DEST/.current.tmp.$$
   vh_remove "$_tmp"
   ln -s "versions/$1" "$_tmp"
