@@ -754,7 +754,9 @@ export class PackService {
         return;
       }
       const actions = result.value.actions.map((a) => this.consider(a, used.length > 0));
-      const rules = this.draftRules(result.value, result.provider, lead.name);
+      // The Claude plan only explains: an answer it wrote proposes no rule change.
+      const viaPlan = result.provider === 'claude' && (await this.status()).leadMayUsePlan;
+      const rules = this.draftRules(result.value, result.provider, lead.name, viaPlan);
       // Text a tool returned could be anyone's, so an answer that used one
       // only proposes memory changes; one from the person's words alone applies them.
       const memoryChanges = this.considerMemory(result.value, used.length > 0, mine.id);
@@ -904,9 +906,17 @@ export class PackService {
     answer: z.infer<typeof LeadAnswer>,
     provider: string,
     name: string,
+    viaPlan: boolean,
   ): RuleDraft[] {
     return (answer.ruleChanges ?? []).slice(0, MAX_RULE_DRAFTS).map((r) => {
       const id = newId(this.now());
+      if (viaPlan)
+        return {
+          id,
+          kind: r.kind,
+          status: 'failed',
+          note: 'Your Claude plan only explains. Suggesting rule changes needs another AI in Settings › AI.',
+        };
       if (!this.o.rules)
         return { id, kind: r.kind, status: 'failed', note: 'Detection isn’t running' };
       const req: RuleDraftRequest = { kind: r.kind, why: r.why };

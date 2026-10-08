@@ -19,6 +19,8 @@ Each suggestion goes through the same checks as Duke's: the 14-day replay and wh
 
 The chat shows a card with the change in plain words and a Review button that opens it on Rules; on Rules it says "Suggested by Scout" (the Lead dog's name). If the checks refuse a draft, the card says why. The answer may rest on alert text anyone could write, which is why only you can accept it.
 
+An answer your Claude plan wrote suggests nothing: the plan only explains, so the card says to pick another AI in Settings › AI.
+
 ```mermaid
 flowchart LR
   Y[You: make this stop alerting] --> L[Lead dog picks the alert and what to exclude]

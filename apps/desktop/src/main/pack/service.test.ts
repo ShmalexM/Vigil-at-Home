@@ -51,6 +51,8 @@ function setup(
     /** Vigil's own tools; push to it to add one later. */
     vigil?: string[];
     hour?: number;
+    /** Which AI answers every run. */
+    provider?: 'codex' | 'claude';
     rules?: PackDeps['rules'];
   } = {},
 ) {
@@ -82,7 +84,12 @@ function setup(
         const h = handlers.shift();
         if (!h) return { ok: false, reason: 'no_provider', logId: 'x' };
         const value = await h(req as RunRequest<unknown>);
-        return { ok: true, value: req.output.parse(value), provider: 'codex', logId: 'x' };
+        return {
+          ok: true,
+          value: req.output.parse(value),
+          provider: opts.provider ?? 'codex',
+          logId: 'x',
+        };
       },
       modelOf: () => 'gpt-5.5',
       status: async () => ({
@@ -605,6 +612,21 @@ describe('the pack', () => {
         expect(msg.actions).toBeUndefined();
         expect((await pack.view()).dogs[0]!.mood).not.toBe('waiting');
       }
+    });
+
+    it('never suggests a rule change from an answer the Claude plan wrote', async () => {
+      const q = queue();
+      const { pack, handlers } = setup({
+        rules: q.rules,
+        provider: 'claude',
+        status: { leadMayUsePlan: true },
+      });
+      handlers.push(() => ({ reply: 'Suggested.', actions: [], ruleChanges: [QUIET] }));
+      await pack.say('make this stop alerting');
+      expect(pack.chat().at(-1)!.rules).toMatchObject([
+        { status: 'failed', note: expect.stringContaining('plan only explains') },
+      ]);
+      expect(q.calls).toEqual([]);
     });
 
     it('says why a draft was refused, and when the same one is already waiting', async () => {
