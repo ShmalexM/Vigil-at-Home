@@ -1,8 +1,8 @@
-import { userInfo } from 'node:os';
+import { hostname, userInfo } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { buildChildEnv } from './env.js';
 import { buildUserPrompt } from './prompt.js';
-import { redactAndSerialize, redactString } from './redact.js';
+import { localNames, redactAndSerialize, redactString } from './redact.js';
 
 describe('redaction', () => {
   const opts = { username: 'alexm', hostname: 'Alexs-MacBook-Pro.local' };
@@ -37,6 +37,67 @@ describe('redaction', () => {
     ]) {
       expect(out).not.toContain(secret);
     }
+  });
+
+  it('hides secrets in environment variables, flags, URLs and known token formats', () => {
+    const cases: Array<[string, string]> = [
+      ['AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENG', 'AWS_SECRET_ACCESS_KEY=<redacted>'],
+      ['export GITHUB_TOKEN=abc123', 'export GITHUB_TOKEN=<redacted>'],
+      ['DB_PASSWORD=hunter2 ./run', 'DB_PASSWORD=<redacted> ./run'],
+      ['x-api-key: abc123', 'x-api-key: <redacted>'],
+      ['{"password": "hunter2"}', '{"password": <redacted>}'],
+      ['cli login --token abc123', 'cli login --token <redacted>'],
+      ['psql --password hunter2 -h db', 'psql --password <redacted> -h db'],
+      ['tool --github-token "a b"', 'tool --github-token <redacted>'],
+      ['mysql -u root -phunter2 shop', 'mysql -u root -p<redacted> shop'],
+      ['mysqldump -phunter2 shop', 'mysqldump -p<redacted> shop'],
+      ['curl https://me:hunter2@example.com/x', 'curl https://<credentials>@example.com/x'],
+      ['postgres://app:s3cr%40t@db:5432/x', 'postgres://<credentials>@db:5432/x'],
+      ['sk_live_' + 'a'.repeat(24), '<api-key>'],
+      ['rk_test_' + 'b'.repeat(24), '<api-key>'],
+      ['AIza' + 'c'.repeat(35), '<api-key>'],
+      ['npm_' + 'd'.repeat(36), '<npm-token>'],
+      ['glpat-' + 'e'.repeat(20), '<gitlab-token>'],
+    ];
+    for (const [text, want] of cases) expect(redactString(text, {})).toBe(want);
+  });
+
+  it('leaves ordinary words and flags alone', () => {
+    for (const text of [
+      'the token expired, so sign in again',
+      'max_tokens=100',
+      'passed: true',
+      'mkdir -p dir && ssh -p 22 host',
+      'mysql -p shop',
+      'git --no-pager log',
+      'https://example.com/a:b',
+      'npm install --save-dev vitest',
+    ]) {
+      expect(redactString(text, {})).toBe(text);
+    }
+  });
+
+  it('hides the short host name, and skips names too generic to replace', () => {
+    expect(redactString('ssh Alexs-MacBook-Pro, then alexs-macbook-pro.local', opts)).toBe(
+      'ssh <host>, then <host>',
+    );
+    // Part of a longer host name is left as it is.
+    expect(redactString('Alexs-MacBook-Pro-2', opts)).toBe('Alexs-MacBook-Pro-2');
+    expect(
+      redactString('the user is admin on localhost', { username: 'admin', hostname: 'localhost' }),
+    ).toBe('the user is admin on localhost');
+    expect(redactString('al is here', { username: 'al' })).toBe('al is here');
+  });
+
+  it("finds this machine's names, leaving out generic ones", () => {
+    const names = localNames();
+    const user = userInfo().username;
+    if (user.length >= 3 && !['root', 'user', 'admin'].includes(user)) {
+      expect(names.username).toBe(user);
+    } else {
+      expect(names.username).toBeUndefined();
+    }
+    if (names.hostname) expect(names.hostname).toBe(hostname());
   });
 
   it('keeps structure, rewrites values and caps size', () => {

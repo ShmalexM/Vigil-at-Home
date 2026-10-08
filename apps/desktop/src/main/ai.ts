@@ -19,6 +19,7 @@ import {
 } from '@vigil/ai';
 import type { AiAssessment, Alert, SensorEvent } from '@vigil/core';
 import type { AnalyzeRunner } from '@vigil/detection';
+import { localNames } from '@vigil/ai/redact';
 import {
   AiPrefs,
   AiPrefsPatch,
@@ -219,6 +220,8 @@ export class AiBridge extends EventEmitter<{
       jev: { ...base.jev, enabled: prefs.jev },
       classifier: { ...base.classifier, enabled: prefs.labelling },
       quota: { ...base.quota, ...(cap !== undefined ? { apiKeyMonthlyCapUsd: cap } : {}) },
+      // The account and Mac names are replaced before anything reaches a model.
+      redaction: { ...base.redaction, ...localNames() },
     };
   }
 

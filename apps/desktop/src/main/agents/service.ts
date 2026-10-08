@@ -83,7 +83,7 @@ import {
 } from './endpoint.js';
 import { hookFiles, hookSnippet, mcpSnippet } from './hook-snippet.js';
 import { processTableReader } from './ps.js';
-import { VigilTools, type StatusFacts } from './tools.js';
+import { VigilTools, type StatusFacts, type VigilToolsSource } from './tools.js';
 
 const KEY_PREFS = 'agents.prefs';
 const KEY_HOOK = 'agents.hook';
@@ -259,7 +259,10 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
   private cachedPrefs: AgentPrefs | undefined;
   private hook: HookState;
   private hookSavedAt = 0;
+  /** Over MCP, for the user's own agents. */
   private readonly tools: VigilTools;
+  /** For the pack, which also sees Vigil's answers to tool requests. */
+  private readonly packView: VigilTools;
   private toolUse: ToolUse;
   private toolUseSavedAt = 0;
   /** Tools calls refused because the tools were off, since start. */
@@ -309,7 +312,7 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
       onTamper: (why) => setImmediate(() => this.socketTampered(why)),
       log: this.log,
     });
-    this.tools = new VigilTools({
+    const source: VigilToolsSource = {
       now: this.now,
       status: () => this.statusFacts(),
       alerts: (opts) => o.store.listAlerts(opts),
@@ -320,7 +323,9 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
       agents: () => this.listAgents(),
       agentSessions: (id, limit) => o.store.listAgentSessions(id, undefined, limit),
       agentSession: (id, rows) => this.sessionDetail(id, rows, rows),
-    });
+    };
+    this.tools = new VigilTools(source);
+    this.packView = new VigilTools(source, { verdicts: true });
   }
 
   /**
@@ -590,14 +595,15 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
 
   /**
    * Vigil's read-only tools, for the pack's own dogs (pack.ts). Same tools,
-   * redaction and caps as the user's agents get over MCP; this path doesn't
-   * depend on that opt-in, because the pack runs inside Vigil.
+   * redaction and caps as the user's agents get over MCP, plus Vigil's answer
+   * to each tool request; this path doesn't depend on that opt-in, because
+   * the pack runs inside Vigil.
    */
   packTools(): {
     list: () => ReturnType<VigilTools['list']>;
     call: (name: string, args: Record<string, unknown>) => ToolsReply;
   } {
-    return { list: () => this.tools.list(), call: (n, a) => this.tools.call(n, a) };
+    return { list: () => this.packView.list(), call: (n, a) => this.packView.call(n, a) };
   }
 
   /**
