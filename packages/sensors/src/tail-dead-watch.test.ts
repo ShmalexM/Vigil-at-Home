@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import type * as fs from 'node:fs';
 import { appendFileSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // A folder watch that starts fine and then never reports anything, as when
 // the stream behind it stops without an error.
 vi.mock('node:fs', async (importOriginal) => {
-  const real = await importOriginal<typeof import('node:fs')>();
+  const real = await importOriginal<typeof fs>();
   return { ...real, watch: () => Object.assign(new EventEmitter(), { close() {} }) };
 });
 
