@@ -327,8 +327,12 @@ function signedRoot(match: CatalogEntry['match']): Condition[] {
  * Vigil's own tree (its helpers run Claude Code) passes on the caller alone,
  * as before: it carries no agent root signature.
  *
- * The whole command must be that one read: only -a, -s, -w and -g, one -s
- * naming its own service, nothing that chains, redirects or substitutes. On a
+ * The whole command must be that one read, exactly as Claude Code's code
+ * runs it: `security find-generic-password -a <user> -w -s <service>` in that
+ * order (optionally /usr/bin/, words optionally quoted, optionally inside a
+ * bare `sh -c`), <user> one plain word, <service> one of its own with an
+ * optional 8-hex-digit suffix. No other option, nothing that chains,
+ * redirects or substitutes. On a
  * real Mac (2026-10-02, 341 shells under Claude Code) a Bash tool step always
  * arrived wrapped (`zsh -c source …snapshot… && eval '…'`, or `sh -c env
  * SANDBOX_RUNTIME=1 …`), never as a bare `sh -c <command>`, so the same read
@@ -375,7 +379,11 @@ export function ownKeychainLogin(
         },
       ],
     });
-  const svc = String.raw`["']?(${services.map(escapeRe).join('|')})(-[0-9a-f]{8})?["']?`;
+  // Exactly the read Claude Code's own code runs, in its order: `security
+  // find-generic-password -a <user> -w -s <service>`, each word bare or quoted.
+  const user = String.raw`([\w.-]+|"[\w.-]+"|'[\w.-]+')`;
+  const svc = String.raw`(${services.map(escapeRe).join('|')})(-[0-9a-f]{8})?`;
+  const head = String.raw`^((/bin/)?(ba)?sh -c )?(/usr/bin/)?security find-generic-password -a ${user} -w -s `;
   return {
     all: [
       { field: 'process.name', op: 'in', value: ['security', 'sh', 'bash'] },
@@ -383,11 +391,7 @@ export function ownKeychainLogin(
       {
         field: 'process.commandLine',
         op: 'regex',
-        value: [
-          String.raw`^((/bin/)?(ba)?sh -c )?(/usr/bin/)?security find-generic-password ` +
-            String.raw`(?=[-\w .@"']{1,200}$)` +
-            String.raw`(?=(.* )?-s ${svc}( |$))(?!.* -s .* -s )(?!(.* )?-[^asgw\s])`,
-        ],
+        value: [`${head}${svc}$`, `${head}"${svc}"$`, `${head}'${svc}'$`],
       },
     ],
   };
