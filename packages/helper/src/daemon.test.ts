@@ -214,11 +214,14 @@ describe('helper daemon with the sync port taken', () => {
     const busyPaths = testPaths(dir);
     let stopBusy: (() => Promise<void>) | undefined;
     let busyClient: HelperClient | undefined;
+    // As above: only root can hand the socket to another user.
+    const busySys = new FakeSystem();
+    busySys.console = process.getuid!() === 0 ? 501 : undefined;
     try {
       stopBusy = await runDaemon({
         paths: busyPaths,
         syncPort: busyPort,
-        sys: new FakeSystem(),
+        sys: busySys,
         log: () => {},
         approvalOwnerUid: process.getuid!(),
         opensslBin: 'openssl',
