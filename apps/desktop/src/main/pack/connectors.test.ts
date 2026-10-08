@@ -110,6 +110,21 @@ describe('connectors', () => {
     expect(c.view()).toMatchObject([{ id: 'old', target: 'http://lan.test/mcp' }]);
   });
 
+  it('never connects to a saved plain-http connector off this computer', async () => {
+    const saved = { id: 'old', name: 'Old', kind: 'http' as const, url: 'http://lan.test/mcp' };
+    let reached = false;
+    const { c } = hub({
+      load: () => [{ ...saved, secrets: [], enabled: true }],
+      connect: async () => {
+        reached = true;
+        throw new Error('should not connect');
+      },
+    });
+    c.setEnabled('old', true);
+    await expect(c.tools('old')).rejects.toThrow('http only');
+    expect(reached).toBe(false);
+  });
+
   it('never takes the name vigil', () => {
     const { c } = hub();
     expect(c.add({ kind: 'http', name: 'Vigil', url: 'https://x.test/mcp' }).id).toMatch(
