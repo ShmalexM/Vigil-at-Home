@@ -325,7 +325,8 @@ export class VigilCore {
   alertDetail(id: string): AlertDetail | null {
     const alert = this.store.getAlert(id);
     if (!alert) return null;
-    const rule = this.store.getRule(alert.ruleId);
+    // Pack rules live in the engine, not the rules table; its mode is the one in force.
+    const rule = this.detector?.rule(alert.ruleId) ?? this.store.getRule(alert.ruleId);
     return {
       alert,
       events: this.store.getEvents(alert.eventIds),

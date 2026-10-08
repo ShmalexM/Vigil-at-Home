@@ -472,3 +472,16 @@ describe('stale open alerts', () => {
     expect(core.staleAlerts()).toEqual([]);
   });
 });
+
+describe('alert detail', () => {
+  it("shows a pack rule's card, in the mode the engine applies", async () => {
+    const { core } = setup();
+    const rule = makeRule({ id: 'download-pipe-to-shell', mode: 'alert', severity: 'medium' });
+    const alert = await core.alerts.raise({ rule, events: [exec('/bin/zsh')], actions: [] });
+    const before = core.alertDetail(alert.id)?.rule;
+    expect(before?.name).toBe('Downloaded script run directly');
+    expect(before?.mode).toBe('alert');
+    core.detector!.engine._setMode('download-pipe-to-shell', 'shadow');
+    expect(core.alertDetail(alert.id)?.rule?.mode).toBe('shadow');
+  });
+});

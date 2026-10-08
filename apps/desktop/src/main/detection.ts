@@ -387,6 +387,12 @@ export class Detector {
     return { ...value, helper };
   }
 
+  /** One rule the engine runs, with the mode it actually applies (the user's choice included). */
+  rule(id: string): Rule | undefined {
+    const r = this.engine.getRule(id);
+    return r ? { ...coreRule(r), mode: this.engine.modeOf(r) } : undefined;
+  }
+
   /** Every rule the engine runs, with the mode it actually applies. */
   rules(): Array<{ rule: Rule; mode: RuleMode }> {
     return this.engine.listRules().map(({ effectiveMode, ...r }) => ({
