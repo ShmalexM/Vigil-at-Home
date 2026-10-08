@@ -60,6 +60,10 @@ export function registerIpc(
     reopen: (id) => core.alerts.reopen(id),
     clearNoticed: (ids) => core.clearNoticed(ids),
     staleAlerts: () => core.staleAlerts(),
+    alertCounts: () => ({
+      open: core.store.countAlerts('open'),
+      resolved: core.store.countAlerts('resolved'),
+    }),
     clearStale: (ids) => core.clearStale(ids),
     undoAction: (id) => core.alerts.undo(id),
     approveProposal: (id) => core.alerts.approveProposal(id),

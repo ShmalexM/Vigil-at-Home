@@ -526,3 +526,8 @@ div.history-row:hover {
 .needs-line {
   gap: 8px;
 }
+/* "Showing the newest 200 of 355" above a capped list. */
+.list-note {
+  display: block;
+  padding: 4px 12px 8px;
+}

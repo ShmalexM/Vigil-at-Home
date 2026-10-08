@@ -30,6 +30,9 @@ export function AlertsView({
   const [tab, setTab] = useState<'open' | 'resolved'>('open');
   const [open] = useLive(() => vigil.listAlerts('open'));
   const [resolved] = useLive(() => vigil.listAlerts('resolved'));
+  // The lists hold the newest alerts only; the tabs count them all.
+  const [counts] = useLive(() => vigil.alertCounts());
+  const total = counts?.[tab];
   const list = (tab === 'open' ? open : resolved) ?? [];
   const current = shownAlert(selected, list);
 
@@ -59,7 +62,7 @@ export function AlertsView({
           tabIndex={tab === 'open' ? 0 : -1}
           onClick={() => setTab('open')}
         >
-          Open <span className="count">{open?.length ?? 0}</span>
+          Open <span className="count">{counts?.open ?? open?.length ?? 0}</span>
         </button>
         <button
           type="button"
@@ -68,7 +71,7 @@ export function AlertsView({
           tabIndex={tab === 'resolved' ? 0 : -1}
           onClick={() => setTab('resolved')}
         >
-          Resolved <span className="count">{resolved?.length ?? 0}</span>
+          Resolved <span className="count">{counts?.resolved ?? resolved?.length ?? 0}</span>
         </button>
       </div>
       {tab === 'open' && <StaleBanner />}
@@ -83,6 +86,11 @@ export function AlertsView({
                 {tab === 'open' ? 'No open alerts' : 'Nothing resolved yet'}
               </span>
             </div>
+          )}
+          {total !== undefined && total > list.length && list.length > 0 && (
+            <span className="t-small list-note">
+              Showing the newest {list.length} of {total.toLocaleString()}.
+            </span>
           )}
           {pileUp(list).map((r) => {
             const a = r.kind === 'alert' ? r.alert : r.alerts[0]!;

@@ -108,6 +108,31 @@ describe('Store', () => {
     expect(s.ruleMatchCounts(15).get('r')).toBe(2);
   });
 
+  it('counts every alert by status, past the newest page listAlerts returns', () => {
+    const s = memoryStore();
+    for (let i = 0; i < 205; i++) {
+      s.saveAlert({
+        id: `a-${i}`,
+        createdAt: i,
+        updatedAt: i,
+        ruleId: 'test.rule',
+        ruleVersion: 1,
+        title: 't',
+        summary: 's',
+        severity: 'high',
+        fidelity: 'high',
+        notify: 'popup',
+        status: i < 3 ? 'resolved' : 'open',
+        containment: 'none',
+        eventIds: ['e'],
+        actionIds: [],
+      });
+    }
+    expect(s.listAlerts({ status: 'open' })).toHaveLength(200);
+    expect(s.countAlerts('open')).toBe(202);
+    expect(s.countAlerts('resolved')).toBe(3);
+  });
+
   it('keeps the database under a size cap by dropping the oldest events', () => {
     const s = memoryStore();
     const kept = makeExec();

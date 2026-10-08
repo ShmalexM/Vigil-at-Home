@@ -610,6 +610,14 @@ export class Store {
       : this.all(Alert, 'SELECT body FROM alerts ORDER BY created_at DESC LIMIT ?', limit);
   }
 
+  /** How many alerts have this status, however many listAlerts returns. */
+  countAlerts(status: Alert['status']): number {
+    const row = this.stmt('SELECT COUNT(*) AS n FROM alerts WHERE status = ?').get(status) as {
+      n: number;
+    };
+    return Number(row.n);
+  }
+
   // ---------------------------------------------------------------- actions
 
   saveAction(record: ActionRecord): ActionRecord {
