@@ -118,17 +118,19 @@ export interface Dog {
   createdBy: 'you' | 'lead';
   createdAt: number;
   /**
-   * The job could hold someone else's text: the Lead dog's change that wrote
-   * it read outside text, and the person didn't type the job themselves.
-   * Cleared when the person edits the job, or a later change writes one they
-   * typed. A pack dog saved before this was recorded counts as tainted.
+   * The job could hold someone else's text: it was written by a change from
+   * an older Lead dog answer that read outside text. Cleared when the person
+   * edits the job, or a later change from the acting path (which reads none)
+   * writes it. A pack dog saved before this was recorded counts as tainted.
+   * The acting path sees a tainted job only as `job:<dogId>`.
    */
   jobTainted?: boolean;
   /**
-   * The name could hold someone else's text: it came from a Lead dog change
-   * whose input read outside text. Cleared when the person names the dog
-   * themselves. Saved before this was recorded, it counts as tainted unless
-   * it is the built-in name. Prompts then name the dog by its id only.
+   * The name could hold someone else's text: it came from a change from an
+   * older Lead dog answer that read outside text. Cleared when the person
+   * names the dog themselves. Saved before this was recorded, it counts as
+   * tainted unless it is the built-in name. Prompts then name the dog by its
+   * id only; a name the person types is mapped to that id by exact match.
    */
   nameTainted?: boolean;
   lastReport?: DogReport;
@@ -148,7 +150,7 @@ export interface LeadAction {
   status: 'pending' | 'done' | 'declined' | 'failed';
   /** Why it waits, or why it failed. */
   note?: string;
-  /** Where its name and job came from: not the person's words, and the answer read outside text. */
+  /** Its name and job could hold outside text: set only on changes saved by older versions. */
   nameTainted?: boolean;
   jobTainted?: boolean;
 }
@@ -164,9 +166,11 @@ export interface ChatMessage {
   /** Tools the Lead dog used while answering. */
   used?: string[];
   /**
-   * Its input could hold someone else's text: a tool's result, a dog's report,
-   * or an answer that read one. The person's own messages are clean. Saved
-   * before this was recorded, a message counts as tainted.
+   * It could hold someone else's text: a reading-path answer (which may read
+   * tool results, reports, jobs and remembered facts), or an older answer
+   * that read any. The person's own messages and acting-path answers are
+   * clean. Saved before this was recorded, a Lead dog message counts as
+   * tainted. The acting path sees a tainted answer only as `answer-<n>`.
    */
   tainted?: boolean;
   failed?: boolean;
@@ -304,12 +308,12 @@ export interface MemoryEntry {
 }
 
 /**
- * A change the Lead dog asked for in the pack's memory. Applied straight
- * away only when that answer read no outside text (no tool was used, no
- * tainted report, job, fact or answer went into its prompt), or the person
- * typed the fact in their message; otherwise it waits on a "Remember this?"
- * card, because text an alert or a connector returned could be written by
- * anyone.
+ * A change the Lead dog's acting path asked for in the pack's memory. The
+ * acting path reads no outside text, so the change applies straight away,
+ * except that it waits on a "Remember this?" or "Forget this?" card when the
+ * turn also went down the reading path, leans on or cites a reference, the
+ * fact replaces one the person's message doesn't name word for word, or it
+ * forgets a fact that could hold outside text.
  */
 export interface MemoryChange {
   id: string;
@@ -322,7 +326,7 @@ export interface MemoryChange {
   replaces?: string;
   status: 'pending' | 'done' | 'declined' | 'failed';
   note?: string;
-  /** The answer that asked for it read outside text; the fact stays tainted if kept. */
+  /** The fact could hold outside text and stays tainted if kept. Cards saved before this was recorded count. */
   tainted?: boolean;
 }
 

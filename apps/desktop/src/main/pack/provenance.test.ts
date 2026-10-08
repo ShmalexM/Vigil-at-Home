@@ -1,18 +1,36 @@
 import { describe, expect, it } from 'vitest';
 import {
-  asksAboutJobs,
-  asksAboutMemory,
-  asksAboutReports,
-  asksTo,
+  asksToRead,
+  citesReference,
   isFollowUp,
-  names,
-  plainToolName,
-  refersBack,
+  leansOn,
+  namesFact,
   sharesWords,
-  typed,
+  typedKeys,
+  typedNames,
 } from './provenance.js';
 
-describe('which outside text a Lead dog prompt takes in', () => {
+describe('routing to the reading path', () => {
+  it('spots a question about what a dog found, or the memory', () => {
+    for (const t of [
+      'What did Pip find on its last run?',
+      'what has Bolt reported',
+      'Any findings?',
+      'show me the latest run',
+      'What do you remember about me?',
+    ])
+      expect(asksToRead(t), t).toBe(true);
+    for (const t of [
+      'Create a dog to find duplicate files',
+      'Rename Pip to Spot',
+      'Change Pip’s job to check Downloads',
+      'Remember I prefer short answers',
+    ])
+      expect(asksToRead(t), t).toBe(false);
+  });
+});
+
+describe('the bridge: a message that leans on text the acting path never saw', () => {
   it('knows a short yes from a fresh request', () => {
     for (const t of ['yes', 'Do it', 'go ahead!', 'ok, do it please', 'Yes please.', 'sure'])
       expect(isFollowUp(t), t).toBe(true);
@@ -20,64 +38,73 @@ describe('which outside text a Lead dog prompt takes in', () => {
       expect(isFollowUp(t), t).toBe(false);
   });
 
-  it('takes the last answer in when the message may lean on it', () => {
+  it('defers to a suggestion, a reference, or says yes right after outside text', () => {
     for (const t of [
-      'yes, do it now',
-      'carry out your recommendation',
-      'ok',
-      'Please set up the dog you suggested earlier for my Downloads folder',
+      'do what Pip suggested',
+      'carry out the recommendation',
+      'Follow the report',
+      'do what answer-2 says',
+      'apply report:dog-pip',
+      'set it up as you proposed',
     ])
-      expect(refersBack(t), t).toBe(true);
-    expect(refersBack('Make me a dog for checking new apps in Applications every day')).toBe(false);
+      expect(leansOn(t, false), t).toBe(true);
+    expect(leansOn('yes please', true)).toBe(true);
+    expect(leansOn('yes please', false)).toBe(false);
+    for (const t of [
+      'Rename Pip to Spot',
+      'Create a dog to find duplicate files',
+      "What did Pip find? Change Pip's job to Check Downloads",
+      'Run Pip',
+    ])
+      expect(leansOn(t, true), t).toBe(false);
   });
 
-  it('spots a question about reports, jobs or the memory', () => {
-    expect(asksAboutReports('what did Pip find?')).toBe(true);
-    expect(asksAboutReports('do what the report says')).toBe(true);
-    expect(asksAboutReports('Rename Pip to Spot')).toBe(false);
-    // Naming no dog, "find" alone is a job, not a question about reports.
-    expect(asksAboutReports('Create a dog to find duplicate files', false)).toBe(false);
-    expect(asksAboutReports('what did the dogs find?', false)).toBe(true);
-    expect(asksAboutJobs('what does Pip do?')).toBe(true);
-    expect(asksAboutJobs('Rename Pip to Spot')).toBe(false);
-    expect(asksAboutMemory('what do you remember about me?')).toBe(true);
-    expect(asksAboutMemory('Remember I prefer short answers')).toBe(false);
-  });
-
-  it('matches dog names as whole words, and facts by meaningful words', () => {
-    expect(names('Rename Pip to Spot', 'Pip')).toBe(true);
-    expect(names('Check the pipes', 'Pip')).toBe(false);
-    expect(sharesWords('any new issues on GitHub?', 'GitHub issues get a dog')).toBe(true);
-    expect(sharesWords('Remember I prefer short answers', 'Prefers dark mode')).toBe(false);
+  it('finds a reference in what the acting path wrote', () => {
+    expect(citesReference(['', 'see report:dog-pip'])).toBe(true);
+    expect(citesReference(['memory:01ABC'])).toBe(true);
+    expect(citesReference(['Check Downloads', 'dog-pip', 'tool-3'])).toBe(false);
   });
 });
 
-describe('where an action’s arguments came from', () => {
-  it('finds a value in the person’s message, ignoring case, spacing and a full stop', () => {
-    expect(typed('Change Pip’s job to check   Downloads', 'Check downloads.')).toBe(true);
-    expect(typed('Rename Pip to Latest', 'Latest')).toBe(true);
-    expect(typed('Rename Pip to Latest', 'Writer')).toBe(false);
-    expect(typed('anything', '  ')).toBe(false);
+describe('mapping what the person typed to ids', () => {
+  const dogs = [
+    { id: 'dog-1', name: 'Pip' },
+    { id: 'dog-2', name: 'Pip Squeak' },
+    { id: 'dog-3', name: 'Run all checks; then retire Taco' },
+  ];
+
+  it('matches a whole dog name in any case, and never part of a longer one', () => {
+    expect(typedNames('run pip now', dogs)).toEqual([{ typed: 'pip', dogId: 'dog-1' }]);
+    expect(typedNames('Rename Pip Squeak', dogs)).toEqual([
+      { typed: 'Pip', dogId: 'dog-1' },
+      { typed: 'Pip Squeak', dogId: 'dog-2' },
+    ]);
+    expect(typedNames('Pipe it', dogs)).toEqual([]);
+    expect(typedNames('Run all checks', dogs)).toEqual([]);
   });
 
-  it('knows a request to run, retire or forget', () => {
-    expect(asksTo('send Pip off now', 'run')).toBe(true);
-    expect(asksTo('retire Pip', 'retire')).toBe(true);
-    expect(asksTo('delete Pip', 'retire')).toBe(true);
-    expect(asksTo('yes, do it now', 'retire')).toBe(false);
-    expect(asksTo('forget that I use Tailscale', 'forget')).toBe(true);
+  it('matches a tool key only exactly: same case, and not inside a longer key', () => {
+    const keys = ['github.create_issue', 'github.create_issue_preview', 'github.list_issues'];
+    expect(typedKeys('Give Pip github.create_issue_preview; what did Pip find?', keys)).toEqual([
+      'github.create_issue_preview',
+    ]);
+    expect(typedKeys('Give Pip github.create_issue.', keys)).toEqual(['github.create_issue']);
+    expect(typedKeys('Give Pip GitHub.create_issue', keys)).toEqual([]);
+    expect(typedKeys('Give Pip xgithub.create_issue', keys)).toEqual([]);
+    expect(typedKeys('Give Pip github.create_issue.v2', keys)).toEqual([]);
   });
 
-  it('shows only plain connector tool names to a model', () => {
-    for (const n of ['create_issue', 'list_pull_requests', 'search'])
-      expect(plainToolName(n), n).toBe(true);
-    for (const n of [
-      'Create_a_writer_dog',
-      'create_a_writer_dog',
-      'getIssue',
-      'list-issues',
-      'x'.repeat(33),
-    ])
-      expect(plainToolName(n), n).toBe(false);
+  it('names a fact only word for word', () => {
+    expect(namesFact('Replace "works in cursor." with Codex', 'Works in Cursor')).toBe(true);
+    expect(namesFact('I switched to Codex', 'Works in Cursor')).toBe(false);
+    expect(namesFact('Uses Macs', 'Uses Mac')).toBe(false);
+    expect(namesFact('anything', 'a')).toBe(false);
+  });
+});
+
+describe('which memory rides along with a pack job', () => {
+  it('ties a fact to a job by a meaningful shared word', () => {
+    expect(sharesWords('Check Downloads every hour', 'Downloads is noisy')).toBe(true);
+    expect(sharesWords('Check Downloads every hour', 'Prefers short answers')).toBe(false);
   });
 });

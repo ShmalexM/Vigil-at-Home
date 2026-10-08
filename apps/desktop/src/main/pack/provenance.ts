@@ -1,43 +1,32 @@
-// Provenance for the Lead dog and pack jobs, in two parts.
+// Plain string checks for the Lead dog's two paths (docs/pack.md, "Who sees
+// outside text"). None of them reads a model's output or outside text, and
+// none can make a change go ahead that would otherwise wait:
 //
-// What goes into a prompt: the word checks here (a report word, a job word,
-// a short "yes, do it") only choose which outside text a prompt carries.
-// They never decide taint. The prompt builders in service.ts count a prompt
-// as tainted when anything they put in it is, item by item.
-//
-// Where an action's arguments came from: `typed` and `asksTo` check a
-// proposed change against the person's own message for the turn, so a change
-// they spelled out stays theirs even when the prompt carried outside text.
-// All plain string checks, never an AI call, so the same message always gets
-// the same answer.
+// - `asksToRead` only routes a message to the reading path, which has no way
+//   to change anything.
+// - `leansOn` only turns a change into a card.
+// - `typedNames` and `typedKeys` map what the person typed to a dog's id or a
+//   tool's id, by exact match, so the acting path can name them without
+//   seeing their text.
+// - `namesFact` is the one check that lets a change through: a memory
+//   `replaces` goes ahead without a card only when the person's own message
+//   names the fact it replaces, word for word.
 
-/** Words that ask about what a named dog found. */
-const REPORT_WORDS =
-  /\b(reports?|reported|find|finds|found|findings?|latest|last run|results?|summary|says|said|saw|seen|spotted|flagged|discovered|turned up|came back|what did)\b/i;
+/** Pointers the acting path is given in place of outside text. */
+export const REFERENCE = /\b(answer-\d+|report:[a-z0-9-]+|job:[a-z0-9-]+|memory:[A-Za-z0-9-]+)\b/;
 
-/**
- * Words that ask about what the dogs found without naming one. Narrower than
- * REPORT_WORDS: "find" alone is too often a job ("a dog to find duplicates").
- */
-const ANY_REPORT_WORDS =
-  /\b(reports?|reported|findings?|latest|last run|results?|summary|what did|what have|what has)\b/i;
+/** Questions about what a dog found, or what the pack remembers. Routing only. */
+const READ_WORDS = [
+  /\bwhat (did|does|has|have|had)\b.{0,60}\b(find|found|report|reported|say|said|see|saw|flag|flagged|spot|spotted|turn up|come back with)\b/i,
+  /\b(reports?|findings?|results?|last run|latest run)\b/i,
+  /\bwhat do you (know|remember)\b|\b(your|the pack'?s?) memory\b/i,
+];
 
-/** Words that point back at the answer before. */
-const BACK_WORDS =
-  /\b(it|that|this|those|these|them|your|recommend\w*|suggest\w*|said|above|previous|earlier|again|same|plan|idea|proposal|proposed)\b/i;
-
-/** Words that ask to send a dog off, retire one, or forget a fact. */
-const VERBS = {
-  run: /\b(run|start|send|launch|kick off)\b/i,
-  retire: /\b(retire|delete|remove|stop|fire|dismiss|get rid of)\b/i,
-  forget: /\b(forget|delete|remove|drop|wrong|cross out|no longer|not true)\b/i,
-};
-
-/** Words that ask about what a dog is told to do. */
-const JOB_WORDS = /\b(jobs?|tasks?|instructions?|what does|what do|doing|purpose|supposed to)\b/i;
-
-/** Words that ask about the memory as a whole. */
-const MEMORY_WORDS = /\b(memory|memories|remembered)\b|\bwhat do you (know|remember)\b/i;
+/** Words that defer to someone else's text: "do what Pip suggested". */
+const DEFER = [
+  /\b(suggest\w*|recommend\w*|advice|advis\w*|propos\w*|said|says|told)\b/i,
+  /\b(do|follow|carry out|apply|implement|act on|go with|go ahead with)\b.{0,24}\b(it|that|this|those|these|them|what|its|their|the (report|plan|idea|finding|findings|result|results|answer|fix|steps?))\b/i,
+];
 
 /** The only words a short "yes, do it" to the last answer is made of. */
 const FOLLOW_UP = new Set(
@@ -46,12 +35,10 @@ const FOLLOW_UP = new Set(
   ),
 );
 
-/** Too common to tie a fact to a message. */
-const STOP = new Set(
-  'that this with from have what when where which about your yours mine they them there their then than been were will would should could into just like also only some more most very much make want know does dont doesn please thanks remember forget prefer prefers always never every each other here those these the and for are was not you can its it’s'.split(
-    ' ',
-  ),
-);
+/** The message asks about a report, a finding or the memory. Only routes it to the reading path. */
+export function asksToRead(text: string): boolean {
+  return READ_WORDS.some((r) => r.test(text));
+}
 
 /** The person's message is a short "yes, do it" to the answer before it. */
 export function isFollowUp(text: string): boolean {
@@ -64,34 +51,66 @@ export function isFollowUp(text: string): boolean {
 }
 
 /**
- * The newest message may lean on the answer before it: a short message, a
- * "yes, do it", or one that points back ("your recommendation", "that").
- * Only chooses whether that answer goes into the prompt.
+ * The message leans on text the acting path never saw: it names a reference,
+ * defers to what someone suggested or said, or is a short "yes" right after
+ * an answer that read outside text. Only ever turns changes into cards.
  */
-export function refersBack(text: string): boolean {
-  const words = text.split(/\s+/).filter(Boolean);
-  return isFollowUp(text) || words.length <= 6 || BACK_WORDS.test(text);
+export function leansOn(text: string, afterOutsideText: boolean): boolean {
+  if (REFERENCE.test(text)) return true;
+  if (DEFER.some((r) => r.test(text))) return true;
+  return afterOutsideText && isFollowUp(text);
 }
 
-/** `named`: the message names the dog the report is from. */
-export function asksAboutReports(text: string, named = true): boolean {
-  return (named ? REPORT_WORDS : ANY_REPORT_WORDS).test(text);
+/** Whether any of these strings holds a reference. */
+export function citesReference(values: readonly string[]): boolean {
+  return values.some((v) => REFERENCE.test(v));
 }
 
-export function asksAboutJobs(text: string): boolean {
-  return JOB_WORDS.test(text);
+/**
+ * The names the person typed, each as they typed it: a whole name, ignoring
+ * case, between non-letters. The whole name has to be there, so typing part
+ * of a longer name matches nothing.
+ */
+export function typedNames(
+  text: string,
+  dogs: readonly { id: string; name: string }[],
+): { typed: string; dogId: string }[] {
+  const out: { typed: string; dogId: string }[] = [];
+  for (const d of dogs) {
+    const n = d.name.trim();
+    if (!n) continue;
+    const m = new RegExp(`(?:^|[^\\p{L}\\p{N}])(${escape(n)})(?=$|[^\\p{L}\\p{N}])`, 'iu').exec(
+      text,
+    );
+    if (m?.[1]) out.push({ typed: m[1], dogId: d.id });
+  }
+  return out;
 }
 
-export function asksAboutMemory(text: string): boolean {
-  return MEMORY_WORDS.test(text);
+/**
+ * Tool keys the person typed, exactly: same case, and not part of a longer
+ * key (`github.create_issue_preview` does not contain `github.create_issue`).
+ * A full stop right after a key ends the sentence, not the key.
+ */
+export function typedKeys(text: string, keys: readonly string[]): string[] {
+  return [...new Set(keys)].filter((k) => {
+    const r = new RegExp(`(?:^|[^A-Za-z0-9_.-])${escape(k)}(?=$|[^A-Za-z0-9_.-]|\\.(?:$|\\s))`);
+    return r.test(text);
+  });
 }
 
-/** Whether the message names this dog, as a whole word. */
-export function names(text: string, name: string): boolean {
-  const n = name.trim().toLowerCase();
-  if (!n) return false;
-  const esc = n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(^|[^\\p{L}\\p{N}])${esc}($|[^\\p{L}\\p{N}])`, 'iu').test(text);
+/**
+ * The person's message names this fact word for word (case and runs of
+ * spaces aside, and a full stop at its end), between non-letters.
+ */
+export function namesFact(text: string, fact: string): boolean {
+  const f = fact
+    .trim()
+    .replace(/[.!?]+$/, '')
+    .replace(/\s+/g, ' ');
+  if (f.length < 3) return false;
+  const t = text.replace(/\s+/g, ' ');
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}])${escape(f)}(?=$|[^\\p{L}\\p{N}])`, 'iu').test(t);
 }
 
 /** The message and the text share a word that means something (four letters or more). */
@@ -99,6 +118,13 @@ export function sharesWords(message: string, text: string): boolean {
   const mine = new Set(keyWords(message));
   return keyWords(text).some((w) => mine.has(w));
 }
+
+/** Too common to tie a fact to a dog's job. */
+const STOP = new Set(
+  'that this with from have what when where which about your yours mine they them there their then than been were will would should could into just like also only some more most very much make want know does dont doesn please thanks remember forget prefer prefers always never every each other here those these the and for are was not you can its it’s'.split(
+    ' ',
+  ),
+);
 
 function keyWords(s: string): string[] {
   return s
@@ -108,36 +134,6 @@ function keyWords(s: string): string[] {
     .map((w) => (w.length > 4 && w.endsWith('s') ? w.slice(0, -1) : w));
 }
 
-/**
- * The value appears in the person's message, ignoring case, spacing and a
- * trailing full stop: so it is their text, not someone else's.
- */
-export function typed(message: string, value: string): boolean {
-  const v = norm(value);
-  return v.length > 0 && norm(message).includes(v);
-}
-
-/** The message asks for this kind of change in so many words. */
-export function asksTo(message: string, kind: keyof typeof VERBS): boolean {
-  return VERBS[kind].test(message);
-}
-
-function norm(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[‘’]/g, "'")
-    .replace(/[“”]/g, '"')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/[.!?]+$/, '')
-    .trim();
-}
-
-/**
- * A connector tool name plain enough to show a model as it is: lower case,
- * up to three words joined by underscores, 32 characters at most. Servers
- * choose their tools' names; anything else is shown by a Vigil-made id.
- */
-export function plainToolName(name: string): boolean {
-  return name.length <= 32 && /^[a-z][a-z0-9]*(?:_[a-z0-9]+){0,2}$/.test(name);
+function escape(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
