@@ -179,6 +179,8 @@ export function helperDigest(dir: string, files: readonly string[]): string {
  */
 export function rootStageScript(platform: NodeJS.Platform = process.platform): string {
   const hash = platform === 'linux' ? 'sha256sum' : '/usr/bin/shasum -a 256';
+  // Never follow a link; on macOS copy the data only, not extended attributes.
+  const copy = platform === 'linux' ? 'cp -P' : 'cp -P -X';
   return [
     'set -eu',
     'src=$1; run=$2; want=$3; shift 3',
@@ -187,7 +189,7 @@ export function rootStageScript(platform: NodeJS.Platform = process.platform): s
     't=$(mktemp -d /tmp/vigil-helper.XXXXXXXX)',
     'trap \'rm -rf "$t"\' EXIT',
     // Plain files only, never links: a FIFO or a link to a device would hang root or fill the disk.
-    'for f; do [ -f "$src/$f" ] && [ ! -h "$src/$f" ] || { echo "Missing $f" >&2; exit 1; }; case $f in */*) mkdir -p "$t/${f%/*}";; esac; cp -P "$src/$f" "$t/$f"; [ -f "$t/$f" ] && [ ! -h "$t/$f" ] || exit 1; done',
+    `for f; do [ -f "$src/$f" ] && [ ! -h "$src/$f" ] || { echo "Missing $f" >&2; exit 1; }; case $f in */*) mkdir -p "$t/\${f%/*}";; esac; ${copy} "$src/$f" "$t/$f"; [ -f "$t/$f" ] && [ ! -h "$t/$f" ] || exit 1; done`,
     `got=$(for f; do ${hash} < "$t/$f"; done | ${hash})`,
     '[ "${got%% *}" = "$want" ] || { echo "The helper files changed while installing, so nothing was changed." >&2; exit 1; }',
     'sh "$t/$run"',
@@ -199,13 +201,9 @@ export function rootStageScript(platform: NodeJS.Platform = process.platform): s
  * nothing the user set (PATH, TMPDIR, NODE_OPTIONS, PERL5OPT…) reaches the
  * programs root runs.
  */
-export const ROOT_SHELL = [
-  '/usr/bin/env',
-  '-i',
-  'PATH=/usr/bin:/bin:/usr/sbin:/sbin',
-  '/bin/sh',
-  '-c',
-] as const;
+const ROOT_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
+
+export const ROOT_SHELL = ['/usr/bin/env', '-i', `PATH=${ROOT_PATH}`, '/bin/sh', '-c'] as const;
 
 /** The arguments after `sh -c <rootStageScript>` that run `kind` from `from`. */
 function stageArgs(
@@ -271,7 +269,8 @@ export type RunFile = (
 
 const runFile: RunFile = (file, args) =>
   new Promise((resolve) =>
-    execFile(file, args, { timeout: 3 * 60_000 }, (err, stdout, stderr) =>
+    // An empty environment: macOS's admin dialog hands it to root's shell.
+    execFile(file, args, { timeout: 3 * 60_000, env: { PATH: ROOT_PATH } }, (err, stdout, stderr) =>
       resolve({
         code: err ? (typeof err.code === 'number' ? err.code : 1) : 0,
         stdout: String(stdout),
