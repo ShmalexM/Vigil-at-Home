@@ -62,6 +62,15 @@ const KEY_CHAT = 'pack.chat';
 const KEY_CHOICES = 'pack.toolChoices';
 /** Vigil's own tools as of the last save, so the Lead dog gets ones added later. */
 const KEY_LEAD_SEEN = 'pack.leadToolsSeen';
+/** What a Lead dog saved before that key existed had to choose from. */
+const FIRST_VIGIL_TOOLS = [
+  'vigil_status',
+  'list_alerts',
+  'get_alert',
+  'search_events',
+  'list_agents',
+  'get_agent_session',
+].map((n) => `vigil.${n}`);
 
 const MAX_PACK = 12;
 const MAX_CHAT = 200;
@@ -139,6 +148,8 @@ const ReportSchema = z.object({
     }),
   ),
   provider: z.string().optional(),
+  retry: z.boolean().optional(),
+  tainted: z.boolean().optional(),
 });
 
 const DogRecord = z.object({
@@ -195,6 +206,7 @@ const ChatRecord = z.object({
   rules: z.array(RuleDraftRecord).optional(),
   memory: z.array(MemoryChangeRecord).optional(),
   used: z.array(z.string()).optional(),
+  tainted: z.boolean().optional(),
   failed: z.boolean().optional(),
 });
 
@@ -468,13 +480,7 @@ export class PackService {
    * arrived since (they only read). One the person took away stays away.
    */
   private withNewVigilTools(lead: Dog): Dog {
-    const seen = new Set(
-      this.o.load(
-        KEY_LEAD_SEEN,
-        z.array(z.string()),
-        lead.tools.filter((k) => k.startsWith('vigil.')),
-      ),
-    );
+    const seen = new Set(this.o.load(KEY_LEAD_SEEN, z.array(z.string()), FIRST_VIGIL_TOOLS));
     const added = this.vigilEntries()
       .map((t) => t.key)
       .filter((k) => !seen.has(k) && !lead.tools.includes(k));
@@ -692,6 +698,12 @@ export class PackService {
               }
             : {}),
         }));
+      // A dog's report, or an earlier answer that read tool output, can carry
+      // someone else's text into this answer even when it uses no tool itself.
+      const readTainted =
+        this.chat()
+          .slice(-CONTEXT_MESSAGES - 1, -1)
+          .some((m) => m.tainted || (m.used?.length ?? 0) > 0) || this.dogs().some(reportTainted);
       const tools = this.toolsFor(lead, ctx);
       const memory = this.memoryFor(tools);
       const result = await this.o.ai.run({
@@ -753,13 +765,14 @@ export class PackService {
         this.setMood(lead.id, 'error', 'Couldn’t answer', DONE_MS);
         return;
       }
-      const actions = result.value.actions.map((a) => this.consider(a, used.length > 0));
+      // Text a tool returned could be anyone's, so an answer that used one, or
+      // read one, only proposes changes; one from the person's words alone applies them.
+      const taint = used.length > 0 ? 'tools' : readTainted ? 'data' : undefined;
+      const actions = result.value.actions.map((a) => this.consider(a, taint !== undefined));
+      const memoryChanges = this.considerMemory(result.value, taint, mine.id);
       // The Claude plan only explains: an answer it wrote proposes no rule change.
       const viaPlan = result.provider === 'claude' && (await this.status()).leadMayUsePlan;
       const rules = this.draftRules(result.value, result.provider, lead.name, viaPlan);
-      // Text a tool returned could be anyone's, so an answer that used one
-      // only proposes memory changes; one from the person's words alone applies them.
-      const memoryChanges = this.considerMemory(result.value, used.length > 0, mine.id);
       const about = lookingAt && subjectOf(lookingAt);
       this.note(
         {
@@ -778,6 +791,7 @@ export class PackService {
       this.reply({
         text: result.value.reply,
         used,
+        ...(taint ? { tainted: true } : {}),
         ...(actions.length ? { actions } : {}),
         ...(rules.length ? { rules } : {}),
         ...(memoryChanges.length ? { memory: memoryChanges } : {}),
@@ -813,10 +827,7 @@ export class PackService {
   }
 
   /** Checks one change the Lead dog asked for, then applies it or leaves it for the user. */
-  private consider(
-    a: z.infer<typeof LeadAnswer>['actions'][number],
-    fromTools: boolean,
-  ): LeadAction {
+  private consider(a: z.infer<typeof LeadAnswer>['actions'][number], tainted: boolean): LeadAction {
     const action: LeadAction = { id: newId(this.now()), kind: a.kind, status: 'pending' };
     const dogs = this.dogs();
     if (a.kind !== 'create') {
@@ -829,11 +840,15 @@ export class PackService {
         return { ...action, status: 'failed', note: 'Only pack dogs run jobs on request' };
     }
     const dog: Partial<DogInput> = {};
-    if (a.name) dog.name = a.name.trim().slice(0, 32);
-    if (a.breed) dog.breed = a.breed;
-    if (a.job) dog.job = a.job.trim();
-    if (a.schedule) dog.schedule = a.schedule;
-    if (a.tools) dog.tools = this.knownToolKeys(a.tools);
+    // Only adding or changing a dog takes fields; a run or a retirement
+    // ignores any the answer sent along.
+    if (a.kind === 'create' || a.kind === 'update') {
+      if (a.name) dog.name = a.name.trim().slice(0, 32);
+      if (a.breed) dog.breed = a.breed;
+      if (a.job) dog.job = a.job.trim();
+      if (a.schedule) dog.schedule = a.schedule;
+      if (a.tools) dog.tools = this.knownToolKeys(a.tools);
+    }
     if (a.kind === 'create') {
       const parsed = DogInput.safeParse({ schedule: 'manual', tools: [], ...dog });
       if (!parsed.success)
@@ -842,28 +857,27 @@ export class PackService {
     }
     if (Object.keys(dog).length) action.dog = dog;
     const before = action.dogId ? (dogs.find((d) => d.id === action.dogId)?.tools ?? []) : [];
-    // What the dog holds once this is done: a new job, or a run, for a dog
-    // that can already change things counts the same as handing it the tool.
-    const after = a.kind === 'retire' ? [] : (dog.tools ?? before);
-    const canWrite = after.some((k) => !this.treatedAsReadOnly(k));
-    if (fromTools && (canWrite || a.kind === 'retire')) {
-      // The answer read alerts, events or connectors, whose text anyone could
-      // have written: it may not point a dog that can change things anywhere
-      // without the person, whatever the mode.
-      return {
-        ...action,
-        note: 'This answer read tool results, so this change waits for your OK',
-      };
-    }
-    if (gateAction(this.mode(), a.kind, canWrite) === 'ask') {
+    const added = (dog.tools ?? []).filter((k) => !before.includes(k));
+    const grantsWrite = added.some((k) => !this.treatedAsReadOnly(k));
+    // In Let AI decide, a new job or a run for a dog that can already change
+    // things counts the same as handing it the tool.
+    // A run uses the tools the dog has, whatever the answer listed with it.
+    const holds = a.kind === 'update' ? (dog.tools ?? before) : before;
+    const holdsWrite = a.kind !== 'retire' && holds.some((k) => !this.treatedAsReadOnly(k));
+    if (
+      gateAction(this.mode(), a.kind, grantsWrite, tainted) === 'ask' ||
+      (this.mode() === 'auto' && holdsWrite)
+    ) {
       return {
         ...action,
         note:
           this.mode() === 'ask'
             ? 'Waiting for your OK'
-            : a.kind === 'retire'
-              ? 'Retiring a dog always waits for your OK'
-              : 'The dog has a tool that can change things, so it waits for your OK',
+            : tainted
+              ? 'This answer read data from your computer, so it waits for your OK'
+              : a.kind === 'retire'
+                ? 'Retiring a dog always waits for your OK'
+                : 'The dog has a tool that can change things, so it waits for your OK',
       };
     }
     return this.apply(action);
@@ -1016,7 +1030,7 @@ export class PackService {
 
   private considerMemory(
     answer: z.infer<typeof LeadAnswer>,
-    fromTools: boolean,
+    taint: 'tools' | 'data' | undefined,
     source: string,
   ): MemoryChange[] {
     if (!this.o.memory) return [];
@@ -1045,14 +1059,16 @@ export class PackService {
         status: 'pending',
       });
     }
+    const why =
+      taint === 'tools' ? 'This answer used tools' : 'This answer read data from your computer';
     return changes.map((c) =>
-      fromTools
+      taint
         ? {
             ...c,
             note:
               c.op === 'remember'
-                ? 'This answer used tools, so it waits for your OK'
-                : 'This answer used tools, so forgetting waits for your OK',
+                ? `${why}, so it waits for your OK`
+                : `${why}, so forgetting waits for your OK`,
           }
         : this.applyMemory(c, 'lead', source),
     );
@@ -1124,7 +1140,15 @@ export class PackService {
             findings: result.value.findings,
             provider: result.provider,
           }
-        : { at: this.now(), ok: false, summary: failText(result.reason), findings: [] };
+        : {
+            at: this.now(),
+            ok: false,
+            summary: failText(result.reason),
+            findings: [],
+            ...(dog.lastReport && !dog.lastReport.ok ? { retry: true } : {}),
+          };
+      // It read its own last report, so taint carries over from that too.
+      report.tainted = used.length > 0 || reportTainted(dog);
       // A scheduled run that never reached an AI isn't a run: the card says
       // why, but the notebook and Today the pack don't count it.
       const reachedAi = result.ok || !['no_provider', 'quota'].includes(result.reason);
@@ -1176,10 +1200,10 @@ export class PackService {
       const last = d.lastReport;
       const night = hour >= 1 && hour < 5;
       // A new dog's first night is its first nightly run, and a run that
-      // failed is tried again an hour later rather than a whole period on.
+      // failed is tried once more an hour later rather than a whole period on.
       const since = at - (last?.at ?? d.createdAt);
       const due =
-        d.schedule === 'hourly' || (last && !last.ok)
+        d.schedule === 'hourly' || (last && !last.ok && !last.retry)
           ? since >= HOUR && (d.schedule !== 'nightly' || night)
           : d.schedule === 'daily'
             ? since >= 24 * HOUR
@@ -1310,6 +1334,8 @@ export class PackService {
       if (decision.kind === 'run' && now.kind !== 'judge') decision = now;
     }
     if (decision.kind === 'deny') return `Not run: ${decision.reason}`;
+    // The run may have ended while the AI was rating the call.
+    if (ctx.over) return 'Not run: this run has ended.';
     if (decision.kind === 'ask') {
       // Nobody is watching a scheduled run: it never stops to ask, so the
       // pack adds nothing to what needs the person.
@@ -1616,6 +1642,16 @@ function remoteEntry(id: string, name: string, t: RemoteTool): ToolEntry {
     serverHint: t.readOnlyHint,
     inputSchema: t.inputSchema,
   };
+}
+
+/**
+ * Whether a dog's last report could hold someone else's text: its run used a
+ * tool, or read a report that did. Reports from before this was recorded
+ * count when the dog has any tools.
+ */
+function reportTainted(d: Dog): boolean {
+  if (!d.lastReport) return false;
+  return d.lastReport.tainted ?? d.tools.length > 0;
 }
 
 function failText(reason: string): string {
