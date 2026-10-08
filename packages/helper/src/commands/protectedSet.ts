@@ -70,7 +70,12 @@ function readdirOrEmpty(dir: string): string[] {
   }
 }
 
-const strip = (p: string) => (p.length > 1 ? p.replace(/\/+$/, '') : p);
+/** A path without trailing slashes (`/` stays `/`). A loop, not a regex, so it stays linear. */
+function strip(p: string): string {
+  let end = p.length;
+  while (end > 1 && p[end - 1] === '/') end--;
+  return p.slice(0, end);
+}
 
 /**
  * Vigil's and the sensors' launch items or units as they are actually named
