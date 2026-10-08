@@ -1,7 +1,12 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { SensorEvent } from '@vigil/core';
-import type { AnalyzeRunner } from '@vigil/detection';
-import { describe, expect, it } from 'vitest';
+import { INDICATOR_RULE, type AnalyzeRunner } from '@vigil/detection';
+import { listDigest } from '@vigil/detection/fastpath';
+import { FastPath, type DetectionSync } from '@vigil/helper';
+import { afterAll, describe, expect, it } from 'vitest';
 import { Store } from './db/store.js';
 import { Detector } from './detection.js';
 import { DryRunExecutor } from './executor.js';
@@ -247,6 +252,148 @@ describe('AI rule suggestions in the app', () => {
         });
       }
       expect(ui.view().pending).toHaveLength(0);
+    });
+
+    it('never turns down or excludes from a blocked-list or known-bad rule, even by rule id alone', async () => {
+      const { detector, ui } = await withAlert();
+      // On the list, but its last event was long ago: the replay has nothing to go on.
+      detector.engine.stores.lists.add('known_bad_sha256', '7'.repeat(64), {
+        source: 'feed',
+        updatedAt: 0,
+      });
+      for (const ruleId of ['known-bad-hash', 'user-blocked-hash', 'known-bad-destination'])
+        expect(
+          ui.draft({ kind: 'turn-down', ruleId, why: 'It never fires.' }, scout),
+        ).toMatchObject({ status: 'failed', note: INDICATOR_RULE });
+      expect(ui.view().pending).toHaveLength(0);
+      expect(detector.rules().find((r) => r.rule.id === 'known-bad-hash')!.mode).toBe('block');
+    });
+
+    it('withdraws a waiting exclusion once its program is confirmed malicious, and refuses to accept it', async () => {
+      const bad = 'e'.repeat(64);
+      const { detector, ui, alertId } = await withAlert(bad);
+      const d = ui.draft(
+        { kind: 'exclude', alertId, scope: 'this_path', why: 'That is my own updater.' },
+        scout,
+      );
+      expect(d.status).toBe('waiting');
+      await detector.learn(alertId, { at: Date.now(), verdict: 'malicious', remember: false });
+      expect(ui.view().pending).toHaveLength(0);
+      expect(ui.view().recent[0]).toMatchObject({ id: d.proposalId, status: 'withdrawn' });
+      await expect(ui.accept(d.proposalId!)).rejects.toThrow(/withdrawn/);
+      expect(detector.engine.getRule('ai-paste-site')!.exclusions).toHaveLength(0);
+    });
+
+    it('refuses at accept a turn-down queued before a feed listed what the rule caught', async () => {
+      const bad = 'd'.repeat(64);
+      const { detector, ui, alertId } = await withAlert(bad);
+      const d = ui.draft({ kind: 'turn-down', alertId, why: 'Too noisy for me.' }, scout);
+      expect(d.status).toBe('waiting');
+      detector.engine.stores.lists.replace('known_bad_sha256', [bad], {
+        source: 'feeds',
+        updatedAt: 0,
+      });
+      await expect(ui.accept(d.proposalId!)).rejects.toThrow(/malicious/);
+      expect(detector.rules().find((r) => r.rule.id === 'ai-paste-site')!.mode).toBe('alert');
+      expect(ui.view().pending).toHaveLength(0);
+    });
+  });
+
+  describe('weakening a blocking rule only the app runs', () => {
+    const dirs: string[] = [];
+    afterAll(() => {
+      for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    });
+
+    /** The helper's own policy check, with a password dialog the test answers. */
+    function withHelper(detector: Detector) {
+      const dir = mkdtempSync(join(tmpdir(), 'vigil-fp-'));
+      dirs.push(dir);
+      const fast = new FastPath({
+        file: join(dir, 'rules.json'),
+        run: async () => ({ ok: true }) as never,
+      });
+      const asked: string[][] = [];
+      const helper = { approve: true };
+      detector.syncHelper = async () => {
+        const set = detector.helperRules();
+        const cmd: DetectionSync = {
+          kind: 'detection.sync',
+          rules: set.rules,
+          appRules: set.appRules,
+          exceptions: set.exceptions,
+          selfPaths: set.selfPaths,
+          lists: Object.fromEntries(Object.entries(set.lists).map(([l, e]) => [l, listDigest(e)])),
+        };
+        const weakens = fast.loosening(cmd);
+        if (weakens.length) {
+          asked.push(weakens);
+          if (!helper.approve) return 'declined';
+        }
+        fast.sync(cmd);
+        return 'applied';
+      };
+      return { asked, helper };
+    }
+
+    it('asks for the password before Scout’s turn-down of a blocking first-seen rule goes live', async () => {
+      const { detector, ui } = setup(answer);
+      const { asked, helper } = withHelper(detector);
+      const mode = () => detector.rules().find((r) => r.rule.id === 'exec-from-shared-temp')!.mode;
+      expect(await detector.setMode('exec-from-shared-temp', 'block')).toBe('applied');
+      expect(asked).toEqual([]);
+      // The helper never runs it: it needs the app's "first seen" baseline.
+      expect(detector.helperRules().rules.map((r) => r.id)).not.toContain('exec-from-shared-temp');
+
+      const d = ui.draft(
+        {
+          kind: 'turn-down',
+          ruleId: 'exec-from-shared-temp',
+          why: 'It keeps firing on my builds.',
+        },
+        { provider: 'codex', name: 'Scout' },
+      );
+      expect(d.status).toBe('waiting');
+
+      // Cancelled password: nothing changes and the suggestion still waits.
+      helper.approve = false;
+      expect(await ui.accept(d.proposalId!)).toBe('declined');
+      expect(asked.at(-1)).toEqual([
+        'stop blocking with “New program started from a temporary folder”',
+      ]);
+      expect(mode()).toBe('block');
+      expect(ui.view().pending.map((p) => p.id)).toEqual([d.proposalId]);
+
+      // The Rules page's own mode switch asks too.
+      expect(await detector.setMode('exec-from-shared-temp', 'alert')).toBe('declined');
+      expect(mode()).toBe('block');
+
+      helper.approve = true;
+      expect(await ui.accept(d.proposalId!)).toBe('applied');
+      expect(mode()).toBe('shadow');
+    });
+
+    it('asks before an exclusion is added to a blocking rule only the app runs', async () => {
+      const { detector, ui } = setup(answer);
+      const { asked, helper } = withHelper(detector);
+      expect(await detector.setMode('exec-from-shared-temp', 'block')).toBe('applied');
+      const res = detector.pipeline.submitTuning(
+        {
+          ruleId: 'exec-from-shared-temp',
+          addExclusion: { field: 'process.sha256', op: 'eq', value: '3'.repeat(64) },
+          rationale: 'That is my own build output.',
+        },
+        'codex',
+        'Scout',
+      );
+      expect(res.ok).toBe(true);
+      helper.approve = false;
+      expect(await ui.accept(res.proposalId!)).toBe('declined');
+      expect(asked.at(-1)).toEqual([
+        'change what “New program started from a temporary folder” blocks',
+      ]);
+      expect(detector.engine.getRule('exec-from-shared-temp')!.exclusions).toHaveLength(0);
+      expect(ui.view().pending.map((p) => p.id)).toEqual([res.proposalId]);
     });
   });
 });

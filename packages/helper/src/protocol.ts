@@ -82,6 +82,21 @@ export const RuleExceptionSchema = z.strictObject({
 export const DetectionSync = z.strictObject({
   kind: z.literal('detection.sync'),
   rules: z.array(DetectionRule).max(64),
+  /**
+   * Blocking rules only the app runs (they need its "first seen" baseline or
+   * agent tags). The helper never runs them, but dropping one or changing what
+   * it blocks needs the admin password like any other weakening.
+   */
+  appRules: z
+    .array(
+      z.strictObject({
+        id: z.string().min(1).max(200),
+        name: z.string().max(300),
+        digest: z.string().regex(/^[a-f0-9]{64}$/),
+      }),
+    )
+    .max(500)
+    .optional(),
   exceptions: z.array(RuleExceptionSchema).max(2000),
   selfPaths: z.array(z.string().min(1).max(1024)).max(8),
   lists: z.record(ListName, Digest),

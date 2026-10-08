@@ -9,7 +9,7 @@ import {
   type RuleExceptionSchema,
 } from '@vigil/helper';
 import type { DetectionRule } from '@vigil/detection';
-import { listDigest } from '@vigil/detection/fastpath';
+import { listDigest, type AppBlockingRule } from '@vigil/detection/fastpath';
 import { HelperCallError, HelperClient } from '@vigil/helper/client';
 import type { z } from 'zod';
 import { DryRunExecutor, type ActionExecutor } from './executor.js';
@@ -29,6 +29,8 @@ const HELPER_RAN_MS = 60_000;
 /** The blocking rules the helper runs itself, and what they need. */
 export interface HelperRuleSet {
   rules: DetectionRule[];
+  /** Blocking rules only the app runs: weakening one needs the password too. */
+  appRules: AppBlockingRule[];
   exceptions: z.infer<typeof RuleExceptionSchema>[];
   selfPaths: string[];
   lists: Record<string, string[]>;
@@ -179,6 +181,7 @@ export class HelperLink
       const sync = {
         kind: 'detection.sync' as const,
         rules: set.rules,
+        appRules: set.appRules,
         exceptions: set.exceptions,
         selfPaths: set.selfPaths,
         lists: digests,

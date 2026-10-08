@@ -1,8 +1,9 @@
 import { newId, type RuleMode } from '@vigil/core';
 import { z } from 'zod';
-import { conditionUsesAgentFields, exclusionHidesAgent } from '../agents/fields.js';
+import { conditionUsesAgentFields, exclusionHidesAgent, isAgentField } from '../agents/fields.js';
 import { compileRule, type DetectionEngine } from '../engine.js';
 import { USER_BLOCKED_HASHES } from '../feedback.js';
+import type { FeedList } from '../feeds/sources.js';
 import { assertUserOrigin, type UserOrigin } from '../origin.js';
 import { lintRule, type LintResult } from '../rules/lint.js';
 import type { EventHistory } from '../state/stores.js';
@@ -47,6 +48,12 @@ export interface Proposal {
   retireTo?: 'alert' | 'shadow' | 'disabled';
   /** What approving it would stop catching, including look-alikes that would slip through. */
   impact?: ImpactReport;
+  /**
+   * For tuning and retire: the sha256 of each program whose detections the
+   * change would hide, so a proposal can be withdrawn the moment one of them
+   * is blocked or listed as bad.
+   */
+  hides?: string[];
   decidedAt?: number;
   decidedVia?: string;
   decisionNote?: string;
@@ -106,6 +113,9 @@ export const ProposeRetirementInput = z
   .strict();
 export type ProposeRetirementInput = z.input<typeof ProposeRetirementInput>;
 
+/** Every list a threat feed fills. */
+const FEED_LISTS: readonly FeedList[] = ['known_bad_sha256', 'known_bad_domains', 'known_bad_ips'];
+
 const MODE_RANK: Record<RuleMode, number> = { disabled: 0, shadow: 1, alert: 2, block: 3 };
 
 export interface SubmitResult {
@@ -145,15 +155,59 @@ export const AGENT_EXCLUSION =
 
 /**
  * Tagged agent-watch or agent-preflight, on agent.tool_request, or whose
- * condition reads an agent field (a rule the user wrote about agents). An
+ * condition reads an agent field (a rule the user wrote about agents),
+ * including a sequence step's kinds and condition and the sequence's key. An
  * exclusion on an agent field only carves agents out of an ordinary rule, so
  * it does not count.
  */
 function userTunedOnly(rule: DetectionRule): boolean {
+  const steps = rule.sequence?.steps ?? [];
   return (
     rule.tags.some((t) => USER_TUNED_TAGS.includes(t)) ||
     rule.eventKinds.includes('agent.tool_request') ||
-    conditionUsesAgentFields(rule.condition)
+    conditionUsesAgentFields(rule.condition) ||
+    steps.some(
+      (st) =>
+        st.eventKinds.includes('agent.tool_request') || conditionUsesAgentFields(st.condition),
+    ) ||
+    (rule.sequence?.key ?? []).some(isAgentField)
+  );
+}
+
+export const INDICATOR_RULE =
+  'This rule stops programs or addresses on your blocked list or a threat list. Only you can turn it down or add an exception to it.';
+
+/**
+ * Lists that say something is bad: the user's own blocked lists and the threat
+ * feeds' known-bad lists. A rule that looks one up is a blocked-indicator rule.
+ */
+export function isIndicatorList(list: string): boolean {
+  return (
+    list === USER_BLOCKED_HASHES ||
+    list.startsWith('user_blocked_') ||
+    list.startsWith('known_bad_') ||
+    (FEED_LISTS as readonly string[]).includes(list)
+  );
+}
+
+function conditionUsesIndicatorList(c: Condition): boolean {
+  if ('all' in c) return c.all.some(conditionUsesIndicatorList);
+  if ('any' in c) return c.any.some(conditionUsesIndicatorList);
+  if ('not' in c) return conditionUsesIndicatorList(c.not);
+  if ('inList' in c) return isIndicatorList(c.inList.list);
+  return false;
+}
+
+/**
+ * A rule that looks a value up in a blocked or known-bad list, in its
+ * condition or any sequence step (known-bad-hash, user-blocked-hash, the feed
+ * rules, or the user's own). No AI may propose weakening one, whatever the
+ * replay shows.
+ */
+export function isIndicatorRule(rule: DetectionRule): boolean {
+  return (
+    conditionUsesIndicatorList(rule.condition) ||
+    (rule.sequence?.steps ?? []).some((st) => conditionUsesIndicatorList(st.condition))
   );
 }
 
@@ -162,6 +216,10 @@ const MAX_NEW_RULE_ALERTS_PER_DAY = 3;
 /** Provider name on suggestions Vigil makes from the user's own answers, not an AI. */
 export const VIGIL_PROVIDER = 'vigil';
 const DAY = 86_400_000;
+export const HIDES_THREAT =
+  'This exclusion would now hide a program you or a threat list marked as malicious.';
+export const STILL_CATCHES_THREAT =
+  'This rule caught a program you or a threat list marked as malicious. It stays on.';
 export const ALREADY_WAITING = 'The same change is already waiting for the user’s review.';
 
 /** JSON with sorted keys, so two conditions that say the same thing compare equal. */
@@ -201,7 +259,9 @@ export class RulePipeline {
     this.repository = opts.repository;
   }
 
+  /** Every proposal, newest first. Pending ones the threat lists now rule out are withdrawn first. */
   list(): Proposal[] {
+    this.withdrawAffected();
     return this.store.list();
   }
 
@@ -319,6 +379,8 @@ export class RulePipeline {
     if (!base) return { ok: false, errors: [`No rule called ${input.ruleId}.`], warnings: [] };
     if (userTunedOnly(base))
       return { ok: false, errors: [USER_TUNED_ONLY], warnings: [], final: true };
+    if (isIndicatorRule(base))
+      return { ok: false, errors: [INDICATOR_RULE], warnings: [], final: true };
     if (exclusionHidesAgent(input.addExclusion))
       return { ok: false, errors: [AGENT_EXCLUSION], warnings: [] };
     if (this.excludesBlockedHash(input.addExclusion))
@@ -372,6 +434,8 @@ export class RulePipeline {
     if (!base) return { ok: false, errors: [`No rule called ${input.ruleId}.`], warnings: [] };
     if (userTunedOnly(base))
       return { ok: false, errors: [USER_TUNED_ONLY], warnings: [], final: true };
+    if (isIndicatorRule(base))
+      return { ok: false, errors: [INDICATOR_RULE], warnings: [], final: true };
     const current = this.engine.modeOf(base);
     if (MODE_RANK[input.toMode] >= MODE_RANK[current]) {
       return {
@@ -453,6 +517,11 @@ export class RulePipeline {
       status: errors.length ? 'rejected_by_checks' : 'awaiting_review',
       lint: { errors, warnings: [] },
       replay: before.report,
+      hides: this.hashesOf(
+        [...before.hitEventIds],
+        before.report.windowStart,
+        before.report.windowEnd,
+      ),
       impact: this.prove(
         base,
         toMode === 'disabled' ? undefined : base,
@@ -536,6 +605,7 @@ export class RulePipeline {
           before.report.windowStart,
           before.report.windowEnd,
         );
+        proposal.hides = this.hashesOf(removed, before.report.windowStart, before.report.windowEnd);
         proposal.tuning = {
           hitsBefore: before.report.hits,
           hitsAfter: after.report.hits,
@@ -598,6 +668,84 @@ export class RulePipeline {
     return values.some((v) => typeof v === 'string' && this.isBlockedHash(v));
   }
 
+  /** The distinct program hashes behind these events, at most 1000. */
+  private hashesOf(eventIds: string[], from: number, to: number): string[] {
+    if (eventIds.length === 0) return [];
+    const ids = new Set(eventIds);
+    const out = new Set<string>();
+    for (const e of this.history.range(from, to)) {
+      if (!ids.has(e.id)) continue;
+      const h = 'process' in e ? e.process?.sha256 : undefined;
+      if (h) out.add(h.toLowerCase());
+      if (out.size >= 1000) break;
+    }
+    return [...out];
+  }
+
+  /**
+   * Why a waiting proposal may no longer go ahead, from what is known now: an
+   * AI asking to weaken a blocked-indicator rule, an exclusion naming a program
+   * now blocked or listed as bad, or a change hiding one. With `replay`, the
+   * confirmed-threat check is run again on the history, as at submission.
+   */
+  private problemNow(p: Proposal, replay: boolean): string | undefined {
+    const ai = p.provider !== VIGIL_PROVIDER || p.by !== undefined;
+    const base = p.baseRuleId ? this.engine.getRule(p.baseRuleId) : undefined;
+    if (p.kind !== 'new_rule' && ai && isIndicatorRule(base ?? p.rule)) return INDICATOR_RULE;
+    const added =
+      p.kind === 'tuning'
+        ? p.rule.exclusions.slice(-1)
+        : p.kind === 'new_rule'
+          ? p.rule.exclusions
+          : [];
+    if (added.some((c) => this.excludesBlockedHash(c))) return BLOCKED_EXCLUSION;
+    if (p.kind === 'new_rule') return undefined;
+    if ((p.hides ?? []).some((h) => this.isBlockedHash(h)))
+      return p.kind === 'tuning' ? HIDES_THREAT : STILL_CATCHES_THREAT;
+    if (!replay || !base) return undefined;
+    if (p.kind === 'tuning') {
+      const before = this.replay(base);
+      const after = this.replay({ ...base, exclusions: [...base.exclusions, ...added] });
+      const removed = [...before.hitEventIds].filter((id) => !after.hitEventIds.has(id));
+      if (this.countConfirmedThreats(removed, before.report.windowStart, before.report.windowEnd))
+        return HIDES_THREAT;
+    } else {
+      const before = this.replay(base);
+      const hits = [...before.hitEventIds];
+      if (this.countConfirmedThreats(hits, before.report.windowStart, before.report.windowEnd))
+        return STILL_CATCHES_THREAT;
+    }
+    return undefined;
+  }
+
+  /**
+   * Quietly withdraw every waiting proposal that what is known now rules out:
+   * a program it would hide or exclude was blocked by the user or listed by a
+   * threat feed. Call after the threat lists change; list() also runs it.
+   * Returns how many were withdrawn.
+   */
+  withdrawAffected(): number {
+    let n = 0;
+    for (const p of this.store.list()) {
+      if (p.status !== 'awaiting_review') continue;
+      const problem = this.problemNow(p, false);
+      if (!problem) continue;
+      this.withdraw(p, problem);
+      n++;
+    }
+    return n;
+  }
+
+  private withdraw(p: Proposal, why: string): void {
+    this.store.put({
+      ...p,
+      status: 'withdrawn',
+      decidedAt: this.opts.now(),
+      decidedVia: VIGIL_PROVIDER,
+      decisionNote: why,
+    });
+  }
+
   private countConfirmedThreats(eventIds: string[], from: number, to: number): number {
     if (eventIds.length === 0) return 0;
     const ids = new Set(eventIds);
@@ -625,6 +773,12 @@ export class RulePipeline {
       if (!current || current.version !== p.baseRuleVersion) {
         throw new Error('The rule changed since this was proposed. Ask for a fresh proposal.');
       }
+    }
+    // What is known about threats may have changed since it was checked: check again.
+    const problem = this.problemNow(p, true);
+    if (problem) {
+      this.withdraw(p, problem);
+      throw new Error(problem);
     }
     const now = this.opts.now();
     let live: DetectionRule;

@@ -81,10 +81,20 @@ const Saved = z.object({
   lists: z.record(z.string(), z.array(z.string())),
   /** Entries lists dropped, by list, with when (ms). Still blocking until RETIRE_MS later. */
   retired: z.record(z.string(), z.record(z.string(), z.number())).default({}),
+  /** The app's own blocking rules, by fingerprint (DetectionSync.appRules). */
+  appRules: z.array(z.object({ id: z.string(), name: z.string(), digest: z.string() })).default([]),
 });
 type Saved = z.infer<typeof Saved>;
 
-const EMPTY: Saved = { rev: 0, rules: [], exceptions: [], selfPaths: [], lists: {}, retired: {} };
+const EMPTY: Saved = {
+  rev: 0,
+  rules: [],
+  exceptions: [],
+  selfPaths: [],
+  lists: {},
+  retired: {},
+  appRules: [],
+};
 
 /** Rule fields that change what an alert says, not what gets blocked. */
 const WORDING = new Set([
@@ -151,8 +161,15 @@ export class FastPath {
    */
   loosening(cmd: DetectionSync): string[] {
     // With no rules nothing is blocked yet, so there is nothing to weaken.
-    if (this.state.rules.length === 0) return [];
+    if (this.state.rules.length === 0 && this.state.appRules.length === 0) return [];
     const out: string[] = [];
+    // The app's own blocking rules: dropping one or changing what it blocks.
+    const nextApp = new Map((cmd.appRules ?? []).map((r) => [r.id, r.digest]));
+    for (const r of this.state.appRules) {
+      const d = nextApp.get(r.id);
+      if (d === undefined) out.push(`stop blocking with “${r.name}”`);
+      else if (d !== r.digest) out.push(`change what “${r.name}” blocks`);
+    }
     const next = new Map(cmd.rules.map((r) => [r.id, r]));
     for (const r of this.state.rules) {
       const n = next.get(r.id);
@@ -186,6 +203,7 @@ export class FastPath {
     this.apply({
       rev: this.state.rev + 1,
       rules: cmd.rules,
+      appRules: cmd.appRules ?? [],
       exceptions: cmd.exceptions,
       selfPaths: cmd.selfPaths,
       lists,

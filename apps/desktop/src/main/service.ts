@@ -105,13 +105,13 @@ export class VigilCore {
 
   start(): void {
     if (this.detector) {
-      const feeds = this.detector.feeds;
+      const detector = this.detector;
       // Threat lists refresh in the background; the engine sees them on its next lookup.
       this.scheduler.every(
         'threat-feeds',
         FEED_CHECK_MS,
         async () => {
-          for (const r of await feeds.run()) {
+          for (const r of await detector.refreshFeeds()) {
             if (r.status === 'failed')
               console.warn(`[feeds] ${r.sourceId}: ${r.error ?? 'failed'}`);
           }

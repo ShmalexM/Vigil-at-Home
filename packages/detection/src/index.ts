@@ -74,6 +74,8 @@ export {
   ProposeTuningInput,
   ProposeRetirementInput,
   BLOCKED_EXCLUSION,
+  INDICATOR_RULE,
+  isIndicatorRule,
   type Proposal,
   type ProposalStatus,
   type ProposalStore,

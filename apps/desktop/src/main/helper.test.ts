@@ -143,6 +143,7 @@ describe('HelperLink', () => {
     const big = Array.from({ length: 2500 }, (_, i) => `h${i}`);
     const out = await link.syncRules({
       rules: [],
+      appRules: [],
       exceptions: [],
       selfPaths: ['/x'],
       lists: { big, small: ['a'] },

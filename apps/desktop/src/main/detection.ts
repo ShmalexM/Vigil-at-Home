@@ -42,7 +42,7 @@ import {
   type SqliteDetectionStores,
   type TrackerOptions,
 } from '@vigil/detection';
-import { fastPathRules, isAppOnlyField } from '@vigil/detection/fastpath';
+import { appBlockingRules, fastPathRules, isAppOnlyField } from '@vigil/detection/fastpath';
 import { userOrigin } from '@vigil/detection/user';
 import type { EventOutcome } from '../shared/ipc.js';
 import type { AlertService } from './alerts.js';
@@ -388,6 +388,8 @@ export class Detector {
     if (!d) return {};
     const { value, helper } = await this.change(() => {
       const result = this.feedback.recordDecision(d, decision, userOrigin('alert'));
+      // A program just confirmed malicious: no waiting suggestion may hide it.
+      if (decision.verdict === 'malicious') this.pipeline.withdrawAffected();
       // A rule that keeps being wrong is only suggested for a quieter mode; the
       // user approves it in Rules like any other suggested change.
       const suggested = result.suggestDemotion
@@ -421,11 +423,14 @@ export class Detector {
         .filter((x) => Object.keys(x.match).some((f) => isAppOnlyField(f)))
         .map((x) => x.ruleId),
     );
-    const { rules, lists } = fastPathRules(
-      this.engine.listRules().filter((r) => !needApp.has(r.id)),
-    );
+    const all = this.engine.listRules();
+    const { rules, lists } = fastPathRules(all.filter((r) => !needApp.has(r.id)));
     return {
       rules,
+      appRules: appBlockingRules(
+        all,
+        rules.map((r) => r.id),
+      ),
       exceptions,
       selfPaths: this.selfPaths,
       lists: Object.fromEntries(lists.map((l) => [l, this.stores.lists.entries(l)])),
@@ -477,7 +482,12 @@ export class Detector {
     };
     let next: Promise<{ value: T; helper: HelperSyncOutcome }>;
     if (this.waiting === 0) {
-      next = settle(apply());
+      // A change refused outright (a proposal that no longer passes its checks) rejects.
+      try {
+        next = settle(apply());
+      } catch (err) {
+        next = Promise.reject(err as Error);
+      }
     } else {
       next = this.changing.then(() => settle(apply()));
     }
@@ -519,6 +529,16 @@ export class Detector {
     for (const e of s.exceptions) if (!now.has(e.id)) this.stores.exceptions.add(e);
     for (const [, p] of s.proposals)
       if (!same(this.stores.proposals.get(p.id), p)) this.stores.proposals.put(p);
+  }
+
+  /**
+   * Fetch the threat feeds that are due. Suggested rule changes that would
+   * now hide a program a feed lists as bad are withdrawn.
+   */
+  async refreshFeeds(opts: { force?: boolean } = {}): ReturnType<FeedImporter['run']> {
+    const results = await this.feeds.run(opts);
+    this.pipeline.withdrawAffected();
+    return results;
   }
 
   feedStatus(): FeedStatus[] {

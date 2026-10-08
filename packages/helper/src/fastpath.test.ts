@@ -307,6 +307,49 @@ describe('blocking rules in the helper', () => {
     await client.call(sync);
   });
 
+  it('needs the admin password to turn down or loosen a blocking rule only the app runs', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    const appRule = {
+      id: 'exec-from-shared-temp',
+      name: 'New program started from a temporary folder',
+      digest: 'a'.repeat(64),
+    };
+    approve = true;
+    const first = await client.call<{ needLists: string[] }>({ ...sync, appRules: [appRule] });
+    await sendLists(first.needLists, lists);
+    approve = false;
+    prompts.length = 0;
+    const rev = fast.status().rev;
+
+    // The helper never runs it, yet turning it down or excluding from it still asks.
+    for (const cmd of [
+      { ...sync, appRules: [] },
+      { ...sync },
+      { ...sync, appRules: [{ ...appRule, digest: 'c'.repeat(64) }] },
+    ])
+      await expect(client.call(cmd)).rejects.toMatchObject({ code: 'refused' });
+    expect(prompts).toEqual([
+      `Vigil wants to loosen its blocking rules: stop blocking with “${appRule.name}”.`,
+      `Vigil wants to loosen its blocking rules: stop blocking with “${appRule.name}”.`,
+      `Vigil wants to loosen its blocking rules: change what “${appRule.name}” blocks.`,
+    ]);
+    expect(fast.status().rev).toBe(rev);
+
+    // Renaming it or adding another blocking rule asks nothing.
+    prompts.length = 0;
+    const more = { id: 'my-rule', name: 'Mine', digest: 'd'.repeat(64) };
+    await client.call({ ...sync, appRules: [{ ...appRule, name: 'Renamed' }, more] });
+    expect(prompts).toEqual([]);
+
+    // With the password, it goes through.
+    approve = true;
+    await client.call({ ...sync, appRules: [] });
+    approve = false;
+    prompts.length = 0;
+    await client.call(sync);
+    expect(prompts).toEqual([]);
+  });
+
   it('lets a held rule change ride on the next password dialog', async () => {
     const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
     approve = true;

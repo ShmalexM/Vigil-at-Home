@@ -9,7 +9,13 @@ import {
   memoryStores,
   MemoryListStore,
 } from '../index.js';
-import { APP_ONLY_FIELD_PREFIXES, fastPathRules, isAppOnlyField, listDigest } from '../fastpath.js';
+import {
+  APP_ONLY_FIELD_PREFIXES,
+  appBlockingRules,
+  fastPathRules,
+  isAppOnlyField,
+  listDigest,
+} from '../fastpath.js';
 import { preexecRules } from '../preexec.js';
 import type { DetectionRule } from '../types.js';
 
@@ -198,5 +204,38 @@ describe('agent rules and the helper', () => {
     // An entry ending in "." covers only what is under it.
     expect(isAppOnlyField('agent.name', ['agent.'])).toBe(true);
     expect(isAppOnlyField('agent', ['agent.'])).toBe(false);
+  });
+});
+
+describe('blocking rules only the app runs', () => {
+  it('lists them by fingerprint so the helper can ask before one is weakened', () => {
+    const rules = engine()
+      .listRules()
+      .map((r) =>
+        r.id === 'exec-from-shared-temp' ? { ...r, effectiveMode: 'block' as const } : r,
+      );
+    const sent = fastPathRules(rules).rules.map((r) => r.id);
+    // It needs the "first seen" baseline, so the helper never gets it...
+    expect(sent).not.toContain('exec-from-shared-temp');
+    const app = appBlockingRules(rules, sent);
+    // ...but it is blocking, so it is listed; the helper's own rules and non-blocking ones are not.
+    expect(app.map((r) => r.id)).toEqual(['exec-from-shared-temp']);
+    const digest = app[0]!.digest;
+    expect(digest).toMatch(/^[a-f0-9]{64}$/);
+
+    const edit = (f: (r: (typeof rules)[number]) => object) =>
+      appBlockingRules(
+        rules.map((r) => (r.id === 'exec-from-shared-temp' ? ({ ...r, ...f(r) } as never) : r)),
+        sent,
+      );
+    // Wording and bookkeeping leave it as it was.
+    expect(edit(() => ({ name: 'Renamed', version: 9, updatedAt: 5 }))[0]!.digest).toBe(digest);
+    // An exclusion changes what it blocks.
+    const excluded = edit((r) => ({
+      exclusions: [...r.exclusions, { field: 'process.path', op: 'glob', value: ['/tmp/**'] }],
+    }));
+    expect(excluded[0]!.digest).not.toBe(digest);
+    // Turned down, it is no longer listed.
+    expect(edit(() => ({ effectiveMode: 'shadow' }))).toEqual([]);
   });
 });

@@ -111,6 +111,67 @@ function scan(rule: object): Scan {
   return s;
 }
 
+/**
+ * A blocking rule only the app runs, as the helper keeps track of it: the
+ * helper never runs it, but a sync that drops one or changes what it blocks
+ * needs the admin password like any other weakening.
+ */
+export interface AppBlockingRule {
+  id: string;
+  name: string;
+  /** Fingerprint of what the rule blocks, without its wording. */
+  digest: string;
+}
+
+/** Rule fields that change what an alert says, not what gets blocked. */
+const WORDING = new Set([
+  'version',
+  'name',
+  'description',
+  'severity',
+  'fidelity',
+  'reasons',
+  'tags',
+  'createdAt',
+  'updatedAt',
+  'origin',
+  'provenance',
+  'editedFrom',
+  'dedupe',
+]);
+
+/** JSON with object keys sorted, so equal values compare equal. */
+function canonical(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  if (v && typeof v === 'object')
+    return `{${Object.keys(v)
+      .sort()
+      .filter((k) => (v as Record<string, unknown>)[k] !== undefined)
+      .map((k) => `${JSON.stringify(k)}:${canonical((v as Record<string, unknown>)[k])}`)
+      .join(',')}}`;
+  return JSON.stringify(v) ?? 'null';
+}
+
+/**
+ * The rules blocking right now that the helper does not run (`sent` are the
+ * ones it does), so turning one down or adding an exclusion to it asks for the
+ * admin password just as it does for the helper's own.
+ */
+export function appBlockingRules(
+  rules: Array<DetectionRule & { effectiveMode: RuleMode }>,
+  sent: Iterable<string>,
+): AppBlockingRule[] {
+  const helper = new Set(sent);
+  const out: AppBlockingRule[] = [];
+  for (const { effectiveMode, ...rule } of rules) {
+    if (effectiveMode !== 'block' || helper.has(rule.id)) continue;
+    const enforced = Object.fromEntries(Object.entries(rule).filter(([k]) => !WORDING.has(k)));
+    const digest = createHash('sha256').update(canonical(enforced)).digest('hex');
+    out.push({ id: rule.id, name: rule.name, digest });
+  }
+  return out.sort((x, y) => x.id.localeCompare(y.id));
+}
+
 /** A stable fingerprint of a list's contents, so the app only sends lists that changed. */
 export function listDigest(entries: Iterable<string>): string {
   const sorted = [...new Set(entries)].sort();
