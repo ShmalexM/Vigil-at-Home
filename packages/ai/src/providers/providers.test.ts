@@ -232,10 +232,14 @@ describe.skipIf(!bundledCodex())('Codex app-server as launched', () => {
       },
     );
     try {
-      await rpc.request('initialize', {
-        clientInfo: { name: 'vigil_test', title: null, version: '0' },
-        capabilities: { experimentalApi: true, requestAttestation: false },
-      });
+      await rpc.request(
+        'initialize',
+        {
+          clientInfo: { name: 'vigil_test', title: null, version: '0' },
+          capabilities: { experimentalApi: true, requestAttestation: false },
+        },
+        30_000,
+      );
       rpc.notify('initialized');
       const { config } = await rpc.request<{
         config: {
@@ -243,7 +247,7 @@ describe.skipIf(!bundledCodex())('Codex app-server as launched', () => {
           features: Record<string, boolean | null>;
           mcp_servers: object;
         };
-      }>('config/read', {});
+      }>('config/read', {}, 30_000);
       expect(config.web_search).toBe('disabled');
       expect(config.mcp_servers).toEqual({});
       for (const feature of CODEX_DISABLED_FEATURES) {
@@ -256,7 +260,11 @@ describe.skipIf(!bundledCodex())('Codex app-server as launched', () => {
         sandbox: { type: string; networkAccess: boolean };
         approvalPolicy: string;
         thread: { environments: unknown[]; ephemeral: boolean };
-      }>('thread/start', codexThreadStartParams({ cwd, systemPrompt: 's', tools: [getFinding] }));
+      }>(
+        'thread/start',
+        codexThreadStartParams({ cwd, systemPrompt: 's', tools: [getFinding] }),
+        30_000,
+      );
       expect(started.sandbox).toEqual({ type: 'readOnly', networkAccess: false });
       expect(started.approvalPolicy).toBe('untrusted');
       expect(started.thread.environments).toEqual([]);

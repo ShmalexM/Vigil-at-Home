@@ -71,7 +71,13 @@ export interface ConnectorHub {
   tools(id: string): Promise<RemoteTool[]>;
   /** Tools already known, without connecting. */
   knownTools(id: string): RemoteTool[];
-  call(id: string, tool: string, args: Record<string, unknown>): Promise<string>;
+  /** `signal`: the run asking ended; nothing is sent once it aborts. */
+  call(
+    id: string,
+    tool: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<string>;
 }
 
 interface Live {
@@ -216,10 +222,18 @@ export class Connectors implements ConnectorHub {
     return out;
   }
 
-  async call(id: string, tool: string, args: Record<string, unknown>): Promise<string> {
-    const client = await this.client(id);
+  async call(
+    id: string,
+    tool: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const client = await untilAborted(this.client(id), signal);
+    // Connecting can take a while: the run may have ended meanwhile.
+    signal?.throwIfAborted();
     const result = await client.callTool({ name: tool, arguments: args }, undefined, {
       timeout: CALL_MS,
+      ...(signal ? { signal } : {}),
     });
     const parts = Array.isArray(result.content) ? result.content : [];
     const text = parts
@@ -429,6 +443,26 @@ function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> 
       (e: unknown) => {
         clearTimeout(t);
         reject(e instanceof Error ? e : new Error(String(e)));
+      },
+    );
+  });
+}
+
+/** `work`, or a rejection as soon as `signal` aborts, whichever comes first. */
+function untilAborted<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return work;
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (v) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(v);
+      },
+      (e: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(e);
       },
     );
   });

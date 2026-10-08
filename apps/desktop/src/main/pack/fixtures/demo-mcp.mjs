@@ -1,5 +1,6 @@
 // A tiny MCP server over stdio, for the connector tests and the demo pack.
 // One tool reads, one would change something; neither touches anything real.
+import { appendFileSync } from 'node:fs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -27,13 +28,17 @@ server.registerTool(
     inputSchema: { repo: z.string(), title: z.string(), body: z.string().optional() },
     annotations: { readOnlyHint: false },
   },
-  async ({ repo, title }) => ({
-    content: [
-      {
-        type: 'text',
-        text: `created ${repo}#2 "${title}" token=${process.env.DEMO_TOKEN ? 'set' : 'missing'}`,
-      },
-    ],
-  }),
+  async ({ repo, title }) => {
+    // Tests can see whether a call reached the server.
+    if (process.env.DEMO_CALL_LOG) appendFileSync(process.env.DEMO_CALL_LOG, `${title}\n`);
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `created ${repo}#2 "${title}" token=${process.env.DEMO_TOKEN ? 'set' : 'missing'}`,
+        },
+      ],
+    };
+  },
 );
 await server.connect(new StdioServerTransport());

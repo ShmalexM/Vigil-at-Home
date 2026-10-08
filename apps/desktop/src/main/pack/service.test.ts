@@ -45,7 +45,12 @@ const REMOTE: RemoteTool[] = [
 ];
 
 function setup(
-  opts: { status?: Partial<PackAiStatus>; preflight?: PreflightReply['decision'] } = {},
+  opts: {
+    status?: Partial<PackAiStatus>;
+    preflight?: PreflightReply['decision'];
+    /** While set, checking AI status waits for it. */
+    statusGate?: { wait?: Promise<void> | undefined; entered?: () => void };
+  } = {},
 ) {
   const settings = new Map<string, unknown>();
   const handlers: Handler[] = [];
@@ -77,12 +82,18 @@ function setup(
         return { ok: true, value: req.output.parse(value), provider: 'codex', logId: 'x' };
       },
       modelOf: () => 'gpt-5.5',
-      status: async () => ({
-        anyReady: true,
-        judge: { ready: true, detail: 'Codex checks risky calls' },
-        leadMayUsePlan: false,
-        ...opts.status,
-      }),
+      status: async () => {
+        if (opts.statusGate?.wait) {
+          opts.statusGate.entered?.();
+          await opts.statusGate.wait;
+        }
+        return {
+          anyReady: true,
+          judge: { ready: true, detail: 'Codex checks risky calls' },
+          leadMayUsePlan: false,
+          ...opts.status,
+        };
+      },
     },
     vigilTools: {
       list: () => [LISTING('list_alerts'), LISTING('search_events')],
@@ -270,6 +281,33 @@ describe('the pack', () => {
     });
     await pack.runDog(dog.id);
     expect(String(answer)).toContain('ran out of time');
+    expect(connectorCalls).toEqual([]);
+  });
+
+  it('starts no risk check, note or ask once the run asking has ended', async () => {
+    const statusGate: { wait?: Promise<void> | undefined; entered?: () => void } = {};
+    const { pack, handlers, runs, connectorCalls, notebook } = setup({ statusGate });
+    pack.setMode('auto');
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    let answer: unknown;
+    handlers.push(async (req) => {
+      let open!: () => void;
+      statusGate.wait = new Promise((r) => (open = r));
+      const entered = new Promise<void>((r) => (statusGate.entered = r));
+      const run = new AbortController();
+      const pending = tool(req, 'github_create_issue').run({ title: 'x' }, { signal: run.signal });
+      await entered;
+      run.abort(); // the deadline passes while the status check is slow
+      statusGate.wait = undefined;
+      open();
+      answer = await pending;
+      return { summary: 'done', findings: [] };
+    });
+    await pack.runDog(dog.id);
+    expect(String(answer)).toContain('ran out of time');
+    expect(runs.filter((r) => r.instructions.includes('Rate how risky'))).toHaveLength(0);
+    expect(notebook.list({ dog: dog.id }).filter((n) => n.kind === 'judge')).toHaveLength(0);
+    expect((await pack.view()).approvals).toHaveLength(0);
     expect(connectorCalls).toEqual([]);
   });
 

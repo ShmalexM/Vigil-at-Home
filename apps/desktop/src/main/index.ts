@@ -419,8 +419,8 @@ function start(): void {
       },
       true,
       // Each helper call has its own time limit, and a big list sync can
-      // take a while chunk by chunk: never give up on blocking rules midway.
-      { stuckAfterMs: Infinity },
+      // take a while chunk by chunk; past ten minutes, something is wrong.
+      { stuckAfterMs: 10 * 60_000 },
     );
   }
 

@@ -1,11 +1,8 @@
-import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, constants, readFile, realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
+import { execFileWithin } from './execWithin.js';
 
 /**
  * Where vendor CLIs are usually installed on a Mac. A menu-bar app launched
@@ -61,18 +58,23 @@ const CODESIGN_TIMEOUT_MS = 20_000;
 
 async function readTeamId(path: string): Promise<string | undefined> {
   if (process.platform !== 'darwin') return undefined;
-  const opts = { timeout: CODESIGN_TIMEOUT_MS };
-  try {
-    await execFileAsync('/usr/bin/codesign', ['--verify', '--strict', path], opts);
-    const { stderr } = await execFileAsync('/usr/bin/codesign', ['-dv', '--verbose=2', path], opts);
-    const match = /^TeamIdentifier=(\S+)$/m.exec(stderr);
-    return match && match[1] !== 'not' ? match[1] : undefined;
-  } catch (err) {
-    // Timed out: say so rather than cache "no team" for this binary.
-    if ((err as { killed?: boolean }).killed)
-      throw new Error(`codesign timed out on ${path}`, { cause: err });
-    return undefined;
-  }
+  const verify = await execFileWithin(
+    '/usr/bin/codesign',
+    ['--verify', '--strict', path],
+    CODESIGN_TIMEOUT_MS,
+  );
+  if (verify.timedOut) throw new Error(`codesign timed out on ${path}`);
+  if (verify.code !== 0) return undefined;
+  const info = await execFileWithin(
+    '/usr/bin/codesign',
+    ['-dv', '--verbose=2', path],
+    CODESIGN_TIMEOUT_MS,
+  );
+  // Timed out: say so rather than cache "no team" for this binary.
+  if (info.timedOut) throw new Error(`codesign timed out on ${path}`);
+  if (info.code !== 0) return undefined;
+  const match = /^TeamIdentifier=(\S+)$/m.exec(info.stderr);
+  return match && match[1] !== 'not' ? match[1] : undefined;
 }
 
 /** Hashing a large CLI on every run is slow, so reuse the result until the file changes. */

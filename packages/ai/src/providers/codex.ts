@@ -431,7 +431,11 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
       async function confirmSignedIn(): Promise<boolean> {
         for (let i = 0; i < SIGN_IN_CONFIRM_TRIES; i++) {
           try {
-            const { account } = await rpc.request<{ account: unknown }>('account/read', {});
+            const { account } = await rpc.request<{ account: unknown }>(
+              'account/read',
+              {},
+              RPC_SETUP_MS,
+            );
             if (account) return true;
           } catch {
             // Try again below.
@@ -449,13 +453,14 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
         const started = await rpc.request<{ type: string; loginId: string; authUrl: string }>(
           'account/login/start',
           { type: 'chatgpt' },
+          RPC_SETUP_MS,
         );
         loginId = started.loginId;
         return {
           url: started.authUrl,
           completed,
           cancel: () => {
-            void rpc.request('account/login/cancel', { loginId }).catch(() => {});
+            void rpc.request('account/login/cancel', { loginId }, RPC_SETUP_MS).catch(() => {});
             settle(false);
           },
         };
@@ -481,11 +486,11 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
         });
         const { account } = await rpc.request<{
           account: { type: string; planType?: string } | null;
-        }>('account/read', {});
+        }>('account/read', {}, RPC_SETUP_MS);
         if (account?.type !== 'chatgpt') return undefined;
         const limits = await rpc.request<{
           rateLimits: Parameters<typeof usageFromSnapshot>[0] | null;
-        }>('account/rateLimits/read', {});
+        }>('account/rateLimits/read', {}, RPC_SETUP_MS);
         return {
           ...(account.planType ? { plan: account.planType } : {}),
           windows: limits.rateLimits ? usageFromSnapshot(limits.rateLimits) : [],
@@ -513,7 +518,11 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
       const done = new Promise<AdapterRunOutput>((resolve) => (settle = resolve));
       const finish = (out: AdapterRunOutput) => settle(usage ? { ...out, usage } : out);
       let rpc: JsonRpcStdio | undefined;
-      const onAbort = () => finish({ kind: 'error', message: 'aborted', audit });
+      // Ending the run stops the server too, so no request waits on it.
+      const onAbort = () => {
+        finish({ kind: 'error', message: 'aborted', audit });
+        rpc?.close();
+      };
       input.signal.addEventListener('abort', onAbort, { once: true });
 
       try {
@@ -592,7 +601,10 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
         const thread = await rpc.request<{ thread: { id: string } }>(
           'thread/start',
           codexThreadStartParams({ cwd, systemPrompt: input.systemPrompt, tools: input.tools }),
+          RPC_SETUP_MS,
         );
+        // Starting the thread can take a while: start no turn for a run that has ended.
+        input.signal.throwIfAborted();
         await rpc.request(
           'turn/start',
           codexTurnStartParams({
@@ -600,6 +612,7 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
             userPrompt: input.userPrompt,
             jsonSchema: input.jsonSchema,
           }),
+          RPC_SETUP_MS,
         );
         return await done;
       } catch (error) {

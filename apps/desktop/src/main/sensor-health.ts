@@ -1,5 +1,5 @@
-import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { execFileWithin } from '@vigil/ai';
 import type { EventSource } from '@vigil/core';
 import type { HelperState } from './helper.js';
 import type { SensorRegistry } from './sensors.js';
@@ -61,13 +61,9 @@ export function macProbe(
     platform,
     ...(helperSensors ? { helperSensors } : {}),
     exists: existsSync,
-    running: (name) =>
-      new Promise((resolve) =>
-        // A pgrep that hangs counts as not running rather than holding up the health check.
-        execFile('/usr/bin/pgrep', ['-x', name], { timeout: PGREP_TIMEOUT_MS }, (err) =>
-          resolve(!err),
-        ),
-      ),
+    // A pgrep that hangs counts as not running rather than holding up the health check.
+    running: async (name) =>
+      (await execFileWithin('/usr/bin/pgrep', ['-x', name], PGREP_TIMEOUT_MS)).code === 0,
     lastEventAt,
     helper,
     now: Date.now,

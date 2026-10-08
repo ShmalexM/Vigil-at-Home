@@ -1134,12 +1134,17 @@ export class PackService {
       readOnly: t.readOnly,
       rules: this.rulesFor(t, args),
     });
+    const over = 'Not run: this run ran out of time.';
     if (decision.kind === 'judge') {
+      if (signal?.aborted) return over;
       this.setMood(dog.id, 'thinking', `Checking whether ${t.title} is safe`);
-      decision = afterJudge(await this.judge(dog, t, argText, ctx.requestedByUser));
+      const judged = await this.judge(dog, t, argText, ctx.requestedByUser, signal);
+      if (signal?.aborted) return over;
+      decision = afterJudge(judged);
     }
     if (decision.kind === 'deny') return `Not run: ${decision.reason}`;
     if (decision.kind === 'ask') {
+      if (signal?.aborted) return over;
       const answer = await this.askUser(dog, t, argText, decision.why, decision.reason);
       if (answer === 'deny') {
         this.setMood(dog.id, 'thinking', 'Carrying on without it');
@@ -1149,7 +1154,7 @@ export class PackService {
     // A wait for the user or the judge can be long: check again right before
     // the call that nothing has since switched it off or a rule now stops it,
     // and that the run asking for it hasn't ended meanwhile.
-    if (signal?.aborted) return 'Not run: this run ran out of time.';
+    if (signal?.aborted) return over;
     const stop = this.recheck(dog, t, args);
     if (stop) return `Not run: ${stop}`;
     ctx.used.push(t.key);
@@ -1164,7 +1169,7 @@ export class PackService {
         const r = this.o.vigilTools.call(t.name, args);
         return r.ok ? r.result : `Vigil couldn’t answer: ${r.error}`;
       }
-      return await this.o.connectors.call(t.source, t.name, args);
+      return await this.o.connectors.call(t.source, t.name, args, signal);
     } catch (err) {
       return `The tool failed: ${err instanceof Error ? err.message.slice(0, 300) : String(err)}`;
     } finally {
@@ -1209,8 +1214,11 @@ export class PackService {
     t: ToolEntry,
     args: string,
     requestedByUser: boolean,
+    signal?: AbortSignal,
   ): Promise<z.infer<typeof Judged> | undefined> {
     if (!(await this.status()).judge.ready && !requestedByUser) return undefined;
+    // Checking status can be slow: start no judge run for a run that has ended.
+    if (signal?.aborted) return undefined;
     const r = await this.o.ai.run({
       // A judgement inside the user's own chat may use what the chat may; a
       // pack job's never uses a Claude plan.
@@ -1233,6 +1241,7 @@ export class PackService {
       deadlineMs: JUDGE_DEADLINE_MS,
       providers: [...JOB_PROVIDERS],
     });
+    if (signal?.aborted) return undefined;
     this.note(
       {
         dog: dog.id,
