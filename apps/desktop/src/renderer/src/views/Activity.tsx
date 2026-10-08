@@ -19,6 +19,7 @@ import {
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { EventGroup, EventLabel, EventOutcome, EventView } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
+import { liveLoader } from '../live';
 import { useToast } from '../components/Toasts';
 import { AgentField, toolRequestFields } from '../components/ToolRequestFields';
 import { Button, Card, Chip, Segmented, StatusMark } from '../components/ui';
@@ -159,22 +160,32 @@ function EventFeed({
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
 
-  const load = useRef(() => {
-    const from = Date.now();
-    void vigil.listEvents(queryRef.current).then((r) => {
-      setRows(r);
-      setMore(r.length === PAGE);
-      setSearchedTo(queryRef.current.text ? from - SEARCH_WINDOW_MS : undefined);
-      setWaiting(0);
-    });
-  }).current;
+  // One load in flight at a time: a busy Mac sends a batch every second, and
+  // a text search over a day of its events can take longer than that.
+  const feed = useRef(
+    liveLoader(
+      async () => {
+        const from = Date.now();
+        const q = queryRef.current;
+        return { r: await vigil.listEvents(q), from, text: !!q.text };
+      },
+      ({ r, from, text }) => {
+        setRows(r);
+        setMore(r.length === PAGE);
+        setSearchedTo(text ? from - SEARCH_WINDOW_MS : undefined);
+        setWaiting(0);
+      },
+    ),
+  ).current;
+  const load = feed.reload;
 
   // Reload when the filters change (search waits for typing to settle).
   const key = JSON.stringify(query);
   useEffect(() => {
-    const t = setTimeout(load, text ? 250 : 0);
+    // New filters: an answer still on its way for the old ones never lands.
+    const t = setTimeout(feed.reset, text ? 250 : 0);
     return () => clearTimeout(t);
-  }, [key, load, text]);
+  }, [key, feed, text]);
 
   // New events arrive in batches at most once a second.
   useEffect(
@@ -207,12 +218,13 @@ function EventFeed({
   return (
     <div className="col" style={{ gap: 16 }}>
       <div className="stat-strip">
-        <Stat label="Events in the last hour" value={stats?.lastHour ?? 0} />
-        <Stat label="Programs started" value={stats?.programsLastHour ?? 0} />
-        <Stat label="Matched a rule" value={stats?.matchedLastHour ?? 0} />
+        {/* Until the numbers arrive, say so rather than show a zero that isn't true. */}
+        <Stat label="Events in the last hour" value={count(stats?.lastHour)} />
+        <Stat label="Programs started" value={count(stats?.programsLastHour)} />
+        <Stat label="Matched a rule" value={count(stats?.matchedLastHour)} />
         <Stat
           label="Latest event"
-          value={stats?.newest ? timeAgo(stats.newest) : 'None yet'}
+          value={!stats ? '…' : stats.newest ? timeAgo(stats.newest) : 'None yet'}
           live={!paused && !!stats?.newest}
         />
       </div>
@@ -316,6 +328,8 @@ function EventFeed({
     </div>
   );
 }
+
+const count = (n: number | undefined) => (n === undefined ? '…' : n.toLocaleString());
 
 function Stat({ label, value, live }: { label: string; value: ReactNode; live?: boolean }) {
   return (

@@ -364,21 +364,22 @@ export class Store {
   }
 
   eventStats(since: number): Omit<EventStats, 'retentionDays'> {
-    const byKind = this.db
-      .prepare(
-        `SELECT kind, COUNT(*) AS n,
-           SUM(matched) AS matched
-         FROM events WHERE ts >= ? GROUP BY kind`,
-      )
-      .all(since) as { kind: string; n: number; matched: number }[];
+    // Counts come from indexes alone (events_kind_ts covers kind and ts, and
+    // matched events have their own partial index), so an hour of a busy Mac,
+    // 200,000 events and more, never reads an event's body here.
+    const byKind = this.stmt(
+      `SELECT kind, COUNT(*) AS n FROM events WHERE ts >= ? GROUP BY kind`,
+    ).all(since) as { kind: string; n: number }[];
+    const matched = this.stmt('SELECT COUNT(*) AS n FROM events WHERE matched = 1 AND ts >= ?').get(
+      since,
+    ) as { n: number };
     const byGroup = Object.fromEntries(
       Object.keys(EVENT_GROUPS).map((g) => [g, 0]),
     ) as EventStats['byGroup'];
     let lastHour = 0;
-    let matchedLastHour = 0;
+    const matchedLastHour = Number(matched.n);
     for (const row of byKind) {
       lastHour += row.n;
-      matchedLastHour += row.matched;
       const group = (Object.keys(EVENT_GROUPS) as EventGroup[]).find((g) =>
         (EVENT_GROUPS[g] as string[]).includes(row.kind),
       );

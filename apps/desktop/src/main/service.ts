@@ -34,6 +34,8 @@ import { TEST_RULE } from './test-alert.js';
 import { WORTH_A_LOOK_RULE } from './worth-a-look.js';
 import { UsageService } from './usage.js';
 
+/** How long the Activity strip's numbers are reused (see eventStats). */
+export const EVENT_STATS_TTL_MS = 5_000;
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 /** The feed hears about new events at most this often, however fast they arrive. */
@@ -230,11 +232,22 @@ export class VigilCore {
     return cleared;
   }
 
+  private statsCache: { at: number; stats: EventStats } | undefined;
+
+  /**
+   * The Activity strip's numbers, at most {@link EVENT_STATS_TTL_MS} old. A
+   * busy Mac stores 200,000 events an hour and counting its distinct
+   * programs reads every launch's body, while the page asks again with every
+   * batch of events, about once a second.
+   */
   eventStats(): EventStats {
-    return {
-      ...this.store.eventStats(this.now() - HOUR),
-      retentionDays: EVENT_RETENTION_DAYS,
-    };
+    const now = this.now();
+    if (this.statsCache && now - this.statsCache.at < EVENT_STATS_TTL_MS) {
+      return this.statsCache.stats;
+    }
+    const stats = { ...this.store.eventStats(now - HOUR), retentionDays: EVENT_RETENTION_DAYS };
+    this.statsCache = { at: now, stats };
+    return stats;
   }
 
   status(): StatusView {
