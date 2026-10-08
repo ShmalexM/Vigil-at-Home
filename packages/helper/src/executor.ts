@@ -58,6 +58,11 @@ export interface ExecutorDeps {
    */
   launchDirs?: RegExp;
   syncPort: number;
+  /**
+   * Santa's client identity (the PKCS#12 file and its password), written into
+   * the profile so Santa presents it on every sync. Absent on Linux and in tests.
+   */
+  santaClientCert?: () => { path: string; password: string };
   /** Ask Santa to sync now so a new rule applies in seconds, not at the next interval. */
   triggerSantaSync?: () => Promise<void>;
   statusExtra?: () => Record<string, unknown>;
@@ -381,8 +386,15 @@ export class Executor {
           throw policyError(err);
         }
       }
-      case 'santa.profile':
-        return { mobileconfig: santaProfile({ syncPort: this.d.syncPort }) };
+      case 'santa.profile': {
+        const client = this.d.santaClientCert?.();
+        return {
+          mobileconfig: santaProfile({
+            syncPort: this.d.syncPort,
+            ...(client ? { clientCertPath: client.path, clientCertPassword: client.password } : {}),
+          }),
+        };
+      }
       case 'events.subscribe':
         // Handled by the server, which owns the connection.
         throw new ActionError('invalid', 'events.subscribe is handled by the connection');

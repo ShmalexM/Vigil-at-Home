@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import type { AddressInfo } from 'node:net';
+import { X509Certificate } from 'node:crypto';
+import { createSecureContext } from 'node:tls';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { RuleStore } from './santa/ruleStore.js';
@@ -16,7 +18,13 @@ import {
   SantaSyncServer,
   SYNC_SESSION_TTL_MS,
 } from './santa/syncServer.js';
-import { ensureSyncTls, serverCertNeedsRenewal, syncTlsPaths } from './santa/tls.js';
+import {
+  certFingerprint,
+  clientCertNeedsRenewal,
+  ensureSyncTls,
+  serverCertNeedsRenewal,
+  syncTlsPaths,
+} from './santa/tls.js';
 import { SensorEvent } from '@vigil/core';
 
 const SHA_A = 'a'.repeat(64);
@@ -104,6 +112,27 @@ beforeAll(async () => {
   expect(statSync(tls.dir).mode & 0o777).toBe(0o755);
   expect(statSync(tls.caCert).mode & 0o777).toBe(0o644);
   expect(statSync(tls.serverCert).mode & 0o777).toBe(0o644);
+  // Santa's client identity: the key and password root-only, the PKCS#12
+  // private to its owner (nobody on a real Mac), and it holds the same pair.
+  expect(clientCertNeedsRenewal(tls)).toBe(false);
+  expect(statSync(tls.clientKey).mode & 0o777).toBe(0o600);
+  expect(statSync(tls.clientP12Password).mode & 0o777).toBe(0o600);
+  expect(statSync(tls.clientP12).mode & 0o777).toBe(0o600);
+  const clientPem = readFileSync(tls.clientCert);
+  expect(
+    new X509Certificate(clientPem).checkIssued(new X509Certificate(readFileSync(tls.caCert))),
+  ).toBe(true);
+  expect(certFingerprint(clientPem)).toMatch(/^[0-9a-f]{64}$/);
+  const password = readFileSync(tls.clientP12Password, 'utf8').trim();
+  expect(() =>
+    createSecureContext({ pfx: readFileSync(tls.clientP12), passphrase: password }),
+  ).not.toThrow();
+  // A missing PKCS#12 brings a new identity, under the same password.
+  rmSync(tls.clientP12);
+  expect(clientCertNeedsRenewal(tls)).toBe(true);
+  expect(await ensureSyncTls(tls, 'openssl')).toBe(true);
+  expect(certFingerprint(readFileSync(tls.clientCert))).not.toBe(certFingerprint(clientPem));
+  expect(readFileSync(tls.clientP12Password, 'utf8').trim()).toBe(password);
   // A folder left at 0700 by an earlier version is repaired.
   chmodSync(tls.dir, 0o700);
   chmodSync(tls.caCert, 0o600);

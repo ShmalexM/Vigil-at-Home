@@ -11,7 +11,9 @@
 // Santa only accepts plain http for localhost, but anything running as the
 // user could bind the port first and serve allow rules. So in production this
 // server runs inside the root helper over HTTPS, with the CA pinned in
-// Santa's ServerAuthRootsData and the private key readable only by root.
+// Santa's ServerAuthRootsFile and the private key readable only by root. The
+// helper also requires Santa's pinned client certificate (tls.ts), once
+// Santa's profile carries it.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { gunzipSync, inflateSync } from 'node:zlib';

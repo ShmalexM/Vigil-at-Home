@@ -37,6 +37,20 @@ describe('Santa profile', () => {
     expect(p.PayloadRemovalDisallowed).toBe(false);
   });
 
+  it("has Santa present Vigil's client certificate when given its password", () => {
+    const without = parsePlist(santaProfile({ syncPort: 8443 })).PayloadContent[0];
+    expect(without.ClientAuthCertificateFile).toBeUndefined();
+    const payload = parsePlist(santaProfile({ syncPort: 8443, clientCertPassword: 'pw' }))
+      .PayloadContent[0];
+    expect(payload.ClientAuthCertificateFile).toBe(
+      '/Library/Application Support/Vigil/santa-sync/client.p12',
+    );
+    expect(payload.ClientAuthCertificatePassword).toBe('pw');
+    // Keychain lookups are not used: they would need an import into a keychain.
+    expect(payload.ClientAuthCertificateCN).toBeUndefined();
+    expect(payload.ClientAuthCertificateIssuerCN).toBeUndefined();
+  });
+
   it('rejects bad ports', () => {
     expect(() => santaProfile({ syncPort: 0 })).toThrow();
   });

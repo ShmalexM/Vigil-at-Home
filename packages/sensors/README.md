@@ -31,6 +31,18 @@ is its sync server on the same Mac:
   runs as `nobody` and fails every sync with a TLS error if it can't read the CA
   (found on a real Mac with Santa 2026.8). If something else holds the port, syncs fail and Santa keeps its
   current rules.
+- **Client certificate (mutual TLS).** The same CA signs a client certificate for
+  Santa. The profile sets `ClientAuthCertificateFile` (a PKCS#12 file Santa opens
+  itself, no keychain import) and `ClientAuthCertificatePassword`. The helper's sync
+  server requires a client certificate from that CA and pins its SHA-256, so another
+  local program can't pull the rules or confirm a sync in Santa's place. The key is
+  root-only (`client.key`); the PKCS#12 copy is owned by `nobody`, mode 0600, because
+  `santasyncservice` reads it after dropping to `nobody`. The password is not a secret
+  (it is in the profile); the file's owner and mode protect it. A profile installed
+  before this certificate existed has no client keys: the helper serves a client
+  without a certificate until Santa first presents the pinned one, then requires it
+  for good (`SyncClientAuth` in the helper). Until the user reinstalls the profile,
+  `helper.status` reports `clientCertRequired: false`.
 - **Monitor mode.** The profile sets `ClientMode` 1: Santa enforces only explicit block
   rules, so a personal Mac keeps working. Lockdown would block every program not
   already allowed.
@@ -91,6 +103,10 @@ Rules treat unsigned and ad hoc programs as untrusted, so every event needs a
 - That a profile the user installs by hand counts as "forced" for Santa. Expected, since
   that is how custom settings payloads work, but not yet tested.
 - Santa accepting the pinned private CA through `ServerAuthRootsFile` for `127.0.0.1`.
+- Santa presenting the client certificate from `ClientAuthCertificateFile` as `nobody`
+  and completing a sync against the helper's mutual-TLS server. The macOS CI checks the
+  file's owner and that Apple's Security framework opens it (`tls.mac.test.ts`), but no
+  runner has Santa installed.
 
 ## osquery setup
 

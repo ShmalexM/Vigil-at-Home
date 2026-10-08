@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   appendFileSync,
+  cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -15,15 +17,17 @@ import { join } from 'node:path';
 import { DetectionEngine, macosCoreRules, memoryStores } from '@vigil/detection';
 import { fastPathRules } from '@vigil/detection/fastpath';
 import type { SensorEvent } from '@vigil/sensors';
-import { fileAccessPolicy, syncTlsPaths } from '@vigil/sensors';
+import { certFingerprint, ensureSyncTls, fileAccessPolicy, syncTlsPaths } from '@vigil/sensors';
 import { HelperClient } from './client.js';
 import { defaultPaths, type HelperPaths } from './config.js';
 import {
+  CLIENT_AUTH_MARKER,
   createSyncHttpsServer,
   listenUnlessStopped,
   runDaemon,
   SYNC_SERVER_LIMITS,
   type SensorHealth,
+  type SyncClientPin,
 } from './daemon.js';
 import type { HelperRan } from './fastpath.js';
 import { FakeSystem } from './testing/fakeSystem.js';
@@ -96,12 +100,34 @@ afterAll(async () => {
   rmSync(root, { recursive: true, force: true });
 });
 
+/** The client identity in a sync folder, as Santa presents it. */
+function clientIdentity(tlsDir: string): { key: Buffer; cert: Buffer } {
+  const t = syncTlsPaths(tlsDir);
+  return { key: readFileSync(t.clientKey), cert: readFileSync(t.clientCert) };
+}
+
+/** Another client identity from the same CA, not the one the helper pinned. */
+async function sameCaIdentity(tlsDir: string): Promise<{ key: Buffer; cert: Buffer }> {
+  const copy = mkdtempSync(join(tmpdir(), 'vigil-other-client-'));
+  cpSync(tlsDir, copy, { recursive: true });
+  rmSync(join(copy, 'client.p12'));
+  await ensureSyncTls(syncTlsPaths(copy), 'openssl');
+  const id = clientIdentity(copy);
+  rmSync(copy, { recursive: true, force: true });
+  return id;
+}
+
 function santaPost(
   stage: string,
   body: unknown,
-  at = { port, tlsDir: paths.tlsDir },
+  at: { port: number; tlsDir: string; client?: { key: Buffer; cert: Buffer } | false } = {
+    port,
+    tlsDir: paths.tlsDir,
+  },
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- loose JSON in tests
 ): Promise<any> {
+  // Santa's own certificate unless the test says otherwise.
+  const client = at.client === undefined ? clientIdentity(at.tlsDir) : at.client;
   return new Promise((resolve, reject) => {
     const req = request(
       {
@@ -110,6 +136,8 @@ function santaPost(
         method: 'POST',
         path: `/${stage}/M1`,
         ca: readFileSync(join(at.tlsDir, 'ca.pem')),
+        ...(client ? client : {}),
+        agent: false,
         headers: { 'content-type': 'application/json' },
       },
       (res) => {
@@ -129,6 +157,33 @@ describe('helper daemon', () => {
     expect(statSync(paths.tlsDir).mode & 0o777).toBe(0o755);
     expect(statSync(join(paths.tlsDir, 'ca.pem')).mode & 0o777).toBe(0o644);
     expect(statSync(join(paths.tlsDir, 'ca.key')).mode & 0o777).toBe(0o600);
+    expect(statSync(join(paths.tlsDir, 'client.key')).mode & 0o777).toBe(0o600);
+    expect(statSync(join(paths.tlsDir, 'client.p12.pass')).mode & 0o777).toBe(0o600);
+    expect(statSync(join(paths.tlsDir, 'client.p12')).mode & 0o777).toBe(0o600);
+  });
+
+  it('serves a profile that has Santa present its client certificate', async () => {
+    const r = await client!.call<{ mobileconfig: string }>({ kind: 'santa.profile' });
+    const password = readFileSync(join(paths.tlsDir, 'client.p12.pass'), 'utf8').trim();
+    expect(r.mobileconfig).toMatch(
+      /<key>ClientAuthCertificateFile<\/key>\s*<string>[^<]*\/client\.p12<\/string>/,
+    );
+    expect(r.mobileconfig).toMatch(
+      new RegExp(`<key>ClientAuthCertificatePassword</key>\\s*<string>${password}</string>`),
+    );
+  });
+
+  it('takes only the pinned client certificate on a new install', async () => {
+    const status = await client!.call<{ sensors: SensorHealth }>({ kind: 'helper.status' });
+    expect(status.sensors.santa.clientCertRequired).toBe(true);
+    await expect(
+      santaPost('preflight', {}, { port, tlsDir: paths.tlsDir, client: false }),
+    ).rejects.toThrow();
+    const other = await sameCaIdentity(paths.tlsDir);
+    await expect(
+      santaPost('preflight', {}, { port, tlsDir: paths.tlsDir, client: other }),
+    ).rejects.toThrow();
+    expect((await santaPost('preflight', {})).sync_type).toBeDefined();
   });
 
   it('serves commands, Santa sync and live sensor events together', async () => {
@@ -137,7 +192,13 @@ describe('helper daemon', () => {
     });
     expect(status.activeActions).toBe(0);
     expect(status.sensors).toEqual({
-      santa: { installed: true, lastEventAt: null, lastSyncAt: null, syncError: null },
+      santa: {
+        installed: true,
+        lastEventAt: null,
+        lastSyncAt: null,
+        syncError: null,
+        clientCertRequired: true,
+      },
       osquery: { installed: false, lastEventAt: null },
     });
 
@@ -258,8 +319,20 @@ describe('helper daemon with the sync port taken', () => {
 describe('the Santa sync port', () => {
   const tlsFiles = () => {
     const t = syncTlsPaths(paths.tlsDir);
-    return { key: readFileSync(t.serverKey), cert: readFileSync(t.serverCert) };
+    return {
+      key: readFileSync(t.serverKey),
+      cert: readFileSync(t.serverCert),
+      ca: readFileSync(t.caCert),
+    };
   };
+  const pinned = (required = true): SyncClientPin & { seen: number } => ({
+    fingerprint: certFingerprint(readFileSync(syncTlsPaths(paths.tlsDir).clientCert)),
+    required,
+    seen: 0,
+    pinnedSeen() {
+      this.seen++;
+    },
+  });
   const freePort = port + 2000;
   const closed = (s: Socket) => new Promise<void>((r) => s.once('close', () => r()));
   const open = async (p: number) => {
@@ -270,7 +343,7 @@ describe('the Santa sync port', () => {
   };
 
   it('cuts off slow clients and keeps few connections', () => {
-    const server = createSyncHttpsServer(tlsFiles(), () => {});
+    const server = createSyncHttpsServer(tlsFiles(), () => {}, pinned());
     expect(server.maxConnections).toBe(16);
     expect(server.headersTimeout).toBe(15_000);
     expect(server.requestTimeout).toBe(30_000);
@@ -279,7 +352,7 @@ describe('the Santa sync port', () => {
   });
 
   it('drops a connection that never finishes the TLS handshake, and ones over the limit', async () => {
-    const server = createSyncHttpsServer(tlsFiles(), () => {}, {
+    const server = createSyncHttpsServer(tlsFiles(), () => {}, pinned(), {
       ...SYNC_SERVER_LIMITS,
       maxConnections: 2,
       handshakeTimeoutMs: 200,
@@ -299,8 +372,98 @@ describe('the Santa sync port', () => {
     }
   });
 
+  /** POSTs a preflight with node's TLS client; 'refused' when the connection is dropped. */
+  const tryPreflight = (
+    p: number,
+    id?: { key: Buffer; cert: Buffer },
+  ): Promise<number | 'refused'> =>
+    new Promise((resolve) => {
+      const req = request(
+        {
+          host: '127.0.0.1',
+          port: p,
+          method: 'POST',
+          path: '/preflight/M1',
+          ca: readFileSync(syncTlsPaths(paths.tlsDir).caCert),
+          agent: false,
+          ...(id ?? {}),
+        },
+        (res) => {
+          res.resume();
+          res.on('end', () => resolve(res.statusCode ?? 0));
+        },
+      );
+      req.on('error', () => resolve('refused'));
+      req.end('{}');
+    });
+
+  const serve = async (pin: SyncClientPin) => {
+    const routed: string[] = [];
+    const server = createSyncHttpsServer(
+      tlsFiles(),
+      (req, res) => {
+        routed.push(req.url ?? '');
+        res.end('{}');
+      },
+      pin,
+    );
+    await listenUnlessStopped(server, freePort, () => false);
+    return {
+      routed,
+      close: () => new Promise<void>((r) => server.close(() => r())),
+    };
+  };
+
+  it('requires the pinned client certificate before routing anything', async () => {
+    const pin = pinned();
+    const s = await serve(pin);
+    try {
+      // No certificate: refused in the handshake.
+      expect(await tryPreflight(freePort)).toBe('refused');
+      // Signed by Vigil's CA, but not the certificate the helper made for Santa.
+      expect(await tryPreflight(freePort, await sameCaIdentity(paths.tlsDir))).toBe('refused');
+      // From another CA altogether.
+      const elsewhere = mkdtempSync(join(tmpdir(), 'vigil-other-ca-'));
+      await ensureSyncTls(syncTlsPaths(elsewhere), 'openssl');
+      expect(await tryPreflight(freePort, clientIdentity(elsewhere))).toBe('refused');
+      rmSync(elsewhere, { recursive: true, force: true });
+      expect(s.routed).toEqual([]);
+      // Santa's own certificate.
+      expect(await tryPreflight(freePort, clientIdentity(paths.tlsDir))).toBe(200);
+      expect(s.routed).toEqual(['/preflight/M1']);
+      expect(pin.seen).toBeGreaterThan(0);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('serves a client without a certificate only until Santa presents its own', async () => {
+    let required = false;
+    const pin: SyncClientPin = {
+      fingerprint: certFingerprint(readFileSync(syncTlsPaths(paths.tlsDir).clientCert)),
+      get required() {
+        return required;
+      },
+      pinnedSeen() {
+        required = true;
+      },
+    };
+    const s = await serve(pin);
+    try {
+      expect(await tryPreflight(freePort)).toBe(200);
+      // A wrong certificate is refused even then.
+      expect(await tryPreflight(freePort, await sameCaIdentity(paths.tlsDir))).toBe('refused');
+      expect(await tryPreflight(freePort, clientIdentity(paths.tlsDir))).toBe(200);
+      expect(required).toBe(true);
+      expect(await tryPreflight(freePort)).toBe('refused');
+      expect(s.routed).toEqual(['/preflight/M1', '/preflight/M1']);
+    } finally {
+      await s.close();
+    }
+  });
+
   it('does not stay bound when the helper stops during listen', async () => {
-    const server = createSyncHttpsServer(tlsFiles(), () => {});
+    const server = createSyncHttpsServer(tlsFiles(), () => {}, pinned());
     let stopped = false;
     const listening = listenUnlessStopped(server, freePort, () => stopped);
     stopped = true;
@@ -310,5 +473,76 @@ describe('the Santa sync port', () => {
     const probe = createServer();
     await new Promise<void>((r) => probe.listen(freePort, '127.0.0.1', () => r()));
     await new Promise<void>((r) => probe.close(() => r()));
+  });
+});
+
+describe('helper upgrade with a Santa profile from before the client certificate', () => {
+  it('keeps Santa syncing, then requires the certificate once Santa presents it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vigil-daemon-upgrade-'));
+    const upPort = port + 3000;
+    const upPaths = testPaths(dir);
+    // An earlier helper made the CA and server certificate; the client
+    // identity is new in this version.
+    const t = syncTlsPaths(upPaths.tlsDir);
+    await ensureSyncTls(t, 'openssl');
+    for (const f of [t.clientKey, t.clientCert, t.clientP12, t.clientP12Password]) rmSync(f);
+    const marker = join(upPaths.tlsDir, CLIENT_AUTH_MARKER);
+    const start = async () => {
+      const s = new FakeSystem();
+      s.console = process.getuid!() === 0 ? 501 : undefined;
+      const stopIt = await runDaemon({
+        paths: upPaths,
+        syncPort: upPort,
+        sys: s,
+        log: () => {},
+        approvalOwnerUid: process.getuid!(),
+        opensslBin: 'openssl',
+        sensorBinaries: { santa: upPaths.santaLog as string, osquery: join(dir, 'no-osqueryd') },
+        osquery: false,
+      });
+      const c = await HelperClient.connect(upPaths.socket, async () => false);
+      return { stop: stopIt, c };
+    };
+    const at = (client?: { key: Buffer; cert: Buffer } | false) => ({
+      port: upPort,
+      tlsDir: upPaths.tlsDir,
+      client: client ?? false,
+    });
+    let run = await start();
+    try {
+      const required = async () =>
+        (await run.c.call<{ sensors: SensorHealth }>({ kind: 'helper.status' })).sensors.santa
+          .clientCertRequired;
+      expect(existsSync(t.clientP12)).toBe(true);
+      expect(await required()).toBe(false);
+      // Santa with the old profile: no certificate, still syncs.
+      expect((await santaPost('preflight', {}, at())).sync_type).toBe('CLEAN');
+      // Any other certificate is refused.
+      await expect(
+        santaPost('preflight', {}, at(await sameCaIdentity(upPaths.tlsDir))),
+      ).rejects.toThrow();
+      expect(existsSync(marker)).toBe(false);
+      // The new profile is installed and Santa presents its certificate.
+      expect((await santaPost('preflight', {}, at(clientIdentity(upPaths.tlsDir)))).sync_type).toBe(
+        'CLEAN',
+      );
+      expect(await required()).toBe(true);
+      expect(statSync(marker).mode & 0o777).toBe(0o600);
+      await expect(santaPost('preflight', {}, at())).rejects.toThrow();
+
+      // And it stays required after a restart.
+      run.c.close();
+      await run.stop();
+      run = await start();
+      expect(await required()).toBe(true);
+      await expect(santaPost('preflight', {}, at())).rejects.toThrow();
+      expect((await santaPost('preflight', {}, at(clientIdentity(upPaths.tlsDir)))).sync_type).toBe(
+        'CLEAN',
+      );
+    } finally {
+      run.c.close();
+      await run.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

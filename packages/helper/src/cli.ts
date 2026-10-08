@@ -9,12 +9,14 @@
 // vigil-helper osquery-setup     (root) write Vigil's osquery config and start osquery
 // vigil-helper osquery-remove    (root) stop Vigil's osquery job, restore osquery's old config
 
+import { readFileSync } from 'node:fs';
 import {
   osqueryConfig,
   osqueryFlags,
   osqueryLinuxConfig,
   osqueryLinuxFlags,
   santaProfile,
+  syncTlsPaths,
 } from '@vigil/sensors';
 import { Approvals } from './approval.js';
 import { defaultPaths, SANTA_SYNC_PORT } from './config.js';
@@ -54,9 +56,28 @@ async function main(argv: string[]): Promise<number> {
       for (const n of nonces) Approvals.writeApproval(defaultPaths().approvalsDir, n);
       return 0;
     }
-    case 'santa-profile':
-      process.stdout.write(santaProfile({ syncPort: SANTA_SYNC_PORT }));
+    case 'santa-profile': {
+      // The client certificate's password is root-only; without it the
+      // profile leaves client authentication out and says so.
+      const tls = syncTlsPaths(defaultPaths().tlsDir);
+      let clientCertPassword: string | undefined;
+      try {
+        clientCertPassword = readFileSync(tls.clientP12Password, 'utf8').trim();
+      } catch {
+        console.error(
+          'note: run as root after the helper has started to include the client certificate',
+        );
+      }
+      process.stdout.write(
+        santaProfile({
+          syncPort: SANTA_SYNC_PORT,
+          ...(clientCertPassword !== undefined
+            ? { clientCertPath: tls.clientP12, clientCertPassword }
+            : {}),
+        }),
+      );
       return 0;
+    }
     case 'osquery-config':
       process.stdout.write(hostPlatform() === 'linux' ? osqueryLinuxConfig() : osqueryConfig());
       return 0;
