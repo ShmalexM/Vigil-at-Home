@@ -144,6 +144,8 @@ export interface ChatMessage {
   memory?: MemoryChange[];
   /** Tools the Lead dog used while answering. */
   used?: string[];
+  /** Its input could hold someone else's text: a tool's result, a dog's report, or an answer that read one. */
+  tainted?: boolean;
   failed?: boolean;
 }
 
@@ -275,8 +277,9 @@ export interface MemoryEntry {
 /**
  * A change the Lead dog asked for in the pack's memory. Applied straight
  * away only when that answer rested on the person's own words alone (no tool
- * was used); otherwise it waits on a "Remember this?" card, because text an
- * alert or a connector returned could be written by anyone.
+ * was used, no dog's report or tool-using answer was read); otherwise it
+ * waits on a "Remember this?" card, because text an alert or a connector
+ * returned could be written by anyone.
  */
 export interface MemoryChange {
   id: string;

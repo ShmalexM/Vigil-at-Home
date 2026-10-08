@@ -168,6 +168,7 @@ const ChatRecord = z.object({
   actions: z.array(ActionRecord).optional(),
   memory: z.array(MemoryChangeRecord).optional(),
   used: z.array(z.string()).optional(),
+  tainted: z.boolean().optional(),
   failed: z.boolean().optional(),
 });
 
@@ -596,6 +597,13 @@ export class PackService {
               }
             : {}),
         }));
+      // A dog's report, or an earlier answer that read tool output, can carry
+      // someone else's text into this answer even when it uses no tool itself.
+      const readTainted =
+        this.chat()
+          .slice(-CONTEXT_MESSAGES - 1, -1)
+          .some((m) => m.tainted || (m.used?.length ?? 0) > 0) ||
+        this.dogs().some((d) => d.lastReport);
       const tools = this.toolsFor(lead, { requestedByUser: true, used });
       const memory = this.memoryFor(tools);
       const result = await this.o.ai.run({
@@ -657,10 +665,11 @@ export class PackService {
         this.setMood(lead.id, 'error', 'Couldn’t answer', DONE_MS);
         return;
       }
-      const actions = result.value.actions.map((a) => this.consider(a));
-      // Text a tool returned could be anyone's, so an answer that used one
-      // only proposes memory changes; one from the person's words alone applies them.
-      const memoryChanges = this.considerMemory(result.value, used.length > 0, mine.id);
+      // Text a tool returned could be anyone's, so an answer that used one, or
+      // read one, only proposes changes; one from the person's words alone applies them.
+      const taint = used.length > 0 ? 'tools' : readTainted ? 'data' : undefined;
+      const actions = result.value.actions.map((a) => this.consider(a, taint !== undefined));
+      const memoryChanges = this.considerMemory(result.value, taint, mine.id);
       const about = lookingAt && subjectOf(lookingAt);
       this.note(
         {
@@ -679,6 +688,7 @@ export class PackService {
       this.reply({
         text: result.value.reply,
         used,
+        ...(taint ? { tainted: true } : {}),
         ...(actions.length ? { actions } : {}),
         ...(memoryChanges.length ? { memory: memoryChanges } : {}),
       });
@@ -697,7 +707,7 @@ export class PackService {
   }
 
   /** Checks one change the Lead dog asked for, then applies it or leaves it for the user. */
-  private consider(a: z.infer<typeof LeadAnswer>['actions'][number]): LeadAction {
+  private consider(a: z.infer<typeof LeadAnswer>['actions'][number], tainted: boolean): LeadAction {
     const action: LeadAction = { id: newId(this.now()), kind: a.kind, status: 'pending' };
     const dogs = this.dogs();
     if (a.kind !== 'create') {
@@ -725,15 +735,17 @@ export class PackService {
     const before = action.dogId ? (dogs.find((d) => d.id === action.dogId)?.tools ?? []) : [];
     const added = (dog.tools ?? []).filter((k) => !before.includes(k));
     const grantsWrite = added.some((k) => !this.treatedAsReadOnly(k));
-    if (gateAction(this.mode(), a.kind, grantsWrite) === 'ask') {
+    if (gateAction(this.mode(), a.kind, grantsWrite, tainted) === 'ask') {
       return {
         ...action,
         note:
           this.mode() === 'ask'
             ? 'Waiting for your OK'
-            : a.kind === 'retire'
-              ? 'Retiring a dog always waits for your OK'
-              : 'It would get a tool that can change things, so it waits for your OK',
+            : tainted
+              ? 'This answer read data from your computer, so it waits for your OK'
+              : a.kind === 'retire'
+                ? 'Retiring a dog always waits for your OK'
+                : 'It would get a tool that can change things, so it waits for your OK',
       };
     }
     return this.apply(action);
@@ -850,7 +862,7 @@ export class PackService {
 
   private considerMemory(
     answer: z.infer<typeof LeadAnswer>,
-    fromTools: boolean,
+    taint: 'tools' | 'data' | undefined,
     source: string,
   ): MemoryChange[] {
     if (!this.o.memory) return [];
@@ -879,14 +891,16 @@ export class PackService {
         status: 'pending',
       });
     }
+    const why =
+      taint === 'tools' ? 'This answer used tools' : 'This answer read data from your computer';
     return changes.map((c) =>
-      fromTools
+      taint
         ? {
             ...c,
             note:
               c.op === 'remember'
-                ? 'This answer used tools, so it waits for your OK'
-                : 'This answer used tools, so forgetting waits for your OK',
+                ? `${why}, so it waits for your OK`
+                : `${why}, so forgetting waits for your OK`,
           }
         : this.applyMemory(c, 'lead', source),
     );

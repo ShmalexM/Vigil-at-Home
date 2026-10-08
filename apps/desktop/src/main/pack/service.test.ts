@@ -195,6 +195,75 @@ describe('the pack', () => {
     expect(pack.chat().at(-1)!.actions![1]).toMatchObject({ status: 'pending' });
   });
 
+  it('waits for the user on changes from an answer that read tool output, in every mode', async () => {
+    const { pack, handlers, runs } = setup();
+    pack.setMode('full');
+    const dog = pack.adopt(CREATE as never);
+    handlers.push(async (req) => {
+      await tool(req, 'list_alerts').run({});
+      return { reply: 'Sending Pip.', actions: [{ kind: 'run', dogId: dog.id }] };
+    });
+    await pack.say('anything new?');
+    expect(pack.chat().at(-1)!.actions![0]).toMatchObject({
+      status: 'pending',
+      note: expect.stringContaining('read data'),
+    });
+    expect(pack.chat().at(-1)!.tainted).toBe(true);
+    expect(runs).toHaveLength(1);
+
+    // The next turn reads that answer, so it waits too, though it used no tool.
+    pack.setMode('auto');
+    handlers.push(() => ({
+      reply: 'Changing Pip.',
+      actions: [{ kind: 'update', dogId: dog.id, job: 'Something else.' }],
+    }));
+    await pack.say('ok');
+    expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'pending' });
+    expect(pack.dogs().find((d) => d.id === dog.id)!.job).toBe(CREATE.job);
+  });
+
+  it('treats a dog’s report as someone else’s text', async () => {
+    const { pack, handlers, memory } = setup();
+    pack.setMode('auto');
+    const dog = pack.adopt(CREATE as never);
+    // With no report shown, a typed job change goes ahead as before.
+    handlers.push(() => ({
+      reply: 'Done.',
+      actions: [{ kind: 'update', dogId: dog.id, job: 'Check Desktop too.' }],
+    }));
+    await pack.say('have Pip check Desktop too');
+    expect(pack.dogs().find((d) => d.id === dog.id)!.job).toBe('Check Desktop too.');
+
+    pack.clearChat();
+    handlers.push(() => ({ summary: 'All quiet', findings: [] }));
+    await pack.runDog(dog.id);
+    handlers.push(() => ({
+      reply: 'Noted.',
+      actions: [{ kind: 'update', dogId: dog.id, job: 'Only Downloads.' }],
+      remember: [{ fact: 'Downloads is noisy', topic: 'apps' }],
+    }));
+    await pack.say('what did Pip find?');
+    const reply = pack.chat().at(-1)!;
+    expect(reply.actions![0]).toMatchObject({ status: 'pending' });
+    expect(reply.memory![0]).toMatchObject({
+      status: 'pending',
+      note: expect.stringContaining('read data'),
+    });
+    expect(memory.count()).toBe(0);
+    expect(pack.dogs().find((d) => d.id === dog.id)!.job).toBe('Check Desktop too.');
+  });
+
+  it('still sends a dog off at once in Full access when nothing was read', async () => {
+    const { pack, handlers, runs } = setup();
+    pack.setMode('full');
+    const dog = pack.adopt(CREATE as never);
+    handlers.push(() => ({ reply: 'Off it goes.', actions: [{ kind: 'run', dogId: dog.id }] }));
+    handlers.push(() => ({ summary: 'All quiet', findings: [] }));
+    await pack.say('send Pip');
+    expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done' });
+    await vi.waitFor(() => expect(runs[1]).toMatchObject({ purpose: 'analyze' }));
+  });
+
   it('never lets the Lead dog retire or send off a built-in helper, or the Lead dog itself', async () => {
     const { pack, handlers } = setup();
     pack.setMode('full');
