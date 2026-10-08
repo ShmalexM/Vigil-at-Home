@@ -5,6 +5,7 @@ import {
   Menu,
   nativeTheme,
   screen,
+  session,
   shell,
   Tray,
   type Rectangle,
@@ -68,7 +69,25 @@ const webPreferences = () => ({
   sandbox: true,
   nodeIntegration: false,
   spellcheck: false,
+  // No inspector in a release build.
+  devTools: !app.isPackaged,
 });
+
+/** The only web permission the app's pages use: copy buttons (navigator.clipboard.writeText). */
+const ALLOWED_PERMISSIONS = new Set(['clipboard-sanitized-write']);
+
+/** Deny every other web permission and embedded <webview>s. Call before any window opens. */
+export function restrictWebContents(): void {
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) =>
+    callback(ALLOWED_PERMISSIONS.has(permission)),
+  );
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) =>
+    ALLOWED_PERMISSIONS.has(permission),
+  );
+  app.on('web-contents-created', (_e, contents) => {
+    contents.on('will-attach-webview', (e) => e.preventDefault());
+  });
+}
 
 /**
  * The app's three surfaces:

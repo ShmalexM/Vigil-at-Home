@@ -18,6 +18,8 @@ const LINE_RE = /^\[([^\]]+)\]\s+\S+\s+santad:\s+(action=.*)$/;
 export type SantaLogFields = Record<string, string>;
 
 export function unescapeSantaValue(value: string): string {
+  // Most values have nothing escaped; skip the two scans.
+  if (!value.includes('<') && !value.includes('\\')) return value;
   return value
     .replaceAll('<pipe>', '|')
     .replace(/\\([nrt\\])/g, (_m, c: string) =>
@@ -25,25 +27,17 @@ export function unescapeSantaValue(value: string): string {
     );
 }
 
-/** Split the key=value part of a Santa log line. Returns undefined for lines that are not events. */
-export function parseSantaLogLine(
-  line: string,
-): { ts: number; fields: SantaLogFields } | undefined {
+/** The timestamp and the `action=...` part of a Santa line, or undefined if it isn't one. */
+function splitSantaLine(line: string): { ts: number; body: string } | undefined {
   const trimmed = line.trimEnd();
   const m = LINE_RE.exec(trimmed);
-  let body: string;
-  let ts: number;
-  if (m) {
-    ts = Date.parse(m[1]!);
-    body = m[2]!;
-  } else if (trimmed.startsWith('action=')) {
-    // Lines without the timestamp prefix (e.g. forwarded from syslog).
-    ts = Number.NaN;
-    body = trimmed;
-  } else {
-    return undefined;
-  }
+  if (m) return { ts: Date.parse(m[1]!), body: m[2]! };
+  // Lines without the timestamp prefix (e.g. forwarded from syslog).
+  if (trimmed.startsWith('action=')) return { ts: Number.NaN, body: trimmed };
+  return undefined;
+}
 
+function parseFields(body: string): SantaLogFields {
   const fields: SantaLogFields = {};
   for (const part of body.split('|')) {
     const eq = part.indexOf('=');
@@ -53,8 +47,43 @@ export function parseSantaLogLine(
     // could only come from a crafted value trying to override a field.
     if (!(key in fields)) fields[key] = unescapeSantaValue(part.slice(eq + 1));
   }
+  return fields;
+}
+
+/** Split the key=value part of a Santa log line. Returns undefined for lines that are not events. */
+export function parseSantaLogLine(
+  line: string,
+): { ts: number; fields: SantaLogFields } | undefined {
+  const split = splitSantaLine(line);
+  if (!split) return undefined;
+  const fields = parseFields(split.body);
   if (!fields.action) return undefined;
-  return { ts, fields };
+  return { ts: split.ts, fields };
+}
+
+/** The actions santaLogLineToEvent maps; every other line is dropped. */
+const MAPPED_ACTIONS: ReadonlySet<string> = new Set([
+  'EXEC',
+  'EXIT',
+  'WRITE',
+  'DELETE',
+  'RENAME',
+  'FILE_ACCESS',
+  'LAUNCH_ITEM_ADD',
+  'LAUNCH_ITEM_REMOVE',
+  'XPROTECT_DETECTED',
+  'TCC_MODIFICATION',
+  'GATEKEEPER_OVERRIDE',
+]);
+
+/**
+ * The line's action, read without parsing the rest. The body always starts
+ * with `action=`, which is its first field, so this is the value the full
+ * parse gives `fields.action`.
+ */
+function actionOf(body: string): string {
+  const end = body.indexOf('|');
+  return unescapeSantaValue(body.slice('action='.length, end < 0 ? undefined : end));
 }
 
 function eventId(line: string): string {
@@ -122,10 +151,12 @@ export function santaLogLineToEvent(
   line: string,
   now: () => number = Date.now,
 ): SensorEvent | undefined {
-  const parsed = parseSantaLogLine(line);
-  if (!parsed) return undefined;
-  const { fields: f } = parsed;
-  const ts = Number.isFinite(parsed.ts) ? parsed.ts : now();
+  const split = splitSantaLine(line);
+  // Santa logs a FORK for about every EXIT; skip lines we drop anyway before
+  // decoding every field and hashing the line.
+  if (!split || !MAPPED_ACTIONS.has(actionOf(split.body))) return undefined;
+  const f = parseFields(split.body);
+  const ts = Number.isFinite(split.ts) ? split.ts : now();
   const base = { id: eventId(line), ts, source: 'santa' as const, raw: f };
 
   switch (f.action) {

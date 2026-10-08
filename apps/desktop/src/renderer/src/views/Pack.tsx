@@ -41,7 +41,7 @@ import { NotebookSheet } from '../components/Notebook';
 import { StreamingText } from '../components/StreamingText';
 import { Thinking } from '../components/Thinking';
 import { MemoryChangeCard, MemorySheet } from '../components/PackMemory';
-import { onRovingKeyDown, rovingTabIndex } from '../components/roving';
+import { onRovingKeyDown, rovingKeyDown, rovingTabIndex } from '../components/roving';
 import { BREEDS, Dog, breedName } from '../components/Dog';
 import { useToast } from '../components/Toasts';
 import { STARTERS, contextStarter, leadChat, useLeadChat } from '../lead-chat';
@@ -77,6 +77,13 @@ export function usePack({ settings = true }: { settings?: boolean } = {}): [
   }, [reload, settings]);
   return [pack, reload];
 }
+
+/**
+ * Arrows only move focus between the modes; Space, Enter or a click picks one.
+ * Picking saves at once, so one arrow press must never land on Full access,
+ * and the arrows stop at the ends instead of wrapping round to it.
+ */
+const onModeKeyDown = rovingKeyDown({ select: false, wrap: false });
 
 const MODES: { id: PermissionMode; label: string; icon: ReactNode; says: string }[] = [
   {
@@ -128,7 +135,7 @@ export function PackPage() {
           className="seg pack-mode-seg"
           role="radiogroup"
           aria-label="Permission mode"
-          onKeyDown={onRovingKeyDown}
+          onKeyDown={onModeKeyDown}
         >
           {MODES.map((m, i) => (
             <button
@@ -138,7 +145,9 @@ export function PackPage() {
               aria-checked={pack.mode === m.id}
               tabIndex={rovingTabIndex(pack.mode === m.id, i, true)}
               className={`mode-${m.id}`}
-              onClick={() => void vigil.setPackMode(m.id).then(reload)}
+              onClick={() => {
+                if (m.id !== pack.mode) void vigil.setPackMode(m.id).then(reload);
+              }}
             >
               {m.icon}
               {m.label}
@@ -270,7 +279,11 @@ function useFitToWindow(head: RefObject<HTMLElement | null>) {
       // Client pixels to CSS pixels, for the text-size zoom.
       const zoom = panel.offsetHeight ? box.height / panel.offsetHeight : 1;
       const room = (innerHeight - Math.max(box.top, 0) - 16) / zoom;
-      panel.style.maxHeight = `${Math.max(320, Math.floor(room))}px`;
+      // The floor keeps the panel usable before it sticks, but never taller
+      // than the window itself, or the message box falls off the bottom when
+      // zoomed in.
+      const floor = Math.min(320, (innerHeight - 32) / zoom);
+      panel.style.maxHeight = `${Math.max(0, Math.floor(Math.max(floor, room)))}px`;
     };
     fit();
     const page = new ResizeObserver(fit);
@@ -294,12 +307,15 @@ export function LeadConversation({
   reload,
   context,
   autoFocus,
+  openSettings = () => (location.hash = 'settings'),
 }: {
   pack: PackView;
   reload: () => void;
   /** Where the person is, so "what's this?" has an answer. */
   context?: ChatContext;
   autoFocus?: boolean;
+  /** Opens Settings; the Ask drawer passes one that also closes itself. */
+  openSettings?: () => void;
 }) {
   const lead = pack.dogs.find((d) => d.role === 'lead')!;
   const { draft, sending, error } = useLeadChat();
@@ -368,7 +384,7 @@ export function LeadConversation({
       </div>
       {pack.noAi && (
         <span className="t-small no-ai">
-          <button type="button" className="link" onClick={() => (location.hash = 'settings')}>
+          <button type="button" className="link" onClick={() => openSettings()}>
             Set up an AI in Settings
           </button>{' '}
           so {lead.name} can talk.

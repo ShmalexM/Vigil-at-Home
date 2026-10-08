@@ -185,6 +185,17 @@ export interface ToolView {
   choice: ToolChoice;
 }
 
+/** https anywhere; plain http only to a server on this computer. */
+export function isSafeConnectorUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.protocol === 'https:') return true;
+    return u.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
 export const ConnectorInput = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('stdio'),
@@ -197,7 +208,11 @@ export const ConnectorInput = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('http'),
     name: z.string().trim().min(1).max(40),
-    url: z.string().url().max(2048),
+    url: z
+      .string()
+      .url()
+      .max(2048)
+      .refine(isSafeConnectorUrl, 'Use https, or http only for a server on this computer'),
     /** A bearer token, kept in the Keychain. */
     token: z.string().max(4096).optional(),
   }),
