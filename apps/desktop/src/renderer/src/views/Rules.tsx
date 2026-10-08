@@ -1,6 +1,6 @@
 import type { RuleMode } from '@vigil/core';
-import { Pencil, Plus } from 'lucide-react';
-import { useState } from 'react';
+import { BellRing, Pencil, Plus, Search } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import type { RuleView } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
 import { HoldButton } from '../components/HoldButton';
@@ -9,7 +9,16 @@ import { RuleSuggestions } from '../components/RuleSuggestions';
 import { useToast } from '../components/Toasts';
 import { helperNote, PASSWORD_CANCELLED } from '../format';
 import { Button, Card, Chip, Segmented, SeverityMark } from '../components/ui';
-import { confirmsFirst, isToolRule, modeLabel, modesFor } from '../rule-modes';
+import {
+  confirmsFirst,
+  INTERRUPT_TEXT,
+  interruptLevel,
+  isToolRule,
+  modeLabel,
+  modesFor,
+  visibleRules,
+  type RuleSort,
+} from '../rule-modes';
 import '../styles/rules.css';
 import { PageHead } from './AppShell';
 
@@ -22,9 +31,18 @@ export function RulesView({
 }) {
   const [rules] = useLive(() => vigil.listRules());
   const [filter, setFilter] = useState<'all' | 'review'>('all');
+  const [text, setText] = useState('');
+  const [sort, setSort] = useState<RuleSort>('default');
   const [creating, setCreating] = useState(false);
   const open = (id: string | undefined) => go?.(id ? `rules/${id}` : 'rules');
-  const list = (rules ?? []).filter((r) => filter === 'all' || r.rule.mode === 'shadow');
+  const all = rules ?? [];
+  const list = visibleRules(all, { text, filter, sort });
+  // A rule opened by link (from an alert) stays in the list and scrolls into view.
+  const shown =
+    selected && !list.some((r) => r.rule.id === selected)
+      ? all.find((r) => r.rule.id === selected)
+      : undefined;
+  const rows = shown ? [shown, ...list] : list;
 
   return (
     <div className="page">
@@ -49,21 +67,68 @@ export function RulesView({
         }
       />
       <RuleSuggestions />
+      {all.length > 0 && (
+        <div className="row feed-controls">
+          <label className="search grow">
+            <Search size={14} />
+            <input
+              type="search"
+              placeholder="Search rules by name, description or id"
+              aria-label="Search rules"
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+            />
+          </label>
+          <Segmented
+            label="Sort rules"
+            value={sort}
+            onChange={setSort}
+            options={[
+              { value: 'default', label: 'Default order' },
+              { value: 'matches', label: 'Most matches' },
+            ]}
+          />
+          <span className="t-small nowrap" aria-live="polite">
+            {list.length === all.length ? `${all.length} rules` : `${list.length} of ${all.length}`}
+          </span>
+        </div>
+      )}
       {creating && (
         <Card>
           <NewRulePanel onClose={() => setCreating(false)} />
         </Card>
       )}
-      {list.length === 0 ? (
-        <div className="empty">
-          <span className="t-h3">No rules yet</span>
-          <span className="t-small">
-            Detection rules will appear here once the rule packs are installed.
-          </span>
-        </div>
+      {rows.length === 0 ? (
+        all.length === 0 ? (
+          <div className="empty">
+            <span className="t-h3">No rules yet</span>
+            <span className="t-small">
+              Detection rules will appear here once the rule packs are installed.
+            </span>
+          </div>
+        ) : (
+          <div className="empty">
+            <span className="t-h3">No rules match</span>
+            <span className="t-small">
+              {filter === 'review' && !text.trim()
+                ? 'No rule is in Shadow right now. Rules you write or accept start there.'
+                : 'Try other words, or show all rules.'}
+            </span>
+            <Button
+              size="sm"
+              kind="ghost"
+              onClick={() => {
+                setText('');
+                setFilter('all');
+              }}
+            >
+              Show all rules
+            </Button>
+          </div>
+        )
       ) : (
         <div className="col" style={{ gap: 10 }}>
-          {list.map((r) => (
+          {rows.map((r) => (
             <RuleRow
               key={r.rule.id}
               view={r}
@@ -89,6 +154,11 @@ function RuleRow({
   const { rule, matches } = view;
   const toast = useToast();
   const [confirmBlock, setConfirmBlock] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (editing) ref.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }, [editing]);
+  const interrupts = interruptLevel(rule);
   // A tool rule answers Claude Code's hook: its modes are Record, Ask and Deny.
   const tool = isToolRule(rule);
 
@@ -111,12 +181,17 @@ function RuleRow({
 
   return (
     <Card tight>
-      <div className="row rule-row">
+      <div ref={ref} className="row rule-row">
         <div className="col grow" style={{ gap: 2 }}>
           <div className="row">
             <span className="t-h3 ellipsis">{rule.name}</span>
             {rule.origin === 'ai' && <Chip tone="ai">AI-drafted</Chip>}
             {rule.origin === 'user' && <Chip>Yours</Chip>}
+            {!tool && interrupts === 'popup' && (
+              <span className="rule-interrupts" title={INTERRUPT_TEXT.popup.long}>
+                <BellRing size={12} aria-hidden /> {INTERRUPT_TEXT.popup.short}
+              </span>
+            )}
           </div>
           <span className="t-small clamp-2" title={rule.description}>
             {rule.description}

@@ -148,3 +148,85 @@ export function replaySampleRow(
   if (toolRule) return { what: s.subject, note: s.program ?? '' };
   return { what: s.program ?? s.subject, note: s.wouldDo.join(', ') };
 }
+
+const SEVERITY_RANK = { info: 0, low: 1, medium: 2, high: 3, critical: 4 } as const;
+type SeverityName = keyof typeof SEVERITY_RANK;
+
+/**
+ * How a rule's new alerts reach the user: a popup, the menu-bar badge, or
+ * only the Alerts list. Mirrors notifyLevel in main/alerts.ts (not imported,
+ * to keep the main process out of the renderer); a test keeps them in step.
+ * A repeat or a burst of the same thing interrupts once either way.
+ */
+export function interruptLevel(rule: {
+  mode: RuleMode;
+  fidelity: 'low' | 'medium' | 'high';
+  severity: SeverityName;
+}): 'popup' | 'badge' | 'silent' | 'none' {
+  if (rule.mode === 'disabled' || rule.mode === 'shadow') return 'none';
+  if (rule.mode === 'block') return 'popup';
+  const sev = SEVERITY_RANK[rule.severity];
+  if (rule.fidelity === 'high' && sev >= SEVERITY_RANK.medium) return 'popup';
+  if (rule.fidelity === 'low' && sev < SEVERITY_RANK.medium) return 'silent';
+  return 'badge';
+}
+
+/** What each interrupt level means, in a word and a sentence. */
+export const INTERRUPT_TEXT: Record<'popup' | 'badge' | 'silent', { short: string; long: string }> =
+  {
+    popup: {
+      short: 'Pops up',
+      long: 'A new match shows a popup. Repeats of the same thing fold into one.',
+    },
+    badge: {
+      short: 'Badge only',
+      long: 'A new match adds to the menu-bar badge, without a popup.',
+    },
+    silent: {
+      short: 'Quiet',
+      long: 'A new match only lands in Alerts: no popup, no badge.',
+    },
+  };
+
+/**
+ * The quieter mode to offer on an alert when its rule is too noisy: Alert
+ * (Ask) goes to Shadow (Record), which still logs every match in Activity.
+ * Undefined when there is nothing safe to offer from the alert itself: a
+ * blocking rule is turned down on the Rules page, where the hold and the
+ * admin password guard it, and Vigil's own checks only alert.
+ */
+export function quieterMode(rule: RuleKinds & { mode: RuleMode }): RuleMode | undefined {
+  if (RAISED_BY_VIGIL.has(rule.id)) return undefined;
+  return rule.mode === 'alert' ? 'shadow' : undefined;
+}
+
+export type RuleSort = 'default' | 'matches';
+
+/**
+ * The Rules page's list: narrowed by the search text (name, description or
+ * id) and the filter, and sorted. `matches` puts the noisiest first, so a
+ * rule that keeps interrupting is easy to find; ties keep the original order.
+ */
+export function visibleRules<
+  V extends {
+    rule: { id: string; name: string; description: string; mode: RuleMode };
+    matches: number;
+  },
+>(views: readonly V[], opts: { text: string; filter: 'all' | 'review'; sort: RuleSort }): V[] {
+  const q = opts.text.trim().toLowerCase();
+  const out = views.filter(
+    (v) =>
+      (opts.filter === 'all' || v.rule.mode === 'shadow') &&
+      (!q ||
+        v.rule.name.toLowerCase().includes(q) ||
+        v.rule.description.toLowerCase().includes(q) ||
+        v.rule.id.toLowerCase().includes(q)),
+  );
+  if (opts.sort === 'matches') {
+    return out
+      .map((v, i) => ({ v, i }))
+      .sort((a, b) => b.v.matches - a.v.matches || a.i - b.i)
+      .map(({ v }) => v);
+  }
+  return out;
+}
