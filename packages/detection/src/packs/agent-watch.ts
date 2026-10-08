@@ -192,7 +192,7 @@ export const COPY_OUT_RES = [SCP_FROM, RSYNC_FROM];
  * tool cannot cross `;`, `&` or another `|`, so two separate commands like
  * `env | grep proxy; curl host` do not count as one exfil.
  */
-export const ENV_DUMP_RE = String.raw`(^|[\s;&|('"])(/usr/bin/|/bin/)?(env|printenv)\s*\|(?!\|)([^;&|\n]|\|(?!\|)){0,256}?(?<=[ \t|(/])(curl|wget|nc|ncat|socat)(?=[\s"')]|$)`;
+export const ENV_DUMP_RE = String.raw`(^|[\s;&|('"])(/usr/bin/|/bin/)?(env|printenv)\s*\|(?!\|)((?!\|\|)[^;&\n]){0,256}?(?<=[ \t|(/])(curl|wget|nc|ncat|socat)(?=[\s"')]|$)`;
 /**
  * Paste sites, file drops and request catchers, matched only as the host part
  * of a URL: after `//`, an optional `name.`/`user@` run, then the host, then a

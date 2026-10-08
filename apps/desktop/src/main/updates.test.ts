@@ -68,6 +68,21 @@ describe('newest', () => {
       newest([{ ...r, html_url: 'https://evil.test/x' }], '0.1.0-alpha.2', 'arm64'),
     ).toBeUndefined();
   });
+
+  it('ignores github.com links outside this repo', () => {
+    const r = release('0.1.0-alpha.3');
+    r.assets[0]!.browser_download_url = r.assets[0]!.browser_download_url.replace(
+      'ShmalexM/Vigil-at-Home',
+      'someone/else',
+    );
+    expect(newest([r], '0.1.0-alpha.2', 'arm64')?.downloadUrl).toBeUndefined();
+    const other = { ...r, html_url: 'https://github.com/someone/else/releases/tag/v0.1.0-alpha.3' };
+    expect(newest([other], '0.1.0-alpha.2', 'arm64')).toBeUndefined();
+    // GitHub owner and repo names are not case-sensitive.
+    const lower = { ...release('0.1.0-alpha.3') };
+    lower.html_url = lower.html_url.replace('ShmalexM/Vigil-at-Home', 'shmalexm/vigil-at-home');
+    expect(newest([lower], '0.1.0-alpha.2', 'arm64')?.version).toBe('0.1.0-alpha.3');
+  });
 });
 
 describe('UpdateChecker', () => {

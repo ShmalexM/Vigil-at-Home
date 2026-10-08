@@ -181,6 +181,7 @@ export function Dog({
   breed: Breed;
   mood?: DogMood;
   size?: number;
+  /** Spoken name, for a dog shown on its own. Without one the dog is hidden from screen readers. */
   title?: string;
   className?: string;
 }) {
@@ -253,8 +254,8 @@ export function Dog({
       viewBox={`0 0 ${W} 104`}
       className={`dog mood-${mood} ${TROTS.includes(mood) ? 'trots' : ''} ${className}`}
       style={style}
-      role="img"
-      aria-label={title ?? breedName(breed)}
+      // Decorative unless titled: a name or label always sits beside it.
+      {...(title ? { role: 'img', 'aria-label': title } : { 'aria-hidden': true })}
     >
       <defs>
         <clipPath id={`body${uid}`}>

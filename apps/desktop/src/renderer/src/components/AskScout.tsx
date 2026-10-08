@@ -120,7 +120,16 @@ function AskDrawer({
           <X size={16} />
         </button>
       </header>
-      <LeadConversation pack={pack} reload={reload} {...(context ? { context } : {})} autoFocus />
+      <LeadConversation
+        pack={pack}
+        reload={reload}
+        {...(context ? { context } : {})}
+        autoFocus
+        openSettings={() => {
+          leadChat.close();
+          go('settings');
+        }}
+      />
     </section>
   );
 }

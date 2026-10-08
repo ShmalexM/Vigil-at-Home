@@ -472,7 +472,8 @@ select {
 .seg[aria-disabled='true'] {
   opacity: 0.45;
 }
-.seg button[aria-selected='true'] {
+.seg button[aria-selected='true'],
+.seg button[aria-checked='true'] {
   background: var(--bg4);
   color: var(--tx0);
   box-shadow: 0 1px 2px var(--shadow);
