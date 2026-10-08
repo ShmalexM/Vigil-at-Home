@@ -58,6 +58,50 @@ describe('FileTailer', () => {
     expect(lines[0]).toBe(s.trimEnd());
   });
 
+  it('drops a runaway line whole, even when it spans many reads', async () => {
+    const { path, lines, tailer } = setup();
+    writeFileSync(path, '');
+    const t = tailer('start');
+    await t.start();
+    await t.stop();
+    // Past the 1 MiB limit, the line ends in what looks like a Santa log line.
+    const santa =
+      '[2026-10-08T10:00:00.000Z] I santad: action=EXEC|decision=ALLOW|reason=BINARY|' +
+      'sha256=' +
+      'a'.repeat(64) +
+      '|pid=12|ppid=1|uid=501|user=a|mode=M|path=/tmp/x|machineid=m';
+    const long = 'x'.repeat(2 * 1024 * 1024 - santa.length) + santa;
+    // Appended in pieces, so the line arrives over several polls.
+    for (let i = 0; i < long.length; i += 300_000) {
+      appendFileSync(path, long.slice(i, i + 300_000));
+      await t.poll();
+    }
+    appendFileSync(path, '\nnext line\n');
+    await t.poll();
+    expect(lines).toEqual(['next line']);
+  });
+
+  it('measures the line limit in bytes', async () => {
+    const { path, lines } = setup();
+    writeFileSync(path, '');
+    const t = new FileTailer({
+      path,
+      from: 'start',
+      maxLineBytes: 10,
+      onLine: (l) => lines.push(l),
+    });
+    await t.start();
+    await t.stop();
+    // Six characters but twelve bytes, first whole and then split across polls.
+    appendFileSync(path, 'éééééé\nok\n');
+    await t.poll();
+    appendFileSync(path, 'ééé');
+    await t.poll();
+    appendFileSync(path, 'ééé tail\nlast\n');
+    await t.poll();
+    expect(lines).toEqual(['ok', 'last']);
+  });
+
   it('resumes from a saved position', async () => {
     const { path, lines } = setup();
     writeFileSync(path, 'a\nb\n');

@@ -34,6 +34,9 @@ export interface TailOptions {
 export class FileTailer {
   private pos: TailPosition | undefined;
   private partial = '';
+  private partialBytes = 0;
+  /** Skipping the rest of a line that grew too long, up to its newline. */
+  private discarding = false;
   private decoder = new StringDecoder('utf8');
   private timer: NodeJS.Timeout | undefined;
   private running = false;
@@ -85,11 +88,14 @@ export class FileTailer {
     if (!this.pos || this.pos.ino !== st.ino) {
       // New file after rotation: flush any partial line from the old one.
       this.flushPartial();
+      this.discarding = false;
       this.decoder = new StringDecoder('utf8');
       this.pos = { ino: st.ino, offset: 0 };
     } else if (st.size < this.pos.offset) {
       // Truncated in place.
       this.partial = '';
+      this.partialBytes = 0;
+      this.discarding = false;
       this.decoder = new StringDecoder('utf8');
       this.pos.offset = 0;
     }
@@ -117,19 +123,40 @@ export class FileTailer {
 
   private consume(text: string): void {
     const max = this.opts.maxLineBytes ?? 1024 * 1024;
-    const data = this.partial + text;
-    const lines = data.split('\n');
-    this.partial = lines.pop() ?? '';
-    if (this.partial.length > max) this.partial = '';
-    for (const line of lines) {
-      if (line.length === 0 || line.length > max) continue;
+    let start = 0;
+    for (;;) {
+      const nl = text.indexOf('\n', start);
+      if (nl === -1) break;
+      const piece = text.slice(start, nl);
+      start = nl + 1;
+      if (this.discarding) {
+        // The end of a line already dropped as too long: not a line of its own.
+        this.discarding = false;
+        continue;
+      }
+      const line = this.partial + piece;
+      const bytes = this.partialBytes + Buffer.byteLength(piece);
+      this.partial = '';
+      this.partialBytes = 0;
+      if (line.length === 0 || bytes > max) continue;
       this.emit(line);
+    }
+    if (this.discarding) return;
+    const rest = text.slice(start);
+    this.partial += rest;
+    this.partialBytes += Buffer.byteLength(rest);
+    if (this.partialBytes > max) {
+      // A runaway line must not eat memory; drop it through its newline.
+      this.partial = '';
+      this.partialBytes = 0;
+      this.discarding = true;
     }
   }
 
   private flushPartial(): void {
     if (this.partial) this.emit(this.partial);
     this.partial = '';
+    this.partialBytes = 0;
   }
 
   private emit(line: string): void {
