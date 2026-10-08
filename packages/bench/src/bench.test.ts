@@ -160,11 +160,11 @@ describe('rule scoring', () => {
     const [score] = scoreCandidates(
       [
         {
-          id: 'candidate-pipe-full-path',
+          id: 'candidate-curl-then-run',
           version: 1,
           origin: 'user',
-          name: 'Downloaded script piped to a shell by full path',
-          description: 'curl or wget piped into /bin/sh, /bin/bash or /bin/zsh.',
+          name: 'Downloaded to a file, then run',
+          description: 'curl or wget saving a file, then a shell running it on the same line.',
           mode: 'shadow',
           severity: 'medium',
           fidelity: 'medium',
@@ -172,11 +172,11 @@ describe('rule scoring', () => {
           condition: {
             field: 'process.commandLine',
             op: 'regex',
-            value: ['(curl|wget)\\s[^|]*\\|\\s*(sudo\\s+)?/bin/(ba|z|da)?sh\\b'],
+            value: ['(curl|wget)\\s[^|&;]{0,200}(&&|;)\\s*(sudo\\s+)?(/\\S+/)?(ba|z|da)?sh\\s+/'],
           },
           response: [],
           exclusions: [],
-          reasons: ['A command downloaded code and ran it with a shell.'],
+          reasons: ['A command downloaded code to a file and ran it with a shell.'],
           tags: [],
           createdAt: START,
           updatedAt: START,
@@ -184,7 +184,9 @@ describe('rule scoring', () => {
       ],
       { days: 8, telemetry: ['sensors'] },
     );
-    expect(score?.newlyCaught).toContain('curl-pipe-full-path (sensors)');
+    // The built-in rule now catches the piped full-path shape itself (it reads the
+    // stages), so what a candidate still adds is the two-step download-then-run.
+    expect(score?.newlyCaught).toContain('curl-then-run (sensors)');
     expect(score?.falsePerDay.developer.alerts).toBe(0);
   }, 30_000);
 });

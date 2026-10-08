@@ -150,6 +150,59 @@ describe('agent tracker', () => {
       expect(bareShellCommand(cmd), cmd).toBeUndefined();
   });
 
+  it('drops the signature when a PID execs into a different program image', () => {
+    const { t, launch } = tracker();
+    const signed = { teamId: 'Q6L2SF6YDW' };
+    const root = launch(CLAUDE_BIN, 501, signed);
+    // A direct child of the signed agent carries the signature, and a fresh
+    // security child spawned by it is excusable (depth 1, signed).
+    const py = launch('/opt/homebrew/bin/python3', root.process.pid, {
+      args: ['python3', '-c', 'x'],
+    });
+    expect(py.process.agent).toMatchObject({ depth: 1, ...signed });
+    // The same PID exec'ing into security keeps the attribution but loses the signature.
+    const reexec = t.observe(
+      exec(
+        proc({
+          pid: py.process.pid,
+          ppid: root.process.pid,
+          path: '/usr/bin/security',
+          args: ['security', 'find-generic-password'],
+          signing: 'apple',
+        }),
+      ) as ExecEvent,
+    ) as ExecEvent;
+    expect(reexec.process.agent).toMatchObject({ id: 'claude-code', depth: 1 });
+    expect(reexec.process.agent?.teamId).toBeUndefined();
+    // A later retag does not bring it back.
+    t.retag();
+    expect(t.lookup(py.process.pid)?.tag?.teamId).toBeUndefined();
+    // A fresh security child of the signed root, by contrast, keeps it.
+    const fresh = launch('/usr/bin/security', root.process.pid, {
+      args: ['security', 'find-generic-password'],
+      signing: 'apple',
+    });
+    expect(fresh.process.agent).toMatchObject({ depth: 1, ...signed });
+  });
+
+  it('lends a signed agent’s signature to Vigil’s own tree, but not an unsigned one', () => {
+    const vigil = { self: { pid: 501, path: '/Applications/Vigil at Home.app/x' } };
+    const signedTree = tracker(vigil);
+    const claude = signedTree.launch(CLAUDE_BIN, 501, { teamId: 'Q6L2SF6YDW' });
+    expect(claude.process.agent).toMatchObject({ id: 'vigil-self', teamId: 'Q6L2SF6YDW' });
+    const child = signedTree.launch('/usr/bin/security', claude.process.pid, {
+      args: ['security', 'find-generic-password'],
+    });
+    expect(child.process.agent).toMatchObject({ id: 'vigil-self', teamId: 'Q6L2SF6YDW' });
+
+    const unsigned = tracker(vigil);
+    const planted = unsigned.launch('/Users/alex/.local/share/claude/versions/9.9.9', 501, {
+      args: ['9.9.9'],
+    });
+    expect(planted.process.agent?.id).toBe('vigil-self');
+    expect(planted.process.agent?.teamId).toBeUndefined();
+  });
+
   it('gives a root found by ps its signature once a sensor reports it', () => {
     const { t } = tracker();
     t.seed([

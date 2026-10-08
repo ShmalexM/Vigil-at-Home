@@ -54,9 +54,17 @@ const run = (eng: DetectionEngine, e: DetectionEvent) =>
 /** Claude Code in a terminal, as the tracker tags it. */
 const claude = agentTree();
 const { sh } = claude;
-/** Vigil's own claude helper: the app (pid 501) starts it, so its tree is `vigil-self`. */
+/** Vigil's own claude helper: the app (pid 501) starts the signed Claude Code, so its tree is `vigil-self`. */
 const helper = agentTree(CLAUDE_BIN, {
   basePid: 70_000,
+  root: { teamId: 'Q6L2SF6YDW', signingId: 'Q6L2SF6YDW:com.anthropic.claude-code' },
+  tracker: { self: { pid: 501, path: VIGIL_APP } },
+});
+/** An unsigned program inside Vigil's own tree: the signature cannot be verified. */
+const fakeHelper = agentTree(`${home}/.local/share/claude/versions/9.9.9`, {
+  basePid: 71_000,
+  args: ['9.9.9'],
+  root: { signing: 'unsigned' },
   tracker: { self: { pid: 501, path: VIGIL_APP } },
 });
 /** A connector the user added to the pack: Vigil (pid 501) starts it, but it is not Vigil's. */
@@ -735,6 +743,13 @@ describe('agent rule packs', () => {
         security(claude, ['-a', 'alex margaris', '-w', '-s', 'Claude Code']),
         security(claude, ['-a', 'alexmargaris', '-w', '-s', '"Claude Code\'']),
         security(claude, ['-a', 'alexmargaris', '-w', '-s', 'Claude Code-1234567']),
+        // A duplicate -s or -a: security takes the last one, so a second selector could
+        // name another service while the first names its own.
+        security(claude, ['-s', 'Claude Code-credentials', '-s', 'Chrome Safe Storage', '-w']),
+        security(claude, [...own('Claude Code-credentials'), '-s', 'Chrome Safe Storage']),
+        security(claude, ['-a', 'alexmargaris', '-a', 'someone', '-w', '-s', 'Claude Code']),
+        // Something unsigned inside Vigil's own helper tree: not the signed Claude Code.
+        security(fakeHelper, own('Claude Code-credentials')),
         // Asked for from a tool step, in the wrappers Claude Code's Bash tool used on a
         // real Mac, or from an MCP server.
         sh(
@@ -900,9 +915,10 @@ describe('agent rule packs', () => {
           secRead(['-a', 'alexmargaris', '-w', '-s', 'Claude', 'Code-credentials']),
           secRead(own('Claude Code')),
           secRead(own('Claude Code-credentials-5ce4712a')),
+          // Vigil's own helper runs the signed Claude Code, which lends its signature.
           secRead(own('Claude Code-credentials'), {
             ancestors: ['2.1.283', 'Vigil at Home'],
-            agent: tag(2, 'vigil-self'),
+            agent: tag(2, 'vigil-self', { teamId: 'Q6L2SF6YDW' }),
           }),
         ];
         for (const e of quiet)
@@ -947,6 +963,11 @@ describe('agent rule packs', () => {
           }),
           // An ancestor that isn't a version number.
           secRead(own('Claude Code-credentials'), { ancestors: ['python3', '2.1.283'] }),
+          // Vigil's own tree, but the program in it is not the signed Claude Code.
+          secRead(own('Claude Code-credentials'), {
+            ancestors: ['9.9.9', 'Vigil at Home'],
+            agent: tag(2, 'vigil-self', {}),
+          }),
           // A Bash tool step asking for it: wrapped, so not the bare read.
           shRead(
             `source /Users/alex/.claude/shell-snapshots/snapshot-zsh-1.sh && eval '${READ.replace(/"/g, '')}'`,

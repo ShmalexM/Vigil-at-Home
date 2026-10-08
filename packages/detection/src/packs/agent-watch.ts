@@ -360,11 +360,20 @@ export function ownKeychainLogin(
         { field: 'process.parentName', op: 'regex', value: [String.raw`^\d+\.\d+\.\d+$`] },
       ],
     });
-  const who: Condition[] = [
-    { all: [{ field: 'process.agent.id', op: 'eq', value: VIGIL_SELF }, { any: caller }] },
-  ];
+  // Who may be excused is decided by the agent root's signature, never by a
+  // name or path alone. Vigil's own tree lends the signature of the signed
+  // agent program it runs (see tracker resolve), so it is verified the same
+  // way; an unsigned or other-program copy inside Vigil's tree is not.
   const signed = agentId ? signedRoot(agent.match) : [];
-  if (agentId && signed.length)
+  const who: Condition[] = [];
+  if (signed.length) {
+    who.push({
+      all: [
+        { field: 'process.agent.id', op: 'eq', value: VIGIL_SELF },
+        { any: signed },
+        { any: caller },
+      ],
+    });
     who.push({
       all: [
         { field: 'process.agent.id', op: 'eq', value: agentId },
@@ -379,6 +388,7 @@ export function ownKeychainLogin(
         },
       ],
     });
+  }
   // Exactly the read Claude Code's own code runs, in its order: `security
   // find-generic-password -a <user> -w -s <service>`, each word bare or quoted.
   const user = String.raw`([\w.-]+|"[\w.-]+"|'[\w.-]+')`;
