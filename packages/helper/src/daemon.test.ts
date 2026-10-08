@@ -31,6 +31,7 @@ import { defaultPaths, type HelperPaths } from './config.js';
 import {
   CLIENT_SEEN_FILE,
   createSyncHttpsServer,
+  REFUSAL_LOG_MS,
   listenUnlessStopped,
   runDaemon,
   SYNC_SERVER_LIMITS,
@@ -676,6 +677,33 @@ describe("Santa's client certificate pin", () => {
       expect(existsSync(join(t.store.paths.dir, CLIENT_SEEN_FILE))).toBe(false);
       expect(auth.accepts(second)).toBe(false);
       expect(auth.accepts(t.store.current!.pin)).toBe(true);
+    } finally {
+      rmSync(t.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('logs each kind of refusal at most once per interval, counting the rest', async () => {
+    const t = await setup();
+    try {
+      const auth = t.make();
+      t.logs.length = 0;
+      // A busy prober alternating between kinds, many times a second.
+      for (let i = 0; i < 300; i++) {
+        auth.refused(i % 2 ? 'no_certificate' : 'wrong_certificate');
+        t.advance(100);
+      }
+      expect(t.logs).toEqual([
+        'Santa sync: refused a connection (wrong certificate)',
+        'Santa sync: refused a connection (no certificate)',
+      ]);
+      // The latest refusal is still what helper.status shows.
+      expect(auth.lastRefusal).toEqual({ at: t.now() - 100, reason: 'no_certificate' });
+      t.advance(REFUSAL_LOG_MS);
+      auth.refused('no_certificate');
+      expect(t.logs.at(-1)).toBe(
+        'Santa sync: refused a connection (no certificate); 149 more since the last one logged',
+      );
+      expect(t.logs).toHaveLength(3);
     } finally {
       rmSync(t.dir, { recursive: true, force: true });
     }

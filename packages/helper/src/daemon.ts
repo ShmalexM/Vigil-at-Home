@@ -461,6 +461,8 @@ export interface SyncClientPin {
 
 /** How often the time Santa was last seen is written down; it is kept in memory between. */
 const SEEN_WRITE_MS = 60_000;
+/** Each kind of refusal is logged at most this often; the ones between are counted. */
+export const REFUSAL_LOG_MS = 10 * 60_000;
 
 /**
  * Santa's client certificate pin, and the move from profiles made before it
@@ -485,6 +487,7 @@ export class SyncClientAuth implements SyncClientPin {
   private lastSeen: number | null;
   private seenWritten = 0;
   private refusal: { at: number; reason: SyncRefusal } | null = null;
+  private readonly refusalLog = new Map<SyncRefusal, { at: number; suppressed: number }>();
   private readonly now: () => number;
 
   constructor(
@@ -553,10 +556,21 @@ export class SyncClientAuth implements SyncClientPin {
       this.o.log('Santa sync: Santa presented its client certificate; it is now required');
   }
 
+  /**
+   * Any local program can open the port, so each kind of refusal is logged
+   * at most once per REFUSAL_LOG_MS, with a count of the ones in between.
+   */
   refused(reason: SyncRefusal): void {
-    const first = this.refusal?.reason !== reason;
-    this.refusal = { at: this.now(), reason };
-    if (first) this.o.log(`Santa sync: refused a connection (${reason.replace('_', ' ')})`);
+    const now = this.now();
+    this.refusal = { at: now, reason };
+    const last = this.refusalLog.get(reason);
+    if (last && now - last.at < REFUSAL_LOG_MS) {
+      last.suppressed++;
+      return;
+    }
+    this.refusalLog.set(reason, { at: now, suppressed: 0 });
+    const more = last?.suppressed ? `; ${last.suppressed} more since the last one logged` : '';
+    this.o.log(`Santa sync: refused a connection (${reason.replace('_', ' ')})${more}`);
   }
 }
 
