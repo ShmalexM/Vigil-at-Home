@@ -28,7 +28,8 @@ const COMPUTED: Record<string, FieldGetter> = {
    * A shell running exactly one of Claude Code's real local-service reads
    * (see rules/quiet-lines.ts). The download-run rule stays quiet on these.
    */
-  'process.quietDownloadLine': (e) => ('process' in e ? runsQuietLine(e.process?.args) : undefined),
+  'process.quietDownloadLine': (e) =>
+    'process' in e ? runsQuietLine(e.process?.path, e.process?.args) : undefined,
   /**
    * The download a process comes from: the nearest downloaded ancestor, or the
    * process itself when it carries the quarantine flag. Chain rules key on it.

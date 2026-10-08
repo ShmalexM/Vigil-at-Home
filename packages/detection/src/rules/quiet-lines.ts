@@ -13,18 +13,25 @@
  * key from a fixed set. The forms Claude Code's harness wraps a line in
  * (`eval '…'`, and `source <snapshot> && eval '…' < /dev/null && pwd -P >| <file>`)
  * are separate exact templates, built here from the same text. Their path
- * slots hold no spaces or shell metacharacters. Nothing is unquoted,
- * unwrapped or normalized before matching.
+ * slots are pinned to the harness's real layout and hold no spaces or shell
+ * metacharacters. Nothing is unquoted, unwrapped or normalized before
+ * matching, and the shell must be a system shell started with an exact argv.
  */
 
 const HOST = '(?:127\\.0\\.0\\.1|localhost)';
 const PORT = '[0-9]{2,5}';
 /** JSON keys the real lines read. */
 const KEY = '(?:token|state|models|name|id)';
-/** The harness's shell snapshot and its cwd record file. */
+/**
+ * The harness's shell snapshot: `~/.claude/shell-snapshots/snapshot-<shell>-<digits>-<id>.sh`
+ * in a user's home. This does not vouch for the snapshot's contents. Whoever
+ * can write that file can already run code through any line main never
+ * alerts on, so accepting the wrapper opens no new path.
+ */
 const SNAPSHOT =
-  '(?:/Users|/home)/[A-Za-z0-9._-]+/\\.claude/shell-snapshots/snapshot-(?:zsh|bash)-[0-9]+-[a-z0-9]+\\.sh';
-const CWD_FILE = '(?:/private)?(?:/var/folders/[A-Za-z0-9_+/-]+|/tmp)/claude-[0-9a-f]+-cwd';
+  '/(?:Users|home)/[A-Za-z0-9_-][A-Za-z0-9._-]*/\\.claude/shell-snapshots/snapshot-(?:zsh|bash)-[0-9]+-[a-z0-9]+\\.sh';
+/** Where the harness records the cwd: the macOS per-user temp folder, or /tmp. */
+const CWD_FILE = '(?:/var/folders/[A-Za-z0-9_+-]{2}/[A-Za-z0-9_+-]+/T|/tmp)/claude-[0-9a-f]+-cwd';
 
 /** The real lines, with {HOST}, {PORT} and {KEY} marking the free slots. */
 const LINES = [
@@ -62,15 +69,32 @@ export function isQuietLine(cmd: string): boolean {
   return TEMPLATES.some((re) => re.test(cmd));
 }
 
-/** The flag spellings a shell may be started with before its command. */
-const COMMAND_FLAGS = ['-c', '-c -l', '-l -c', '-lc'];
+/** System shells only: no Homebrew or home-folder copies. */
+const SYSTEM_SHELLS = new Set([
+  '/bin/bash',
+  '/bin/zsh',
+  '/bin/sh',
+  '/usr/bin/bash',
+  '/usr/bin/zsh',
+  '/usr/bin/sh',
+]);
 
 /**
- * The process is a shell started as exactly `<shell> -c <line>` (or with a
- * login flag) and <line> is a quiet template. Any extra argument fails.
+ * The process is a system shell, with argv[0] the same path as the program,
+ * started with exactly one of `-c <line>`, `-lc <line>` or `-l -c <line>`,
+ * and <line> is a quiet template. Arguments are compared one by one, never
+ * joined, and any extra argument fails.
  */
-export function runsQuietLine(args: readonly string[] | undefined): boolean {
-  if (!args || args.length < 3 || args.length > 4) return false;
-  const flags = args.slice(1, -1).join(' ');
-  return COMMAND_FLAGS.includes(flags) && isQuietLine(args[args.length - 1]!);
+export function runsQuietLine(
+  path: string | undefined,
+  args: readonly string[] | undefined,
+): boolean {
+  if (!path || !args || !SYSTEM_SHELLS.has(path) || args[0] !== path) return false;
+  const line =
+    args.length === 3 && (args[1] === '-c' || args[1] === '-lc')
+      ? args[2]
+      : args.length === 4 && args[1] === '-l' && args[2] === '-c'
+        ? args[3]
+        : undefined;
+  return line !== undefined && isQuietLine(line);
 }

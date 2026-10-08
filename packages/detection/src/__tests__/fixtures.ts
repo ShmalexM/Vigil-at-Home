@@ -156,3 +156,15 @@ export const REAL_LOCAL_READS = [
   `for i in 1 2 3; do curl -s -m 8 http://127.0.0.1:11434/api/ps | python3 -c "import json,sys; d=json.load(sys.stdin); print([m['name'] for m in d.get('models',[])])"; sleep 2; done`,
   `curl -s -m 3 http://localhost:11434/api/tags | python3 -c "import sys,json; print(json.load(sys.stdin))"`,
 ];
+
+/** A system shell started as Claude Code's Bash tool starts it: argv[0] is the full path. */
+export const agentShell = (cmd: string, path = '/bin/zsh', flags: string[] = ['-c']) =>
+  proc({
+    path,
+    args: [path, ...flags, cmd],
+    signing: 'apple',
+    parentPath: '/Users/alex/.local/share/claude/versions/2.1.0',
+  });
+
+/** The cwd file Claude Code's harness writes, in the macOS per-user temp folder. */
+export const HARNESS_CWD = '/var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/T/claude-ab12-cwd';
