@@ -20,14 +20,20 @@
 // the cdhash), for as long as it stays connected. Nothing the client says is
 // part of the check, and nothing else gets weaker. Without a pin, or when
 // the pin doesn't match (another app, or an app updated since the install),
-// there is no protection; the helper update that follows an app update pins
-// the new app.
+// there is no protection.
+//
+// Only an app outside the installer's folder (/Applications/Vigil at
+// Home.app, /opt/Vigil at Home) is pinned: one inside it is protected by
+// path already, so it has no pin, an update in place asks for nothing, and
+// no connection is looked up. An app outside it is re-pinned by the next
+// self grant the password approves (repinFromGrant), or else by a helper
+// update.
 
 import { chmodSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { FileHasher } from '@vigil/sensors';
-import { selfRoots, underSelfRoot } from '@vigil/core/self';
+import { selfRoots, underSelfRoot, type SelfImage } from '@vigil/core/self';
 import type { System } from './system.js';
 import { identifyProcess } from './commands/process.js';
 import { runsFromSelfImage } from './commands/selfImage.js';
@@ -110,10 +116,9 @@ export async function pinFor(
   opts: PinOptions,
 ): Promise<AppPin | undefined> {
   if (!isAbsolute(path)) throw new Error(`${path} is not an absolute path`);
-  const hash =
-    opts.sha256 ?? ((p: string) => new FileHasher({ maxBytes: 4 * 1024 ** 3 }).sha256(p));
+  const hash = opts.sha256 ?? sha256Of;
+  if (inInstalled(sys, opts.installed, path)) return undefined;
   if (sys.platform === 'linux') {
-    if (underSelfRoot(selfRoots(opts.installed, false), path, false)) return undefined;
     const image = sys.fileId?.(path);
     const sha256 = hash(path);
     if (!image || !sha256) throw new Error(`${path} is not a file Vigil can pin`);
@@ -123,6 +128,73 @@ export async function pinFor(
   const sha256 = hash(path);
   if (!cd || !sha256) throw new Error(`${path} has no code signature to pin`);
   return { platform: 'darwin', path, cdhash: cd, sha256 };
+}
+
+const sha256Of = (p: string) => new FileHasher({ maxBytes: 4 * 1024 ** 3 }).sha256(p);
+
+/**
+ * Whether `path` is inside the installer's own folder, which the helper
+ * already protects by path: an app there is never pinned, so an update in
+ * place asks for nothing and connections cost nothing to check.
+ */
+function inInstalled(sys: System, installed: readonly string[], path: string): boolean {
+  const caseless = sys.platform !== 'linux';
+  return underSelfRoot(selfRoots(installed, caseless), path, caseless);
+}
+
+export interface RepinOptions extends PinOptions {
+  socketPath: string;
+  pinFile: string;
+  /** For tests: the helper's own pid. */
+  self?: number;
+}
+
+/**
+ * After the admin password approved a self grant: pin the app that asked
+ * for it, so an app updated outside the installer's folder is re-pinned
+ * with the grant's one prompt instead of a helper update's. Only the
+ * process the kernel names on the connection the grant came from counts,
+ * and only when what it runs is inside what the password just approved:
+ *
+ *   macOS  its executable is inside one of the grant's paths, and the
+ *          file there has the cdhash the running process has (so the
+ *          sha256 pinned is of the code that runs).
+ *   Linux  it runs from one of the grant's AppImages (device and inode).
+ *
+ * Anything else leaves the pin as it was. Returns the new pin, if any.
+ */
+export async function repinFromGrant(
+  sys: System,
+  fd: number,
+  grant: { selfPaths: readonly string[]; selfImages?: readonly SelfImage[] | undefined },
+  opts: RepinOptions,
+): Promise<AppPin | undefined> {
+  const pid = await peerPid(sys, fd, opts.socketPath, opts.self);
+  if (pid === undefined) return undefined;
+  const id = await identifyProcess(sys, pid);
+  if (!id || inInstalled(sys, opts.installed, id.path)) return undefined;
+  const hash = opts.sha256 ?? sha256Of;
+  let pin: AppPin | undefined;
+  if (sys.platform === 'linux') {
+    const image = (grant.selfImages ?? []).find(
+      (i) => sys.fileId?.(i.path) === i.id && runsFromSelfImage(sys, pid, [i.id]),
+    );
+    const sha256 = image && hash(image.path);
+    if (image && sha256) pin = { platform: 'linux', path: image.path, image: image.id, sha256 };
+  } else {
+    const caseless = true;
+    if (!underSelfRoot(selfRoots(grant.selfPaths, caseless), id.path, caseless)) return undefined;
+    const running = await cdhash(sys, String(pid));
+    const onDisk = await cdhash(sys, id.path);
+    const sha256 = running && running === onDisk ? hash(id.path) : undefined;
+    if (running && sha256) pin = { platform: 'darwin', path: id.path, cdhash: running, sha256 };
+  }
+  if (!pin) return undefined;
+  // Still the same process.
+  const after = await identifyProcess(sys, pid);
+  if (!after || after.started !== id.started) return undefined;
+  writePin(opts.pinFile, pin);
+  return pin;
 }
 
 /** A connected process verified as the pinned app, and the program hashes it runs. */

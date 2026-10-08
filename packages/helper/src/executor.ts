@@ -14,7 +14,7 @@ import {
   type RuleType,
   type SantaRule,
 } from '@vigil/sensors';
-import type { HelperAction, HelperCommand } from './protocol.js';
+import type { HelperAction, HelperCommand, SelfGrant } from './protocol.js';
 import { needsApproval } from './protocol.js';
 import { Journal, type JournalEntry } from './journal.js';
 import type { Approvals } from './approval.js';
@@ -76,6 +76,16 @@ export interface ExecutorDeps {
    * by hash, while they stay connected.
    */
   peers?: () => readonly ProtectedPeer[];
+  /**
+   * After the password approved a self grant: re-pin the app on the
+   * connection it came from (appPin.ts repinFromGrant).
+   */
+  repin?: (fd: number, grant: SelfGrant) => Promise<void>;
+}
+
+/** Where a command came from: the helper's end of the client's connection. */
+export interface CommandSource {
+  fd: number;
 }
 
 export type ExecOutcome =
@@ -131,7 +141,8 @@ export class Executor {
       : this.d.quarantine;
   }
 
-  async execute(cmd: HelperCommand, approval?: string): Promise<ExecOutcome> {
+  async execute(cmd: HelperCommand, approval?: string, from?: CommandSource): Promise<ExecOutcome> {
+    let approvedGrant = false;
     // Refuse what Linux can't do before asking for a password for it.
     if (this.d.sys.platform === 'linux') checkLinuxBlock(cmd);
     if (cmd.kind === 'detection.sync') {
@@ -158,6 +169,7 @@ export class Executor {
         const nonce = this.d.approvals.request(cmd);
         return { kind: 'needs_approval', nonce, prompt: selfPrompt(grants) };
       }
+      approvedGrant = grants.length > 0;
     } else if (needsApproval(cmd)) {
       // Check the release can actually happen before bothering the user.
       this.findContainment(cmd as HelperAction);
@@ -166,7 +178,11 @@ export class Executor {
         return { kind: 'needs_approval', nonce, prompt: this.approvalPrompt(cmd as HelperAction) };
       }
     }
-    return { kind: 'done', result: await this.run(cmd) };
+    const result = await this.run(cmd);
+    // Only a grant the password approved re-pins, never one that named nothing new.
+    if (approvedGrant && cmd.kind === 'self.grant' && from && this.d.repin)
+      await this.d.repin(from.fd, cmd).catch(() => undefined);
+    return { kind: 'done', result };
   }
 
   private approvalPrompt(cmd: HelperAction): string {

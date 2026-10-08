@@ -7,9 +7,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RuleStore } from '@vigil/sensors';
 import { Approvals } from './approval.js';
-import { pinFor, readPin, verifyPeer, writePin, type ProtectedPeer } from './appPin.js';
+import {
+  pinFor,
+  readPin,
+  repinFromGrant,
+  verifyPeer,
+  writePin,
+  type ProtectedPeer,
+} from './appPin.js';
+import { FastPath } from './fastpath.js';
 import { Executor } from './executor.js';
 import { Journal } from './journal.js';
+import type { HelperCommand } from './protocol.js';
 import { parseLsofSockets, peerPid, ssPeerInode } from './peer.js';
 import { HelperServer } from './server.js';
 import { realSystem, type BinaryName, type RunResult } from './system.js';
@@ -188,6 +197,67 @@ describe('the app pinned at install (macOS)', () => {
     await expect(pinFor(sys, 'relative', { installed: [] })).rejects.toThrow();
   });
 
+  it('pins nothing for an app in /Applications, so no connection is looked up', async () => {
+    const installed = ['/Applications/Vigil at Home.app'];
+    const exe = '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home';
+    sys.cdhashes.set(exe, CDHASH);
+    expect(await pinFor(sys, exe, { installed, sha256: () => APP_SHA })).toBeUndefined();
+    expect(sys.runs).toEqual([]);
+    // install.sh then leaves no pin, and each connection costs nothing.
+    writePin(pinFile, undefined);
+    expect(await check()).toBeUndefined();
+    expect(sys.runs).toEqual([]);
+  });
+
+  describe('re-pinned by an approved self grant', () => {
+    const DOWNLOADS = '/Users/a/Downloads/Vigil at Home.app';
+    const EXE = `${DOWNLOADS}/Contents/MacOS/Vigil at Home`;
+    const NEW = 'e'.repeat(40);
+    const repin = (selfPaths: string[]) =>
+      repinFromGrant(
+        sys,
+        FD,
+        { selfPaths },
+        {
+          socketPath: MAC_SOCKET,
+          pinFile,
+          self: HELPER,
+          installed: ['/Applications/Vigil at Home.app'],
+          sha256: () => 'b'.repeat(64),
+        },
+      );
+    beforeEach(() => {
+      // The app was updated in Downloads: its code has a new cdhash, the pin the old one.
+      sys.cdhashes.set(String(APP), NEW);
+      sys.cdhashes.set(EXE, NEW);
+    });
+
+    it('pins the connected app whose executable the grant covers', async () => {
+      expect(await check()).toBeUndefined();
+      const pin = await repin([DOWNLOADS]);
+      expect(pin).toEqual({ platform: 'darwin', path: EXE, cdhash: NEW, sha256: 'b'.repeat(64) });
+      expect(readPin(pinFile)).toEqual(pin);
+      expect((await check())?.pid).toBe(APP);
+    });
+
+    it('leaves the pin alone otherwise', async () => {
+      const before = readPin(pinFile);
+      // The grant names somewhere else.
+      expect(await repin(['/Users/a/Other.app'])).toBeUndefined();
+      // The file on disk isn't the code that runs.
+      sys.cdhashes.set(EXE, 'f'.repeat(40));
+      expect(await repin([DOWNLOADS])).toBeUndefined();
+      // The app in /Applications is protected by path, never pinned.
+      sys.cdhashes.set(EXE, NEW);
+      sys.processes.set(APP, {
+        path: '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home',
+        started: STARTED,
+      });
+      expect(await repin(['/Applications/Vigil at Home.app'])).toBeUndefined();
+      expect(readPin(pinFile)).toEqual(before);
+    });
+  });
+
   it('protects the connected process whose running code matches the pin', async () => {
     expect(await check()).toEqual({ pid: APP, started: STARTED, hashes: [CDHASH, APP_SHA] });
     // The cdhash comes from the running process, never from a file path.
@@ -290,6 +360,26 @@ describe('the app pinned at install (Linux AppImage)', () => {
     });
     expect(await pinFor(sys, '/opt/Vigil at Home/vigil-at-home', opts)).toBeUndefined();
     await expect(pinFor(sys, '/home/alex/missing', opts)).rejects.toThrow();
+  });
+
+  it('is re-pinned by an approved grant that names the image it runs from', async () => {
+    writePin(pinFile, undefined);
+    const opts = {
+      socketPath: LINUX_SOCKET,
+      pinFile,
+      self: HELPER,
+      installed: ['/opt/Vigil at Home'],
+      sha256: () => APP_SHA,
+    };
+    const other = { path: '/home/alex/Other.AppImage', id: '2049:7777' };
+    sys.files.set(other.path, other.id);
+    expect(
+      await repinFromGrant(sys, FD, { selfPaths: [], selfImages: [other] }, opts),
+    ).toBeUndefined();
+    expect(readPin(pinFile)).toBeUndefined();
+    const grant = { selfPaths: [], selfImages: [{ path: image, id: '2049:5501' }] };
+    expect(await repinFromGrant(sys, FD, grant, opts)).toMatchObject({ image: '2049:5501' });
+    expect((await check())?.pid).toBe(2000);
   });
 
   it('protects Vigil running from the pinned image', async () => {
@@ -397,6 +487,46 @@ describe('what a verified peer is spared', () => {
     peers = [];
     await ex.execute(set);
     expect(blocks.has(APP_SHA)).toBe(true);
+  });
+});
+
+describe('the self grant’s password re-pins', () => {
+  it('asks for a re-pin only after the password approved a grant', async () => {
+    const sys = new FakeSystem();
+    const asked: number[] = [];
+    const fast = new FastPath({
+      file: join(root, 'helper-rules.json'),
+      run: async () => {
+        throw new Error('unused');
+      },
+    });
+    const ex = new Executor({
+      sys,
+      journal: new Journal(join(root, 'journal.json')),
+      approvals: new Approvals({
+        dir: join(root, 'approvals'),
+        requiredOwnerUid: process.getuid!(),
+      }),
+      rules: new RuleStore(join(root, 'rules.json')),
+      quarantine: { quarantineDir: join(root, 'Quarantine') },
+      syncPort: 47821,
+      fastPath: fast,
+      repin: async (fd) => void asked.push(fd),
+    });
+    const grant: HelperCommand = {
+      kind: 'self.grant',
+      selfPaths: ['/Users/a/Downloads/Vigil at Home.app'],
+    };
+    const ask = await ex.execute(grant, undefined, { fd: FD });
+    expect(ask.kind).toBe('needs_approval');
+    expect(asked).toEqual([]);
+    const nonce = (ask as { nonce: string }).nonce;
+    Approvals.writeApproval(join(root, 'approvals'), nonce);
+    await ex.execute(grant, nonce, { fd: FD });
+    expect(asked).toEqual([FD]);
+    // The same grant again names nothing new, needs no password, and re-pins nothing.
+    await ex.execute(grant, undefined, { fd: FD });
+    expect(asked).toEqual([FD]);
   });
 });
 

@@ -23,6 +23,7 @@ import {
   helperInstallCommand,
   helperScriptFiles,
   helperMatch,
+  inInstallerFolder,
   installedHelperFiles,
   ROOT_SHELL,
   rootStageScript,
@@ -315,13 +316,37 @@ describe('helper install', () => {
     });
   }
 
-  it('asks for a helper update when the helper is pinned to another app', () => {
+  it('never asks anything of an app updated in place in /Applications', () => {
     const { dir } = bundle();
     const root = mkdtempSync(join(tmpdir(), 'root-'));
     for (const f of installedHelperFiles(dir, 'darwin', root)) {
       mkdirSync(dirname(f.installed), { recursive: true });
       writeFileSync(f.installed, readFileSync(f.bundled));
     }
+    const app = {
+      execPath: '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home',
+      env: {},
+    };
+    expect(inInstallerFolder('darwin', app)).toBe(true);
+    // No pin file at all, and whatever the app's executable now is: current,
+    // with the same bundle as without the app, so nothing is asked again.
+    const m = helperMatch(dir, 'darwin', root, app);
+    expect(m).toEqual(helperMatch(dir, 'darwin', root));
+    expect(m.installed).toBe('current');
+    expect(appPinned('darwin', app, root)).toBe(true);
+    // Folder names compare without case on macOS, as the disk does.
+    const lower = { ...app, execPath: '/applications/vigil at home.app/Contents/MacOS/x' };
+    expect(helperMatch(dir, 'darwin', root, lower).installed).toBe('current');
+  });
+
+  it('asks for a helper update when a Downloads app is pinned to another build', () => {
+    const { dir } = bundle();
+    const root = mkdtempSync(join(tmpdir(), 'root-'));
+    for (const f of installedHelperFiles(dir, 'darwin', root)) {
+      mkdirSync(dirname(f.installed), { recursive: true });
+      writeFileSync(f.installed, readFileSync(f.bundled));
+    }
+    // As run from Downloads (or translocated): outside the installer's folder.
     const exe = join(root, 'Vigil at Home');
     writeFileSync(exe, 'app v1');
     const app = { execPath: exe, env: {} };
@@ -360,6 +385,7 @@ describe('helper install', () => {
     expect(appPinned('linux', app, root)).toBe(true);
     // A .deb install needs no pin: its folder is root-owned and protected already.
     const deb = { execPath: '/opt/Vigil at Home/vigil-at-home', env: {} };
+    expect(inInstallerFolder('linux', deb)).toBe(true);
     expect(appPinned('linux', deb, mkdtempSync(join(tmpdir(), 'empty-')))).toBe(true);
     expect(helperMatch(dir, 'linux', root, deb).installed).toBe('none');
   });

@@ -27,7 +27,7 @@ import {
   syncTlsPaths,
 } from '@vigil/sensors';
 import { Approvals } from './approval.js';
-import { verifyPeer } from './appPin.js';
+import { repinFromGrant, verifyPeer } from './appPin.js';
 import { defaultPaths, installedSelf, SANTA_SYNC_PORT, type HelperPaths } from './config.js';
 import { Executor, type ActionOutcome } from './executor.js';
 import { FastPath } from './fastpath.js';
@@ -173,6 +173,16 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     ...(fapolicyd ? { fapolicyd } : {}),
     // The app on the other end of the socket, while it is the one pinned at install.
     peers: () => server.peers(),
+    repin: async (fd, grant) => {
+      const pin = await repinFromGrant(sys, fd, grant, {
+        socketPath: paths.socket,
+        pinFile: paths.appPin,
+        installed: installedSelf(sys.platform),
+      });
+      if (!pin) return;
+      log(`pinned the app at ${pin.path}`);
+      server.recheckPeers();
+    },
   });
 
   const server: HelperServer = new HelperServer({

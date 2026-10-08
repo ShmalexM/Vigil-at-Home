@@ -343,6 +343,8 @@ function start(): void {
     const bundle = helperAtStart.bundle;
     if (store.getSetting('helper.updateAsked', z.string(), '') !== bundle) {
       setTimeout(() => {
+        // The self grant's password may have re-pinned this app meanwhile.
+        if (checkHelperMatch()?.installed !== 'outdated') return;
         void runHelperScript('update', helperDir())
           .then(afterHelperScript)
           .then((r) => {

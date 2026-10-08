@@ -42,6 +42,8 @@ export class HelperServer {
   private readonly verified = new Map<Socket, ProtectedPeer>();
   /** Peer checks run one at a time: each reads every process's sockets. */
   private checking: Promise<void> = Promise.resolve();
+  /** Each connection's file descriptor, for finding who is on the other end. */
+  private readonly fds = new Map<Socket, number>();
 
   constructor(private readonly opts: HelperServerOptions) {}
 
@@ -89,6 +91,11 @@ export class HelperServer {
     return [...this.verified.values()];
   }
 
+  /** Check the connections not yet verified again, after the pin changed. */
+  recheckPeers(): void {
+    for (const sock of this.connections) if (!this.verified.has(sock)) this.checkPeer(sock);
+  }
+
   /**
    * Check who is on the other end, once, when the connection opens. A
    * connection that closes first is skipped, and one that closes while it is
@@ -96,9 +103,8 @@ export class HelperServer {
    */
   private checkPeer(sock: Socket): void {
     const identify = this.opts.identifyPeer;
-    // Node keeps the descriptor on the connection's handle; there is no public accessor.
-    const fd = (sock as unknown as { _handle?: { fd?: unknown } })._handle?.fd;
-    if (!identify || typeof fd !== 'number' || fd < 0) return;
+    const fd = this.fds.get(sock);
+    if (!identify || fd === undefined) return;
     this.checking = this.checking.then(async () => {
       if (!this.connections.has(sock)) return;
       let peer: ProtectedPeer | undefined;
@@ -116,6 +122,9 @@ export class HelperServer {
   private onConnection(sock: Socket): void {
     let buf = '';
     this.connections.add(sock);
+    // Node keeps the descriptor on the connection's handle; there is no public accessor.
+    const fd = (sock as unknown as { _handle?: { fd?: unknown } })._handle?.fd;
+    if (typeof fd === 'number' && fd >= 0) this.fds.set(sock, fd);
     this.checkPeer(sock);
     sock.setEncoding('utf8');
     sock.on('data', (chunk: string) => {
@@ -135,6 +144,7 @@ export class HelperServer {
       this.subscribers.delete(sock);
       this.connections.delete(sock);
       this.verified.delete(sock);
+      this.fds.delete(sock);
     };
     sock.on('close', forget);
     sock.on('error', forget);
@@ -159,7 +169,12 @@ export class HelperServer {
       return;
     }
     try {
-      const out = await this.opts.executor.execute(req.command, req.approval);
+      const fd = this.fds.get(sock);
+      const out = await this.opts.executor.execute(
+        req.command,
+        req.approval,
+        fd === undefined ? undefined : { fd },
+      );
       if (out.kind === 'needs_approval') {
         this.send(sock, {
           id: req.id,

@@ -106,9 +106,9 @@ const thisApp = (): AppIdentity => ({ execPath: process.execPath, env: process.e
 
 /**
  * What install.sh pins as the app: the main executable on macOS, the
- * AppImage on Linux (its real path, as the kernel names it). A .deb or .rpm
- * install is pinned by its root-owned folder instead, which install.sh
- * recognises from the same path.
+ * AppImage on Linux (its real path, as the kernel names it). install.sh
+ * pins nothing for an app inside the installer's folder, which it recognises
+ * from the same path.
  */
 export function appPinTarget(
   platform: NodeJS.Platform = process.platform,
@@ -132,8 +132,20 @@ export function appPinFile(platform: NodeJS.Platform = process.platform, root = 
   );
 }
 
-/** The installer's own folder on Linux, which needs no pin (config installedSelf). */
-const LINUX_INSTALLED = '/opt/Vigil at Home/';
+/**
+ * Whether the app is inside the installer's own folder (config
+ * installedSelf), which the helper protects by path: such an app is never
+ * pinned, so an update in place never asks for a helper update.
+ */
+export function inInstallerFolder(
+  platform: NodeJS.Platform = process.platform,
+  app: AppIdentity = thisApp(),
+): boolean {
+  const target = appPinTarget(platform, app);
+  return platform === 'linux'
+    ? target.startsWith('/opt/Vigil at Home/')
+    : target.toLowerCase().startsWith('/applications/vigil at home.app/');
+}
 
 /**
  * This app's identity in the terms of the pin: on macOS its executable's
@@ -141,9 +153,9 @@ const LINUX_INSTALLED = '/opt/Vigil at Home/';
  * needs pinning.
  */
 function appIdentity(platform: NodeJS.Platform, app: AppIdentity): string | undefined {
+  if (inInstallerFolder(platform, app)) return undefined;
   const target = appPinTarget(platform, app);
   if (platform === 'linux') {
-    if (target.startsWith(LINUX_INSTALLED)) return undefined;
     const st = statSync(target, { bigint: true });
     return fileId(st.dev, st.ino);
   }
@@ -184,9 +196,12 @@ export interface HelperMatch {
  * is updated by replacing it, the old helper keeps running until install.sh
  * runs again. Every installed file is root-owned but readable.
  *
- * Given `app`, a helper pinned to another app (appPinned) is outdated too,
- * and the bundle names this app as well, so each new app asks once to be
- * pinned even when the helper's own files didn't change.
+ * Given `app` outside the installer's folder, a helper pinned to another
+ * app (appPinned) is outdated too, and the bundle names this app as well, so
+ * each new such app asks once to be pinned even when the helper's own files
+ * didn't change. An app inside the installer's folder is never pinned and
+ * changes neither. The self grant's password re-pins as well, so the app
+ * checks again before asking (see index.ts).
  */
 export function helperMatch(
   dir: string,
