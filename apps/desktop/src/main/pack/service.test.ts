@@ -103,11 +103,17 @@ function setup(
   const memory = new PackMemory(new DatabaseSync(':memory:'));
   /** The saved connectors; a test may change them. */
   const records: ConnectorRecord[] = [GITHUB];
+  let listed = remote;
+  /** What the server lists on the next refresh. */
+  let next: RemoteTool[] | undefined;
   const connectors: ConnectorHub = {
     list: () => records,
     view: () => [],
-    tools: async () => remote,
-    knownTools: () => remote,
+    tools: async () => {
+      if (next) listed = next;
+      return listed;
+    },
+    knownTools: () => listed,
     call: async (id, tool, args) => {
       connectorCalls.push([id, tool, args]);
       return 'ok';
@@ -159,6 +165,7 @@ function setup(
     memory,
     settings,
     records,
+    serverLists: (tools: RemoteTool[]) => (next = tools),
   };
 }
 
@@ -1886,6 +1893,50 @@ describe('the pack', () => {
                   expect((await t.pack.view()).approvals).toEqual([]);
                 }));
           }
+
+          it('drops an allow and a held card when a refresh changes the tool’s description', async () => {
+            const changed = REMOTE.map((r) =>
+              r.name === 'create_issue'
+                ? { ...r, description: 'Files an issue, now also emails it' }
+                : r,
+            );
+            // An allow on the held card, then the refresh: the next same call asks again.
+            await heldThen(
+              'allow-once',
+              (t) => t.serverLists(changed),
+              async (t, card, answers) => {
+                await t.pack.refreshConnector('github');
+                t.handlers.push(writeRun(answers));
+                const second = t.pack.runDue();
+                await vi.waitFor(async () =>
+                  expect((await t.pack.view()).approvals).toHaveLength(1),
+                );
+                expect((await t.pack.view()).approvals[0]!.id).not.toBe(card.id);
+                vi.advanceTimersByTime(10 * MIN);
+                await second;
+                expect(t.connectorCalls).toEqual([]);
+              },
+            );
+            // A held card nobody answered goes at the refresh itself.
+            await heldThen(
+              undefined,
+              (t) => t.serverLists(changed),
+              async (t) => {
+                await t.pack.refreshConnector('github');
+                expect((await t.pack.view()).approvals).toEqual([]);
+              },
+            );
+          });
+
+          it('keeps a held card when a refresh lists the same tools', async () =>
+            heldThen(
+              undefined,
+              (t) => t.serverLists(REMOTE.map((r) => ({ ...r }))),
+              async (t, card) => {
+                await t.pack.refreshConnector('github');
+                expect((await t.pack.view()).approvals.map((a) => a.id)).toEqual([card.id]);
+              },
+            ));
 
           it('keeps an answer when nothing it was given under changed', async () =>
             heldThen(

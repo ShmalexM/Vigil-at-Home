@@ -14,6 +14,7 @@
 // dogs too; the user can name them and pick their breed, and they move when
 // those jobs run.
 
+import { createHash } from 'node:crypto';
 import { newId, type PreflightReply, type PreflightRequest, type ToolsReply } from '@vigil/core';
 import type { ReadTool, RunRequest, RunResult } from '@vigil/ai';
 import { redactValue } from '@vigil/ai/redact';
@@ -1666,9 +1667,12 @@ export class PackService {
 
   /** Lists a connector's tools now, so they can be chosen for dogs. */
   async refreshConnector(id: string): Promise<void> {
+    const before = toolsDigest(this.o.connectors.knownTools(id));
     try {
       await this.o.connectors.tools(id);
     } finally {
+      // A tool's name, description or input changed: what was held for it no longer counts.
+      if (toolsDigest(this.o.connectors.knownTools(id)) !== before) this.connectorChanged(id);
       this.changed();
     }
   }
@@ -1932,8 +1936,10 @@ export class PackService {
   /**
    * What a held card and its answer are bound to: the mode, the dog's tool
    * grant, the person's choice for the tool, and the identity and settings
-   * of every connector the dog's tools or this tool come from. A backstop
-   * for dropHeld: anything that changes one of these drops them anyway.
+   * of every connector the dog's tools or this tool come from, and a digest
+   * of each such tool's name, description and input schema as its server
+   * gave them. A backstop for dropHeld: anything that changes one of these
+   * drops them anyway.
    */
   private heldContext(dogId: string, t: ToolEntry): string {
     const tools = [...(this.dogs().find((d) => d.id === dogId)?.tools ?? [])].sort();
@@ -1946,7 +1952,13 @@ export class PackService {
         ? [c.id, c.kind, c.command ?? null, c.args ?? [], c.url ?? null, c.secrets, c.enabled]
         : [id, null];
     });
-    return JSON.stringify([this.mode(), tools, this.choiceOf(t.key), connectors]);
+    const defs = toolsDigest(
+      [...new Set([t.key, ...tools])].sort().map((k) => {
+        const e = k === t.key ? t : this.entry(k);
+        return e ? [k, e.name, e.description, e.inputSchema] : [k, null];
+      }),
+    );
+    return JSON.stringify([this.mode(), tools, this.choiceOf(t.key), connectors, defs]);
   }
 
   /**
@@ -2213,17 +2225,27 @@ function failText(reason: string): string {
 
 /** Which card a call belongs on: its dog, its tool and its arguments in a stable order. */
 function approvalKey(dogId: string, tool: string, args: unknown): string {
-  const stable = (v: unknown): unknown =>
-    Array.isArray(v)
-      ? v.map(stable)
-      : v && typeof v === 'object'
-        ? Object.fromEntries(
-            Object.keys(v)
-              .sort()
-              .map((k) => [k, stable((v as Record<string, unknown>)[k])]),
-          )
-        : v;
   return JSON.stringify([dogId, tool, stable(args)]);
+}
+
+/** A value with its object keys sorted, for comparing as JSON. */
+function stable(v: unknown): unknown {
+  return Array.isArray(v)
+    ? v.map(stable)
+    : v && typeof v === 'object'
+      ? Object.fromEntries(
+          Object.keys(v)
+            .sort()
+            .map((k) => [k, stable((v as Record<string, unknown>)[k])]),
+        )
+      : v;
+}
+
+/** A digest of tool definitions, keys in a stable order. */
+function toolsDigest(v: unknown): string {
+  return createHash('sha256')
+    .update(JSON.stringify(stable(v)))
+    .digest('hex');
 }
 
 function sameKeys(a: readonly string[], b: readonly string[]): boolean {
