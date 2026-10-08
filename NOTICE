@@ -18,5 +18,8 @@ Test fixtures in packages/sensors/src/logParser.test.ts contain sample log
 lines from Santa (https://github.com/northpolesec/santa), used under the
 Apache License, Version 2.0.
 
+The Claude Agent SDK bundled in the app is Anthropic's proprietary software,
+used under Anthropic's terms, and is not covered by the Apache License.
+
 See THIRD_PARTY_NOTICES.md for the full license texts and for the third-party
 software bundled with or used by the app.
