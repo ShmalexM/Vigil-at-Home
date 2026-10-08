@@ -33,6 +33,11 @@ export function pileUp(alerts: readonly Alert[]): Row[] {
   );
 }
 
+/** The pile this alert joins in Needs you, or undefined when it shows on its own. */
+export function pileKey(a: Alert): string | undefined {
+  return pileable(a) ? a.pile!.key : undefined;
+}
+
 function pileable(a: Alert): boolean {
   return (
     !!a.pile &&

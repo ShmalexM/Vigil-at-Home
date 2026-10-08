@@ -5,6 +5,7 @@ import { isNoticed, needsDecision } from '../shared/attention.js';
 import { Store } from './db/store.js';
 import { DryRunExecutor } from './executor.js';
 import { VigilCore } from './service.js';
+import { alertCounts } from './status.js';
 import { makeExec, makeRule } from './testing.js';
 
 const base: Alert = {
@@ -71,9 +72,46 @@ describe('VigilCore', () => {
       );
     }
     expect(core.status()).toMatchObject({ needsYou: 250, noticed: 250 });
-    // Cached until an alert changes, then counted again.
     store.saveAlert(alert({ id: 'n0', status: 'resolved' }));
     expect(core.status()).toMatchObject({ needsYou: 250, noticed: 249 });
+  });
+
+  it('counts exactly as needsDecision and piles do', () => {
+    const { store } = setup();
+    const pile = (key: string) => ({ key, who: 'claude' });
+    const decision = { at: 2, verdict: 'expected' as const, remember: false };
+    const cases: Partial<Alert>[] = [
+      {},
+      { severity: 'high' },
+      { severity: 'critical', decision },
+      { notify: 'popup' },
+      { containment: 'active' },
+      { containment: 'active', pile: pile('a') },
+      { severity: 'high', pile: pile('a') },
+      { severity: 'high', pile: pile('a') },
+      { severity: 'high', pile: pile('b') },
+      { severity: 'high', pile: pile('a'), actionIds: ['x'] },
+      {
+        severity: 'high',
+        pile: pile('c'),
+        ai: { provider: 'x', at: 1, verdict: 'unsure', summary: '', proposalIds: ['p'] },
+      },
+      { pile: pile('d') },
+      { status: 'resolved', severity: 'high' },
+      { decision },
+    ];
+    const all = cases.map((over, i) => alert({ id: `c${i}`, createdAt: i, ...over }));
+    for (const a of all) store.saveAlert(a);
+    const open = store.listAlerts({ status: 'open', limit: -1 });
+    expect(store.openAlertCounts()).toEqual(alertCounts(open));
+    // An alert saved in a transaction that rolls back isn't counted.
+    expect(() =>
+      store.tx(() => {
+        store.saveAlert(alert({ id: 'gone', severity: 'critical' }));
+        throw new Error('rolled back');
+      }),
+    ).toThrow();
+    expect(store.openAlertCounts()).toEqual(alertCounts(open));
   });
 
   it('clears only Noticed alerts and never releases a block', async () => {
