@@ -116,6 +116,8 @@ export interface AiBridgeOptions {
   readonly dataDir: string;
   /** Optional AI work waits while the Mac is busy or on low battery. */
   readonly isBusy?: () => boolean;
+  /** Why the Mac is busy (PowerPolicy.busyReason); lets labelling go after a long wait on load alone. */
+  readonly busyReason?: () => 'power' | 'load' | undefined;
   /** Opens a vendor's sign-in page in the user's browser. */
   readonly openExternal: (url: string) => Promise<void>;
   /** For tests. */
@@ -162,6 +164,9 @@ export class AiBridge extends EventEmitter<{
    * its next answer. So AI work that stops never stops silently.
    */
   private readonly held = new Map<'explainer' | 'labeller', HelperHeld>();
+  private labellerShowTimer: ReturnType<typeof setTimeout> | undefined;
+  /** When labelling last sent a batch, kept when the runner is rebuilt. */
+  private readonly labelClock: { lastSentAt?: number } = {};
 
   constructor(private readonly o: AiBridgeOptions) {
     super();
@@ -256,6 +261,8 @@ export class AiBridge extends EventEmitter<{
       ...(this.o.keys.list().typesafe ? { getJevApiKey: keyOf('typesafe') } : {}),
       spentThisMonthUsd: async () => this.spentThisMonthUsd(),
       ...(this.o.isBusy ? { isBusy: this.o.isBusy } : {}),
+      ...(this.o.busyReason ? { busyReason: this.o.busyReason } : {}),
+      labelClock: this.labelClock,
     });
     this.instance = { ai, key };
     return ai;
@@ -263,10 +270,12 @@ export class AiBridge extends EventEmitter<{
 
   /** Every run, wherever it went, lands in the Usage page's store. */
   private record(entry: PromptLogEntry): void {
-    const helper =
-      entry.purpose === 'explain' ? 'explainer' : entry.purpose === 'classify' ? 'labeller' : null;
-    if (helper && entry.provider === null) this.hold(helper, heldWhy(entry.outcome, entry.detail));
-    else if (helper && entry.outcome === 'ok') this.unhold(helper);
+    // The labeller's state comes from its batches (labelBatch), which try
+    // several AIs in turn; one attempt alone says little.
+    if (entry.purpose === 'explain') {
+      if (entry.provider === null) this.hold('explainer', heldWhy(entry.outcome, entry.detail));
+      else if (entry.outcome === 'ok') this.unhold('explainer');
+    }
     if (entry.model) {
       this.models.set(entry.id, entry.model);
       if (this.models.size > 100) this.models.delete(this.models.keys().next().value!);
@@ -291,14 +300,34 @@ export class AiBridge extends EventEmitter<{
     return { ...h };
   }
 
+  /**
+   * Note why a helper's work reached no AI. The most important reason seen
+   * since its last answer stays (the cap, then no AI ready, then failures,
+   * then a busy Mac), so the line doesn't flip between them; the page hears
+   * of it only when what it shows changes.
+   */
   private hold(helper: 'explainer' | 'labeller', why: string): void {
     const prev = this.held.get(helper);
+    if (prev && heldRank(prev.why) > heldRank(why)) return;
     this.held.set(helper, { since: prev?.since ?? this.now(), why });
-    if (prev?.why !== why) this.emit('changed');
+    if (helper === 'labeller' && !prev) {
+      // Shown only after an hour: tell the page when that hour is up.
+      clearTimeout(this.labellerShowTimer);
+      this.labellerShowTimer = setTimeout(
+        () => this.emit('changed'),
+        LABELLER_HELD_SHOWN_AFTER_MS + 1_000,
+      );
+      this.labellerShowTimer.unref?.();
+      return;
+    }
+    if (prev?.why !== why && this.heldBack(helper)) this.emit('changed');
   }
 
   private unhold(helper: 'explainer' | 'labeller'): void {
-    if (this.held.delete(helper)) this.emit('changed');
+    const shown = this.heldBack(helper) !== undefined;
+    if (!this.held.delete(helper)) return;
+    if (helper === 'labeller') clearTimeout(this.labellerShowTimer);
+    if (shown) this.emit('changed');
   }
 
   /** What Vigil charged to the user's keys since the 1st, all providers together, for the cap. */
@@ -557,7 +586,7 @@ export class AiBridge extends EventEmitter<{
     );
     if (!result.ok) {
       // A batch over the hourly budget isn't held back: the labeller ran recently.
-      if (result.reason === 'busy') this.hold('labeller', 'The Mac has been busy or on battery');
+      if (result.reason === 'busy') this.hold('labeller', MAC_BUSY);
       else if (result.reason === 'failed') this.hold('labeller', heldWhy('failed', result.detail));
       return 0;
     }
@@ -756,12 +785,24 @@ const Explanation = z.object({
   details: z.string().max(2000).optional(),
 });
 
+const CAP_USED_UP = 'This month’s spending cap on your API keys is used up';
+const NO_AI_READY = 'No AI app is ready';
+const MAC_BUSY = 'The Mac has been busy or on battery';
+
+/** Which held-back reason matters most when several come up. */
+function heldRank(why: string): number {
+  if (why === CAP_USED_UP) return 3;
+  if (why === NO_AI_READY) return 2;
+  if (why === MAC_BUSY) return 0;
+  return 1;
+}
+
 /** In words, why a helper's runs aren't reaching an AI. */
 function heldWhy(outcome: string, detail: string | undefined): string {
-  if (detail === MONTHLY_CAP_HELD) return 'This month’s spending cap on your API keys is used up';
+  if (detail === MONTHLY_CAP_HELD) return CAP_USED_UP;
   if (detail === PLAN_LIMITS_HELD || outcome === 'quota')
     return 'Your AI plans are near their limits';
-  if (outcome === 'no_provider' || detail === 'no_provider') return 'No AI app is ready';
+  if (outcome === 'no_provider' || detail === 'no_provider') return NO_AI_READY;
   if (detail === 'quota') return 'Your AI plans are near their limits';
   return detail ? `Its tries keep failing (${detail.slice(0, 160)})` : whyNot(outcome);
 }

@@ -407,9 +407,10 @@ describe('event labelling with a small local model', () => {
       }),
       maxEventsPerBatch: 5,
       maxBatchesPerHour: 60,
-      isBusy: () => true,
+      busyReason: () => why,
       now: () => now,
     });
+    const why: 'power' | 'load' | undefined = 'load';
     expect(await classifier.classify([exec('e1', '/a')])).toMatchObject({ reason: 'busy' });
     now += DEFAULT_MAX_BUSY_WAIT_MS;
     expect((await classifier.classify([exec('e1', '/a')])).ok).toBe(true);
@@ -417,6 +418,65 @@ describe('event labelling with a small local model', () => {
     now += 60_000;
     expect(await classifier.classify([exec('e2', '/b')])).toMatchObject({ reason: 'busy' });
     expect(ollama.runs).toBe(1);
+  });
+
+  it('never gives way on battery or when the Mac is hot, however long it waited', async () => {
+    const ollama = ready('ollama', { suspicious: [], unusual: [] });
+    let now = 0;
+    const clock = {};
+    const make = () =>
+      createEventClassifier({
+        runner: createAiRunner({
+          settings: { ...defaultAiSettings('/tmp/v'), order: ['ollama'] },
+          adapters: [ollama],
+          log: { record: () => {} },
+        }),
+        maxEventsPerBatch: 5,
+        maxBatchesPerHour: 60,
+        busyReason: () => 'power',
+        clock,
+        now: () => now,
+      });
+    now += 10 * DEFAULT_MAX_BUSY_WAIT_MS;
+    expect(await make().classify([exec('e1', '/a')])).toMatchObject({ reason: 'busy' });
+    expect(ollama.runs).toBe(0);
+    // An isBusy alone (no reason) never gives way either.
+    const plain = createEventClassifier({
+      runner: createAiRunner({
+        settings: { ...defaultAiSettings('/tmp/v'), order: ['ollama'] },
+        adapters: [ollama],
+        log: { record: () => {} },
+      }),
+      maxEventsPerBatch: 5,
+      maxBatchesPerHour: 60,
+      isBusy: () => true,
+      now: () => now,
+    });
+    now += 10 * DEFAULT_MAX_BUSY_WAIT_MS;
+    expect(await plain.classify([exec('e1', '/a')])).toMatchObject({ reason: 'busy' });
+  });
+
+  it('keeps the busy wait across a rebuilt classifier', async () => {
+    const ollama = ready('ollama', { suspicious: [], unusual: [] });
+    let now = 0;
+    const clock = {};
+    const make = () =>
+      createEventClassifier({
+        runner: createAiRunner({
+          settings: { ...defaultAiSettings('/tmp/v'), order: ['ollama'] },
+          adapters: [ollama],
+          log: { record: () => {} },
+        }),
+        maxEventsPerBatch: 5,
+        maxBatchesPerHour: 60,
+        busyReason: () => 'load',
+        clock,
+        now: () => now,
+      });
+    make();
+    now += DEFAULT_MAX_BUSY_WAIT_MS;
+    // A settings change rebuilt it; the wait it already did still counts.
+    expect((await make().classify([exec('e1', '/a')])).ok).toBe(true);
   });
 
   it('charges local batches by CPU time, so a slow Mac does fewer', async () => {

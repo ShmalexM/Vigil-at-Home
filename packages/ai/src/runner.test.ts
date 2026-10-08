@@ -200,6 +200,42 @@ describe('runner', () => {
     }
   });
 
+  it('asks a slow probe again soon, and uses its late answer', async () => {
+    vi.useFakeTimers();
+    try {
+      let probes = 0;
+      const slow: ProviderAdapter = {
+        id: 'codex',
+        probe: () => {
+          probes++;
+          return new Promise((r) =>
+            setTimeout(() => r({ provider: 'codex', state: 'ready' }), PROBE_DEADLINE_MS + 10_000),
+          );
+        },
+        run: async () => ({
+          kind: 'ok',
+          json: { verdict: 'benign', summary: 'codex' },
+          audit: audit(),
+        }),
+      };
+      const ollama = fake('ollama', () => ({
+        kind: 'ok',
+        json: { verdict: 'benign', summary: 'ok' },
+        audit: audit(),
+      }));
+      const { runner } = setup([slow, ollama], { order: ['codex', 'ollama'] });
+      const first = runner.run(request);
+      await vi.advanceTimersByTimeAsync(PROBE_DEADLINE_MS + 1);
+      expect(await first).toMatchObject({ ok: true, provider: 'ollama' });
+      // The same probe answers later; the next run uses it without probing twice.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await runner.run(request)).toMatchObject({ ok: true, provider: 'codex' });
+      expect(probes).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reports no_provider when nothing is set up', async () => {
     const { runner, log } = setup([]);
     expect(await runner.run(request)).toMatchObject({ ok: false, reason: 'no_provider' });

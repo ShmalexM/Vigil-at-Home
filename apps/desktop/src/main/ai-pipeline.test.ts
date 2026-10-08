@@ -193,4 +193,47 @@ describe('the AI path, end to end', () => {
     expect(await ai.labelBatch(store)).toBeGreaterThan(0);
     expect(labeller().held).toBeUndefined();
   });
+  it('tells the page when the labeller line appears, and keeps the stronger reason', async () => {
+    network({ ollama: false });
+    let at = NOW;
+    let busy: 'power' | 'load' | undefined;
+    const store = memoryStore();
+    const core = new VigilCore(store, new DryRunExecutor(), true, () => at);
+    const ai = new AiBridge({
+      store,
+      usage: core.usage,
+      keys: keys({ typesafe: 'ts-key-1234' }),
+      mode: () => 'both',
+      dataDir: '/tmp/vigil-pipeline-test',
+      openExternal: async () => {},
+      busyReason: () => busy,
+      isBusy: () => busy !== undefined,
+      now: () => at,
+    });
+    ai.setPrefs({ monthlyCapUsd: 1 });
+    spent(store, 1.5);
+    ai.labelEventsFrom(core);
+    let changed = 0;
+    ai.on('changed', () => changed++);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      core.ingest(makeExec('/tmp/odd-tool'), unmatched);
+      core.events.flush();
+      await ai.labelBatch(store);
+      expect(changed).toBe(0);
+      // A busy Mac next: the cap stays the reason shown.
+      busy = 'power';
+      await ai.labelBatch(store);
+      at = NOW + HOUR + 2_000;
+      vi.advanceTimersByTime(HOUR + 2_000);
+      expect(changed).toBe(1);
+      expect(ai.heldBack('labeller')?.why).toBe(
+        'This month’s spending cap on your API keys is used up',
+      );
+      await ai.labelBatch(store);
+      expect(changed).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

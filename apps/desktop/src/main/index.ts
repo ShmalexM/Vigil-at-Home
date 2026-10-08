@@ -227,6 +227,7 @@ function start(): void {
     mode: () => setup.mode(),
     dataDir,
     isBusy: () => power.isBusy(),
+    busyReason: () => power.busyReason(),
     openExternal: (url) => shell.openExternal(url),
   });
   if (!demo) core.usage.setLimitsSource(() => ai.limits());

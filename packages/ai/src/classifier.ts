@@ -185,6 +185,17 @@ export interface EventClassifierOptions {
    * running coding agents all day, is labelled slowly rather than never.
    */
   readonly maxBusyWaitMs?: number;
+  /**
+   * Why the Mac is busy, when it is. Only 'load' (the Mac is merely busy)
+   * gives way after `maxBusyWaitMs`; 'power' (battery, heat, sleep) always
+   * holds labelling. Without it, `isBusy` holds labelling with no limit.
+   */
+  readonly busyReason?: () => 'power' | 'load' | undefined;
+  /**
+   * When a batch last went out, kept by the caller so a rebuilt classifier
+   * doesn't restart the busy wait.
+   */
+  readonly clock?: { lastSentAt?: number };
   readonly deadlineMs?: number;
   readonly now?: () => number;
   /** A candidate prompt in place of LABEL_INSTRUCTIONS (benchmark only). */
@@ -202,7 +213,8 @@ export function createEventClassifier(options: EventClassifierOptions) {
   const cpu: Array<{ at: number; seconds: number }> = [];
   const maxBusyWaitMs = options.maxBusyWaitMs ?? DEFAULT_MAX_BUSY_WAIT_MS;
   /** When a batch last went out, or when labelling started. */
-  let lastSentAt = now();
+  const clock = options.clock ?? {};
+  clock.lastSentAt ??= now();
 
   return {
     async classify(events: readonly SensorEvent[]): Promise<ClassifyResult> {
@@ -210,7 +222,12 @@ export function createEventClassifier(options: EventClassifierOptions) {
       const deferred = events.slice(options.maxEventsPerBatch).map((e) => e.id);
       if (batch.length === 0) return { ok: true, labels: [], deferred };
       const all = events.map((e) => e.id);
-      if (options.isBusy?.() && now() - lastSentAt < maxBusyWaitMs)
+      const busy = options.busyReason
+        ? options.busyReason()
+        : options.isBusy?.()
+          ? 'power'
+          : undefined;
+      if (busy === 'power' || (busy === 'load' && now() - clock.lastSentAt! < maxBusyWaitMs))
         return { ok: false, reason: 'busy', deferred: all };
       const hourAgo = now() - 3_600_000;
       while (sent.length > 0 && sent[0]! < hourAgo) sent.shift();
@@ -222,7 +239,7 @@ export function createEventClassifier(options: EventClassifierOptions) {
       )
         return { ok: false, reason: 'budget', deferred: all };
       sent.push(now());
-      lastSentAt = now();
+      clock.lastSentAt = now();
 
       const ids = new Set(batch.map((e) => e.id));
       const labels = new Map<string, LabelledEvent>();

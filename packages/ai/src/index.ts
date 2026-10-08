@@ -107,6 +107,10 @@ export interface VigilAiOptions {
   readonly spentThisMonthUsd?: () => Promise<number>;
   /** The app says when the Mac is busy or on low battery, so event labelling waits. */
   readonly isBusy?: () => boolean;
+  /** Why the Mac is busy: only 'load' lets labelling go after a long wait (see the classifier). */
+  readonly busyReason?: () => 'power' | 'load' | undefined;
+  /** When labelling last sent a batch, kept across rebuilt runners. */
+  readonly labelClock?: { lastSentAt?: number };
 }
 
 export interface VigilAi extends AiRunner {
@@ -246,6 +250,8 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
       maxCpuSecondsPerHour: settings.classifier.maxCpuSecondsPerHour,
       cpuThreads: runtime.numThread,
       ...(options.isBusy ? { isBusy: options.isBusy } : {}),
+      ...(options.busyReason ? { busyReason: options.busyReason } : {}),
+      ...(options.labelClock ? { clock: options.labelClock } : {}),
     });
   }
 
