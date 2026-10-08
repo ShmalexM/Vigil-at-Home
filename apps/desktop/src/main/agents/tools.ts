@@ -352,7 +352,7 @@ export class VigilTools {
 
   private getAlert(id: string): Record<string, unknown> {
     const alert = this.src.alert(id);
-    if (!alert) throw new ToolError(`No alert ${id}. list_alerts gives the ids.`);
+    if (!alert) throw new ToolError('No alert has that id. list_alerts gives the ids.');
     const events = this.src.events(alert.eventIds.slice(0, MAX_ROWS));
     return {
       alert: {
@@ -424,7 +424,7 @@ export class VigilTools {
 
   private getRule(id: string): Record<string, unknown> {
     const r = this.src.rules().find((x) => x.id === id);
-    if (!r) throw new ToolError(`No rule ${id}. list_rules gives the ids.`);
+    if (!r) throw new ToolError('No rule has that id. list_rules gives the ids.');
     return {
       rule: {
         id: r.id,
