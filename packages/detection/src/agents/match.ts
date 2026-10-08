@@ -1,5 +1,5 @@
 import type { AgentIdentity } from '@vigil/core';
-import { clip, globProblem, globToRegExp } from '../rules/compile.js';
+import { globMatcher, globProblem } from '../rules/compile.js';
 
 /** What matching sees of a program. Sensors give all four; a `ps` seed gives path and args. */
 export interface AgentProc {
@@ -32,7 +32,7 @@ interface Clause {
   teamIds?: Set<string>;
   signingIds?: Set<string>;
   names?: Set<string>;
-  paths?: RegExp[];
+  paths?: ((path: string) => boolean)[];
   /** Lower case; all must match. */
   argGlobs?: string[];
 }
@@ -110,7 +110,7 @@ function namesProgram(c: Clause, p: AgentProc, name: string): boolean {
   if (c.teamIds && !(p.teamId !== undefined && c.teamIds.has(p.teamId))) return false;
   if (c.signingIds && !(p.signingId !== undefined && c.signingIds.has(p.signingId))) return false;
   if (c.names && !c.names.has(name)) return false;
-  if (c.paths && !c.paths.some((re) => re.test(clip(p.path)))) return false;
+  if (c.paths && !c.paths.some((fits) => fits(p.path))) return false;
   return true;
 }
 
@@ -155,7 +155,8 @@ export function compileAgentMatchers(ids: readonly AgentIdentity[]): CompiledAge
       if (m.teamIds?.length) c.teamIds = new Set(m.teamIds);
       if (m.signingIds?.length) c.signingIds = new Set(m.signingIds);
       if (m.names?.length) c.names = new Set(m.names);
-      if (m.paths?.length) c.paths = m.paths.map((g) => globToRegExp(g));
+      // Matched without a regex (globMatcher), in time linear in the path.
+      if (m.paths?.length) c.paths = m.paths.map((g) => globMatcher(g));
       if (m.argGlobs?.length) c.argGlobs = m.argGlobs.map((g) => g.toLowerCase());
       if (c.teamIds) for (const k of c.teamIds) push(byTeam, k, c);
       else if (c.signingIds) for (const k of c.signingIds) push(bySigning, k, c);
@@ -164,17 +165,15 @@ export function compileAgentMatchers(ids: readonly AgentIdentity[]): CompiledAge
     }
   });
 
-  // One pass over the path decides whether any glob-only clause is worth trying.
-  const anyGlob = globOnly.length
-    ? new RegExp(globOnly.flatMap((c) => c.paths!.map((re) => `(?:${re.source})`)).join('|'), 'i')
-    : undefined;
+  // Whether any glob-only clause is worth trying.
+  const anyGlob = (path: string) => globOnly.some((c) => c.paths!.some((fits) => fits(path)));
 
   /** Clause lists that could fit p, cheapest first; the glob-only ones last. */
   const candidates = (p: AgentProc, name: string): Array<Clause[] | undefined> => [
     p.teamId !== undefined ? byTeam.get(p.teamId) : undefined,
     p.signingId !== undefined ? bySigning.get(p.signingId) : undefined,
     byName.get(name),
-    anyGlob?.test(clip(p.path)) ? globOnly : undefined,
+    globOnly.length && anyGlob(p.path) ? globOnly : undefined,
   ];
 
   return {

@@ -28,7 +28,7 @@ import { FEED_CHECK_MS, type Detector } from './detection.js';
 import { RuleEditing } from './rule-editing.js';
 import type { ActionExecutor } from './executor.js';
 import { Scheduler } from './scheduler.js';
-import { SensorRegistry } from './sensors.js';
+import { ruleMatcherHealth, SensorRegistry } from './sensors.js';
 import { computeStatus } from './status.js';
 import { TEST_RULE } from './test-alert.js';
 import { WORTH_A_LOOK_RULE } from './worth-a-look.js';
@@ -93,6 +93,8 @@ export class VigilCore {
     store.upsertRule(TEST_RULE);
     store.upsertRule(WORTH_A_LOOK_RULE);
     store.upsertRule(SLOW_RULE);
+    const matcher = ruleMatcherHealth();
+    if (matcher) this.sensors.report(matcher);
   }
 
   start(): void {

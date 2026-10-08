@@ -14,6 +14,8 @@ import { setFlagsFromString } from 'node:v8';
 const LINEAR = 'l';
 
 let available: boolean | undefined;
+/** For tests: pretend the runtime has, or lacks, the engine. */
+let simulated: boolean | undefined;
 
 function compiles(source: string, flags: string): boolean {
   try {
@@ -24,25 +26,49 @@ function compiles(source: string, flags: string): boolean {
   }
 }
 
+/** The `l` flag is taken, and a regex built with it matches. */
+function works(): boolean {
+  try {
+    const re = new RegExp('^a+b$', LINEAR);
+    return re.flags.includes(LINEAR) && re.test('aab') && !re.test('aa');
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Whether this runtime has the linear-time engine. It needs V8's
  * --enable-experimental-regexp-engine, which is turned on here the first time,
  * so Electron's main process, the helper's node and the tests need no command-line
  * flag. V8 reads it each time a regex is built, so setting it late works.
+ *
+ * Without it nothing falls back to the backtracking engine: a regex Vigil
+ * does not ship is refused with the reason (linearProblem), except in a saved
+ * rule that ran before (legacy.ts), and the app shows it in sensor health.
  */
 export function linearEngine(): boolean {
+  if (simulated !== undefined) return simulated;
   if (available !== undefined) return available;
-  available = compiles('', LINEAR);
+  available = works();
   if (!available) {
     try {
       setFlagsFromString('--enable-experimental-regexp-engine');
     } catch {
       // Not a V8 that takes flags at run time: available stays false.
     }
-    available = compiles('', LINEAR);
+    available = works();
   }
   return available;
 }
+
+/** For tests: act as if the runtime lacks (false) or has (true) the engine; undefined to stop. */
+export function simulateLinearEngine(on: boolean | undefined): void {
+  simulated = on;
+}
+
+/** Why a regex can't be used when this runtime has no linear-time engine. */
+export const NO_LINEAR_ENGINE =
+  "this copy of Vigil can't run the linear-time matcher, so only regexes Vigil ships, and those in rules saved before, can be used";
 
 /** How the `i` flag compares characters without the `u` flag (ECMA-262 Canonicalize). */
 function canonicalize(code: number): number {
@@ -50,6 +76,17 @@ function canonicalize(code: number): number {
   if (u.length !== 1) return code;
   const up = u.charCodeAt(0);
   return code >= 128 && up < 128 ? code : up;
+}
+
+let canon: Uint16Array | undefined;
+
+/** The code unit `i` compares `code` as (without `u`), from a table built on first use. */
+export function caseFold(code: number): number {
+  if (!canon) {
+    canon = new Uint16Array(0x10000);
+    for (let c = 0; c <= 0xffff; c++) canon[c] = canonicalize(c);
+  }
+  return canon[code]!;
 }
 
 /** Each code unit that `i` treats as equal to others, with all of them (itself included). */
@@ -371,18 +408,19 @@ function linearSource(
  * Assumes regexProblem already passed it, so it is a valid regex.
  */
 export function linearProblem(pattern: string, ignoreCase = false): string | undefined {
-  if (!linearEngine()) return undefined;
+  if (!linearEngine()) return `regex can't be used: ${NO_LINEAR_ENGINE}`;
   const src = linearSource(pattern, ignoreCase);
   if (!('problem' in src)) return undefined;
   return `regex can't use the linear-time matcher that rules Vigil did not ship need: ${src.problem}`;
 }
 
 /**
- * A regex on the linear-time engine, or on the usual one when this runtime
- * has none. Throws when linearProblem would refuse the pattern.
+ * A regex on the linear-time engine. Throws when linearProblem would refuse
+ * the pattern, including when this runtime has no such engine: it never
+ * falls back to the backtracking one.
  */
 export function linearRegExp(pattern: string, ignoreCase: boolean): RegExp {
-  if (!linearEngine()) return new RegExp(pattern, ignoreCase ? 'i' : '');
+  if (!linearEngine()) throw new Error(`regex can't be used: ${NO_LINEAR_ENGINE}`);
   const src = linearSource(pattern, ignoreCase);
   if ('problem' in src)
     throw new Error(

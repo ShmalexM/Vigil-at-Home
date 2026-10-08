@@ -1,6 +1,6 @@
 import { authorizeAction, type Action, type ProcessRef } from '@vigil/core';
 import { BlockList, isIP } from 'node:net';
-import { clip, globProblem, globToRegExp } from './rules/compile.js';
+import { clip, globMatcher, globToRegExp } from './rules/compile.js';
 import type { DetectionEvent } from './types.js';
 
 /**
@@ -66,8 +66,8 @@ function toBlockList(networks: string[], label: string): BlockList {
 }
 
 export class SafetyFloor {
-  private readonly protectedPaths: RegExp[];
-  private readonly protectedFiles: RegExp[];
+  private readonly protectedPaths: ((path: string) => boolean)[];
+  private readonly protectedFiles: ((path: string) => boolean)[];
   private readonly appleTools = APPLE_TOOL_GLOBS.map((g) => globToRegExp(g));
   private readonly systemPersistence = SYSTEM_PERSISTENCE_GLOBS.map((g) => globToRegExp(g));
   private readonly selfPaths: string[];
@@ -75,12 +75,16 @@ export class SafetyFloor {
 
   constructor(cfg: Partial<SafetyConfig> = {}) {
     const extra = cfg.protectedPathGlobs ?? [];
-    for (const g of extra) {
-      const problem = globProblem(g);
-      if (problem) throw new Error(`protectedPathGlobs: ${g}: ${problem}`);
-    }
-    this.protectedPaths = [...DEFAULT_PROTECTED_PATH_GLOBS, ...extra].map((g) => globToRegExp(g));
-    this.protectedFiles = [...PROTECTED_FILE_GLOBS, ...extra].map((g) => globToRegExp(g));
+    // Matched without a regex (globMatcher), in time linear in the path.
+    const match = (g: string) => {
+      try {
+        return globMatcher(g);
+      } catch (err) {
+        throw new Error(`protectedPathGlobs: ${g}: ${(err as Error).message}`, { cause: err });
+      }
+    };
+    this.protectedPaths = [...DEFAULT_PROTECTED_PATH_GLOBS, ...extra].map(match);
+    this.protectedFiles = [...PROTECTED_FILE_GLOBS, ...extra].map(match);
     this.selfPaths = (cfg.selfPaths ?? []).map((p) => p.toLowerCase().replace(/\/+$/, ''));
     this.neverBlock = toBlockList(
       [...DEFAULT_NEVER_BLOCK_NETWORKS, ...(cfg.neverBlockNetworks ?? [])],
@@ -104,7 +108,7 @@ export class SafetyFloor {
       }
     }
     if (this.isSelf(p.path)) return 'it is Vigil itself';
-    if (this.protectedPaths.some((r) => r.test(clip(p.path)))) {
+    if (this.protectedPaths.some((fits) => fits(p.path))) {
       return 'it lives in a protected system folder';
     }
     return undefined;
@@ -142,7 +146,7 @@ export class SafetyFloor {
           : undefined;
       case 'file.quarantine': {
         if (this.isSelf(action.path)) return 'it is part of Vigil';
-        if (this.protectedFiles.some((r) => r.test(clip(action.path))))
+        if (this.protectedFiles.some((fits) => fits(action.path)))
           return 'the file is part of macOS';
         if (proc && proc.path === action.path) return this.processProtection(proc);
         return undefined;

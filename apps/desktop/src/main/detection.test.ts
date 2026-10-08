@@ -3,6 +3,7 @@ import type { PreflightRequest, SensorEvent } from '@vigil/core';
 import {
   DetectionRule,
   forgetLegacyPatterns,
+  simulateLinearEngine,
   sqliteStores,
   SLOW_RULE_BUDGET_MS,
   type SessionStart,
@@ -61,6 +62,7 @@ function exec(path: string, sha256?: string): SensorEvent {
 
 describe('Detector', () => {
   afterEach(() => {
+    simulateLinearEngine(undefined);
     forgetLegacyPatterns();
   });
 
@@ -112,6 +114,17 @@ describe('Detector', () => {
     });
     expect(out.ok).toBe(false);
     expect(out.errors.join()).toMatch(/linear-time.*lookahead/);
+  });
+
+  it('says in sensor health when the linear-time engine is missing, and keeps saved rules', () => {
+    expect(setup().core.sensors.get('rule-matcher')).toBeUndefined();
+    simulateLinearEngine(false);
+    const { core } = setup({}, [ownRule('mine', '^/tmp/x[0-9]+$')]);
+    expect(core.sensors.get('rule-matcher')).toMatchObject({ state: 'degraded' });
+    expect(core.status().reasons.join()).toMatch(/Rule matcher/);
+    expect(core.rules().find((r) => r.rule.id === 'mine')).toMatchObject({ legacy: true });
+    const out = core.detector!.editor.validate(ownRule('brand-new', '^/tmp/y$'));
+    expect(out.errors.join()).toMatch(/can't run the linear-time matcher/);
   });
 
   it('stores ordinary events with how many rules checked them', async () => {

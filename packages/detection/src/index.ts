@@ -1,7 +1,19 @@
 export * from './types.js';
 export { lintRule, isAnchored, type LintResult, type LintOptions } from './rules/lint.js';
-export { globProblem, globToRegExp, regexProblem, renderTemplate } from './rules/compile.js';
-export { foldCase, linearEngine, linearProblem } from './rules/linear.js';
+export {
+  globMatcher,
+  globProblem,
+  globToRegExp,
+  regexProblem,
+  renderTemplate,
+} from './rules/compile.js';
+export {
+  foldCase,
+  linearEngine,
+  linearProblem,
+  NO_LINEAR_ENGINE,
+  simulateLinearEngine,
+} from './rules/linear.js';
 export {
   adoptLegacyPatterns,
   forgetLegacyPatterns,

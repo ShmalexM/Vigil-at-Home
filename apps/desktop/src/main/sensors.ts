@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { linearEngine } from '@vigil/detection';
 import type { SensorHealth } from './status.js';
 
 /**
@@ -25,6 +26,22 @@ export class SensorRegistry extends EventEmitter<{ changed: [] }> {
   list(): SensorHealth[] {
     return [...this.sensors.values()];
   }
+}
+
+/**
+ * One line when this runtime has no linear-time regex engine, checked at
+ * startup; undefined when it has. Without it, a new rule's regex is refused
+ * and older saved ones run as they did, without the time limit.
+ */
+export function ruleMatcherHealth(): SensorHealth | undefined {
+  if (linearEngine()) return undefined;
+  return {
+    id: 'rule-matcher',
+    name: 'Rule matcher',
+    state: 'degraded',
+    detail: 'Runs the patterns in rules you and AI write in limited time',
+    note: 'Not available in this copy of Vigil: new rules can’t use regexes, and older ones run without a time limit',
+  };
 }
 
 export const DEFAULT_SENSORS: SensorHealth[] = [
