@@ -1,9 +1,11 @@
 /* The Pack page: the Lead dog's chat, the pack's cards, tools and connectors. */
 
-.pack .muted {
+.pack .muted,
+.notebook .muted {
   color: var(--tx3);
 }
-.pack .wrap {
+.pack .wrap,
+.notebook .wrap {
   flex-wrap: wrap;
 }
 
@@ -48,6 +50,9 @@
 .lead-panel {
   position: sticky;
   top: 44px;
+  /* The message box stays on screen and the log scrolls. Once stuck it fits the
+     window; before that, useFitToWindow in Pack.tsx trims it further. */
+  max-height: calc(100vh - 60px);
   gap: 10px;
   padding-bottom: 12px;
 }
@@ -150,8 +155,9 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  min-height: 260px;
-  max-height: min(46vh, 480px);
+  flex: 1;
+  min-height: 160px;
+  max-height: none;
   overflow-y: auto;
   padding: 4px 2px;
 }
@@ -172,6 +178,14 @@
 .starter:hover {
   border-color: var(--ac-ln);
   color: var(--tx0);
+}
+.starter:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.starter:disabled:hover {
+  border-color: var(--ln1);
+  color: var(--tx1);
 }
 
 .msg {
@@ -588,6 +602,15 @@
   text-decoration: line-through;
 }
 
+.pack-tabs {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  border-bottom: 1px solid var(--ln0);
+}
+.pack-tabs .tabs {
+  border-bottom: 0;
+}
 .pack-voice {
   display: inline-flex;
   align-items: center;
