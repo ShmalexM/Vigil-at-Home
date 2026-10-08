@@ -168,6 +168,8 @@ export class RuleStore {
 
   /** Called at postflight once Santa confirms it applied rules up to `rev`. */
   markSynced(rev: number, clean: boolean): void {
+    // Most syncs change nothing; don't rewrite the file for those.
+    if (this.state.syncedRev === rev && !(clean && this.state.cleanSyncPending)) return;
     this.state.syncedRev = rev;
     if (clean) this.state.cleanSyncPending = false;
     this.save();

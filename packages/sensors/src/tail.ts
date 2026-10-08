@@ -4,8 +4,9 @@
 // It watches the file's folder so new lines arrive at once without waking
 // the CPU when nothing happens. A folder watch keeps working across rotation
 // (a watch on the file itself follows the old file, and on macOS did not
-// report appends at all). It also polls every couple of seconds in case the
-// watch misses something or the folder does not exist yet.
+// report appends at all). It also polls every couple of seconds while the
+// folder does not exist yet, and every ten once the watch works, in case it
+// misses something.
 
 import { watch, type FSWatcher } from 'node:fs';
 import { open, stat } from 'node:fs/promises';
@@ -25,6 +26,8 @@ export interface TailOptions {
   from?: TailPosition | 'start' | 'end';
   /** Fallback poll interval. Changes usually arrive through the file watch well before this. */
   intervalMs?: number;
+  /** Fallback poll interval while the folder watch is working (default 5× intervalMs). */
+  watchedIntervalMs?: number;
   /** Watch the file for changes (default true). Without it, lines arrive on the fallback poll only. */
   watch?: boolean;
   /** Lines longer than this are dropped (a runaway line must not eat memory). */
@@ -65,6 +68,9 @@ export class FileTailer {
     }
     this.arm();
     this.schedule();
+    // What was written since a saved position (or the whole file) is read now,
+    // not at the first fallback poll.
+    if (from !== 'end') this.kick();
   }
 
   async stop(): Promise<void> {
@@ -98,12 +104,15 @@ export class FileTailer {
     const fh = await open(this.opts.path, 'r');
     try {
       const chunkSize = 256 * 1024;
-      const buf = Buffer.alloc(chunkSize);
+      // Only the bytes read are decoded, so the buffer needn't be zeroed, and
+      // a poll that finds a few lines (the usual case) takes a few KB from
+      // Node's pool instead of a fresh 256 KB.
+      const buf = Buffer.allocUnsafe(Math.min(chunkSize, st.size - this.pos.offset));
       while (this.pos.offset < st.size) {
         const { bytesRead } = await fh.read(
           buf,
           0,
-          Math.min(chunkSize, st.size - this.pos.offset),
+          Math.min(buf.length, st.size - this.pos.offset),
           this.pos.offset,
         );
         if (bytesRead === 0) break;
@@ -179,11 +188,19 @@ export class FileTailer {
     this.watcher = undefined;
   }
 
+  /**
+   * While the folder watch works the poll is only a safety net, so it runs
+   * less often: one wakeup every 10 s per log instead of every 2 s.
+   */
   private schedule(): void {
     if (!this.running) return;
-    this.timer = setTimeout(() => {
-      this.kick();
-      this.schedule();
-    }, this.opts.intervalMs ?? 2000);
+    const interval = this.opts.intervalMs ?? 2000;
+    this.timer = setTimeout(
+      () => {
+        this.kick();
+        this.schedule();
+      },
+      this.watcher ? (this.opts.watchedIntervalMs ?? interval * 5) : interval,
+    );
   }
 }
