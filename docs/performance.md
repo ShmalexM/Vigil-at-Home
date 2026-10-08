@@ -106,7 +106,10 @@ doesn't: the app only answers a line on a local socket. See
 5. **Optional work checks `power.isBusy()`.** On battery, when the Mac is hot,
    asleep or already loaded (load above 0.8 per core), the classifier, AI rule
    reviews and anything else that can wait holds off. Routine scheduler jobs
-   run 4× less often on battery and pause when the Mac is hot or asleep.
+   run 4× less often on battery and pause when the Mac is hot or asleep. If
+   macOS never says the Mac woke up, the power state is read again two
+   minutes after it went to sleep, and a scheduled task still running after
+   30 minutes gives its place back so it can't hold up the rest.
 6. **Renderers only while visible.** Each window's page is its own process
    (30–80 MB on macOS). The main window's goes when it closes and a hidden
    popup's after a minute. The popover is the one kept loaded, because

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Scheduler } from './scheduler.js';
+import { Scheduler, TaskTimeoutError } from './scheduler.js';
 
 const tick = () => new Promise((r) => setImmediate(r));
 
@@ -84,5 +84,71 @@ describe('Scheduler', () => {
     await vi.advanceTimersByTimeAsync(300);
     expect(calls).toBe(9);
     s.stop();
+  });
+
+  it('gives a hung task’s slot back so other work keeps running', async () => {
+    vi.useFakeTimers();
+    const errors: string[] = [];
+    const s = new Scheduler({
+      concurrency: 1,
+      taskTimeoutMs: 1_000,
+      onError: (name, err) => errors.push(`${name}: ${(err as Error).message}`),
+    });
+    const hung = s.enqueue('hung', () => new Promise<void>(() => {}));
+    const hungResult = hung.catch((e: unknown) => e);
+    const ran: string[] = [];
+    const next = s.enqueue('next', () => void ran.push('next'));
+    await vi.advanceTimersByTimeAsync(999);
+    expect(ran).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    await next;
+    expect(ran).toEqual(['next']);
+    expect(await hungResult).toBeInstanceOf(TaskTimeoutError);
+    expect(errors).toEqual(['hung: hung still running after 1 s; gave up waiting']);
+    expect(s.active).toBe(0);
+  });
+
+  it('ignores a timed-out task that finishes later and doesn’t free its slot twice', async () => {
+    vi.useFakeTimers();
+    const s = new Scheduler({ concurrency: 1, taskTimeoutMs: 1_000 });
+    let finish!: () => void;
+    const slow = s.enqueue('slow', () => new Promise<void>((r) => (finish = r))).catch(() => {});
+    await vi.advanceTimersByTimeAsync(1_000);
+    await slow;
+    let release!: () => void;
+    const holder = s.enqueue('holder', () => new Promise<void>((r) => (release = r)));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.active).toBe(1);
+    finish(); // the abandoned task returns at last
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.active).toBe(1);
+    const after = s.enqueue('after', () => 'ran');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.pending().routine).toBe(1); // still waits for the one slot
+    release();
+    await holder;
+    expect(await after).toBe('ran');
+  });
+
+  it('lets a periodic job run again after a hung run and counts the time-out', async () => {
+    vi.useFakeTimers();
+    const s = new Scheduler({ taskTimeoutMs: 1_000 });
+    let calls = 0;
+    s.every(
+      'stuck',
+      5_000,
+      () => {
+        calls++;
+        return calls === 1 ? new Promise<void>(() => {}) : undefined;
+      },
+      true,
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(s.status()[0]).toMatchObject({ busy: false, timeouts: 1 });
+    expect(s.status()[0]!.lastError).toMatch(/gave up waiting/);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(calls).toBe(2);
+    expect(s.status()[0]).toMatchObject({ runs: 1, timeouts: 1 });
+    expect(s.status()[0]!.lastError).toBeUndefined();
   });
 });

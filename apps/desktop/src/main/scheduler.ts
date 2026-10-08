@@ -9,6 +9,10 @@
  * - On battery the app slows periodic jobs down (`setSlowdown`): a job runs
  *   at most once every `everyMs × factor`.
  *
+ * - A task still running after `taskTimeoutMs` gives its slot back, so one
+ *   call that never returns can't stall every other job behind it. Its
+ *   result, if it ever comes, is ignored, and its job may run again.
+ *
  * Blocking never goes through here. Blocks run inline in the alert path.
  */
 export type Priority = 'urgent' | 'routine';
@@ -21,6 +25,8 @@ export interface JobStatus {
   lastError?: string;
   runs: number;
   busy: boolean;
+  /** Runs given up on after `taskTimeoutMs`. */
+  timeouts: number;
 }
 
 interface Task {
@@ -39,8 +45,18 @@ interface Job extends JobStatus {
 export interface SchedulerOptions {
   /** Tasks running at once across both lanes. */
   concurrency?: number;
+  /** How long a task may run before its slot is given back (default 30 minutes). */
+  taskTimeoutMs?: number;
   now?: () => number;
   onError?: (name: string, err: unknown) => void;
+}
+
+export const DEFAULT_TASK_TIMEOUT_MS = 30 * 60_000;
+
+export class TaskTimeoutError extends Error {
+  constructor(name: string, ms: number) {
+    super(`${name} still running after ${Math.round(ms / 1000)} s; gave up waiting`);
+  }
 }
 
 export class Scheduler {
@@ -51,11 +67,13 @@ export class Scheduler {
   private stopped = false;
   private slowdown = 1;
   private readonly concurrency: number;
+  private readonly taskTimeoutMs: number;
   private readonly now: () => number;
   private readonly onError: (name: string, err: unknown) => void;
 
   constructor(opts: SchedulerOptions = {}) {
     this.concurrency = Math.max(1, opts.concurrency ?? 2);
+    this.taskTimeoutMs = opts.taskTimeoutMs ?? DEFAULT_TASK_TIMEOUT_MS;
     this.now = opts.now ?? Date.now;
     this.onError = opts.onError ?? (() => {});
   }
@@ -85,7 +103,7 @@ export class Scheduler {
   /** Run `fn` every `everyMs` in the routine lane. `runNow` also queues it immediately. */
   every(name: string, everyMs: number, fn: () => Promise<void> | void, runNow = false): void {
     if (this.jobs.has(name)) throw new Error(`Job already registered: ${name}`);
-    const job: Job = { name, everyMs, fn, runs: 0, busy: false };
+    const job: Job = { name, everyMs, fn, runs: 0, busy: false, timeouts: 0 };
     this.jobs.set(name, job);
     job.timer = setInterval(() => this.tick(job), everyMs);
     job.timer.unref?.();
@@ -112,7 +130,12 @@ export class Scheduler {
         job.runs++;
       }
     })
-      .catch(() => {})
+      .catch((err: unknown) => {
+        if (err instanceof TaskTimeoutError) {
+          job.timeouts++;
+          job.lastError = err.message;
+        }
+      })
       .finally(() => {
         job.busy = false;
       });
@@ -153,6 +176,11 @@ export class Scheduler {
     return [...this.jobs.values()].map(({ fn: _fn, timer: _timer, ...s }) => ({ ...s }));
   }
 
+  /** Tasks running now, timed-out ones not counted. */
+  get active(): number {
+    return this.running;
+  }
+
   /** Tasks waiting, by lane. */
   pending(): Record<Priority, number> {
     return {
@@ -168,16 +196,35 @@ export class Scheduler {
       const [task] = this.queue.splice(idx, 1);
       if (!task) return;
       this.running++;
-      task
-        .run()
-        .then(task.resolve, (err: unknown) => {
+      let settled = false;
+      const done = (): boolean => {
+        if (settled) return false;
+        settled = true;
+        clearTimeout(watchdog);
+        this.running--;
+        return true;
+      };
+      const watchdog = setTimeout(() => {
+        if (!done()) return;
+        const err = new TaskTimeoutError(task.name, this.taskTimeoutMs);
+        this.onError(task.name, err);
+        task.reject(err);
+        this.pump();
+      }, this.taskTimeoutMs);
+      watchdog.unref?.();
+      task.run().then(
+        (v) => {
+          if (!done()) return;
+          task.resolve(v);
+          this.pump();
+        },
+        (err: unknown) => {
+          if (!done()) return;
           this.onError(task.name, err);
           task.reject(err);
-        })
-        .finally(() => {
-          this.running--;
           this.pump();
-        });
+        },
+      );
     }
   }
 }

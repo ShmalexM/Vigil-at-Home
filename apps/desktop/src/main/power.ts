@@ -23,6 +23,12 @@ export interface PowerSource {
 }
 
 export const BATTERY_SLOWDOWN = 4;
+/**
+ * Timers don't run while the Mac sleeps, so one that fires this long after
+ * "suspend" means it is awake again. Then the power state is read afresh, in
+ * case "resume" (or a battery or heat change) was never announced.
+ */
+export const WAKE_RECHECK_MS = 2 * 60_000;
 /** System load per core above which optional work waits: the user is busy. */
 export const BUSY_LOAD_PER_CORE = 0.8;
 
@@ -31,9 +37,10 @@ export class PowerPolicy extends EventEmitter<{ change: [PowerMode] }> {
   private thermal: ThermalState;
   private asleep = false;
   private current: PowerMode;
+  private recheck?: ReturnType<typeof setTimeout>;
 
   constructor(
-    source: PowerSource,
+    private readonly source: PowerSource,
     private readonly load: () => number = () => loadavg()[0]! / availableParallelism(),
   ) {
     super();
@@ -42,8 +49,16 @@ export class PowerPolicy extends EventEmitter<{ change: [PowerMode] }> {
     this.current = this.compute();
     source.on('on-ac', () => this.update(() => (this.battery = false)));
     source.on('on-battery', () => this.update(() => (this.battery = true)));
-    source.on('suspend', () => this.update(() => (this.asleep = true)));
-    source.on('resume', () => this.update(() => (this.asleep = false)));
+    source.on('suspend', () => {
+      this.update(() => (this.asleep = true));
+      clearTimeout(this.recheck);
+      this.recheck = setTimeout(() => this.reread(), WAKE_RECHECK_MS);
+      this.recheck.unref?.();
+    });
+    source.on('resume', () => {
+      clearTimeout(this.recheck);
+      this.update(() => (this.asleep = false));
+    });
     source.on('thermal-state-change', (e) => this.update(() => (this.thermal = e.state)));
   }
 
@@ -64,6 +79,15 @@ export class PowerPolicy extends EventEmitter<{ change: [PowerMode] }> {
     if (this.asleep || this.thermal === 'serious' || this.thermal === 'critical')
       return 'constrained';
     return this.battery ? 'saving' : 'normal';
+  }
+
+  /** Awake for sure: read battery and heat again rather than trusting missed events. */
+  private reread(): void {
+    this.update(() => {
+      this.asleep = false;
+      this.battery = this.source.isOnBatteryPower();
+      this.thermal = this.source.getCurrentThermalState?.() ?? this.thermal;
+    });
   }
 
   private update(apply: () => void): void {
