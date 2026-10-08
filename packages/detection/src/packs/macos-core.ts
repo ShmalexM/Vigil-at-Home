@@ -54,8 +54,39 @@ const SANTA_BLOCK_BINARY = {
   policy: 'block',
 } as const;
 
-/** A download piped straight into a shell: `curl … | sh`, `wget … | sudo bash`. */
-export const PIPE_TO_SHELL_RE = '(curl|wget)\\s[^|]*\\|\\s*(sudo\\s+)?(ba|z|da)?sh\\b';
+/** Text up to the next pipe holding no `://`, so the URL it holds is the only one. */
+const NO_URL = String.raw`((?!://)[^|])*`;
+/** A URL on this Mac itself: 127.x.x.x, localhost or [::1]. */
+const LOOPBACK_URL = String.raw`://(127(\.\d+){3}|localhost|\[::1\])[:/'"\s]`;
+/** Words that make an interpreter's inline program run what it reads. */
+const RUNS_INPUT = String.raw`\b(exec|eval|system|spawn|popen|subprocess)\b`;
+/** curl or wget, unless the only URL it fetches is this Mac's own, piped on (optionally to sudo). */
+const DOWNLOAD_PIPED = String.raw`(curl|wget)\s(?!${NO_URL}${LOOPBACK_URL}${NO_URL}(\||$))[^|]*\|\s*(sudo\s+)?`;
+
+/**
+ * A download piped straight into a shell or a script interpreter: `curl … |
+ * sh`, `wget … | sudo bash`, `curl … | bash -s`, `curl … | python3`. Two
+ * things are left out, both seen in Claude Code's own steps on a real Mac
+ * (2026-10-08): a download whose only URL is this Mac itself (`curl
+ * http://127.0.0.1:11434/…`, a local server answering), and an interpreter
+ * given its program inline (`python3 -c "…json.load(sys.stdin)…"`, `node -e`),
+ * which reads the download as data, unless that program execs or evals it.
+ */
+export const PIPE_TO_SHELL_RE = String.raw`${DOWNLOAD_PIPED}(ba|z|da)?sh\b`;
+export const PIPE_TO_INTERPRETER_RE = String.raw`${DOWNLOAD_PIPED}(python[0-9.]*|perl|ruby|node)\b(?![^|]*\s-[ce]\s(?![^|]*${RUNS_INPUT}))`;
+/**
+ * A download run through command or process substitution: `sh -c "$(curl
+ * …)"`, `python3 -c "$(curl …)"`, `eval "$(curl …)"`, `bash <(curl …)`.
+ * Capturing a download into a variable (`U=$(curl …)`) runs nothing, so it
+ * is left out.
+ */
+export const SUBST_TO_RUN_RES = [
+  String.raw`(\b(ba|z|da)?sh|python[0-9.]*|perl|ruby|node)\s+(-[a-z]*[ce]\s+)?["']?\$\(\s*(curl|wget)\s`,
+  String.raw`\b(eval|source)\s+["']?\$\(\s*(curl|wget)\s`,
+  String.raw`(\b(ba|z|da)?sh|\bsource|(^|[\s;&|])\.)\s+<\(\s*(curl|wget)\s`,
+];
+/** Every way above of running a download, for a rule's regex list. */
+export const PIPE_TO_RUN_RES = [PIPE_TO_SHELL_RE, PIPE_TO_INTERPRETER_RE, ...SUBST_TO_RUN_RES];
 
 /** Developer tools (Homebrew Python, Ansible, git helpers) read these every day. */
 const SSH_KEY_GLOBS = ['~/.ssh/id_*'];
@@ -410,7 +441,7 @@ export const macosCoreRules: DetectionRuleInput[] = [
     id: 'download-pipe-to-shell',
     name: 'Downloaded script run directly',
     description:
-      "A shell ran something straight from curl or wget. Some installers do this, but so do fake 'paste this into Terminal' fixes.",
+      "A shell ran something straight from curl or wget, or piped it into Python, Perl, Ruby or Node. Some installers do this, but so do fake 'paste this into Terminal' fixes.",
     mode: 'alert',
     severity: 'medium',
     fidelity: 'medium',
@@ -418,12 +449,7 @@ export const macosCoreRules: DetectionRuleInput[] = [
     condition: {
       all: [
         { field: 'process.name', op: 'in', value: SHELLS },
-        {
-          any: [
-            { field: 'process.commandLine', op: 'regex', value: [PIPE_TO_SHELL_RE] },
-            { field: 'process.commandLine', op: 'contains', value: ['$(curl', '$(wget'] },
-          ],
-        },
+        { field: 'process.commandLine', op: 'regex', value: PIPE_TO_RUN_RES },
       ],
     },
     response: [SUSPEND],
