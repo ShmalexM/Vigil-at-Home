@@ -12,7 +12,8 @@
 //          executable recorded at install.
 //   Linux  whether the target runs from the pinned AppImage, by device and
 //          inode, checked the way the self floor checks it
-//          (commands/selfImage.ts).
+//          (commands/selfImage.ts), and whether that image still has the
+//          pinned contents: unchanged ctime and size, or else its sha256.
 //
 // A match is refused, and so is a hash block naming the pinned program's
 // sha256 (or, on macOS, its cdhash). Nothing a client says is part of the
@@ -46,9 +47,9 @@ import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { FileHasher } from '@vigil/sensors';
 import { insideInstalledRoot, looksLikeAppImage, type SelfImage } from '@vigil/core/self';
-import type { System } from './system.js';
+import type { FileStat, System } from './system.js';
 import type { ProcessIdentity } from './commands/process.js';
-import { runsFromSelfImage } from './commands/selfImage.js';
+import { selfImageOf } from './commands/selfImage.js';
 
 const SHA256 = /^[0-9a-f]{64}$/;
 /** Santa's CDHASH identifiers: the first 20 bytes of the CodeDirectory hash. */
@@ -67,6 +68,17 @@ export const AppPin = z.discriminatedUnion('platform', [
     path: z.string(),
     /** The AppImage's `fileId`, device and inode. */
     image: z.string().regex(/^\d+:\d+$/),
+    /**
+     * The AppImage's ctime (ns) and size when pinned. An inode can be
+     * rewritten in place; while these are unchanged it wasn't, and once
+     * they change the image's contents must still hash to `sha256`. A pin
+     * without them is checked by contents every time.
+     */
+    ctime: z
+      .string()
+      .regex(/^\d{1,30}$/)
+      .optional(),
+    size: z.number().int().nonnegative().optional(),
     /** The AppImage file's own sha256, which a program block would name. */
     sha256: z.string().regex(SHA256),
   }),
@@ -119,6 +131,9 @@ async function codesign(
 }
 
 const sha256Of = (p: string) => new FileHasher({ maxBytes: 4 * 1024 ** 3 }).sha256(p);
+
+const sameStat = (a: FileStat, b: FileStat | undefined) =>
+  !!b && a.id === b.id && a.ctime === b.ctime && a.size === b.size;
 
 /**
  * Whether `path` is inside the installer's own folder, which the helper
@@ -176,10 +191,14 @@ export async function pinFor(
   const appImage = opts.appImage ?? isAppImage(sys, path);
   if (inInstalled(sys, opts.installed, path, appImage)) return undefined;
   if (sys.platform === 'linux') {
-    const image = sys.fileId?.(path);
-    const sha256 = hash(path);
-    if (!image || !sha256) throw new Error(`${path} is not a file Vigil can pin`);
-    return { platform: 'linux', path, image, sha256 };
+    // Hashed between two looks at the file, so the hash is of what was stat'ed.
+    const before = sys.fileStat?.(path);
+    const sha256 = before && hash(path);
+    const after = sys.fileStat?.(path);
+    if (!before || !sha256 || !sameStat(before, after))
+      throw new Error(`${path} is not a file Vigil can pin`);
+    const { id: image, ctime, size } = before;
+    return { platform: 'linux', path, image, ctime, size, sha256 };
   }
   const id = await codesign(sys, path);
   const exe = id?.executable ?? path;
@@ -244,18 +263,51 @@ export function pinnedHashes(pinFile: string): string[] {
  * process is identified again: `recheck` says whether it is still the same
  * one, and if not the answer is 'changed', so a pid reused while codesign
  * ran is neither spared nor hit.
+ *
+ * On Linux the process must run the pinned image by device and inode, and
+ * the image must still be what was pinned: while its ctime and size are as
+ * pinned it hasn't been written to; once they changed, the image the process
+ * runs (through /proc, so whatever its name now) must hash to the pinned
+ * sha256, or there is no exemption.
  */
 export async function runsPinnedApp(
   sys: System,
   pinFile: string,
   id: ProcessIdentity,
   recheck: () => Promise<ProcessIdentity | undefined>,
+  opts: { sha256?: (path: string) => string | undefined } = {},
 ): Promise<boolean | 'changed'> {
   const pin = readPin(pinFile);
   if (!pin || pin.platform !== (sys.platform ?? 'darwin')) return false;
-  if (pin.platform === 'linux') return runsFromSelfImage(sys, id.pid, [pin.image]);
+  if (pin.platform === 'linux') return runsPinnedImage(sys, pin, id.pid, opts.sha256 ?? sha256Of);
   const running = await codesign(sys, String(id.pid));
   const after = await recheck();
   if (!after || after.started !== id.started || after.path !== id.path) return 'changed';
   return running?.cdhash === pin.cdhash;
+}
+
+type LinuxPin = Extract<AppPin, { platform: 'linux' }>;
+
+/** Images whose contents were found to match their pin after a change, by pin and stat. */
+const rehashed = new Set<string>();
+
+function runsPinnedImage(
+  sys: System,
+  pin: LinuxPin,
+  pid: number,
+  hash: (path: string) => string | undefined,
+): boolean {
+  const image = selfImageOf(sys, pid, [pin.image]);
+  if (!image) return false;
+  const now = sys.fileStat?.(image);
+  if (!now || now.id !== pin.image) return false;
+  if (now.ctime === pin.ctime && now.size === pin.size) return true;
+  // Written to since it was pinned (or a pin without a ctime): the contents decide.
+  const key = `${pin.image}|${pin.sha256}|${now.ctime}|${now.size}`;
+  if (rehashed.has(key)) return true;
+  const sha256 = hash(image);
+  if (sha256 !== pin.sha256 || !sameStat(now, sys.fileStat?.(image))) return false;
+  if (rehashed.size >= 16) rehashed.clear();
+  rehashed.add(key);
+  return true;
 }

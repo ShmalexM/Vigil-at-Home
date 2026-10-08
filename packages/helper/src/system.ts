@@ -80,6 +80,18 @@ export interface System {
    * file itself even after it was renamed.
    */
   fileId?(path: string): string | undefined;
+  /**
+   * Linux only: what `fileId` gives, plus the file's ctime (nanoseconds,
+   * as a decimal string) and size, following links. Any write to the file
+   * moves its ctime, and nothing short of root setting the clock moves it back.
+   */
+  fileStat?(path: string): FileStat | undefined;
+}
+
+export interface FileStat {
+  id: string;
+  ctime: string;
+  size: number;
 }
 
 export function realSystem(
@@ -187,6 +199,14 @@ export function realSystem(
       try {
         const st = statSync(path, { bigint: true });
         return fileId(st.dev, st.ino);
+      } catch {
+        return undefined;
+      }
+    },
+    fileStat(path) {
+      try {
+        const st = statSync(path, { bigint: true });
+        return { id: fileId(st.dev, st.ino), ctime: st.ctimeNs.toString(), size: Number(st.size) };
       } catch {
         return undefined;
       }

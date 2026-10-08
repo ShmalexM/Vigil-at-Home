@@ -365,7 +365,15 @@ describe('the app pinned at install (Linux AppImage)', () => {
   const image = '/home/alex/Apps/Vigil.AppImage';
   const mount = '/tmp/.mount_VigilaB1c2D';
   let sys: FakeLinuxSystem;
-  const pin: AppPin = { platform: 'linux', path: image, image: '2049:5501', sha256: APP_SHA };
+  // FakeLinuxSystem gives a file it has no inode entry for ctime "1" and size 1.
+  const pin: AppPin = {
+    platform: 'linux',
+    path: image,
+    image: '2049:5501',
+    ctime: '1',
+    size: 1,
+    sha256: APP_SHA,
+  };
 
   beforeEach(() => {
     sys = new FakeLinuxSystem();
@@ -427,6 +435,57 @@ describe('the app pinned at install (Linux AppImage)', () => {
     writePin(pinFile, undefined);
     await ex.execute({ kind: 'process.suspend', pid: 2000, path: `${mount}/vigil-at-home` });
     expect(sys.signals.map((s) => s.pid)).toEqual([2000, 2000]);
+  });
+
+  it('pins the image’s ctime and size, and checks its contents once they change', async () => {
+    sys.inodes.set('2049:5501', { ctime: '1700000000123456789', size: 150_000_000 });
+    const opts = { installed: ['/opt/Vigil at Home'], sha256: () => APP_SHA };
+    const pinned = await pinFor(sys, image, opts);
+    expect(pinned).toEqual({ ...pin, ctime: '1700000000123456789', size: 150_000_000 });
+    writePin(pinFile, pinned);
+    // What the image file now holds, by the /proc path the check hashes.
+    let contents = APP_SHA;
+    const hashed: string[] = [];
+    const ex = new Executor({
+      ...executorDeps(sys),
+      appPinSha256: (p) => (hashed.push(p), contents),
+    });
+    const kill = (pid: number) =>
+      ex.execute({ kind: 'process.kill', pid, path: sys.processes.get(pid)!.path });
+    // Unchanged: spared, and nothing hashed.
+    await expect(kill(2000)).rejects.toMatchObject({ code: 'refused' });
+    expect(hashed).toEqual([]);
+    // Rewritten in place, same inode, other contents: no exemption, for the
+    // app on the mount or the runtime running the image itself.
+    sys.inodes.set('2049:5501', { ctime: '1700000999000000000', size: 150_000_000 });
+    contents = 'd'.repeat(64);
+    await kill(2000);
+    await kill(2003);
+    expect(sys.signals.map((s) => s.pid)).toEqual([2000, 2003]);
+    // Nor is an image pinned that was written to while it was being hashed.
+    const racing = () => (sys.inodes.set('2049:5501', { ctime: '9', size: 1 }), APP_SHA);
+    await expect(pinFor(sys, image, { ...opts, sha256: racing })).rejects.toThrow();
+    expect(hashed).toEqual(['/proc/2003/exe', '/proc/2003/exe']);
+  });
+
+  it('spares a changed image whose contents still match the pin', async () => {
+    writePin(pinFile, { ...pin, ctime: '5', size: 1 });
+    sys.inodes.set('2049:5501', { ctime: '6', size: 1 }); // touched (chmod, say)
+    const hashed: string[] = [];
+    const ex = new Executor({
+      ...executorDeps(sys),
+      appPinSha256: (p) => (hashed.push(p), APP_SHA),
+    });
+    await expect(
+      ex.execute({ kind: 'process.kill', pid: 2000, path: `${mount}/vigil-at-home` }),
+    ).rejects.toMatchObject({ code: 'refused' });
+    expect(hashed).toEqual(['/proc/2003/exe']);
+    // A pin from before ctimes were kept is checked by contents too.
+    writePin(pinFile, { platform: 'linux', path: image, image: '2049:5501', sha256: APP_SHA });
+    sys.inodes.set('2049:5501', { ctime: '7', size: 1 }); // and rewritten since
+    const bare = new Executor({ ...executorDeps(sys), appPinSha256: () => 'e'.repeat(64) });
+    await bare.execute({ kind: 'process.kill', pid: 2000, path: `${mount}/vigil-at-home` });
+    expect(sys.signals.map((s) => s.pid)).toEqual([2000]);
   });
 
   it('pins an AppImage inside the installer’s folder like one anywhere else', async () => {

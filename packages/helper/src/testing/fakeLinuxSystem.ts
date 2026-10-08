@@ -1,4 +1,4 @@
-import type { BinaryName, RunResult, System } from '../system.js';
+import type { BinaryName, FileStat, RunResult, System } from '../system.js';
 import type { FakeProcess } from './fakeSystem.js';
 
 interface FakeRule {
@@ -148,6 +148,15 @@ export class FakeLinuxSystem implements System {
       ? this.procFds(pid).find(([n]) => n === Number(m[3]))?.[1]
       : this.processes.get(pid)?.path;
     return target === undefined ? undefined : this.files.get(target);
+  }
+
+  /** ctime and size by file id; a file not listed has ctime "1" and size 1. */
+  readonly inodes = new Map<string, { ctime: string; size: number }>();
+
+  fileStat(path: string): FileStat | undefined {
+    const id = this.fileId(path);
+    if (id === undefined) return undefined;
+    return { id, ...(this.inodes.get(id) ?? { ctime: '1', size: 1 }) };
   }
 
   signal(pid: number, signal: 'SIGSTOP' | 'SIGCONT' | 'SIGKILL'): void {

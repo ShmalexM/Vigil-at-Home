@@ -76,6 +76,8 @@ export interface ExecutorDeps {
    * paused or stopped, and its program never blocked by hash.
    */
   appPin?: string;
+  /** Hashes a file for the pin check; the real hasher when absent. For tests. */
+  appPinSha256?: (path: string) => string | undefined;
   /** After the password approved a self grant: re-pin the app it covers (appPin.ts repinFromGrant). */
   repin?: (grant: SelfGrant) => Promise<void>;
 }
@@ -128,8 +130,9 @@ export class Executor {
     const file = this.d.appPin;
     if (!file) return {};
     const sys = this.d.sys;
+    const hash = this.d.appPinSha256 ? { sha256: this.d.appPinSha256 } : {};
     return {
-      isPinnedApp: (id) => runsPinnedApp(sys, file, id, () => identifyProcess(sys, id.pid)),
+      isPinnedApp: (id) => runsPinnedApp(sys, file, id, () => identifyProcess(sys, id.pid), hash),
     };
   }
 
