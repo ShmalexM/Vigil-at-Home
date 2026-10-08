@@ -8,10 +8,10 @@
 // safe. The format is defined in Santa's
 // Source/santad/Logs/EndpointSecurity/Serializers/BasicString.mm.
 
-import { createHash } from 'node:crypto';
 import type { EventOfKind, FileOp, SensorEvent } from '@vigil/core';
 import { defined, nonEmpty, num, pidOf, type ProcessRef } from '../types.js';
 import { santaSigning } from '../signing.js';
+import { lineEventId } from '../eventId.js';
 
 const LINE_RE = /^\[([^\]]+)\]\s+\S+\s+santad:\s+(action=.*)$/;
 
@@ -86,10 +86,6 @@ function actionOf(body: string): string {
   return unescapeSantaValue(body.slice('action='.length, end < 0 ? undefined : end));
 }
 
-function eventId(line: string): string {
-  return 'santa-log:' + createHash('sha256').update(line).digest('hex').slice(0, 32);
-}
-
 type Mechanism = EventOfKind<'persistence'>['mechanism'];
 
 function mechanismFor(itemType: string | undefined, itemPath: string): Mechanism {
@@ -157,7 +153,12 @@ export function santaLogLineToEvent(
   if (!split || !MAPPED_ACTIONS.has(actionOf(split.body))) return undefined;
   const f = parseFields(split.body);
   const ts = Number.isFinite(split.ts) ? split.ts : now();
-  const base = { id: eventId(line), ts, source: 'santa' as const, raw: f };
+  const base = {
+    id: lineEventId('santa-log:', line, Number.isFinite(split.ts) ? ts : undefined),
+    ts,
+    source: 'santa' as const,
+    raw: f,
+  };
 
   switch (f.action) {
     case 'EXEC': {

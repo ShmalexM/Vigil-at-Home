@@ -1,11 +1,11 @@
 // Turns lines of osquery's filesystem results log into SensorEvents.
 
-import { createHash } from 'node:crypto';
 import type { EventOfKind, SensorEvent } from '@vigil/core';
 import { defined, pidOf } from '../types.js';
 import { QUERY_NAMES } from './config.js';
 import { LINUX_QUERY_NAMES } from './linuxConfig.js';
 import { osquerySigning } from '../signing.js';
+import { lineEventId } from '../eventId.js';
 
 export interface OsqueryResultLine {
   name?: string;
@@ -24,10 +24,6 @@ export interface OsqueryParseOptions {
    * for an explicit inventory scan.
    */
   includeBaseline?: boolean;
-}
-
-function id(line: string): string {
-  return 'osquery:' + createHash('sha256').update(line).digest('hex').slice(0, 32);
 }
 
 function port(v: string | undefined): number | undefined {
@@ -71,9 +67,10 @@ export function osqueryResultToEvents(
   const evented = parsed.name === LINUX_QUERY_NAMES.processEvents;
   if (Number(parsed.counter) === 0 && !opts.includeBaseline && !evented) return [];
   const unix = Number(parsed.unixTime);
+  const lineTs = Number.isFinite(unix) && unix > 0 ? unix * 1000 : undefined;
   const base = {
-    id: id(line),
-    ts: Number.isFinite(unix) && unix > 0 ? unix * 1000 : Date.now(),
+    id: lineEventId('osquery:', line, lineTs),
+    ts: lineTs ?? Date.now(),
     source: 'osquery' as const,
     raw: parsed,
   };
