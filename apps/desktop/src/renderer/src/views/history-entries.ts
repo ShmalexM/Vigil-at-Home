@@ -51,3 +51,33 @@ export function historyEntries(
     .sort((a, b) => b.at - a.at)
     .slice(0, LIMIT);
 }
+
+/**
+ * The entries whose words match every word of the search, ignoring case. The
+ * words are what the row shows plus what's behind it: the alert's title and
+ * summary, the program's path, and each action's description.
+ */
+export function filterEntries(
+  entries: Entry[],
+  query: string,
+  describe: (r: ActionRecord) => string,
+): Entry[] {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return entries;
+  return entries.filter((e) => {
+    const text = (
+      e.kind === 'alert'
+        ? [
+            e.alert.title,
+            e.alert.summary,
+            e.alert.subject?.path ?? '',
+            outcome(e.alert),
+            ...e.actions.map(describe),
+          ]
+        : [describe(e.record), e.record.reason]
+    )
+      .join('\n')
+      .toLowerCase();
+    return words.every((w) => text.includes(w));
+  });
+}
