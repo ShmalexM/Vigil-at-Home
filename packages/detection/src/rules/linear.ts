@@ -90,7 +90,16 @@ interface Escape {
   code?: number;
 }
 
-/** The escape at `i` (a backslash), read as without the `u` flag. */
+/** Control escapes with one character each: \t \n \v \f \r. */
+const CONTROL: Readonly<Record<string, number>> = { t: 9, n: 10, v: 11, f: 12, r: 13 };
+
+/**
+ * The escape at `i` (a backslash), read as without the `u` flag (ECMA-262
+ * Annex B). Every escape that stands for one character gets its code, so a
+ * class range between them (`[\0-\x7f]`, `[\t-\r]`) is folded as a range.
+ * Without `u`, `\u{41}` is a plain `u` followed by a repeat count, and an
+ * escape that is not a known one stands for its letter.
+ */
 function readEscape(p: string, i: number, inClass: boolean): Escape {
   const next = p[i + 1];
   if (next === undefined) return { end: i + 1, raw: '\\' };
@@ -100,12 +109,30 @@ function readEscape(p: string, i: number, inClass: boolean): Escape {
     return at(i + 4, parseInt(p.slice(i + 2, i + 4), 16));
   if (next === 'u' && /^[0-9a-fA-F]{4}$/.test(p.slice(i + 2, i + 6)))
     return at(i + 6, parseInt(p.slice(i + 2, i + 6), 16));
-  // A control character (\cJ) has no case.
-  if (next === 'c' && /^[A-Za-z]$/.test(p[i + 2] ?? '')) return at(i + 3);
+  const control = CONTROL[next];
+  if (control !== undefined) return at(i + 2, control);
+  if (next === 'c') {
+    // \cJ, and in a class also \c0 and \c_: the code modulo 32. Otherwise
+    // the backslash is itself, and the `c` is read next.
+    const x = p[i + 2] ?? '';
+    if (/^[A-Za-z]$/.test(x) || (inClass && /^[0-9_]$/.test(x)))
+      return at(i + 3, x.charCodeAt(0) % 32);
+    return { end: i + 1, raw: '\\', code: 92 };
+  }
+  // \0 (NUL) and legacy octal: \0 to \377 anywhere it starts with 0, and
+  // \1 to \7 too in a class (outside one, those are backreferences).
+  if (next === '0' || (inClass && /[1-7]/.test(next))) {
+    let end = i + 2;
+    const most = next <= '3' ? 3 : 2;
+    while (end - i - 1 < most && /[0-7]/.test(p[end] ?? '')) end++;
+    return at(end, parseInt(p.slice(i + 1, end), 8));
+  }
   if (inClass && next === 'b') return at(i + 2, 8);
-  // Classes (\w, \d, \s, and their opposites) already hold every case, and
-  // assertions, digits and control escapes have none.
-  if (/[bBdDsSwWfnrtv0-9]/.test(next)) return at(i + 2);
+  // In a class \8, \9 and \B stand for themselves.
+  if (inClass && /[89B]/.test(next)) return at(i + 2, next.charCodeAt(0));
+  // Classes (\w, \d, \s, and their opposites) already hold every case;
+  // assertions (\b \B) and backreferences (\1 to \9) have none.
+  if (/[bBdDsSwW1-9]/.test(next)) return at(i + 2);
   // Anything else stands for itself: \., \/, and without `u`, \p and \k too.
   return at(i + 2, next.charCodeAt(0));
 }

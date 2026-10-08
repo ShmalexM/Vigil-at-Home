@@ -150,6 +150,50 @@ describe('foldCase', () => {
     }
     expect(wrong).toEqual([]);
   });
+  it('reads control and octal escapes in a class range as the characters they stand for', () => {
+    const ci = (p: string) => new RegExp(foldCase(p));
+    expect(ci('^[\\0-\\x7f]+$').test('ABC')).toBe(true);
+    expect(ci('^[\\0-\\x7f]+$').test('é')).toBe(false);
+    expect(ci('^[\\t-\\r]$').test('-')).toBe(false);
+    expect(ci('^[\\t-\\r]$').test('\v')).toBe(true);
+    for (const p of [
+      '^[\\0-\\x7f]+$',
+      '^[\\t-\\r]$',
+      '^[\\n-\\f]$',
+      '^[\\x00-\\u007A]$',
+      '^[\\cA-\\cZ]$',
+      '^[\\c0-\\c_]$',
+      '^[\\01-\\177]$',
+      '^[\\101-\\132]$',
+      '^[\\8\\9\\B]$',
+      '^[\\u{2}-\\x7f]+$',
+      '^[\\c-]$',
+      '^\\0\\t\\cJ$',
+    ]) {
+      const want = new RegExp(p, 'i');
+      for (const s of [
+        'ABC',
+        'abc',
+        '-',
+        '\v',
+        '\t',
+        '\n',
+        '\x01',
+        'a',
+        'Z',
+        'b',
+        'u',
+        '{',
+        '\\',
+        'c',
+        '8',
+        'B',
+        '\0\t\n',
+        '}',
+      ])
+        expect(ci(p).test(s), `${p} on ${JSON.stringify(s)}`).toBe(want.test(s));
+    }
+  });
   it('leaves a pattern with no letters as it is', () => {
     expect(foldCase('^[0-9]+\\.\\d*$')).toBe('^[0-9]+\\.\\d*$');
   });
