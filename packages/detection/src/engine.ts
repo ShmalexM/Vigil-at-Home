@@ -99,11 +99,12 @@ export function compileRule(
   const rule = DetectionRule.parse(input);
   try {
     const scopePrefix = `${[...rule.eventKinds].sort().join('+')}:`;
-    const condition = compileCondition(rule.condition, scopePrefix);
-    const exclusions = rule.exclusions.map((x) => compileCondition(x, scopePrefix));
+    const ctx = { ruleId: rule.id, origin: rule.origin };
+    const condition = compileCondition(rule.condition, scopePrefix, ctx);
+    const exclusions = rule.exclusions.map((x) => compileCondition(x, scopePrefix, ctx));
     const steps = (rule.sequence?.steps ?? []).map((st) => ({
       kinds: new Set<string>(st.eventKinds),
-      condition: compileCondition(st.condition, scopePrefix),
+      condition: compileCondition(st.condition, scopePrefix, ctx),
     }));
     return {
       rule,

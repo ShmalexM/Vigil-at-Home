@@ -1,8 +1,8 @@
 import { BlockList, isIP } from 'node:net';
 import type { Condition, DetectionEvent, FieldTest } from '../types.js';
 import { compileField, keyOf, type FieldGetter, type FieldValue } from './fields.js';
-import { linearProblem, linearRegExp } from './linear.js';
-import { isShippedPattern } from './trusted.js';
+import { linearRegExp } from './linear.js';
+import { isTrustedPattern } from './trusted.js';
 
 /** Longest string a regex or glob is ever run against. Bounds evaluation time. */
 export const MAX_SUBJECT_LENGTH = 4096;
@@ -27,8 +27,14 @@ export interface CompiledCondition {
   test: Predicate;
   /** Baseline keys this condition reads, so the engine can learn them after evaluation. */
   firstSeen: FirstSeenSpec[];
-  /** Has a regex or glob Vigil does not ship (see isShippedPattern), so the engine times it. */
+  /** Has a regex or glob Vigil does not ship (see isTrustedPattern), so the engine times it. */
   untrusted: boolean;
+}
+
+/** The rule a condition is in, which decides how its regexes and globs run. */
+export interface PatternContext {
+  ruleId?: string | undefined;
+  origin?: string | undefined;
 }
 
 /**
@@ -299,8 +305,52 @@ function buildBlockList(values: string[]): BlockList {
   return bl;
 }
 
+/**
+ * The regex for one regex or glob value of a test: on the usual engine when
+ * Vigil ships that test (isTrustedPattern), otherwise on the linear-time one.
+ * Throws, with the field and the reason, when the value can't be used.
+ *
+ * @param onUntrusted called when the value is not one Vigil ships.
+ */
+function patternRegExp(
+  c: FieldTest & { op: 'regex' | 'glob' },
+  value: string,
+  ctx: PatternContext,
+  onUntrusted: () => void,
+): RegExp {
+  const problem = c.op === 'regex' ? regexProblem(value) : globProblem(value);
+  if (problem) throw new Error(`${c.field}: ${problem}`);
+  const nocase = c.op === 'regex' ? c.nocase === true : c.nocase !== false;
+  const use = { ...ctx, field: c.field, op: c.op, nocase, pattern: value };
+  // Vigil's own patterns keep the usual engine (they need lookarounds);
+  // any other runs in linear time, so no pattern can stall the checks.
+  if (isTrustedPattern(use))
+    return c.op === 'regex' ? new RegExp(value, nocase ? 'i' : '') : globToRegExp(value, nocase);
+  onUntrusted();
+  try {
+    return c.op === 'regex' ? linearRegExp(value, nocase) : globToRegExp(value, nocase, true);
+  } catch (err) {
+    throw new Error(`${c.field}: ${(err as Error).message}`, { cause: err });
+  }
+}
+
+/** Why each regex or glob value of `c` can't be used in the rule `ctx`, for the linter. */
+export function patternProblems(c: FieldTest, ctx: PatternContext): string[] {
+  if (c.op !== 'regex' && c.op !== 'glob') return [];
+  const values = Array.isArray(c.value) ? c.value : c.value === undefined ? [] : [c.value];
+  const out: string[] = [];
+  for (const v of values) {
+    try {
+      patternRegExp({ ...c, op: c.op }, String(v), ctx, () => undefined);
+    } catch (err) {
+      out.push((err as Error).message);
+    }
+  }
+  return out;
+}
+
 /** @param onUntrusted called when the test has a regex or glob Vigil does not ship. */
-function compileMatch(c: FieldTest, onUntrusted: () => void): Predicate {
+function compileMatch(c: FieldTest, ctx: PatternContext, onUntrusted: () => void): Predicate {
   const get = compileField(c.field);
   const ic = c.nocase === true;
   const norm = (s: string) => (ic ? s.toLowerCase() : s);
@@ -346,32 +396,10 @@ function compileMatch(c: FieldTest, onUntrusted: () => void): Predicate {
       return (e) => anyString(e, (s) => nvalues.some((v) => norm(s).endsWith(v)));
     case 'contains':
       return (e) => anyString(e, (s) => nvalues.some((v) => norm(clip(s)).includes(v)));
-    case 'glob': {
-      const res = values.map((g) => {
-        const problem = globProblem(g);
-        if (problem) throw new Error(`${c.field}: ${problem}`);
-        const shipped = isShippedPattern('glob', g);
-        if (!shipped) onUntrusted();
-        try {
-          return globToRegExp(g, c.nocase !== false, !shipped);
-        } catch (err) {
-          throw new Error(`${c.field}: ${(err as Error).message}`, { cause: err });
-        }
-      });
-      return (e) => anyString(e, (s) => res.some((r) => r.test(clip(s))));
-    }
+    case 'glob':
     case 'regex': {
-      const res = values.map((p) => {
-        const problem = regexProblem(p);
-        if (problem) throw new Error(`${c.field}: ${problem}`);
-        // Vigil's own patterns keep the usual engine (they need lookarounds);
-        // any other runs in linear time, so no pattern can stall the checks.
-        if (isShippedPattern('regex', p)) return new RegExp(p, ic ? 'i' : '');
-        onUntrusted();
-        const linear = linearProblem(p, ic);
-        if (linear) throw new Error(`${c.field}: ${linear}`);
-        return linearRegExp(p, ic);
-      });
+      const op = c.op;
+      const res = values.map((v) => patternRegExp({ ...c, op }, v, ctx, onUntrusted));
       return (e) => anyString(e, (s) => res.some((r) => r.test(clip(s))));
     }
     case 'cidr': {
@@ -398,7 +426,11 @@ function compileMatch(c: FieldTest, onUntrusted: () => void): Predicate {
  * @param scopePrefix baseline namespace, normally the rule's event kinds, so
  *   "first seen on a network connection" is not answered by an earlier exec.
  */
-export function compileCondition(c: Condition, scopePrefix = ''): CompiledCondition {
+export function compileCondition(
+  c: Condition,
+  scopePrefix = '',
+  ctx: PatternContext = {},
+): CompiledCondition {
   const firstSeen: FirstSeenSpec[] = [];
   let untrusted = false;
 
@@ -429,7 +461,7 @@ export function compileCondition(c: Condition, scopePrefix = ''): CompiledCondit
       const get = compileField(c.inList.field);
       return (e, s) => asStrings(get(e)).some((v) => s.listHas(list, v));
     }
-    return compileMatch(c, () => (untrusted = true));
+    return compileMatch(c, ctx, () => (untrusted = true));
   };
 
   const test = walk(c);

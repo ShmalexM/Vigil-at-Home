@@ -7,7 +7,7 @@ import { SECRET_PATH_SSH } from '../packs/agent-watch.js';
 import { globProblem, MAX_SUBJECT_LENGTH, regexProblem } from '../rules/compile.js';
 import { foldCase, linearEngine, linearProblem } from '../rules/linear.js';
 import { lintRule } from '../rules/lint.js';
-import { isShippedPattern } from '../rules/trusted.js';
+import { isTrustedPattern, TEMPLATE_PATTERNS } from '../rules/trusted.js';
 import { userOrigin } from '../user.js';
 import { SafetyFloor } from '../safety.js';
 import { MemoryAgentStore, memoryStores } from '../state/stores.js';
@@ -269,10 +269,51 @@ describe('patterns Vigil ships', () => {
     for (const r of [...builtinRulesFor('darwin'), ...builtinRulesFor('linux')])
       expect(compileRule(r).untrusted, r.id).toBe(false);
   });
-  it('count as shipped in your own rule too, by their text alone', () => {
-    expect(isShippedPattern('regex', SECRET_PATH_SSH)).toBe(true);
-    expect(compileRule(onCommandLine(SECRET_PATH_SSH)).untrusted).toBe(false);
-    expect(isShippedPattern('regex', `${SECRET_PATH_SSH} `)).toBe(false);
+  it('are trusted only in their own built-in rule, on their own field, as shipped', () => {
+    const shipped = {
+      ruleId: 'agent-secret-command',
+      origin: 'builtin',
+      field: 'process.commandLine',
+      op: 'regex' as const,
+      nocase: true,
+      pattern: SECRET_PATH_SSH,
+    };
+    expect(isTrustedPattern(shipped)).toBe(true);
+    expect(isTrustedPattern({ ...shipped, origin: 'user' })).toBe(false);
+    expect(isTrustedPattern({ ...shipped, ruleId: 'r-own' })).toBe(false);
+    expect(isTrustedPattern({ ...shipped, field: 'process.args' })).toBe(false);
+    expect(isTrustedPattern({ ...shipped, nocase: false })).toBe(false);
+    expect(isTrustedPattern({ ...shipped, pattern: `${SECRET_PATH_SSH} ` })).toBe(false);
+    // A template's regex makes a rule of your own: trusted on its field, in any rule.
+    const t = TEMPLATE_PATTERNS[0]!;
+    const template = { field: t.field, op: 'regex' as const, nocase: false, pattern: t.regex };
+    expect(isTrustedPattern({ ...template, ruleId: 'ask-force-push-2', origin: 'user' })).toBe(
+      true,
+    );
+    expect(isTrustedPattern({ ...template, field: 'process.commandLine' })).toBe(false);
+  });
+
+  it('copied into a rule of your own, or onto another field, run in linear time or not at all', () => {
+    // Its lookbehind's {0,64} runs there once split into counts of 16.
+    expect(compileRule(onCommandLine(SECRET_PATH_SSH, true)).untrusted).toBe(true);
+    const moved = testRule({
+      id: 'agent-secret-command',
+      origin: 'builtin',
+      condition: { field: 'process.args', op: 'regex', value: SECRET_PATH_SSH, nocase: true },
+    });
+    expect(compileRule(moved).untrusted).toBe(true);
+    // One with a lookahead can't run there, so a copy is refused.
+    const values: string[] = [];
+    const walk = (c: unknown): void => {
+      if (!c || typeof c !== 'object') return;
+      const o = c as Record<string, unknown>;
+      if (o.op === 'regex') values.push(...[o.value].flat().map(String));
+      for (const v of Object.values(o)) walk(v);
+    };
+    walk(builtinRulesFor('darwin').find((r) => r.id === 'agent-guard-tamper')?.condition);
+    const lookahead = values.find((v) => v.startsWith('tccutil'))!;
+    expect(lookahead).toContain('(?!');
+    expect(() => compileRule(onCommandLine(lookahead, true))).toThrow(/lookahead/);
   });
 });
 
