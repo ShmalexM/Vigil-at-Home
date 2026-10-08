@@ -523,7 +523,10 @@ function Review({ view, onDone }: { view: SetupView; onDone: () => void }) {
       ? view.steps.some((s) => s.id === 'ollama-model' && s.state === 'done')
       : view.steps.some((s) => s.group === 'ai' && s.state === 'done') ||
         view.keys.some((k) => k.saved);
-  const pending = view.steps.filter((s) => s.state === 'unavailable');
+  // A skipped or unfinished helper means nothing is really blocked yet; say so here too.
+  const pending = view.steps.filter(
+    (s) => s.state === 'unavailable' || (s.id === 'helper' && s.state !== 'done'),
+  );
   return (
     <>
       <div className="col" style={{ gap: 6 }}>
