@@ -129,6 +129,7 @@ export function registerIpc(
     setUpdateAuto: (auto) => updates.setAuto(auto),
     dismissUpdate: () => updates.dismiss(),
     downloadUpdate: () => updates.download(),
+    openUpdateNotes: () => updates.openNotes(),
     getAi: () => ai.view(),
     getAiPrefs: () => ai.prefs(),
     setAiPrefs: (patch) => ai.setPrefs(patch),

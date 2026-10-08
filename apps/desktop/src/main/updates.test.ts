@@ -103,8 +103,26 @@ describe('UpdateChecker', () => {
     expect(c.view()).toMatchObject({ auto: false, dismissed: true });
   });
 
+  it('opens the release page for What’s new', async () => {
+    const { c, opened } = checker([release('0.1.0-alpha.3')]);
+    await c.openNotes();
+    expect(opened).toEqual([]);
+    await c.check();
+    await c.openNotes();
+    expect(opened[0]).toMatch(/\/releases\/tag\/v0\.1\.0-alpha\.3$/);
+  });
+
   it('reports a failed check in words', async () => {
     const { c } = checker(null, false);
     expect((await c.check()).error).toMatch(/403/);
+  });
+});
+
+describe('newest on Linux', () => {
+  it('never offers a Mac DMG to an x64 Linux machine: the release page opens instead', () => {
+    const a = newest([release('0.1.0-alpha.3')], '0.1.0-alpha.2', 'x64', 'linux');
+    expect(a?.version).toBe('0.1.0-alpha.3');
+    expect(a?.downloadUrl).toBeUndefined();
+    expect(a?.notesUrl).toMatch(/^https:\/\/github\.com\//);
   });
 });

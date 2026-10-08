@@ -63,6 +63,7 @@ export const CALL_NAMES = [
   'setUpdateAuto',
   'dismissUpdate',
   'downloadUpdate',
+  'openUpdateNotes',
   'listAgents',
   'listAgentNames',
   'getAgent',

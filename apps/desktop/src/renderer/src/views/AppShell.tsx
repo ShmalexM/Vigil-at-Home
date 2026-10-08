@@ -108,7 +108,8 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
         <div className="row brand">
           <Shield height={22} />
           <span className="t-h3">Vigil at Home</span>
-          {updates?.available && (
+          {/* After Later, a quiet reminder here takes over from the banner. */}
+          {updates?.available && updates.dismissed && (
             <IconButton
               size="sm"
               className="btn icon-btn sm update-pill"
@@ -213,8 +214,11 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
             <Button size="sm" kind="ghost" onClick={() => void vigil.dismissUpdate()}>
               Later
             </Button>
+            <Button size="sm" kind="ghost" onClick={() => void vigil.openUpdateNotes()}>
+              What’s new
+            </Button>
             <Button size="sm" kind="primary" onClick={() => void vigil.downloadUpdate()}>
-              Download
+              {updates.available.downloadUrl ? 'Download' : 'Get it on GitHub'}
             </Button>
           </div>
         )}

@@ -238,6 +238,7 @@ function start(): void {
   const updates = new UpdateChecker({
     current: app.getVersion(),
     arch: process.arch,
+    platform: process.platform,
     load: () => store.getSetting('updates', z.unknown(), {}),
     save: (s) => store.setSetting('updates', s),
     openExternal: (url) => shell.openExternal(url),

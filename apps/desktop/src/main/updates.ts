@@ -31,6 +31,12 @@ export interface UpdateOptions {
   current: string;
   /** process.arch: arm64 (Apple silicon) or x64 (Intel), matching the DMG names. */
   arch: string;
+  /**
+   * process.platform. Only macOS gets a direct installer link: the Linux .deb
+   * and AppImage can't be told apart from here, and an x64 DMG must never be
+   * offered to an x64 Linux machine. Elsewhere the release page opens instead.
+   */
+  platform?: NodeJS.Platform;
   load: () => unknown;
   save: (s: Saved) => void;
   fetch?: typeof fetch;
@@ -98,7 +104,12 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
         signal: AbortSignal.timeout(20_000),
       });
       if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
-      this.available = newest(Releases.parse(await res.json()), this.o.current, this.o.arch);
+      this.available = newest(
+        Releases.parse(await res.json()),
+        this.o.current,
+        this.o.arch,
+        this.o.platform,
+      );
       this.error = undefined;
       const v = this.available?.version;
       if (v && !this.told.has(v) && this.saved().dismissed !== v) {
@@ -133,6 +144,11 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
     if (!a) return;
     await this.o.openExternal(a.downloadUrl ?? a.notesUrl);
   }
+
+  /** Opens the release's page on GitHub, to read what changed. */
+  async openNotes(): Promise<void> {
+    if (this.available) await this.o.openExternal(this.available.notesUrl);
+  }
 }
 
 /**
@@ -144,6 +160,7 @@ export function newest(
   raw: unknown[],
   current: string,
   arch: string,
+  platform: NodeJS.Platform = 'darwin',
 ): UpdateView['available'] | undefined {
   const releases = raw.flatMap((item) => {
     const p = Release.safeParse(item);
@@ -161,9 +178,12 @@ export function newest(
     if (!best || compareVersions(version, best.version) > 0) best = { version, r };
   }
   if (!best) return undefined;
-  const dmg = best.r.assets.find(
-    (a) => a.name.endsWith(`-${arch}.dmg`) && isGitHub(a.browser_download_url),
-  );
+  const dmg =
+    platform === 'darwin'
+      ? best.r.assets.find(
+          (a) => a.name.endsWith(`-${arch}.dmg`) && isGitHub(a.browser_download_url),
+        )
+      : undefined;
   return {
     version: best.version,
     notesUrl: best.r.html_url,

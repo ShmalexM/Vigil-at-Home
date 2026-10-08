@@ -254,6 +254,7 @@ export const calls = {
   setUpdateAuto: z.tuple([z.boolean()]),
   dismissUpdate: z.tuple([]),
   downloadUpdate: z.tuple([]),
+  openUpdateNotes: z.tuple([]),
   // Agents (main/agents).
   listAgents: z.tuple([]),
   listAgentNames: z.tuple([]),
@@ -615,6 +616,7 @@ export interface CallResults {
   setUpdateAuto: void;
   dismissUpdate: void;
   downloadUpdate: void;
+  openUpdateNotes: void;
   listAgents: AgentView[];
   /** The registry only, without listAgents' stats. */
   listAgentNames: Pick<AgentView, 'id' | 'name' | 'status'>[];
