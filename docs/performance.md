@@ -100,6 +100,11 @@ doesn't: the app only answers a line on a local socket. See
 3. **Store what rules read.** The sensor's `raw` record roughly doubles an
    event's size and no rule reads it, so the event log drops it. Events an
    alert refers to keep it.
+   Command-line arguments of launches no rule matched are stored once each
+   (`apps/desktop/src/main/db/arg-dictionary.ts`) and each event keeps a
+   packed list of their ids; reading an event puts the exact arguments back.
+   A new query on `events` that reads `body` also reads `args`
+   (`arg-dictionary.test.ts` checks).
 4. **No fast polling.** Nothing wakes the Mac more than once a second while
    idle. Prefer being told (kqueue via `fs.watch`, powerMonitor events) over
    asking, and don't leave timers running when there is nothing to do.
@@ -190,6 +195,24 @@ items (macOS 13 and later), osquery's launchd query runs every 5 minutes
 instead of every minute. Reading the two logs every 200 ms wakes the Mac more
 than the rest of Vigil put together; the Sensors change that watches the
 log folder and polls every 2 s only as a fallback (PR #19) fits the budget.
+
+### Stored launches
+
+On a developer's Mac with coding agents running, six hours held 270,000
+launches no rule matched, about 2.9 KB each, and arguments were 88% of those
+bytes. Agents re-run the same wrappers (`sandbox-exec`, `env`, shells), so
+31.5 million arguments came from only 165,000 distinct strings. Storing each
+argument once and a 2–3 byte id per use, on a synthetic workload shaped like
+that one (100,000 launches, 123 arguments each, 500 repeated commands, 27%
+with one unique argument):
+
+|                         | Database | Writing | Reading all back   | Search |
+| ----------------------- | -------- | ------- | ------------------ | ------ |
+| Arguments in each event | 495 MB   | 9.4 s   | 2.6 s (26 µs each) | 3 ms   |
+| Arguments as ids        | 57 MB    | 4.5 s   | 2.0 s (20 µs each) | 7 ms   |
+
+Reading back is what replaying a rule over history costs, and it got a
+little faster because there is less JSON to parse.
 
 ### Local classifier
 
