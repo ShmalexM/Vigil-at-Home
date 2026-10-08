@@ -124,7 +124,13 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
       <div className="setup-inner">
         <div className="row" style={{ gap: 10 }}>
           <Shield height={26} />
-          <span className="t-h2">Set up Vigil at Home</span>
+          <span className="t-h2 grow">Set up Vigil at Home</span>
+          {/* Opened again from Home or Settings: leave without finishing anything. */}
+          {view.finished && (
+            <Button kind="ghost" size="sm" icon={<ArrowLeft size={15} />} onClick={onDone}>
+              Back to Vigil
+            </Button>
+          )}
         </div>
         <ol className="setup-stages" aria-label="Setup steps">
           {STAGES.map((s, i) => (
@@ -291,6 +297,7 @@ function StepList({
   checking: boolean;
   recheck: () => void;
 }) {
+  const toast = useToast();
   const required = steps.filter((s) => !s.optional);
   const done = required.filter((s) => s.state === 'done').length;
   return (
@@ -308,7 +315,13 @@ function StepList({
           )}
           <Button
             icon={<SquareTerminal size={15} />}
-            onClick={() => void vigil.openSettingsPane('terminal')}
+            onClick={() =>
+              vigil.openSettingsPane('terminal').catch(() =>
+                toast({
+                  text: 'No terminal app found. Open one yourself and paste the commands.',
+                }),
+              )
+            }
           >
             Open Terminal
           </Button>

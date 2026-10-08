@@ -210,6 +210,17 @@ export function HomeView({ go }: { go: (r: string) => void }) {
                       {s.note}
                     </span>
                   )}
+                  {(s.state === 'not_installed' || s.state === 'down') &&
+                    !(s.id === 'helper' && status.helperInstallable) && (
+                      <button
+                        type="button"
+                        className="btn sm"
+                        title="Setup shows the commands and checks the result"
+                        onClick={() => go('setup')}
+                      >
+                        {s.state === 'down' ? 'How to restart' : 'Set up'}
+                      </button>
+                    )}
                   {s.id === 'helper' &&
                     (s.state !== 'ok' || status.helperOutdated) &&
                     status.helperInstallable && (
