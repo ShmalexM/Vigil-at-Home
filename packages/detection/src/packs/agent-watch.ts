@@ -1,4 +1,4 @@
-import { AGENT_CATALOG, type CatalogEntry } from '../agents/catalog.js';
+import { AGENT_CATALOG, VIGIL_SELF, type CatalogEntry } from '../agents/catalog.js';
 import type { Condition, DetectionRuleInput } from '../types.js';
 import {
   CREDENTIAL_STORE_GLOBS,
@@ -281,7 +281,9 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  * `sh -c`, wherever that program runs in the tree (Vigil's own helpers start
  * Claude Code too). The caller is the parent: its path or plain name fits the
  * catalogue, or, for a shell that reached Vigil without its parent's path, it
- * sits right under the agent itself.
+ * sits right under the agent itself, or its nearest ancestor is a native
+ * install's version-named binary (real Mac, 2026-10-08: `2.1.283` started by
+ * `2.1.283`, so the read sits two levels down, with no parent path).
  *
  * The whole command must be that one read: only -a, -s, -w and -g, one -s
  * naming its own service, nothing that chains, redirects or substitutes. On a
@@ -309,6 +311,18 @@ export function ownKeychainLogin(
       all: [
         { field: 'process.agent.id', op: 'eq', value: agentId },
         { field: 'process.agent.depth', op: 'eq', value: 1 },
+      ],
+    });
+  // A native install names its binary by version (`…/versions/2.1.283`), and
+  // one copy often starts another. With no parent path, the parent's name is
+  // the nearest ancestor's: a version number inside this agent's tree, or
+  // inside Vigil's own (its helpers run the same program), is the agent itself.
+  if (agentId && paths.some((p) => p.endsWith('/versions/*')))
+    caller.push({
+      all: [
+        { field: 'process.agent.id', op: 'in', value: [agentId, VIGIL_SELF] },
+        { not: { field: 'process.parentPath', op: 'exists' } },
+        { field: 'process.parentName', op: 'regex', value: [String.raw`^\d+\.\d+\.\d+$`] },
       ],
     });
   const svc = String.raw`["']?(${services.map(escapeRe).join('|')})(-[0-9a-f]{8})?["']?`;
