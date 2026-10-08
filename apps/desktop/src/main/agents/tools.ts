@@ -31,6 +31,7 @@ import {
   type AgentSessionView,
   type AgentView,
   type TreeNode,
+  type VigilToolInfo,
   type VigilToolName,
 } from '../../shared/agents.js';
 import {
@@ -258,9 +259,9 @@ export class VigilTools {
     };
   }
 
-  /** The tools for MCP's tools/list, with JSON Schemas for their arguments. */
-  list(): ToolListing[] {
-    return VIGIL_TOOLS.map((t) => {
+  /** The tools for MCP's tools/list, with JSON Schemas for their arguments. The pack also gets its own. */
+  list(o: { pack?: boolean } = {}): ToolListing[] {
+    return offered(o).map((t) => {
       const { $schema: _schema, ...inputSchema } = z.toJSONSchema(this.defs[t.name].input, {
         io: 'input',
       }) as Record<string, unknown>;
@@ -275,12 +276,14 @@ export class VigilTools {
   }
 
   /** One call, answered as a tools reply: a redacted result within the caps, or why not. */
-  call(name: string, args: Record<string, unknown>): ToolsReply {
-    const tool = VIGIL_TOOLS.find((t) => t.name === name);
+  call(name: string, args: Record<string, unknown>, o: { pack?: boolean } = {}): ToolsReply {
+    const tool = offered(o).find((t) => t.name === name);
     // The name isn't repeated back: an answer carries only Vigil's own words and data.
     if (!tool)
       return fail(
-        `Vigil has no such tool. Its tools: ${VIGIL_TOOLS.map((t) => t.name).join(', ')}.`,
+        `Vigil has no such tool. Its tools: ${offered(o)
+          .map((t) => t.name)
+          .join(', ')}.`,
       );
     const d = this.defs[tool.name];
     const parsed = d.input.safeParse(args);
@@ -772,4 +775,9 @@ function fit(result: Record<string, unknown>): Record<string, unknown> {
   }
   if (bytes(out) > MAX_RESULT_BYTES) throw new ToolError('The result is too large to send.');
   return out;
+}
+
+/** The tools one caller may use: watched agents never get the pack's own. */
+function offered(o: { pack?: boolean }): readonly VigilToolInfo[] {
+  return o.pack ? VIGIL_TOOLS : VIGIL_TOOLS.filter((t) => !t.packOnly);
 }

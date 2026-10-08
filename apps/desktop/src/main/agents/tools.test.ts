@@ -222,8 +222,20 @@ function ok(r: ToolsReply): Record<string, unknown> {
 }
 
 describe('VigilTools', () => {
+  it('keeps the pack’s own tools from the agents Vigil watches', () => {
+    const tools = new VigilTools(source());
+    const forAgents = tools.list().map((t) => t.name);
+    expect(forAgents).not.toContain('list_rules');
+    expect(forAgents).not.toContain('get_rule');
+    expect(forAgents).not.toContain('list_actions');
+    expect(tools.call('list_rules', {})).toMatchObject({ ok: false });
+    expect(tools.call('get_rule', { id: 'agent-secret-read' })).toMatchObject({ ok: false });
+    expect(tools.call('list_actions', {})).toMatchObject({ ok: false });
+    expect(tools.list({ pack: true })).toHaveLength(9);
+  });
+
   it('lists nine read-only tools with JSON Schemas for their arguments', () => {
-    const list = new VigilTools(source()).list();
+    const list = new VigilTools(source()).list({ pack: true });
     expect(list.map((t) => t.name)).toEqual(VIGIL_TOOLS.map((t) => t.name));
     for (const t of list) {
       expect(t.inputSchema).toMatchObject({ type: 'object', properties: expect.any(Object) });
@@ -442,7 +454,7 @@ describe('VigilTools', () => {
 
   it('describes rules without their conditions', () => {
     const tools = new VigilTools(source());
-    const list = ok(tools.call('list_rules', {}));
+    const list = ok(tools.call('list_rules', {}, { pack: true }));
     expect(list['rules']).toEqual([
       {
         id: 'unsigned-launch-agent',
@@ -456,11 +468,11 @@ describe('VigilTools', () => {
       expect.objectContaining({ id: 'old-rule', enabled: false, hits7d: 0 }),
     ]);
     expect(list['more']).toBe(false);
-    const blocking = ok(tools.call('list_rules', { mode: 'block', limit: 1 }));
+    const blocking = ok(tools.call('list_rules', { mode: 'block', limit: 1 }, { pack: true }));
     expect(blocking).toMatchObject({ rules: [{ id: 'unsigned-launch-agent' }], more: false });
-    expect(ok(tools.call('list_rules', { limit: 1 }))['more']).toBe(true);
+    expect(ok(tools.call('list_rules', { limit: 1 }, { pack: true }))['more']).toBe(true);
 
-    const r = ok(tools.call('get_rule', { id: 'agent-secret-read' }));
+    const r = ok(tools.call('get_rule', { id: 'agent-secret-read' }, { pack: true }));
     expect(r['rule']).toEqual({
       id: 'agent-secret-read',
       name: 'Agent read a cloud or SSH secret',
@@ -474,7 +486,7 @@ describe('VigilTools', () => {
     for (const word of ['condition', 'regex', 'glob', 'response']) {
       expect(JSON.stringify(r)).not.toContain(word);
     }
-    expect(tools.call('get_rule', { id: 'nope' })).toMatchObject({
+    expect(tools.call('get_rule', { id: 'nope' }, { pack: true })).toMatchObject({
       ok: false,
       error: expect.stringContaining('list_rules'),
     });
@@ -482,7 +494,7 @@ describe('VigilTools', () => {
 
   it('lists what Vigil did, newest first, without anything that reads as a permission', () => {
     const tools = new VigilTools(source());
-    const r = ok(tools.call('list_actions', {}));
+    const r = ok(tools.call('list_actions', {}, { pack: true }));
     expect(r['actions']).toEqual([
       {
         id: 'act3',
@@ -506,10 +518,12 @@ describe('VigilTools', () => {
       }),
     ]);
     expect(JSON.stringify(r)).not.toMatch(/allow/i);
-    const recent = ok(tools.call('list_actions', { since: '1d' }));
+    const recent = ok(tools.call('list_actions', { since: '1d' }, { pack: true }));
     expect(recent['actions']).toHaveLength(1);
-    expect(ok(tools.call('list_actions', { limit: 2 }))['more']).toBe(true);
-    expect(tools.call('list_actions', { limit: MAX_ROWS + 1 })).toMatchObject({ ok: false });
+    expect(ok(tools.call('list_actions', { limit: 2 }, { pack: true }))['more']).toBe(true);
+    expect(tools.call('list_actions', { limit: MAX_ROWS + 1 }, { pack: true })).toMatchObject({
+      ok: false,
+    });
   });
 
   it('refuses unknown tools and bad arguments, and hides other failures', () => {
@@ -566,7 +580,7 @@ describe('VigilTools', () => {
       const args = Object.fromEntries(
         Array.from({ length: rnd(3) }, () => [pick(keys), pick(values)]),
       );
-      const reply = tools.call(pick(names), args);
+      const reply = tools.call(pick(names), args, { pack: i % 2 === 0 });
       expect(Object.keys(reply).sort()).toEqual(
         reply.ok ? ['ok', 'result', 'v'] : ['error', 'ok', 'v'],
       );
