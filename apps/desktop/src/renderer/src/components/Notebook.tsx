@@ -1,5 +1,6 @@
 import { BookOpen, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import type { DogNote, DogNoteKind, NotesFilter } from '../../../shared/pack';
 import { vigil } from '../api';
 import { timeAgo } from '../format';
@@ -47,7 +48,8 @@ export function NotebookSheet({
   const box = useRef<HTMLDivElement>(null);
   useDialogFocus(box, onClose);
 
-  return (
+  // On body: inside a sticky parent such as the Lead panel, the scrim would sit under the drag strip.
+  return createPortal(
     <div className="scrim" onClick={onClose}>
       <div
         ref={box}
@@ -80,7 +82,8 @@ export function NotebookSheet({
           </ol>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
