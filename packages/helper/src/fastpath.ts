@@ -26,7 +26,7 @@
 
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { isRelease, type Action, type SensorEvent } from '@vigil/core';
-import { selfKey, type SelfImage } from '@vigil/core/self';
+import { selfKey, selfRoots, underSelfRoot, type SelfImage } from '@vigil/core/self';
 import {
   DetectionEngine,
   DetectionRule,
@@ -65,6 +65,11 @@ export interface FastPathOptions {
   retiredMax?: number;
   /** A file's device and inode (`fileId`), to check an AppImage the app names is that file. */
   fileId?: (path: string) => string | undefined;
+  /**
+   * Vigil's own folders as the installer put them in place (root-owned). The
+   * first sync the helper ever takes may name these without the password.
+   */
+  installed?: readonly string[];
 }
 
 /** What the helper never pauses, kills or blocks, as the app last sent it. */
@@ -127,6 +132,8 @@ const WORDING = new Set([
 
 export class FastPath {
   private state: Saved = EMPTY;
+  /** Whether any policy was ever saved here: loaded from disk or taken from a sync. */
+  private everSaved = false;
   private engine: DetectionEngine | undefined;
   private digests = new Map<string, string>();
   /** Lists arriving in parts: name → digest and the parts so far. */
@@ -145,6 +152,8 @@ export class FastPath {
     } catch {
       return;
     }
+    // Even a damaged file means a policy was saved once: no first-sync grace.
+    this.everSaved = true;
     const parsed = Saved.safeParse(safeJson(raw));
     if (!parsed.success) {
       this.opts.log?.('fast path: ignoring saved rules that do not parse');
@@ -159,11 +168,19 @@ export class FastPath {
 
   /**
    * What this sync would weaken, in words for the password prompt; empty when
-   * it only adds. Lists are not counted: dropped entries retire instead.
+   * it only adds or tightens. Lists are not counted: dropped entries retire
+   * instead. This holds whether or not any rule is saved yet: an exception or
+   * a self grant taken while no rule blocks would outlast the rules that
+   * follow. The one exemption is the first sync the helper ever takes, which
+   * may name the installer's own folders as Vigil without the password (see
+   * `installed`); a self path outside them, an AppImage or a program hash
+   * still asks.
+   *
+   * Throws PolicyRefused for an AppImage that isn't the file at its path,
+   * before anyone is asked for a password for it.
    */
   loosening(cmd: DetectionSync): string[] {
-    // With no rules nothing is blocked yet, so there is nothing to weaken.
-    if (this.state.rules.length === 0) return [];
+    this.checkImages(cmd.selfImages ?? []);
     const out: string[] = [];
     const next = new Map(cmd.rules.map((r) => [r.id, r]));
     for (const r of this.state.rules) {
@@ -178,7 +195,10 @@ export class FastPath {
     // Anything named as Vigil's own that wasn't before, even a file inside a
     // folder already named: being Vigil exempts a program from every block.
     const paths = new Set(this.state.selfPaths.map((p) => selfKey(p)));
-    for (const p of cmd.selfPaths) if (!paths.has(selfKey(p))) out.push(`never block ${p}`);
+    const installed = this.everSaved ? [] : selfRoots(this.opts.installed ?? []);
+    for (const p of ownPaths(cmd.selfPaths, cmd.selfImages ?? []))
+      if (!paths.has(selfKey(p)) && !underSelfRoot(installed, selfKey(p)))
+        out.push(`never block ${p}`);
     const images = new Set(this.state.selfImages.map((i) => i.id));
     for (const i of cmd.selfImages ?? []) if (!images.has(i.id)) out.push(`never block ${i.path}`);
     const hashes = new Set(this.state.selfHashes);
@@ -205,7 +225,7 @@ export class FastPath {
       rev: this.state.rev + 1,
       rules: cmd.rules,
       exceptions: cmd.exceptions,
-      selfPaths: cmd.selfPaths,
+      selfPaths: ownPaths(cmd.selfPaths, selfImages),
       selfImages,
       selfHashes: cmd.selfHashes ?? [],
       lists,
@@ -242,7 +262,7 @@ export class FastPath {
   /** What is Vigil's own, as the app last sent it. */
   self(): SelfSet {
     return {
-      paths: this.state.selfPaths,
+      paths: ownPaths(this.state.selfPaths, this.state.selfImages),
       images: this.state.selfImages.map((i) => i.id),
       hashes: this.state.selfHashes,
     };
@@ -341,7 +361,10 @@ export class FastPath {
           next.rules.map((r) => ({ ...r, mode: 'block' as const })),
           stores,
           {
-            safety: { selfPaths: next.selfPaths, selfHashes: next.selfHashes },
+            safety: {
+              selfPaths: ownPaths(next.selfPaths, next.selfImages),
+              selfHashes: next.selfHashes,
+            },
             recordHistory: false,
           },
         )
@@ -352,6 +375,7 @@ export class FastPath {
   }
 
   private save(): void {
+    this.everSaved = true;
     const tmp = `${this.opts.file}.tmp`;
     try {
       writeFileSync(tmp, JSON.stringify(this.state), { mode: 0o600 });
@@ -360,6 +384,16 @@ export class FastPath {
       this.opts.log?.(`fast path: could not save rules: ${(err as Error).message}`);
     }
   }
+}
+
+/**
+ * Self paths without the AppImages' own paths. An image counts by device and
+ * inode alone (selfImage.ts): trusting its path too would make whatever file
+ * later sits at that path Vigil, after the image is moved or replaced.
+ */
+function ownPaths(paths: readonly string[], images: readonly SelfImage[]): string[] {
+  const named = new Set(images.map((i) => selfKey(i.path)));
+  return paths.filter((p) => !named.has(selfKey(p)));
 }
 
 /** A rule as the helper enforces it, without its wording. */

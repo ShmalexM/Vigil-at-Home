@@ -91,7 +91,9 @@ export function selfPaths(
   const id = d.fileId(image);
   return {
     app: [mount ?? dir, image],
-    helper: { paths: [image], images: id ? [{ path: image, id }] : [], hashes: [] },
+    // The image goes by device and inode only: its path would make whatever
+    // file sits there later Vigil too, once the image is moved or replaced.
+    helper: { paths: [], images: id ? [{ path: image, id }] : [], hashes: [] },
     ...(mount ? { mount } : {}),
   };
 }

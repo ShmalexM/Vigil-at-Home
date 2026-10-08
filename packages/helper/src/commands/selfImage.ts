@@ -25,6 +25,14 @@
 // program from inside Vigil's own mount is Vigil. Processes that later share
 // the pipe (everything Vigil starts inherits it) started after R, so they
 // can't stand in for it.
+//
+// The earliest-started holder stands in for R. A process the launcher never
+// handed the pipe to could hold it only by opening it out of Vigil's own
+// /proc/<pid>/fd, which the kernel gates behind ptrace read access to Vigil:
+// a same-user attacker with that access is already inside Vigil's own process
+// and past any boundary this test could draw. So the pipe need not be proven
+// unforgeable here, only unforgeable by a process the kernel keeps at arm's
+// length from Vigil, which is every process Vigil did not start.
 
 import {
   isImageMount,

@@ -43,8 +43,9 @@ describe('selfPaths', () => {
     const p = selfPaths(`${MOUNT}/vigil-at-home`, 'linux', true, env, deps());
     expect(p.app).toEqual([MOUNT, '/home/alex/Apps/Vigil.AppImage']);
     expect(p.mount).toBe(MOUNT);
+    // Never by its path: a file put there after a move would be trusted too.
     expect(p.helper).toEqual({
-      paths: ['/home/alex/Apps/Vigil.AppImage'],
+      paths: [],
       images: [{ path: '/home/alex/Apps/Vigil.AppImage', id: '2049:5501' }],
       hashes: [],
     });

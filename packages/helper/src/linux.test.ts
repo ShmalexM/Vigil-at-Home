@@ -374,7 +374,8 @@ describe('executor on Linux', () => {
     proc(2011, `${mount}/chrome_crashpad_handler`, 521);
     // A connector: the user's own program, started later, with the pipe inherited.
     proc(2100, '/usr/bin/node', 900, [[3, 'pipe:[90001]']]);
-    return { image, mount, self: { paths: [image], images: ['2049:5501'] } };
+    // As FastPath.self() gives it: the image by identity only, never by path.
+    return { image, mount, self: { paths: [] as string[], images: ['2049:5501'] } };
   }
 
   it('never pauses Vigil running from its AppImage, and nothing else counts as Vigil', async () => {
@@ -458,7 +459,88 @@ describe('executor on Linux', () => {
     sys.files.set('/home/alex/Apps/vigil.appimage', '2049:6000');
     sys.processes.set(86, { path: '/home/alex/Apps/vigil.appimage', started: STARTED });
     await suspendProcess(sys, 86, { self });
-    expect(sys.signals.map((s) => s.pid)).toEqual([86]);
+    // Another file put at the image's old path is not Vigil.
+    sys.files.set(image, '2049:6001');
+    sys.processes.set(87, { path: image, started: STARTED });
+    await suspendProcess(sys, 87, { self });
+    expect(sys.signals.map((s) => s.pid)).toEqual([86, 87]);
+  });
+
+  it('gives nothing to a connector that execs a program, whenever it started', async () => {
+    const { mount, self } = launchAppImage();
+    // A program on another read-only FUSE mount the user controls, holding
+    // Vigil's keepalive pipe (a connector Vigil started that exec'd it). It
+    // started after R, so it cannot stand in for R.
+    const fake = '/tmp/.mount_EvilaZZZZZ';
+    sys.mounts += `\n700 40 0:80 / ${fake} ro,nosuid,nodev,relatime - fuse.AppImage AppImage ro,user_id=1000,group_id=1000`;
+    sys.processes.set(4000, { path: `${fake}/payload`, started: STARTED });
+    sys.starts.set(4000, 940);
+    sys.fds.set(4000, [[7, 'pipe:[90001]']]);
+    await suspendProcess(sys, 4000, { self });
+    // And a second program on that same mount, with no pipe at all.
+    sys.processes.set(4001, { path: `${fake}/other`, started: STARTED });
+    sys.starts.set(4001, 941);
+    await suspendProcess(sys, 4001, { self });
+    expect(sys.signals.map((s) => s.pid)).toEqual([4000, 4001]);
+    // Vigil's own mount is unaffected by the look-alike alongside it.
+    await expect(suspendProcess(sys, 2010, { self })).rejects.toMatchObject({ code: 'refused' });
+    expect(mount).toContain('.mount_');
+  });
+
+  it('matches a mount point with escaped spaces as the kernel wrote it', async () => {
+    launchAppImage();
+    // A genuine Vigil mount whose path holds a space: mountinfo escapes it as
+    // \\040, /proc/<pid>/exe gives the real space. Both must line up.
+    const spaced = '/tmp/.mount Vigil X';
+    sys.mounts += `\n710 40 0:82 / /tmp/.mount\\040Vigil\\040X ro,nosuid,nodev,relatime - fuse.AppImage AppImage ro,user_id=1000,group_id=1000`;
+    sys.files.set('/home/alex/Apps/Vigil2.AppImage', '2049:7000');
+    sys.processes.set(5000, { path: `${spaced}/vigil-at-home`, started: STARTED });
+    sys.starts.set(5000, 510);
+    sys.processes.set(5001, { path: '/home/alex/Apps/Vigil2.AppImage', started: STARTED });
+    sys.starts.set(5001, 509);
+    sys.fds.set(5001, [
+      [4, 'pipe:[90010]'],
+      [5, '/home/alex/Apps/Vigil2.AppImage'],
+      [6, '/dev/fuse'],
+    ]);
+    // R for this second image, on the spaced mount, earliest on the pipe.
+    sys.processes.set(5002, { path: `${spaced}/vigil-at-home`, started: STARTED });
+    sys.starts.set(5002, 508);
+    sys.fds.set(5002, [[3, 'pipe:[90010]']]);
+    await expect(
+      suspendProcess(sys, 5000, { self: { paths: [], images: ['2049:7000'] } }),
+    ).rejects.toMatchObject({ code: 'refused' });
+    // A crafted mountinfo line that only looks like a mount point: a program
+    // whose real path has no space can't match the escaped entry.
+    sys.processes.set(5003, {
+      path: '/tmp/.mount\\040Vigil\\040X/vigil-at-home',
+      started: STARTED,
+    });
+    sys.starts.set(5003, 511);
+    await suspendProcess(sys, 5003, { self: { paths: [], images: ['2049:7000'] } });
+    expect(sys.signals.map((s) => s.pid)).toEqual([5003]);
+  });
+
+  it('refuses nothing to a server that holds a different file than the image', async () => {
+    const { mount, self } = launchAppImage();
+    // A server running the approved image but holding a DIFFERENT file open
+    // (not the image), with its own mount and R. It does not serve the image.
+    const other = '/tmp/.mount_decoyQ';
+    sys.files.set('/home/alex/decoy', '2049:8000');
+    sys.mounts += `\n720 40 0:83 / ${other} ro,nosuid,nodev,relatime - fuse.AppImage AppImage ro,user_id=1000,group_id=1000`;
+    sys.processes.set(6000, { path: '/home/alex/Apps/Vigil.AppImage', started: STARTED });
+    sys.starts.set(6000, 600);
+    sys.fds.set(6000, [
+      [4, 'pipe:[90020]'],
+      [5, '/home/alex/decoy'],
+      [6, '/dev/fuse'],
+    ]);
+    sys.processes.set(6001, { path: `${other}/vigil-at-home`, started: STARTED });
+    sys.starts.set(6001, 599);
+    sys.fds.set(6001, [[3, 'pipe:[90020]']]);
+    await suspendProcess(sys, 6001, { self });
+    expect(sys.signals.map((s) => s.pid)).toEqual([6001]);
+    expect(mount).toBeTruthy();
   });
 
   it('refuses to block a program inside Vigil by hash', async () => {

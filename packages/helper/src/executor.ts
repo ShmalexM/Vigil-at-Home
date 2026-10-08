@@ -119,7 +119,12 @@ export class Executor {
     if (this.d.sys.platform === 'linux') checkLinuxBlock(cmd);
     if (cmd.kind === 'detection.sync') {
       // Whether a sync weakens anything depends on the policy in force.
-      const weakens = this.d.fastPath?.loosening(cmd) ?? [];
+      let weakens: string[];
+      try {
+        weakens = this.d.fastPath?.loosening(cmd) ?? [];
+      } catch (err) {
+        throw policyError(err);
+      }
       if (weakens.length && (!approval || !this.d.approvals.consume(approval, cmd))) {
         const nonce = this.d.approvals.request(cmd);
         return { kind: 'needs_approval', nonce, prompt: syncPrompt(weakens) };

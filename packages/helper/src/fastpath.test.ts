@@ -8,7 +8,7 @@ import { RuleStore, type SensorEvent } from '@vigil/sensors';
 import { Approvals } from './approval.js';
 import { HelperClient } from './client.js';
 import { Executor, type ActionOutcome } from './executor.js';
-import { FastPath, RETIRE_MS, type HelperRan } from './fastpath.js';
+import { FastPath, PolicyRefused, RETIRE_MS, type HelperRan } from './fastpath.js';
 import { Journal } from './journal.js';
 import { LIST_PART_MAX, type DetectionSync } from './protocol.js';
 import { HelperServer } from './server.js';
@@ -36,6 +36,7 @@ function makeFastPath(executor: Executor): FastPath {
     now: () => clock,
     retiredMax: RETIRED_TEST_MAX,
     fileId: (p) => files.get(p),
+    installed: [SELF],
     run: async (action) => {
       const out = await executor.execute(action);
       if (out.kind !== 'done') throw new Error('needs the admin password');
@@ -488,5 +489,83 @@ describe('blocking rules in the helper', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(replayed).toEqual([ran]);
     replay.close();
+  });
+});
+
+describe('what a sync may grant without the password', () => {
+  let n = 0;
+  const image = { path: '/home/alex/Apps/Vigil.AppImage', id: '2049:5501' };
+  const disk = new Map([[image.path, image.id]]);
+  /** A helper of its own, on its own file; `fresh` leaves the file absent. */
+  function helper(file = join(root, `own-${n++}.json`)) {
+    const fp = new FastPath({
+      file,
+      run: () => Promise.reject(new Error('not in these tests')),
+      fileId: (p) => disk.get(p),
+      installed: [SELF],
+    });
+    fp.load();
+    return { fp, file };
+  }
+  const bare = (over: Partial<DetectionSync> = {}): DetectionSync => ({
+    kind: 'detection.sync',
+    rules: [],
+    exceptions: [],
+    selfPaths: [],
+    lists: {},
+    ...over,
+  });
+  const exception = { id: 'x', ruleId: '*', match: { 'process.path': '/tmp/x' }, createdAt: 1 };
+
+  it('lets only the first sync ever name the installed app, and nothing more', () => {
+    const { fp, file } = helper();
+    expect(fp.loosening(bare({ selfPaths: [SELF] }))).toEqual([]);
+    // Even the first sync asks for anything the installer didn't put there.
+    expect(fp.loosening(bare({ selfPaths: [SELF, '/tmp'] }))).toEqual(['never block /tmp']);
+    expect(fp.loosening(bare({ selfImages: [image] }))).toEqual([`never block ${image.path}`]);
+    expect(fp.loosening(bare({ selfHashes: ['c'.repeat(64)] }))).toEqual([
+      'never block 1 of Vigil’s programs by hash',
+    ]);
+    expect(fp.loosening(bare({ exceptions: [exception] }))).toEqual(['add an exception to *']);
+
+    // Once anything was saved, even a policy with no rules, the grace is over.
+    fp.sync(bare());
+    expect(fp.loosening(bare({ selfPaths: [SELF] }))).toEqual([`never block ${SELF}`]);
+    // And it stays over across a restart.
+    expect(helper(file).fp.loosening(bare({ selfPaths: [SELF] }))).toEqual([`never block ${SELF}`]);
+  });
+
+  it('asks before weakening a policy that has no block rules yet', () => {
+    const { fp } = helper();
+    fp.sync(bare({ selfPaths: [SELF] }));
+    expect(fp.status().rules).toBe(0);
+    expect(fp.loosening(bare({ selfPaths: [SELF], exceptions: [exception] }))).toEqual([
+      'add an exception to *',
+    ]);
+    expect(fp.loosening(bare({ selfPaths: [SELF, '/home/alex/payload'] }))).toEqual([
+      'never block /home/alex/payload',
+    ]);
+    expect(fp.loosening(bare({ selfPaths: [SELF], selfImages: [image] }))).toEqual([
+      `never block ${image.path}`,
+    ]);
+    // Adding or keeping what is there asks nothing.
+    expect(fp.loosening(bare({ selfPaths: [SELF] }))).toEqual([]);
+    expect(fp.loosening(bare())).toEqual([]);
+  });
+
+  it('refuses an AppImage that is not the file at its path before asking', () => {
+    const { fp } = helper();
+    expect(() =>
+      fp.loosening(bare({ selfImages: [{ path: image.path, id: '2049:9999' }] })),
+    ).toThrow(PolicyRefused);
+  });
+
+  it('never trusts an approved AppImage by its path', () => {
+    const { fp } = helper();
+    // An app that still names the image among its paths, as earlier versions did.
+    fp.sync(bare({ selfPaths: [SELF, image.path], selfImages: [image] }));
+    expect(fp.self()).toEqual({ paths: [SELF], images: [image.id], hashes: [] });
+    // Naming it there again is no new grant.
+    expect(fp.loosening(bare({ selfPaths: [SELF, image.path], selfImages: [image] }))).toEqual([]);
   });
 });
