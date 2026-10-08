@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { rovingIndex, rovingTabIndex } from './roving';
+import { rovingIndex, rovingTabIndex, rovingTarget } from './roving';
 
 describe('rovingIndex', () => {
   it('moves with the arrows and wraps around', () => {
@@ -23,5 +23,50 @@ describe('rovingTabIndex', () => {
     expect(rovingTabIndex(false, 0, true)).toBe(-1);
     expect(rovingTabIndex(false, 0, false)).toBe(0);
     expect(rovingTabIndex(false, 1, false)).toBe(-1);
+  });
+});
+
+describe('rovingTarget', () => {
+  /** A button that records focus and selection like the real ones. */
+  function buttons(n: number, disabled: number[] = []) {
+    const log: string[] = [];
+    let selected = 0;
+    const items = Array.from({ length: n }, (_, i) => ({
+      disabled: disabled.includes(i),
+      focus: () => log.push(`focus ${i}`),
+      // What the browser does for Space or Enter on a focused <button>.
+      click: () => {
+        selected = i;
+        log.push(`select ${i}`);
+      },
+    }));
+    return { items, log, selected: () => selected };
+  }
+
+  it('moves focus with the arrows, Home and End, and never selects', () => {
+    const { items, log, selected } = buttons(3);
+    rovingTarget(items, items[0], 'ArrowRight')!.focus();
+    rovingTarget(items, items[1], 'End')!.focus();
+    rovingTarget(items, items[2], 'ArrowDown')!.focus();
+    expect(log).toEqual(['focus 1', 'focus 2', 'focus 0']);
+    expect(selected()).toBe(0);
+  });
+
+  it('leaves Space and Enter to the focused button, so keyboard users still choose', () => {
+    const { items, log, selected } = buttons(2);
+    expect(rovingTarget(items, items[0], ' ')).toBeUndefined();
+    expect(rovingTarget(items, items[0], 'Enter')).toBeUndefined();
+    // On / Off: move to Off, then press Space.
+    const off = rovingTarget(items, items[0], 'ArrowRight')!;
+    off.focus();
+    off.click();
+    expect(log).toEqual(['focus 1', 'select 1']);
+    expect(selected()).toBe(1);
+  });
+
+  it('skips disabled items and ignores keys when focus is elsewhere', () => {
+    const { items } = buttons(3, [1]);
+    expect(rovingTarget(items, items[0], 'ArrowRight')).toBe(items[2]);
+    expect(rovingTarget(items, undefined, 'ArrowRight')).toBeUndefined();
   });
 });

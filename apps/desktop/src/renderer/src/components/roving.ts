@@ -23,21 +23,40 @@ export function rovingIndex(key: string, current: number, count: number): number
   }
 }
 
+/** The keyboard-reachable parts of a focusable item, for `rovingTarget`. */
+export interface RovingItem {
+  focus(): void;
+  disabled?: boolean;
+}
+
 /**
- * Keyboard for a tablist or radiogroup: put it on the container. Moving also
- * selects, as tabs and radio buttons do on macOS.
+ * The item a key moves focus to in a row of tabs or radio buttons, or
+ * undefined when the key isn't one that moves. Moving never selects: the
+ * items are buttons, so Space, Enter or a click selects (ARIA "manual
+ * activation"). That way arrow keys pressed to scroll a page can't flip a
+ * switch that happens to have focus.
  */
+export function rovingTarget<T extends RovingItem>(
+  all: readonly T[],
+  active: unknown,
+  key: string,
+): T | undefined {
+  const items = all.filter((el) => !el.disabled);
+  const current = items.findIndex((el) => el === active);
+  if (current < 0) return undefined;
+  const next = rovingIndex(key, current, items.length);
+  return next === undefined ? undefined : items[next];
+}
+
+/** Keyboard for a tablist or radiogroup: put it on the container. Moves focus only. */
 export function onRovingKeyDown(e: KeyboardEvent<HTMLElement>): void {
   const items = [
-    ...e.currentTarget.querySelectorAll<HTMLElement>('[role="tab"], [role="radio"]'),
-  ].filter((el) => !(el as HTMLButtonElement).disabled);
-  const current = items.findIndex((el) => el === document.activeElement);
-  if (current < 0) return;
-  const next = rovingIndex(e.key, current, items.length);
-  if (next === undefined) return;
+    ...e.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"], [role="radio"]'),
+  ];
+  const target = rovingTarget(items, document.activeElement, e.key);
+  if (!target) return;
   e.preventDefault();
-  items[next]!.focus();
-  items[next]!.click();
+  target.focus();
 }
 
 /** Only the selected item (or the first, when none is) is a Tab stop. */
