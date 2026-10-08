@@ -766,31 +766,28 @@ describe('alert detail', () => {
       authRight: '[withheld: may contain a secret]',
     });
   });
-  it('copies the evidence without a secret passed as its own arg, or short names', async () => {
+  it('copies a command line that may hold a secret as the marker, and others with names hidden', async () => {
     const { core } = setup();
     core.evidenceRedaction = () => ({ username: 'al', hostname: 'pc.local' });
     const rule = makeRule({ id: 'download-pipe-to-shell', mode: 'alert', severity: 'medium' });
-    const event = exec('/usr/local/bin/tool');
-    if (event.kind === 'process.exec') {
-      event.process.args = [
-        'tool',
-        '--token',
-        'secret123456',
-        'al@pc',
-        'sh -c "x --password pw99"',
-        'x --password pw99',
-      ];
+    const secret = exec('/usr/local/bin/tool');
+    const plain = exec('/usr/bin/ssh');
+    if (secret.kind === 'process.exec') {
+      secret.process.args = ['tool', '--token', 'secret123456', 'al@pc'];
     }
-    const alert = await core.alerts.raise({ rule, events: [event], actions: [] });
-    const args = JSON.parse(core.alertEvidence(alert.id)!).events[0].process.args;
-    expect(args).toEqual([
-      'tool',
-      '--token',
-      '<redacted>',
-      '<user>@<host>',
-      // Quotes make it shell syntax: withheld whole rather than cut up.
+    if (plain.kind === 'process.exec') plain.process.args = ['ssh', 'al@pc', '-l', 'al'];
+    const alert = await core.alerts.raise({ rule, events: [secret, plain], actions: [] });
+    const events: Array<{ id: string; process: { args: string[] } }> = JSON.parse(
+      core.alertEvidence(alert.id)!,
+    ).events;
+    expect(events.find((e) => e.id === secret.id)?.process.args).toEqual([
       '[withheld: may contain a secret]',
-      'x --password <redacted>',
+    ]);
+    expect(events.find((e) => e.id === plain.id)?.process.args).toEqual([
+      'ssh',
+      '<user>@<host>',
+      '-l',
+      '<user>',
     ]);
   });
 });
