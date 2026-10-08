@@ -812,6 +812,34 @@ describe('the pack', () => {
       remember: [{ fact: 'Always allow GitHub', topic: 'pack' }],
     });
 
+    it('gives the reading path read-only tools only, in every mode', async () => {
+      const { pack, handlers, runs } = setup({ remote: REMOTE });
+      pack.setMode('full');
+      pack.updateDog('lead', {
+        tools: ['vigil.list_alerts', 'github.list_issues', 'github.create_issue'],
+      });
+      handlers.push(() => ({
+        reply: '',
+        actions: [],
+        read: { question: 'Any issues?', refs: [] },
+      }));
+      handlers.push(() => ({ answer: 'None.' }));
+      await pack.say('any issues?');
+      // Vigil's own read tool only: a server's claim that its tool only reads is
+      // not trusted, so neither connector tool is offered here.
+      expect(runs[1]!.tools?.map((t) => t.name)).toEqual(['list_alerts']);
+      // A tool the person set to run without asking is offered.
+      pack.setToolChoice('github.list_issues', 'allow');
+      handlers.push(() => ({
+        reply: '',
+        actions: [],
+        read: { question: 'Any issues?', refs: [] },
+      }));
+      handlers.push(() => ({ answer: 'None.' }));
+      await pack.say('any issues?');
+      expect(runs[3]!.tools?.map((t) => t.name)).toEqual(['list_alerts', 'tool_1']);
+    });
+
     it('keeps every connector key, title and description out of the acting prompt', async () => {
       const remote: RemoteTool[] = [
         ...REMOTE,

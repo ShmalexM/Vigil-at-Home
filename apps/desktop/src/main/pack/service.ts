@@ -976,7 +976,10 @@ export class PackService {
     refs: Refs,
     used: string[],
   ): Prompt {
-    const tools = this.toolsFor(lead, { requestedByUser: true, used }, new Intake());
+    // It reads outside text, so it gets only tools that read, or that the
+    // person set to run without asking: nothing else it is steered into can
+    // change anything.
+    const tools = this.toolsFor(lead, { requestedByUser: true, used }, new Intake(), true);
     const looked: Record<string, unknown> = {};
     for (const r of read.refs) {
       const v = this.resolveRef(r, refs);
@@ -1600,6 +1603,7 @@ export class PackService {
     dog: Dog,
     ctx: { requestedByUser: boolean; used: string[] },
     intake: Intake,
+    readOnlyOnly = false,
   ): ReadTool[] {
     const out: ReadTool[] = [];
     const taken = new Set<string>();
@@ -1607,6 +1611,7 @@ export class PackService {
     for (const key of dog.tools) {
       const t = this.entry(key);
       if (!t || this.choiceOf(key) === 'off') continue;
+      if (readOnlyOnly && !this.treatedAsReadOnly(key)) continue;
       const vigil = t.source === 'vigil';
       const name = vigil ? t.name.replace(/[^A-Za-z0-9_]/g, '_').slice(0, 60) : `tool_${++n}`;
       if (taken.has(name)) continue;
