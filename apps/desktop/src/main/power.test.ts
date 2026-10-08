@@ -207,6 +207,20 @@ describe('PowerPolicy', () => {
       expect(p.mode).toBe('normal');
     });
 
+    it('does not count use from before a sleep once a late check finds it slept', () => {
+      vi.useFakeTimers();
+      let idle = 30 * 86_400;
+      const { p, clock, emit } = sleepyMac(() => idle);
+      emit('suspend');
+      vi.advanceTimersByTime(WAKE_RECHECK_MS); // on time; nobody there
+      expect(p.mode).toBe('constrained');
+      // Used a few minutes later, then slept ~an hour; the check fires in a dark wake.
+      clock.slept += 58 * 60_000;
+      idle = 55 * 60;
+      vi.advanceTimersByTime(WAKE_RECHECK_MS);
+      expect(p.mode).toBe('constrained');
+    });
+
     it('is not held asleep by checks that App Nap delays a little', () => {
       vi.useFakeTimers();
       const { p, clock, emit } = sleepyMac();

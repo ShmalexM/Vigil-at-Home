@@ -109,10 +109,10 @@ doesn't: the app only answers a line on a local socket. See
    run 4× less often on battery and pause when the Mac is hot or asleep. If
    macOS never says the Mac woke up, Vigil checks every two minutes and
    counts it awake once someone uses it or it has run ten minutes without a
-   check firing late (a late check means it slept: dark wakes don't count). A
-   scheduled task still running after 30 minutes gives its place back so it
-   can't hold up the rest, but its job doesn't start again until that run
-   has ended.
+   check firing late (a late check means it slept: dark wakes don't count). Every call
+   a scheduled task makes to the outside world (AI providers, connectors,
+   child processes) has its own time limit, so tasks always finish; one still
+   running after 30 minutes shows as stuck in the status until it does.
 6. **Renderers only while visible.** Each window's page is its own process
    (30–80 MB on macOS). The main window's goes when it closes and a hidden
    popup's after a minute. The popover is the one kept loaded, because

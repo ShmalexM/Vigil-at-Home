@@ -430,31 +430,6 @@ describe('AiBridge event labels', () => {
     expect(sent[0]).toHaveLength(31);
   });
 
-  it('gives a batch back the moment the scheduler gives up on it, and writes nothing late', async () => {
-    let release!: () => void;
-    let round = 0;
-    const { core, ai, sent } = labelling((ids) =>
-      round++ === 0
-        ? new Promise((r) => (release = () => r({ labels: ids, deferred: [] })))
-        : { labels: ids, deferred: [] },
-    );
-    ai.labelEventsFrom(core);
-    const a = makeExec('/tmp/late');
-    core.ingest(a, unmatched);
-    core.events.flush();
-    const given = new AbortController();
-    const hung = ai.labelBatch(core.store, given.signal);
-    await new Promise((r) => setImmediate(r));
-    given.abort();
-    // Back in the queue while the first call still hangs.
-    expect(await ai.labelBatch(core.store)).toBe(1);
-    release();
-    expect(await hung).toBe(0);
-    expect(sent).toEqual([[a.id], [a.id]]);
-    const labelled = core.store.listEventViews({}).filter((v) => v.label);
-    expect(labelled).toHaveLength(1);
-  });
-
   it('gives a batch back when the classifier fails', async () => {
     let round = 0;
     const { core, ai } = labelling((ids) => {
@@ -468,51 +443,24 @@ describe('AiBridge event labels', () => {
     expect(await ai.labelBatch(core.store)).toBe(1);
   });
 
-  it('keeps a returned batch even when 200 newer events queued meanwhile', async () => {
-    let release!: () => void;
-    let round = 0;
-    const { core, ai, sent } = labelling((ids) =>
-      round++ === 0
-        ? new Promise((r) => (release = () => r({ labels: [], deferred: [] })))
-        : { labels: ids, deferred: [] },
-    );
-    ai.labelEventsFrom(core);
-    const first = makeExec('/tmp/first');
-    core.ingest(first, unmatched);
-    core.events.flush();
-    const given = new AbortController();
-    const hung = ai.labelBatch(core.store, given.signal);
-    await new Promise((r) => setImmediate(r));
-    for (let i = 0; i < 250; i++) core.ingest(makeExec(`/tmp/newer-${i}`), unmatched);
-    core.events.flush();
-    given.abort();
-    release();
-    await hung;
-    await ai.labelBatch(core.store);
-    expect(sent[1]).toContain(first.id);
-    expect(sent[1]!.length).toBeLessThanOrEqual(200);
-  });
-
   it('never lets new events push out a batch that was given back', async () => {
     let release!: () => void;
     let round = 0;
-    const { core, ai, sent } = labelling((ids) =>
-      round++ === 0
-        ? new Promise((r) => (release = () => r({ labels: [], deferred: [] })))
-        : { labels: ids, deferred: [] },
-    );
+    const { core, ai, sent } = labelling(async (ids) => {
+      if (round++ > 0) return { labels: ids, deferred: [] };
+      await new Promise<void>((r) => (release = r));
+      throw new Error('model crashed');
+    });
     ai.labelEventsFrom(core);
     const firsts = Array.from({ length: 200 }, (_, i) => makeExec(`/tmp/first-${i}`));
     for (const e of firsts) core.ingest(e, unmatched);
     core.events.flush();
-    const given = new AbortController();
-    const hung = ai.labelBatch(core.store, given.signal);
+    const failing = ai.labelBatch(core.store);
     await new Promise((r) => setImmediate(r));
-    given.abort(); // all 200 go back to the queue, which is now full
+    release();
+    await expect(failing).rejects.toThrow('model crashed'); // all 200 go back; the queue is full
     for (let i = 0; i < 50; i++) core.ingest(makeExec(`/tmp/newer-${i}`), unmatched);
     core.events.flush();
-    release();
-    await hung;
     await ai.labelBatch(core.store);
     expect(sent[1]).toEqual(firsts.map((e) => e.id));
   });

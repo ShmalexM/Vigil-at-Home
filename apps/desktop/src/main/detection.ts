@@ -205,7 +205,7 @@ export class Detector {
     );
   }
 
-  async reviewRules(opts: { force?: boolean; signal?: AbortSignal } = {}) {
+  async reviewRules(opts: { force?: boolean } = {}) {
     if (!this.reviewer) return { ran: false as const, reason: 'no_runner' as const };
     const out = await this.reviewer.maybeRun(opts);
     return out;

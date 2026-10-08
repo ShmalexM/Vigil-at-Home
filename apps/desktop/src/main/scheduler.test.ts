@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Scheduler, TaskTimeoutError } from './scheduler.js';
+import { Scheduler } from './scheduler.js';
 
 const tick = () => new Promise((r) => setImmediate(r));
 
@@ -86,117 +86,76 @@ describe('Scheduler', () => {
     s.stop();
   });
 
-  it('gives a hung task’s slot back so other work keeps running', async () => {
+  it('never gives up on a run: it marks it stuck and holds its job until it ends', async () => {
     vi.useFakeTimers();
     const errors: string[] = [];
     const s = new Scheduler({
-      concurrency: 1,
-      taskTimeoutMs: 1_000,
+      stuckAfterMs: 1_000,
       onError: (name, err) => errors.push(`${name}: ${(err as Error).message}`),
     });
-    const hung = s.enqueue('hung', () => new Promise<void>(() => {}));
-    const hungResult = hung.catch((e: unknown) => e);
-    const ran: string[] = [];
-    const next = s.enqueue('next', () => void ran.push('next'));
-    await vi.advanceTimersByTimeAsync(999);
-    expect(ran).toEqual([]);
-    await vi.advanceTimersByTimeAsync(1);
-    await next;
-    expect(ran).toEqual(['next']);
-    expect(await hungResult).toBeInstanceOf(TaskTimeoutError);
-    expect(errors).toEqual(['hung: hung still running after 1 s; gave up waiting']);
-    expect(s.active).toBe(0);
-  });
-
-  it('ignores a timed-out task that finishes later and doesn’t free its slot twice', async () => {
-    vi.useFakeTimers();
-    const s = new Scheduler({ concurrency: 1, taskTimeoutMs: 1_000 });
-    let finish!: () => void;
-    const slow = s.enqueue('slow', () => new Promise<void>((r) => (finish = r))).catch(() => {});
-    await vi.advanceTimersByTimeAsync(1_000);
-    await slow;
-    let release!: () => void;
-    const holder = s.enqueue('holder', () => new Promise<void>((r) => (release = r)));
-    await vi.advanceTimersByTimeAsync(0);
-    expect(s.active).toBe(1);
-    finish(); // the abandoned task returns at last
-    await vi.advanceTimersByTimeAsync(0);
-    expect(s.active).toBe(1);
-    const after = s.enqueue('after', () => 'ran');
-    await vi.advanceTimersByTimeAsync(0);
-    expect(s.pending().routine).toBe(1); // still waits for the one slot
-    release();
-    await holder;
-    expect(await after).toBe('ran');
-  });
-
-  it('lets a periodic job run again after a hung run, and marks it stuck until one finishes', async () => {
-    vi.useFakeTimers();
-    const s = new Scheduler({ concurrency: 1, taskTimeoutMs: 1_000 });
     let calls = 0;
+    let finish!: () => void;
     s.every(
-      'stuck',
+      'slow',
       5_000,
       () => {
         calls++;
-        return calls <= 2 ? new Promise<void>(() => {}) : undefined;
+        return calls === 1 ? new Promise<void>((r) => (finish = r)) : undefined;
       },
       true,
     );
     let other = 0;
     s.every('other', 5_000, () => void other++, true);
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(s.status()[0]).toMatchObject({ busy: false, timeouts: 1, stuck: true });
-    expect(s.status()[0]!.lastError).toMatch(/gave up waiting/);
-    await vi.advanceTimersByTimeAsync(5_000); // runs again, hangs again
+    expect(s.status()[0]).toMatchObject({ busy: true, stuck: true, timeouts: 1 });
+    expect(errors).toEqual(['slow: slow still running after 1 s']);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(calls).toBe(1); // never two at once
+    expect(other).toBeGreaterThan(3); // the other slot keeps working
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.status()[0]).toMatchObject({ busy: false, stuck: false, runs: 1, timeouts: 1 });
+    await vi.advanceTimersByTimeAsync(5_000);
     expect(calls).toBe(2);
-    expect(s.status()[0]).toMatchObject({ stuck: true });
-    await vi.advanceTimersByTimeAsync(5_000); // and then finishes
-    expect(calls).toBe(3);
-    expect(s.status()[0]).toMatchObject({ runs: 1, timeouts: 2, stuck: false });
-    expect(s.status()[0]!.lastError).toBeUndefined();
-    expect(other).toBeGreaterThan(1);
   });
 
-  it('aborts a timed-out run, and its late finish doesn’t count as a run', async () => {
+  it('runs a job again on the next cycle once a hung call’s own time limit ends it', async () => {
     vi.useFakeTimers();
-    const s = new Scheduler({ taskTimeoutMs: 1_000 });
-    let finish!: () => void;
-    let seen: AbortSignal | undefined;
+    const s = new Scheduler({ stuckAfterMs: 30_000 });
+    const callWithLimit = (ms: number) =>
+      Promise.race([
+        new Promise<never>(() => {}), // e.g. a connector that never answers
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('no answer in time')), ms),
+        ),
+      ]);
     let calls = 0;
     s.every(
-      'slow',
+      'pack-dogs',
       5_000,
-      (signal) => {
+      async () => {
         calls++;
-        if (calls > 1) return;
-        seen = signal;
-        return new Promise<void>((r) => (finish = r));
+        if (calls === 1) await callWithLimit(2_000);
       },
       true,
     );
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(seen?.aborted).toBe(true);
-    expect(seen?.reason).toBeInstanceOf(TaskTimeoutError);
-    await vi.advanceTimersByTimeAsync(4_000); // runs again, quickly
-    expect(s.status()[0]).toMatchObject({ runs: 1, timeouts: 1, stuck: false });
-    finish(); // the first run returns at last
-    await vi.advanceTimersByTimeAsync(0);
-    expect(s.status()[0]).toMatchObject({ runs: 1, timeouts: 1, stuck: false });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(s.status()[0]).toMatchObject({ busy: false, stuck: false, runs: 1 });
+    expect(s.status()[0]!.lastError).toBe('no answer in time');
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(calls).toBe(2);
     expect(s.status()[0]!.lastError).toBeUndefined();
   });
 
-  it('never gives up on a task with no time limit', async () => {
+  it('never marks a task with no expected time stuck', async () => {
     vi.useFakeTimers();
-    const s = new Scheduler({ taskTimeoutMs: 1_000 });
+    const s = new Scheduler({ stuckAfterMs: 1_000 });
     let finish!: () => void;
     const long = s.enqueue(
       'sync',
       () => new Promise<string>((r) => (finish = () => r('done'))),
       'routine',
-      {
-        timeoutMs: Infinity,
-      },
+      { stuckAfterMs: Infinity },
     );
     await vi.advanceTimersByTimeAsync(60 * 60_000);
     expect(s.active).toBe(1);

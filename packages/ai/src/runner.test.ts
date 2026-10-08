@@ -219,6 +219,32 @@ describe('runner', () => {
     expect(await runner.run(request)).toMatchObject({ ok: true });
   });
 
+  it('keeps a stale check out even after the newer answer was cleared', async () => {
+    let releaseOld!: () => void;
+    let calls = 0;
+    let fail = false;
+    const claude = fake('claude', () =>
+      fail
+        ? { kind: 'error', message: 'boom', audit: audit() }
+        : { kind: 'ok', json: { verdict: 'benign', summary: 'ok' }, audit: audit() },
+    );
+    claude.probe = () =>
+      calls++ === 0
+        ? new Promise(
+            (r) => (releaseOld = () => r({ provider: 'claude', state: 'error', detail: 'old' })),
+          )
+        : Promise.resolve({ provider: 'claude', state: 'ready' });
+    const { runner } = setup([claude], { order: ['claude'] });
+    expect(await runner.run({ ...request, deadlineMs: 50 })).toMatchObject({ reason: 'timeout' });
+    expect(await runner.status()).toEqual([expect.objectContaining({ state: 'ready' })]);
+    fail = true;
+    await runner.run(request); // a provider error clears the cached status
+    releaseOld(); // the stale check answers now
+    await new Promise((r) => setTimeout(r, 10));
+    fail = false;
+    expect(await runner.run(request)).toMatchObject({ ok: true });
+  });
+
   it('treats a provider whose check fails as not usable', async () => {
     const claude = fake('claude', () => ({
       kind: 'ok',
@@ -256,6 +282,49 @@ describe('runner', () => {
     await runner.run({ ...request, tools: [tool] });
     expect(seen).toContain('/Users/<user>/bin/x');
     expect(seen).not.toContain('me@example.com');
+  });
+
+  it('runs no tool and takes no usage from a model still working after the deadline', async () => {
+    let toolRuns = 0;
+    let seenSignal: AbortSignal | undefined;
+    const tool = readTool({
+      name: 'get_process',
+      description: 'Process details',
+      input: { pid: z.number() },
+      run: async (_args, run) => {
+        toolRuns++;
+        seenSignal = run?.signal;
+        return {};
+      },
+    });
+    let late!: (input: AdapterRunInput) => Promise<void>;
+    const claude = fake('claude', () => {
+      late = async (i) => {
+        i.onUsage({ provider: 'claude', windowId: 'five_hour', usedPercent: 5, resetsAt: 1 });
+        await i.tools[0]!.run({ pid: 1 });
+      };
+      return new Promise<AdapterRunOutput>(() => {});
+    });
+    const { runner } = setup([claude], { order: ['claude'] });
+    runner.quota.observe({
+      provider: 'claude',
+      windowId: 'five_hour',
+      usedPercent: 95,
+      resetsAt: Date.now() + 3_600_000,
+    });
+    expect(await runner.run({ ...request, tools: [tool], deadlineMs: 20 })).toMatchObject({
+      reason: 'timeout',
+    });
+    await expect(late(claude.inputs[0]!)).rejects.toThrow('deadline passed');
+    expect(toolRuns).toBe(0);
+    expect(runner.quota.snapshot('claude').get('five_hour')?.usedPercent).toBe(95);
+    // A tool the run did call is handed the run's signal.
+    const ok = fake('claude', async (input) => {
+      await input.tools[0]!.run({ pid: 2 });
+      return { kind: 'ok', json: { verdict: 'benign', summary: 'x' }, audit: audit() };
+    });
+    await setup([ok]).runner.run({ ...request, tools: [tool] });
+    expect(seenSignal).toBeInstanceOf(AbortSignal);
   });
 
   it("keeps background work within Vigil's share of the window", async () => {

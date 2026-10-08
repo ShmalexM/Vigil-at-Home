@@ -9,12 +9,11 @@
  * - On battery the app slows periodic jobs down (`setSlowdown`): a job runs
  *   at most once every `everyMs × factor`.
  *
- * - A task still running after its time limit (`taskTimeoutMs`, or the
- *   task's own) gives its slot back, so one call that never returns can't
- *   stall every other job behind it, and its job may run again. Its signal
- *   is aborted: that is the fence. Work that writes checks the signal before
- *   writing, so a run given up on keeps nothing, even if it finishes after
- *   a newer run. Its result is ignored and doesn't count as a run.
+ * - A task never gets abandoned: every call it makes to the outside world
+ *   (AI providers, connectors, child processes) has its own time limit, so
+ *   it finishes on its own. One still running after its expected time
+ *   (`stuckAfterMs`) keeps its slot and is marked stuck, so the status can
+ *   say work has stopped; its job doesn't start again until it ends.
  *
  * Blocking never goes through here. Blocks run inline in the alert path.
  */
@@ -28,51 +27,46 @@ export interface JobStatus {
   lastError?: string;
   runs: number;
   busy: boolean;
-  /** Runs given up on after `taskTimeoutMs`. */
+  /** Runs that went past their expected time. */
   timeouts: number;
-  /** The latest run was given up on, and no run has finished since: the job's work has stopped. */
+  /** A run is still going past its expected time: the job's work has stopped for now. */
   stuck: boolean;
 }
 
-/** A task's work. `signal` is aborted when the task is given up on. */
-export type TaskFn<T> = (signal: AbortSignal) => Promise<T> | T;
+export type TaskFn<T> = () => Promise<T> | T;
 
 export interface TaskOptions {
-  /** How long it may run before its slot is given back. Infinity for work that is always making progress. */
-  timeoutMs?: number;
+  /** How long it may run before it counts as stuck. Infinity for work that is always making progress. */
+  stuckAfterMs?: number;
 }
 
 interface Task {
   name: string;
   priority: Priority;
-  timeoutMs: number;
-  run: (signal: AbortSignal) => Promise<unknown>;
+  stuckAfterMs: number;
+  run: () => Promise<unknown>;
   resolve: (v: unknown) => void;
   reject: (e: unknown) => void;
+  /** Told when the task passes its expected time, and when it ends after that. */
+  onStuck?: (stuck: boolean) => void;
 }
 
 interface Job extends JobStatus {
   fn: TaskFn<void>;
-  timeoutMs?: number;
+  stuckAfterMs?: number;
   timer?: ReturnType<typeof setInterval>;
 }
 
 export interface SchedulerOptions {
   /** Tasks running at once across both lanes. */
   concurrency?: number;
-  /** How long a task may run before its slot is given back (default 30 minutes). */
-  taskTimeoutMs?: number;
+  /** How long a task may run before it counts as stuck (default 30 minutes). */
+  stuckAfterMs?: number;
   now?: () => number;
   onError?: (name: string, err: unknown) => void;
 }
 
-export const DEFAULT_TASK_TIMEOUT_MS = 30 * 60_000;
-
-export class TaskTimeoutError extends Error {
-  constructor(name: string, ms: number) {
-    super(`${name} still running after ${Math.round(ms / 1000)} s; gave up waiting`);
-  }
-}
+export const DEFAULT_STUCK_AFTER_MS = 30 * 60_000;
 
 export class Scheduler {
   private readonly queue: Task[] = [];
@@ -82,13 +76,13 @@ export class Scheduler {
   private stopped = false;
   private slowdown = 1;
   private readonly concurrency: number;
-  private readonly taskTimeoutMs: number;
+  private readonly stuckAfterMs: number;
   private readonly now: () => number;
   private readonly onError: (name: string, err: unknown) => void;
 
   constructor(opts: SchedulerOptions = {}) {
     this.concurrency = Math.max(1, opts.concurrency ?? 2);
-    this.taskTimeoutMs = opts.taskTimeoutMs ?? DEFAULT_TASK_TIMEOUT_MS;
+    this.stuckAfterMs = opts.stuckAfterMs ?? DEFAULT_STUCK_AFTER_MS;
     this.now = opts.now ?? Date.now;
     this.onError = opts.onError ?? (() => {});
   }
@@ -98,17 +92,18 @@ export class Scheduler {
     name: string,
     fn: TaskFn<T>,
     priority: Priority = 'routine',
-    opts: TaskOptions = {},
+    opts: TaskOptions & { onStuck?: (stuck: boolean) => void } = {},
   ): Promise<T> {
     if (this.stopped) return Promise.reject(new Error('Scheduler stopped'));
     return new Promise<T>((resolve, reject) => {
       const task: Task = {
         name,
         priority,
-        timeoutMs: opts.timeoutMs ?? this.taskTimeoutMs,
-        run: async (signal) => fn(signal),
+        stuckAfterMs: opts.stuckAfterMs ?? this.stuckAfterMs,
+        run: async () => fn(),
         resolve: resolve as (v: unknown) => void,
         reject,
+        ...(opts.onStuck ? { onStuck: opts.onStuck } : {}),
       };
       if (priority === 'urgent') {
         // After other urgent tasks, ahead of all routine ones.
@@ -131,7 +126,7 @@ export class Scheduler {
   ): void {
     if (this.jobs.has(name)) throw new Error(`Job already registered: ${name}`);
     const job: Job = { name, everyMs, fn, runs: 0, busy: false, timeouts: 0, stuck: false };
-    if (opts.timeoutMs !== undefined) job.timeoutMs = opts.timeoutMs;
+    if (opts.stuckAfterMs !== undefined) job.stuckAfterMs = opts.stuckAfterMs;
     this.jobs.set(name, job);
     job.timer = setInterval(() => this.tick(job), everyMs);
     job.timer.unref?.();
@@ -145,36 +140,31 @@ export class Scheduler {
     if (this.slowdown > 1 && job.lastStart !== undefined && this.now() - job.lastStart < gap)
       return;
     job.busy = true;
-    const opts = job.timeoutMs === undefined ? {} : { timeoutMs: job.timeoutMs };
     this.enqueue(
       job.name,
-      async (signal) => {
+      async () => {
         job.lastStart = this.now();
         try {
-          await job.fn(signal);
-          if (!signal.aborted) delete job.lastError;
+          await job.fn();
+          delete job.lastError;
         } catch (err) {
-          if (!signal.aborted) job.lastError = err instanceof Error ? err.message : String(err);
+          job.lastError = err instanceof Error ? err.message : String(err);
           throw err;
         } finally {
-          // A run given up on was counted then; a late finish changes nothing.
-          if (!signal.aborted) {
-            job.lastEnd = this.now();
-            job.runs++;
-            job.stuck = false;
-          }
+          job.lastEnd = this.now();
+          job.runs++;
         }
       },
       'routine',
-      opts,
+      {
+        ...(job.stuckAfterMs === undefined ? {} : { stuckAfterMs: job.stuckAfterMs }),
+        onStuck: (stuck) => {
+          job.stuck = stuck;
+          if (stuck) job.timeouts++;
+        },
+      },
     )
-      .catch((err: unknown) => {
-        if (err instanceof TaskTimeoutError) {
-          job.timeouts++;
-          job.stuck = true;
-          job.lastError = err.message;
-        }
-      })
+      .catch(() => {})
       .finally(() => {
         job.busy = false;
       });
@@ -212,12 +202,12 @@ export class Scheduler {
   }
 
   status(): JobStatus[] {
-    return [...this.jobs.values()].map(({ fn: _fn, timer: _timer, timeoutMs: _t, ...s }) => ({
+    return [...this.jobs.values()].map(({ fn: _fn, timer: _timer, stuckAfterMs: _t, ...s }) => ({
       ...s,
     }));
   }
 
-  /** Tasks running now, timed-out ones not counted. */
+  /** Tasks running now, stuck ones included. */
   get active(): number {
     return this.running;
   }
@@ -237,37 +227,35 @@ export class Scheduler {
       const [task] = this.queue.splice(idx, 1);
       if (!task) return;
       this.running++;
-      let settled = false;
-      const abort = new AbortController();
-      const done = (): boolean => {
-        if (settled) return false;
-        settled = true;
-        clearTimeout(watchdog);
-        this.running--;
-        return true;
-      };
-      const watchdog = Number.isFinite(task.timeoutMs)
+      let stuck = false;
+      const watch = Number.isFinite(task.stuckAfterMs)
         ? setTimeout(() => {
-            if (!done()) return;
-            const err = new TaskTimeoutError(task.name, task.timeoutMs);
-            abort.abort(err);
-            this.onError(task.name, err);
-            task.reject(err);
-            this.pump();
-          }, task.timeoutMs)
+            stuck = true;
+            this.onError(
+              task.name,
+              new Error(
+                `${task.name} still running after ${Math.round(task.stuckAfterMs / 1000)} s`,
+              ),
+            );
+            task.onStuck?.(true);
+          }, task.stuckAfterMs)
         : undefined;
-      watchdog?.unref?.();
-      task.run(abort.signal).then(
+      watch?.unref?.();
+      const done = (): void => {
+        clearTimeout(watch);
+        if (stuck) task.onStuck?.(false);
+        this.running--;
+        this.pump();
+      };
+      task.run().then(
         (v) => {
-          if (!done()) return;
           task.resolve(v);
-          this.pump();
+          done();
         },
         (err: unknown) => {
-          if (!done()) return;
           this.onError(task.name, err);
           task.reject(err);
-          this.pump();
+          done();
         },
       );
     }

@@ -136,8 +136,9 @@ export class PowerPolicy extends EventEmitter<{ change: [PowerMode] }> {
     // Sleep and dark wakes that both fall between two checks still count as
     // running; that takes a dark wake every two minutes, which macOS doesn't do.
     const idle = this.source.getSystemIdleTime?.();
-    // Someone used it since the last check: it is awake, however late the check.
-    if (idle !== undefined && idle * 1000 < ran) return this.reread();
+    // Someone used it within one check interval: it is awake, however late
+    // the check. (Older use could have come before a sleep.)
+    if (idle !== undefined && idle * 1000 < WAKE_RECHECK_MS) return this.reread();
     const used = idle === undefined || idle * 1000 < now.monotonic - this.awakeSince;
     if (used || this.unbroken >= AWAKE_UNBROKEN_MS) this.reread();
     else this.checkWakeLater();

@@ -83,11 +83,29 @@ export class JsonRpcStdio {
     }
   }
 
-  request<T = Json>(method: string, params: Json): Promise<T> {
+  /** Send a request. With `timeoutMs`, it fails if no answer comes in that time. */
+  request<T = Json>(method: string, params: Json, timeoutMs?: number): Promise<T> {
     if (this.closedError) return Promise.reject(this.closedError);
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (v: Json) => void, reject });
+      const timer =
+        timeoutMs === undefined
+          ? undefined
+          : setTimeout(() => {
+              this.pending.delete(id);
+              reject(new Error(`${method}: no answer in ${Math.round(timeoutMs / 1000)} s`));
+            }, timeoutMs);
+      timer?.unref?.();
+      this.pending.set(id, {
+        resolve: (v: Json) => {
+          clearTimeout(timer);
+          (resolve as (v: Json) => void)(v);
+        },
+        reject: (e: Error) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      });
       this.send({ id, method, params });
     });
   }

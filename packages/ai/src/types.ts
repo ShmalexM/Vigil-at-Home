@@ -24,7 +24,8 @@ export interface ReadTool<Shape extends z.ZodRawShape = z.ZodRawShape> {
   readonly name: string;
   readonly description: string;
   readonly input: Shape;
-  run(args: z.infer<z.ZodObject<Shape>>): Promise<unknown>;
+  /** `run.signal` aborts when the run that called the tool reaches its deadline. */
+  run(args: z.infer<z.ZodObject<Shape>>, run?: { signal: AbortSignal }): Promise<unknown>;
 }
 
 export interface RunRequest<T> {

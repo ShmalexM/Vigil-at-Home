@@ -27,6 +27,9 @@ import { JsonRpcStdio } from './jsonRpcStdio.js';
 import { isSafeBaseUrl } from './openaiCompatible.js';
 import { verifyBinary } from './verifyBinary.js';
 
+/** Starting Codex's app server or asking it who is signed in; it should answer at once. */
+const RPC_SETUP_MS = 15_000;
+
 const execFileAsync = promisify(execFile);
 
 /** The Codex version these settings were checked against. */
@@ -298,11 +301,20 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
       cwd,
       handlers,
     );
-    await rpc.request('initialize', {
-      clientInfo: { name: 'vigil_at_home', title: 'Vigil at Home', version: '0.1.0' },
-      // Dynamic tools, which keep Vigil's tools in Vigil's process, are an experimental API.
-      capabilities: { experimentalApi: true, requestAttestation: false },
-    });
+    try {
+      await rpc.request(
+        'initialize',
+        {
+          clientInfo: { name: 'vigil_at_home', title: 'Vigil at Home', version: '0.1.0' },
+          // Dynamic tools, which keep Vigil's tools in Vigil's process, are an experimental API.
+          capabilities: { experimentalApi: true, requestAttestation: false },
+        },
+        RPC_SETUP_MS,
+      );
+    } catch (err) {
+      rpc.close();
+      throw err;
+    }
     rpc.notify('initialized');
     return rpc;
   }
@@ -358,7 +370,7 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
         });
         const account = await rpc.request<{
           account: { type: string; email?: string | null } | null;
-        }>('account/read', {});
+        }>('account/read', {}, RPC_SETUP_MS);
         const canShare =
           !account.account &&
           (await canShareCodexSignIn(options.userCodexHome ?? DEFAULT_USER_CODEX_HOME));

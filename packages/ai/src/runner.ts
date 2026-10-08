@@ -79,7 +79,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
   const now = deps.now ?? Date.now;
   const quota = deps.quota ?? new QuotaTracker(deps.settings.quota.backgroundSharePercent, now);
   const adapters = new Map(deps.adapters.map((a) => [a.id, a]));
-  const statusCache = new Map<ProviderId, { status: ProviderStatus; at: number; seq: number }>();
+  const statusCache = new Map<ProviderId, { status: ProviderStatus; at: number }>();
   const redaction = deps.settings.redaction;
   const planNames = new Map<ProviderId, string>();
   let planUsageAt = -Infinity;
@@ -129,6 +129,8 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
   }
 
   let probeSeq = 0;
+  /** The newest check whose answer was kept, per provider; clearing the cache keeps it. */
+  const installedSeq = new Map<ProviderId, number>();
 
   async function statusOf(adapter: ProviderAdapter, fresh = false): Promise<ProviderStatus> {
     const cached = statusCache.get(adapter.id);
@@ -143,17 +145,25 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
       // e.g. codesign timing out: the provider isn't usable right now.
       status = { provider: adapter.id, state: 'error', detail: (err as Error).message };
     }
-    const latest = statusCache.get(adapter.id);
-    if (latest && latest.seq > seq) return latest.status;
-    statusCache.set(adapter.id, { status, at: now(), seq });
+    if ((installedSeq.get(adapter.id) ?? 0) > seq)
+      return statusCache.get(adapter.id)?.status ?? status;
+    installedSeq.set(adapter.id, seq);
+    statusCache.set(adapter.id, { status, at: now() });
     return status;
   }
 
-  /** Tool results go through the same redaction as the data before the model sees them. */
-  function redactingTools(tools: readonly ReadTool[]): ReadTool[] {
+  /**
+   * Tool results go through the same redaction as the data before the model
+   * sees them. Once the run's deadline passes, a model still working gets no
+   * more tool calls: nothing it asks for then is done.
+   */
+  function redactingTools(tools: readonly ReadTool[], signal: AbortSignal): ReadTool[] {
     return tools.map((t) => ({
       ...t,
-      run: async (args) => redactValue(await t.run(args), redaction),
+      run: async (args) => {
+        if (signal.aborted) throw new Error('This run is over: its deadline passed.');
+        return redactValue(await t.run(args, { signal }), redaction);
+      },
     }));
   }
 
@@ -181,7 +191,14 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
       signal.addEventListener('abort', () => resolve('timeout'), { once: true }),
     );
     return Promise.race([
-      adapter.run({ ...input, signal, onUsage: (w) => quota.observe(w) }),
+      adapter.run({
+        ...input,
+        signal,
+        // Usage reported after the deadline is stale; newer runs have reported since.
+        onUsage: (w) => {
+          if (!signal.aborted) quota.observe(w);
+        },
+      }),
       timedOut,
     ]);
   }
@@ -234,7 +251,8 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
       const runId = randomUUID();
       let logId = runId;
       let entries = 0;
-      const tools = redactingTools(request.tools ?? []);
+      const signal = AbortSignal.timeout(request.deadlineMs);
+      const tools = redactingTools(request.tools ?? [], signal);
       const systemPrompt = buildSystemPrompt(
         request.purpose,
         tools.map((t) => t.name),
@@ -244,7 +262,6 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
         redactAndSerialize(request.data, { ...redaction, maxBytes: redaction.maxDataBytes }),
       );
       const jsonSchema = jsonSchemaFor(request.output);
-      const signal = AbortSignal.timeout(request.deadlineMs);
 
       const record = (
         provider: ProviderId | null,

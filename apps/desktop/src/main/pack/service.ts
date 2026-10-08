@@ -98,9 +98,7 @@ export interface PackDeps {
   /** Vigil's rules on a connector call, as a watched agent's hook would get them. */
   preflight(req: PreflightRequest): PreflightReply;
   connectors: ConnectorHub;
-  scheduler?: {
-    every(name: string, ms: number, fn: (signal: AbortSignal) => Promise<void> | void): void;
-  };
+  scheduler?: { every(name: string, ms: number, fn: () => Promise<void> | void): void };
   isBusy?: () => boolean;
   /** Where each dog writes down what it was asked, looked at and answered. */
   notebook?: Pick<Notebook, 'write' | 'list' | 'clear' | 'tally'>;
@@ -330,7 +328,7 @@ export class PackService {
   }
 
   start(): void {
-    this.o.scheduler?.every('pack-dogs', CHECK_SCHEDULES_MS, (signal) => this.runDue(signal));
+    this.o.scheduler?.every('pack-dogs', CHECK_SCHEDULES_MS, () => this.runDue());
   }
 
   // ---------------------------------------------------------------- state
@@ -919,15 +917,10 @@ export class PackService {
   // ---------------------------------------------------------------- pack jobs
 
   /**
-   * Run a dog's job. A run the scheduler gave up on (`signal`), or one whose
-   * job the user changed meanwhile, writes no report or notebook entry: it
-   * would describe work the dog is no longer doing.
+   * Run a dog's job. A run whose job the user changed meanwhile writes no
+   * report or notebook entry: it would describe work the dog no longer does.
    */
-  async runDog(
-    id: string,
-    urgency: 'now' | 'background' = 'now',
-    signal?: AbortSignal,
-  ): Promise<DogReport | undefined> {
+  async runDog(id: string, urgency: 'now' | 'background' = 'now'): Promise<DogReport | undefined> {
     const dog = this.dogs().find((d) => d.id === id);
     if (!dog || dog.role !== 'pack') throw new Error('Only pack dogs run jobs');
     if (!dog.enabled) throw new Error(`${dog.name} is switched off`);
@@ -960,7 +953,7 @@ export class PackService {
         providers: [...JOB_PROVIDERS],
       });
       const now = this.dogs().find((d) => d.id === id);
-      if (signal?.aborted || !now || now.job !== dog.job) {
+      if (!now || now.job !== dog.job) {
         this.setMood(id, 'idle');
         return undefined;
       }
@@ -1009,14 +1002,11 @@ export class PackService {
   /**
    * Run the scheduled dogs that are due, one after another; skipped while the
    * Mac is busy or on low battery. Each dog is read afresh just before it
-   * runs, since an earlier one may have taken a while. Once the scheduler
-   * gives up on the cycle (`signal`) it starts no more dogs, and the one
-   * running keeps nothing it finds.
+   * runs, since an earlier one may have taken a while.
    */
-  async runDue(signal?: AbortSignal): Promise<void> {
+  async runDue(): Promise<void> {
     if (this.o.isBusy?.()) return;
     for (const { id } of this.dogs()) {
-      if (signal?.aborted) return;
       const d = this.dogs().find((x) => x.id === id);
       if (!d || d.role !== 'pack' || !d.enabled || d.schedule === 'manual') continue;
       const at = this.now();
@@ -1028,7 +1018,7 @@ export class PackService {
           : d.schedule === 'daily'
             ? at - last >= 24 * HOUR
             : at - last >= 20 * HOUR && hour >= 1 && hour < 5;
-      if (due) await this.runDog(d.id, 'background', signal).catch(() => undefined);
+      if (due) await this.runDog(d.id, 'background').catch(() => undefined);
     }
   }
 
@@ -1123,7 +1113,8 @@ export class PackService {
             1000,
           ),
         input: shapeFromJsonSchema(t.inputSchema),
-        run: (args) => this.callTool(dog, t, args as Record<string, unknown>, ctx),
+        run: (args, run) =>
+          this.callTool(dog, t, args as Record<string, unknown>, ctx, run?.signal),
       });
     }
     return out;
@@ -1134,6 +1125,7 @@ export class PackService {
     t: ToolEntry,
     args: Record<string, unknown>,
     ctx: { requestedByUser: boolean; used: string[] },
+    signal?: AbortSignal,
   ): Promise<unknown> {
     const argText = clip(JSON.stringify(redactValue(args, {})), 4000);
     let decision = gateTool({
@@ -1155,7 +1147,9 @@ export class PackService {
       }
     }
     // A wait for the user or the judge can be long: check again right before
-    // the call that nothing has since switched it off or a rule now stops it.
+    // the call that nothing has since switched it off or a rule now stops it,
+    // and that the run asking for it hasn't ended meanwhile.
+    if (signal?.aborted) return 'Not run: this run ran out of time.';
     const stop = this.recheck(dog, t, args);
     if (stop) return `Not run: ${stop}`;
     ctx.used.push(t.key);

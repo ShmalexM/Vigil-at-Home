@@ -255,6 +255,24 @@ describe('the pack', () => {
     expect(connectorCalls).toEqual([['github', 'create_issue', { title: 'y' }]]);
   });
 
+  it('makes no connector call once the run waiting on the user has ended', async () => {
+    const { pack, handlers, connectorCalls } = setup();
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    let answer: unknown;
+    handlers.push(async (req) => {
+      const run = new AbortController();
+      const pending = tool(req, 'github_create_issue').run({ title: 'x' }, { signal: run.signal });
+      await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+      run.abort(); // the run's deadline passes while it waits
+      pack.decideTool((await pack.view()).approvals[0]!.id, 'allow-once');
+      answer = await pending;
+      return { summary: 'done', findings: [] };
+    });
+    await pack.runDog(dog.id);
+    expect(String(answer)).toContain('ran out of time');
+    expect(connectorCalls).toEqual([]);
+  });
+
   it('refuses what a Vigil rule stops, even in Full access', async () => {
     const { pack, handlers, connectorCalls } = setup({ preflight: 'deny' });
     pack.setMode('full');
@@ -400,49 +418,6 @@ describe('the pack', () => {
       vi.useRealTimers();
     }
     expect(pack.dogs().find((d) => d.id === dog.id)?.lastReport?.ok).toBe(true);
-  });
-
-  it('starts no more dogs once the scheduler gives up on a cycle', async () => {
-    const { pack, handlers, runs } = setup();
-    const a = pack.adopt(CREATE as never);
-    const b = pack.adopt(CREATE as never);
-    const later = Date.now() + 61 * 60_000;
-    vi.useFakeTimers({ now: later, toFake: ['Date'] });
-    try {
-      const abort = new AbortController();
-      handlers.push(() => {
-        abort.abort(); // the cycle is given up on while the first dog runs
-        return { summary: 'ok', findings: [] };
-      });
-      await pack.runDue(abort.signal);
-      expect(runs).toHaveLength(1);
-      expect(pack.dogs().filter((d) => d.lastReport)).toEqual([]);
-      // The next cycle runs both: the first one's late answer wasn't kept.
-      handlers.push(() => ({ summary: 'ok', findings: [] }));
-      handlers.push(() => ({ summary: 'ok', findings: [] }));
-      await pack.runDue();
-      expect(runs).toHaveLength(3);
-      const ids = pack
-        .dogs()
-        .filter((d) => d.lastReport)
-        .map((d) => d.id);
-      expect(ids.sort()).toEqual([a.id, b.id].sort());
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('keeps nothing from a run the scheduler gave up on', async () => {
-    const { pack, handlers, notebook } = setup();
-    const dog = pack.adopt(CREATE as never);
-    const abort = new AbortController();
-    handlers.push(() => {
-      abort.abort(); // the deadline passes while the dog works
-      return { summary: 'late', findings: [] };
-    });
-    expect(await pack.runDog(dog.id, 'background', abort.signal)).toBeUndefined();
-    expect(pack.dogs().find((d) => d.id === dog.id)?.lastReport).toBeUndefined();
-    expect(notebook.list({ dog: dog.id })).toEqual([]);
   });
 
   it('keeps nothing from a run whose job the user changed meanwhile', async () => {

@@ -424,8 +424,8 @@ export class AiBridge extends EventEmitter<{
     core.onIngest = (event, outcome) => this.consider(event, outcome);
     // The strongest catches become quiet "worth a look" alerts (worth-a-look.ts).
     if (core.alerts) this.worthALook = new WorthALook(core.alerts, this.now);
-    core.scheduler.every('label-events', LABEL_EVERY_MS, async (signal) => {
-      await this.labelBatch(core.store, signal);
+    core.scheduler.every('label-events', LABEL_EVERY_MS, async () => {
+      await this.labelBatch(core.store);
     });
   }
 
@@ -440,8 +440,8 @@ export class AiBridge extends EventEmitter<{
     const detector = core.detector;
     if (!detector) return;
     detector.attachReviewer(() => this.ruleReviewRunner(), this.o.isBusy);
-    core.scheduler.every('rule-review', REVIEW_CHECK_MS, async (signal) => {
-      const out = await detector.reviewRules({ signal });
+    core.scheduler.every('rule-review', REVIEW_CHECK_MS, async () => {
+      const out = await detector.reviewRules();
       if (out.ran) this.emit('changed');
     });
   }
@@ -499,14 +499,13 @@ export class AiBridge extends EventEmitter<{
   }
 
   /**
-   * Sends one batch to the classifier and stores what comes back. The batch
-   * is on loan while the classifier works: if the run fails, or the
-   * scheduler gives up on it (`signal`), its events go back to the front of
-   * the queue at once, and a late answer writes nothing. The queue's cap
-   * drops newer events to make room for them, never the other way round.
+   * Sends one batch to the classifier and stores what comes back. If the
+   * classifier fails, the batch goes back to the front of the queue; the
+   * queue's cap drops newer events to make room for it, never the other way
+   * round. (The classifier's own deadline bounds the wait.)
    */
-  async labelBatch(store: Pick<Store, 'setEventLabels'>, signal?: AbortSignal): Promise<number> {
-    if (this.labelQueue.length === 0 || signal?.aborted) return 0;
+  async labelBatch(store: Pick<Store, 'setEventLabels'>): Promise<number> {
+    if (this.labelQueue.length === 0) return 0;
     const classifier = this.ai().classifier;
     if (!classifier) {
       this.labelQueue = [];
@@ -516,26 +515,18 @@ export class AiBridge extends EventEmitter<{
     const batch = this.labelQueue;
     this.labelQueue = [];
     this.retrying.clear();
-    let onLoan = true;
     const giveBack = (events: readonly SensorEvent[]): void => {
-      if (!onLoan) return;
-      onLoan = false;
       for (const e of events) this.retrying.add(e.id);
       this.labelQueue = [...events, ...this.labelQueue];
       this.trimLabelQueue();
     };
-    const onAbort = (): void => giveBack(batch);
-    signal?.addEventListener('abort', onAbort, { once: true });
     let result: Awaited<ReturnType<typeof classifier.classify>>;
     try {
       result = await this.busyWhile('labeller', () => classifier.classify(batch));
     } catch (err) {
       giveBack(batch);
       throw err;
-    } finally {
-      signal?.removeEventListener('abort', onAbort);
     }
-    if (!onLoan) return 0; // given back on abort; this answer came too late
     // Whatever wasn't labelled goes back ahead of newer events.
     const deferred = new Set(result.deferred);
     giveBack(batch.filter((e) => deferred.has(e.id)));
@@ -556,7 +547,6 @@ export class AiBridge extends EventEmitter<{
     if (this.worthALook) {
       const byId = new Map(batch.map((e) => [e.id, e]));
       for (const l of labelled) {
-        if (signal?.aborted) break;
         const event = byId.get(l.eventId);
         if (!event) continue;
         try {
