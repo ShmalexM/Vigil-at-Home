@@ -86,6 +86,15 @@ Santa / osquery ─► SensorHub ─► FastPath (same engine as the app) ─►
   new ones have fully arrived.
 - `helper-rules.json` is root-owned in a root-owned folder, and `helper.status` reports its
   revision (`helperRules.rev`), which goes up with every change.
+- The app on the other end of the socket is spared when the kernel names it and it matches
+  the app pinned at install (`appPin.ts`): `install.sh` runs `vigil-helper pin-app` as
+  root, which records the cdhash and sha256 of the app's main executable on macOS, or the
+  AppImage's device, inode and sha256 on Linux, in `app-pin.json`. The peer comes from the
+  kernel's socket tables (`lsof -U` on macOS, `ss -x` and `/proc` on Linux, `peer.ts`) and
+  its running code is checked against the pin (codesign on the pid; the AppImage's mount
+  on Linux). While it stays connected, the helper won't pause or stop that one process or
+  block those hashes. No pin, or one for another app, spares nothing; after an app update
+  the app asks for the helper update, which pins the new app.
 
 Anything running as the user can reach the socket and send fewer rules. That only moves
 those blocks back to the app's engine, as before, so this needs no password.

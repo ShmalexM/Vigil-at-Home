@@ -1,8 +1,17 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileId } from '@vigil/core/self';
 import type { HelperInstallResult } from '../shared/ipc.js';
 
 const hasHelper = (dir: string) =>
@@ -87,6 +96,82 @@ export function installedHelperFiles(
   ];
 }
 
+/** The running app, as install.sh pins it (packages/helper/src/appPin.ts). */
+export interface AppIdentity {
+  execPath: string;
+  env: NodeJS.ProcessEnv;
+}
+
+const thisApp = (): AppIdentity => ({ execPath: process.execPath, env: process.env });
+
+/**
+ * What install.sh pins as the app: the main executable on macOS, the
+ * AppImage on Linux (its real path, as the kernel names it). A .deb or .rpm
+ * install is pinned by its root-owned folder instead, which install.sh
+ * recognises from the same path.
+ */
+export function appPinTarget(
+  platform: NodeJS.Platform = process.platform,
+  app: AppIdentity = thisApp(),
+): string {
+  const image = platform === 'linux' ? app.env['APPIMAGE'] : undefined;
+  if (!image) return app.execPath;
+  try {
+    return realpathSync(image);
+  } catch {
+    return image;
+  }
+}
+
+/** Where the helper keeps its pin; root-owned, readable by everyone. */
+export function appPinFile(platform: NodeJS.Platform = process.platform, root = ''): string {
+  return join(
+    root,
+    platform === 'linux' ? '/var/lib/vigil' : '/Library/Application Support/Vigil',
+    'app-pin.json',
+  );
+}
+
+/** The installer's own folder on Linux, which needs no pin (config installedSelf). */
+const LINUX_INSTALLED = '/opt/Vigil at Home/';
+
+/**
+ * This app's identity in the terms of the pin: on macOS its executable's
+ * sha256, on Linux its AppImage's device and inode. Undefined when nothing
+ * needs pinning.
+ */
+function appIdentity(platform: NodeJS.Platform, app: AppIdentity): string | undefined {
+  const target = appPinTarget(platform, app);
+  if (platform === 'linux') {
+    if (target.startsWith(LINUX_INSTALLED)) return undefined;
+    const st = statSync(target, { bigint: true });
+    return fileId(st.dev, st.ino);
+  }
+  return fileSha256(target);
+}
+
+/**
+ * Whether the helper's pin names this app. After an update that replaced
+ * the app it names the old one, and the helper update pins this one.
+ */
+export function appPinned(
+  platform: NodeJS.Platform = process.platform,
+  app: AppIdentity = thisApp(),
+  root = '',
+): boolean {
+  const want = appIdentity(platform, app);
+  if (want === undefined) return true;
+  try {
+    const pin = JSON.parse(readFileSync(appPinFile(platform, root), 'utf8')) as {
+      image?: unknown;
+      sha256?: unknown;
+    };
+    return (platform === 'linux' ? pin.image : pin.sha256) === want;
+  } catch {
+    return false;
+  }
+}
+
 export interface HelperMatch {
   /** current: the installed helper is the one this app ships; outdated: it isn't. */
   installed: 'none' | 'current' | 'outdated';
@@ -98,11 +183,16 @@ export interface HelperMatch {
  * Compares the installed helper with the one this app carries. After the app
  * is updated by replacing it, the old helper keeps running until install.sh
  * runs again. Every installed file is root-owned but readable.
+ *
+ * Given `app`, a helper pinned to another app (appPinned) is outdated too,
+ * and the bundle names this app as well, so each new app asks once to be
+ * pinned even when the helper's own files didn't change.
  */
 export function helperMatch(
   dir: string,
   platform: NodeJS.Platform = process.platform,
   root = '',
+  app?: AppIdentity,
 ): HelperMatch {
   const files = installedHelperFiles(dir, platform, root);
   const fingerprint = (path: string, by: 'content' | 'size') =>
@@ -110,8 +200,18 @@ export function helperMatch(
       ? String(statSync(path).size)
       : createHash('sha256').update(readFileSync(path)).digest('hex');
   const shipped = files.filter((f) => existsSync(f.bundled));
+  let identity: string | undefined;
+  try {
+    identity = app && appIdentity(platform, app);
+  } catch {
+    identity = undefined; // the app's own file is unreadable: nothing to compare
+  }
   const bundle = createHash('sha256')
-    .update(shipped.map((f) => fingerprint(f.bundled, f.by)).join('\n'))
+    .update(
+      [...shipped.map((f) => fingerprint(f.bundled, f.by)), ...(identity ? [identity] : [])].join(
+        '\n',
+      ),
+    )
     .digest('hex')
     .slice(0, 16);
   if (!existsSync(files[0]!.installed)) return { installed: 'none', bundle };
@@ -122,7 +222,8 @@ export function helperMatch(
       return false;
     }
   });
-  return { installed: same ? 'current' : 'outdated', bundle };
+  const pinned = !identity || !app || appPinned(platform, app, root);
+  return { installed: same && pinned ? 'current' : 'outdated', bundle };
 }
 
 /** The files each script reads, the script first, relative to the helper folder. */
@@ -175,7 +276,8 @@ export function helperDigest(dir: string, files: readonly string[]): string {
  * runs the script where it finds it: it copies the listed files into a fresh
  * folder only root can write, checks them against the digest the app computed
  * from its own copy, and runs the script from there. Arguments: the folder to
- * copy from, the script, the digest, then the files.
+ * copy from, the script, the digest, the app to pin (appPinTarget), then the
+ * files.
  */
 export function rootStageScript(platform: NodeJS.Platform = process.platform): string {
   const hash = platform === 'linux' ? 'sha256sum' : '/usr/bin/shasum -a 256';
@@ -183,7 +285,8 @@ export function rootStageScript(platform: NodeJS.Platform = process.platform): s
   const copy = platform === 'linux' ? 'cp -P' : 'cp -P -X';
   return [
     'set -eu',
-    'src=$1; run=$2; want=$3; shift 3',
+    // app: what install.sh pins as the app it installs the helper for; may be empty.
+    'src=$1; run=$2; want=$3; app=$4; shift 4',
     // A fixed root-owned, sticky parent: a folder made in the user's own
     // TMPDIR could be renamed away and replaced by its owner.
     't=$(mktemp -d /tmp/vigil-helper.XXXXXXXX)',
@@ -192,7 +295,7 @@ export function rootStageScript(platform: NodeJS.Platform = process.platform): s
     `for f; do [ -f "$src/$f" ] && [ ! -h "$src/$f" ] || { echo "Missing $f" >&2; exit 1; }; case $f in */*) mkdir -p "$t/\${f%/*}";; esac; ${copy} "$src/$f" "$t/$f"; [ -f "$t/$f" ] && [ ! -h "$t/$f" ] || exit 1; done`,
     `got=$(for f; do ${hash} < "$t/$f"; done | ${hash})`,
     '[ "${got%% *}" = "$want" ] || { echo "The helper files changed while installing, so nothing was changed." >&2; exit 1; }',
-    'sh "$t/$run"',
+    'sh "$t/$run" "$app"',
   ].join('; ');
 }
 
@@ -213,7 +316,8 @@ function stageArgs(
   platform: NodeJS.Platform,
 ): string[] {
   const files = helperScriptFiles(kind, platform);
-  return ['vigil-helper-setup', from, files[0]!, helperDigest(dir, files), ...files];
+  const app = kind === 'install' ? appPinTarget(platform) : '';
+  return ['vigil-helper-setup', from, files[0]!, helperDigest(dir, files), app, ...files];
 }
 
 /** The Terminal command that installs the helper, for the setup wizard. */

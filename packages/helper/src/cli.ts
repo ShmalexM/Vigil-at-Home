@@ -8,6 +8,8 @@
 // vigil-helper osquery-flags     print osquery's startup flags (osquery.flags)
 // vigil-helper osquery-setup     (root) write Vigil's osquery config and start osquery
 // vigil-helper osquery-remove    (root) stop Vigil's osquery job, restore osquery's old config
+// vigil-helper pin-app <path>    (root) pin the app the helper is installed for (appPin.ts):
+//                                its main executable on macOS, its AppImage on Linux
 
 import {
   osqueryConfig,
@@ -16,8 +18,11 @@ import {
   osqueryLinuxFlags,
   santaProfile,
 } from '@vigil/sensors';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { Approvals } from './approval.js';
-import { defaultPaths, SANTA_SYNC_PORT } from './config.js';
+import { pinFor, writePin } from './appPin.js';
+import { defaultPaths, installedSelf, SANTA_SYNC_PORT } from './config.js';
 import { runDaemon } from './daemon.js';
 import { ensureOsquery, removeOsquery } from './osquery.js';
 import { ensureLinuxOsquery, removeLinuxOsquery } from './linuxOsquery.js';
@@ -78,10 +83,29 @@ async function main(argv: string[]): Promise<number> {
         );
       return 0;
     }
+    case 'pin-app': {
+      if (process.getuid?.() !== 0) {
+        console.error('pin-app must run as root (install.sh runs it)');
+        return 1;
+      }
+      if (!arg || more.length) {
+        console.error('usage: vigil-helper pin-app <path>');
+        return 2;
+      }
+      const sys = realSystem();
+      const file = defaultPaths().appPin;
+      // Whatever happens, an older app's pin doesn't outlive this install.
+      writePin(file, undefined);
+      const pin = await pinFor(sys, arg, { installed: installedSelf(sys.platform) });
+      if (!pin) return 0;
+      mkdirSync(dirname(file), { recursive: true, mode: 0o755 });
+      writePin(file, pin);
+      return 0;
+    }
     default:
       console.error(
         'usage: vigil-helper daemon | approve <nonce>… | santa-profile | osquery-config | ' +
-          'osquery-flags | osquery-setup | osquery-remove',
+          'osquery-flags | osquery-setup | osquery-remove | pin-app <path>',
       );
       return 2;
   }

@@ -13,6 +13,7 @@ import { parseRequest, type HelperResponse } from './protocol.js';
 import type { Executor } from './executor.js';
 import type { HelperRan } from './fastpath.js';
 import { ActionError } from './commands/errors.js';
+import type { ProtectedPeer } from './appPin.js';
 
 // Large enough for detection.sync with a full rule set; still bounded.
 const MAX_LINE = 1024 * 1024;
@@ -24,6 +25,11 @@ export interface HelperServerOptions {
   /** Owner for the socket file (the console user). Skipped when undefined. */
   ownerUid?: number | undefined;
   log?: ((msg: string) => void) | undefined;
+  /**
+   * The connected process on the connection's file descriptor, when it is
+   * the app the helper was installed for (appPin.ts verifyPeer).
+   */
+  identifyPeer?: ((fd: number) => Promise<ProtectedPeer | undefined>) | undefined;
 }
 
 export class HelperServer {
@@ -32,6 +38,10 @@ export class HelperServer {
   private readonly connections = new Set<Socket>();
   private readonly recent: string[] = [];
   private readonly recentIds: string[] = [];
+  /** Verified app connections; each loses its protection when it closes. */
+  private readonly verified = new Map<Socket, ProtectedPeer>();
+  /** Peer checks run one at a time: each reads every process's sockets. */
+  private checking: Promise<void> = Promise.resolve();
 
   constructor(private readonly opts: HelperServerOptions) {}
 
@@ -74,9 +84,39 @@ export class HelperServer {
     }
   }
 
+  /** The connected processes verified as the pinned app (appPin.ts). */
+  peers(): ProtectedPeer[] {
+    return [...this.verified.values()];
+  }
+
+  /**
+   * Check who is on the other end, once, when the connection opens. A
+   * connection that closes first is skipped, and one that closes while it is
+   * checked keeps nothing, so a reused descriptor never lends its protection.
+   */
+  private checkPeer(sock: Socket): void {
+    const identify = this.opts.identifyPeer;
+    // Node keeps the descriptor on the connection's handle; there is no public accessor.
+    const fd = (sock as unknown as { _handle?: { fd?: unknown } })._handle?.fd;
+    if (!identify || typeof fd !== 'number' || fd < 0) return;
+    this.checking = this.checking.then(async () => {
+      if (!this.connections.has(sock)) return;
+      let peer: ProtectedPeer | undefined;
+      try {
+        peer = await identify(fd);
+      } catch (err) {
+        this.opts.log?.(`peer check failed: ${(err as Error).message}`);
+      }
+      if (!peer || !this.connections.has(sock)) return;
+      this.verified.set(sock, peer);
+      this.opts.log?.(`the app is connected as pid ${peer.pid}`);
+    });
+  }
+
   private onConnection(sock: Socket): void {
     let buf = '';
     this.connections.add(sock);
+    this.checkPeer(sock);
     sock.setEncoding('utf8');
     sock.on('data', (chunk: string) => {
       buf += chunk;
@@ -94,6 +134,7 @@ export class HelperServer {
     const forget = () => {
       this.subscribers.delete(sock);
       this.connections.delete(sock);
+      this.verified.delete(sock);
     };
     sock.on('close', forget);
     sock.on('error', forget);

@@ -3,7 +3,7 @@
 // shell), and signal delivery. Tests swap in fakes.
 
 import { execFile } from 'node:child_process';
-import { readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import { fileId } from '@vigil/core/self';
 import { hostPlatform, type Platform } from './platform.js';
 
@@ -32,6 +32,8 @@ export const LINUX_BINARIES = {
   rpm: '/usr/bin/rpm',
   fagenrules: '/usr/sbin/fagenrules',
   osqueryd: '/opt/osquery/bin/osqueryd',
+  /** iproute2: in /usr/bin on Debian and Ubuntu, /usr/sbin on older Fedora and RHEL. */
+  ss: existsSync('/usr/bin/ss') ? '/usr/bin/ss' : '/usr/sbin/ss',
 } as const;
 
 export type MacBinaryName = keyof typeof BINARIES;

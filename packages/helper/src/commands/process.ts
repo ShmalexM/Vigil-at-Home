@@ -52,6 +52,8 @@ export interface ProcessTarget {
   path?: string;
   /** Linux: what is Vigil's own (FastPath.self()), never paused or stopped. */
   self?: { paths: readonly string[]; images: readonly string[] };
+  /** The app connected to the helper, verified against its install-time pin (appPin.ts). */
+  peers?: readonly { pid: number; started: string }[];
   /** Expected start time, ms since epoch. ps reports whole seconds, so it matches within a second. */
   startTime?: number;
 }
@@ -94,6 +96,8 @@ async function checkTarget(
       );
     }
   }
+  if (expect.peers?.some((p) => p.pid === id.pid && p.started === id.started))
+    throw new ActionError('refused', `${id.path} is Vigil, connected to the helper`);
   if (isSelf(sys, pid, id.path, expect.self))
     throw new ActionError('refused', `${id.path} is part of Vigil`);
   if (isProtectedProcess(id.path, sys.platform))

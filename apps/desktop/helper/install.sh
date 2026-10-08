@@ -2,6 +2,8 @@
 # Installs the Vigil helper as a root launchd daemon. Vigil at Home runs this
 # through the macOS password dialog, or you can run it yourself:
 #   sudo "/Applications/Vigil at Home.app/Contents/Resources/helper/install.sh"
+# Its one optional argument is the app's main executable, which the helper
+# pins (by cdhash) as the app it was installed for.
 # Everything it installs is root-owned, so nothing running as you can change
 # what runs as root. uninstall.sh (next to this file) reverses it.
 set -eu
@@ -50,6 +52,12 @@ if [ -d /var/osquery ]; then
   "$TOOLS/vigil-helper" osquery-config >/var/osquery/osquery.conf
   "$TOOLS/vigil-helper" osquery-flags >/var/osquery/osquery.flags
   launchctl kickstart -k system/io.osquery.agent 2>/dev/null || true
+fi
+
+# Pin the app that asked for this install, so the helper's rules stay off it
+# while it is connected. Without a pin the helper still works, unpinned.
+if [ -n "${1:-}" ]; then
+  "$TOOLS/vigil-helper" pin-app "$1" || echo "Could not pin the app; the helper runs without it." >&2
 fi
 
 launchctl bootstrap system "$PLIST"

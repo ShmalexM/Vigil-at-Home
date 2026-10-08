@@ -21,6 +21,7 @@ import type { Approvals } from './approval.js';
 import type { System } from './system.js';
 import { PolicyRefused, type FastPath, type SelfSet } from './fastpath.js';
 import type { PreexecSync } from './preexec.js';
+import type { ProtectedPeer } from './appPin.js';
 import { ActionError } from './commands/errors.js';
 import {
   identifyProcess,
@@ -69,6 +70,12 @@ export interface ExecutorDeps {
   fapolicyd?: FapolicydBlocks;
   /** What is Vigil's own: never paused, stopped or blocked. Defaults to fastPath.self(). */
   self?: () => SelfSet;
+  /**
+   * The connected processes verified as the app the helper was installed for
+   * (appPin.ts): never paused or stopped, and their programs never blocked
+   * by hash, while they stay connected.
+   */
+  peers?: () => readonly ProtectedPeer[];
 }
 
 export type ExecOutcome =
@@ -105,6 +112,16 @@ export class Executor {
 
   private self(): SelfSet {
     return this.d.self?.() ?? this.d.fastPath?.self() ?? { paths: [], images: [], hashes: [] };
+  }
+
+  private peers(): readonly ProtectedPeer[] {
+    return this.d.peers?.() ?? [];
+  }
+
+  /** Whether blocking this hash would block Vigil's own program. */
+  private isOwnHash(identifier: string): boolean {
+    const id = identifier.toLowerCase();
+    return this.self().hashes.includes(id) || this.peers().some((p) => p.hashes.includes(id));
   }
 
   /** Quarantine settings with the protected folders of the OS the helper acts on. */
@@ -243,16 +260,16 @@ export class Executor {
 
   private async run(cmd: HelperCommand): Promise<unknown> {
     const { sys, journal } = this.d;
-    if (
-      cmd.kind === 'santa.rule.set' &&
-      cmd.policy !== 'allow' &&
-      this.self().hashes.includes(cmd.identifier.toLowerCase())
-    )
+    if (cmd.kind === 'santa.rule.set' && cmd.policy !== 'allow' && this.isOwnHash(cmd.identifier))
       throw new ActionError('refused', 'that program is part of Vigil');
     if (sys.platform === 'linux' && cmd.kind.startsWith('santa.')) return this.runLinuxBlock(cmd);
     switch (cmd.kind) {
       case 'process.suspend': {
-        const id = await suspendProcess(sys, cmd.pid, { ...target(cmd), self: this.self() });
+        const id = await suspendProcess(sys, cmd.pid, {
+          ...target(cmd),
+          self: this.self(),
+          peers: this.peers(),
+        });
         return this.record(cmd, `paused ${id.path} (pid ${id.pid})`, { process: id });
       }
       case 'process.resume': {
@@ -270,7 +287,11 @@ export class Executor {
         );
       }
       case 'process.kill': {
-        const id = await killProcess(sys, cmd.pid, { ...target(cmd), self: this.self() });
+        const id = await killProcess(sys, cmd.pid, {
+          ...target(cmd),
+          self: this.self(),
+          peers: this.peers(),
+        });
         for (const e of journal.active()) {
           if (e.kind === 'process.suspend' && (e.undo?.process as ProcessIdentity).pid === id.pid)
             journal.markUndone(e.id);

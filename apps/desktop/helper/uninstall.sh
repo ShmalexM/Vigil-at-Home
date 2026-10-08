@@ -18,5 +18,6 @@ launchctl bootout "system/$LABEL" 2>/dev/null || true
 rm -f "/Library/LaunchDaemons/$LABEL.plist"
 rm -f /Library/PrivilegedHelperTools/vigil-helper
 rm -rf /Library/PrivilegedHelperTools/vigil-helper.d
+rm -f "/Library/Application Support/Vigil/app-pin.json"
 rm -f /var/run/vigil-helper.sock
 echo "Vigil helper removed. Quarantined files are still in /Library/Application Support/Vigil."

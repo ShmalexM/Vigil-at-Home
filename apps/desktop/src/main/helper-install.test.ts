@@ -1,10 +1,12 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -13,6 +15,9 @@ import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   adminScriptArgs,
+  appPinFile,
+  appPinned,
+  appPinTarget,
   helperBundleDir,
   helperDigest,
   helperInstallCommand,
@@ -63,7 +68,9 @@ describe('helper install', () => {
     const cmd = helperInstallCommand(dir, 'darwin')!;
     expect(cmd).toBe(
       `sudo ${ROOT_SHELL.join(' ')} ${shellQuote(rootStageScript('darwin'))} vigil-helper-setup ${shellQuote(dir)} ` +
-        [files[0]!, helperDigest(dir, files), ...files].map(shellQuote).join(' '),
+        [files[0]!, helperDigest(dir, files), appPinTarget('darwin'), ...files]
+          .map(shellQuote)
+          .join(' '),
     );
     const linux = helperInstallCommand(dir, 'linux')!;
     expect(
@@ -84,7 +91,7 @@ describe('helper install', () => {
     const out = mkdtempSync(join(tmpdir(), 'out-'));
     writeFileSync(
       join(dir, 'linux', 'install.sh'),
-      `cd "$(dirname "$0")" && pwd > ${shellQuote(join(out, 'ran-in'))}; cat "$(dirname "$0")/../helper.mjs" > ${shellQuote(join(out, 'saw'))}`,
+      `cd "$(dirname "$0")" && pwd > ${shellQuote(join(out, 'ran-in'))}; cat "$(dirname "$0")/../helper.mjs" > ${shellQuote(join(out, 'saw'))}; printf %s "$1" > ${shellQuote(join(out, 'app'))}`,
     );
     const files = helperScriptFiles('install', 'linux');
     const want = helperDigest(dir, files);
@@ -98,6 +105,7 @@ describe('helper install', () => {
           src,
           files[0]!,
           want,
+          "/home/a b/Vigil's.AppImage",
           ...files,
         ],
         // Root ignores whatever TMPDIR the caller had.
@@ -106,6 +114,8 @@ describe('helper install', () => {
 
     stage(dir);
     expect(readFileSync(join(out, 'saw'), 'utf8')).toBe('helper.mjs');
+    // The script gets the app to pin as its one argument, as given.
+    expect(readFileSync(join(out, 'app'), 'utf8')).toBe("/home/a b/Vigil's.AppImage");
     const ranIn = readFileSync(join(out, 'ran-in'), 'utf8').trim();
     expect(ranIn.startsWith(dir)).toBe(false);
     expect(ranIn).toMatch(/^\/tmp\/vigil-helper\.[^/]+\/linux$/);
@@ -214,6 +224,7 @@ describe('helper install', () => {
       staged,
       'linux/install.sh',
       helperDigest(dir, files),
+      appPinTarget('linux'),
       ...files,
     ]);
     expect(staged).toMatch(/vigil-helper-[^/]+$/);
@@ -303,4 +314,53 @@ describe('helper install', () => {
       expect(helperMatch(dir, platform, root).installed).toBe('outdated');
     });
   }
+
+  it('asks for a helper update when the helper is pinned to another app', () => {
+    const { dir } = bundle();
+    const root = mkdtempSync(join(tmpdir(), 'root-'));
+    for (const f of installedHelperFiles(dir, 'darwin', root)) {
+      mkdirSync(dirname(f.installed), { recursive: true });
+      writeFileSync(f.installed, readFileSync(f.bundled));
+    }
+    const exe = join(root, 'Vigil at Home');
+    writeFileSync(exe, 'app v1');
+    const app = { execPath: exe, env: {} };
+    const sha = (s: string) => createHash('sha256').update(s).digest('hex');
+    const pin = (sha256: string) => {
+      mkdirSync(dirname(appPinFile('darwin', root)), { recursive: true });
+      writeFileSync(appPinFile('darwin', root), JSON.stringify({ platform: 'darwin', sha256 }));
+    };
+    // Not pinned yet (a helper from before pins): an update pins it.
+    expect(helperMatch(dir, 'darwin', root, app).installed).toBe('outdated');
+    pin(sha('app v1'));
+    expect(appPinned('darwin', app, root)).toBe(true);
+    const v1 = helperMatch(dir, 'darwin', root, app);
+    expect(v1.installed).toBe('current');
+    // The app was replaced; the helper's files are the same, its pin isn't.
+    writeFileSync(exe, 'app v2');
+    const v2 = helperMatch(dir, 'darwin', root, app);
+    expect(v2.installed).toBe('outdated');
+    expect(v2.bundle).not.toBe(v1.bundle);
+    pin(sha('app v2'));
+    expect(helperMatch(dir, 'darwin', root, app).installed).toBe('current');
+  });
+
+  it('pins the AppImage on Linux, and nothing for the installer’s own folder', () => {
+    const { dir } = bundle();
+    const root = mkdtempSync(join(tmpdir(), 'root-'));
+    const image = join(root, 'Vigil.AppImage');
+    writeFileSync(image, 'image');
+    const app = { execPath: '/tmp/.mount_X/vigil-at-home', env: { APPIMAGE: image } };
+    expect(appPinTarget('linux', app)).toBe(image);
+    expect(appPinTarget('darwin', app)).toBe('/tmp/.mount_X/vigil-at-home');
+    expect(appPinned('linux', app, root)).toBe(false);
+    const st = statSync(image, { bigint: true });
+    mkdirSync(dirname(appPinFile('linux', root)), { recursive: true });
+    writeFileSync(appPinFile('linux', root), JSON.stringify({ image: `${st.dev}:${st.ino}` }));
+    expect(appPinned('linux', app, root)).toBe(true);
+    // A .deb install needs no pin: its folder is root-owned and protected already.
+    const deb = { execPath: '/opt/Vigil at Home/vigil-at-home', env: {} };
+    expect(appPinned('linux', deb, mkdtempSync(join(tmpdir(), 'empty-')))).toBe(true);
+    expect(helperMatch(dir, 'linux', root, deb).installed).toBe('none');
+  });
 });
