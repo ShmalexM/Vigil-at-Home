@@ -49,6 +49,7 @@ function setup(
     status?: Partial<PackAiStatus>;
     preflight?: PreflightReply['decision'];
     remote?: RemoteTool[];
+    now?: () => number;
   } = {},
 ) {
   const remote = opts.remote ?? REMOTE;
@@ -101,6 +102,7 @@ function setup(
     notebook,
     memory,
     onChange: () => undefined,
+    ...(opts.now ? { now: opts.now } : {}),
   });
   return { pack, handlers, runs, connectorCalls, vigilCalls, notebook, memory, settings };
 }
@@ -1527,6 +1529,113 @@ describe('the pack', () => {
         await vi.waitFor(() => expect(seen).toHaveLength(1));
         await vi.waitFor(() => expect(pip(pack).lastReport!.at).not.toBe(1));
         expect(connectorCalls).toEqual([]);
+      });
+
+      describe('one quiet card per pending write', () => {
+        const MIN = 60_000;
+        /** A scheduled run of Pip that tries the write and waits for its answer. */
+        const writeRun =
+          (answers: unknown[], args: Record<string, unknown> = { title: 'from the report' }) =>
+          async (req: RunRequest<unknown>) => {
+            answers.push(await tool(req, 'tool_1').run(args));
+            return { summary: 'ok', findings: [] };
+          };
+
+        it('updates the card a scheduled run left when the next run asks the same', async () => {
+          let clock = 10 * 24 * 60 * MIN;
+          const { pack, handlers, settings, connectorCalls } = setup({ now: () => clock });
+          pack.setMode('full');
+          settings.set('pack.dogs', [WRITER]);
+          vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+          try {
+            const answers: unknown[] = [];
+            handlers.push(writeRun(answers));
+            const first = pack.runDue();
+            await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+            const card = (await pack.view()).approvals[0]!;
+            expect(card).toMatchObject({ dogId: 'dog-pip', why: 'outside-text' });
+            // Nobody answers: the run carries on without it, the card stays.
+            vi.advanceTimersByTime(10 * MIN);
+            await first;
+            expect(answers).toEqual([expect.stringContaining('said no')]);
+            expect((await pack.view()).approvals).toEqual([card]);
+
+            // The next scheduled run asks for the same write: the same card, brought up to date.
+            clock += 61 * MIN;
+            handlers.push(writeRun(answers));
+            const second = pack.runDue();
+            await vi.waitFor(async () => expect((await pack.view()).approvals[0]!.at).toBe(clock));
+            expect((await pack.view()).approvals).toEqual([{ ...card, at: clock }]);
+            pack.decideTool(card.id, 'allow-once');
+            await second;
+            expect(connectorCalls).toEqual([
+              ['github', 'create_issue', { title: 'from the report' }],
+            ]);
+            expect((await pack.view()).approvals).toEqual([]);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('gives an answer on a held card to the next run’s same call, and only that', async () => {
+          let clock = 10 * 24 * 60 * MIN;
+          const { pack, handlers, settings, connectorCalls } = setup({ now: () => clock });
+          pack.setMode('full');
+          settings.set('pack.dogs', [WRITER]);
+          vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+          try {
+            const answers: unknown[] = [];
+            handlers.push(writeRun(answers));
+            const first = pack.runDue();
+            await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+            vi.advanceTimersByTime(10 * MIN);
+            await first;
+            pack.decideTool((await pack.view()).approvals[0]!.id, 'deny');
+            expect((await pack.view()).approvals).toEqual([]);
+            clock += 61 * MIN;
+            // Different arguments are a different write: a card of their own.
+            handlers.push(async (req) => {
+              const t = tool(req, 'tool_1');
+              answers.push(await t.run({ title: 'from the report' }));
+              answers.push(await t.run({ title: 'something else' }));
+              return { summary: 'ok', findings: [] };
+            });
+            const second = pack.runDue();
+            await vi.waitFor(async () =>
+              expect((await pack.view()).approvals).toMatchObject([
+                { args: expect.stringContaining('something else') },
+              ]),
+            );
+            pack.decideTool((await pack.view()).approvals[0]!.id, 'allow-once');
+            await second;
+            expect(answers.slice(1)).toEqual([expect.stringContaining('said no'), 'ok']);
+            expect(connectorCalls).toEqual([
+              ['github', 'create_issue', { title: 'something else' }],
+            ]);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('shows the same write asked twice in one run once, and runs it once', async () => {
+          const { pack, handlers, settings, connectorCalls } = setup();
+          pack.setMode('full');
+          settings.set('pack.dogs', [WRITER]);
+          const answers: unknown[] = [];
+          handlers.push(async (req) => {
+            const t = tool(req, 'tool_1');
+            const calls = [t.run({ title: 'x' }), t.run({ title: 'x' })];
+            await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+            await new Promise((r) => setTimeout(r, 10));
+            expect((await pack.view()).approvals).toHaveLength(1);
+            pack.decideTool((await pack.view()).approvals[0]!.id, 'allow-once');
+            answers.push(...(await Promise.all(calls)));
+            return { summary: 'ok', findings: [] };
+          });
+          await pack.runDog('dog-pip', 'background');
+          expect(answers).toEqual(['ok', expect.stringContaining('said no')]);
+          expect(connectorCalls).toHaveLength(1);
+        });
       });
 
       it('lets a dog with a clean last report use a tool set to Always allow', async () => {

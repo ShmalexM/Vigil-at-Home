@@ -72,6 +72,11 @@ const APPROVAL_WAIT_MS = 10 * 60_000;
 const DONE_MS = 8_000;
 const CHECK_SCHEDULES_MS = 5 * 60_000;
 const HOUR = 60 * 60_000;
+/**
+ * A scheduled run's card outlives the run's wait for this long, so the same
+ * write asked again on a later run lands on the card it already has.
+ */
+const HELD_MS = 24 * HOUR;
 /** Pack jobs need a model that can use tools: never Jev, which only picks labels. */
 const JOB_PROVIDERS = ['claude', 'codex', 'api', 'ollama'] as const;
 
@@ -430,8 +435,12 @@ interface Runtime {
 
 interface PendingApproval {
   view: ToolApproval;
-  resolve: (d: ToolDecision) => void;
-  timer: NodeJS.Timeout;
+  /** The same dog, tool and arguments: one card, however often it is asked. */
+  key: string;
+  /** The calls waiting on this card. None once a scheduled run's wait ran out. */
+  waiters: Set<(d: ToolDecision) => void>;
+  /** A card with no waiters stays until then, for the next run's same ask. */
+  heldUntil?: number;
 }
 
 interface ToolEntry {
@@ -452,6 +461,8 @@ export class PackService {
   private readonly now: () => number;
   private readonly runtime = new Map<string, Runtime>();
   private readonly approvals = new Map<string, PendingApproval>();
+  /** Answers given on a held card, by its key, for the next run's same call. */
+  private readonly answered = new Map<string, { decision: ToolDecision; until: number }>();
   private readonly running = new Set<string>();
   private aiStatus: { at: number; value: PackAiStatus } | undefined;
   private chatting = false;
@@ -561,7 +572,7 @@ export class PackService {
         return { ...d, mood: r.mood, ...(r.activity ? { activity: r.activity } : {}) };
       }),
       chat,
-      approvals: [...this.approvals.values()].map((a) => a.view),
+      approvals: this.liveApprovals().map((a) => a.view),
       leadMayUsePlan: ai.leadMayUsePlan,
       judge: ai.judge,
       noAi: !ai.anyReady,
@@ -1703,7 +1714,7 @@ export class PackService {
     }
     if (decision.kind === 'deny') return `Not run: ${decision.reason}`;
     if (decision.kind === 'ask') {
-      const answer = await this.askUser(dog, t, argText, decision.why, decision.reason);
+      const answer = await this.askUser(dog, t, args, argText, decision, !ctx.requestedByUser);
       if (answer === 'deny') {
         this.setMood(dog.id, 'thinking', 'Carrying on without it');
         return 'Not run: the person said no to this call. Carry on without it.';
@@ -1814,48 +1825,90 @@ export class PackService {
     return r.ok ? r.value : undefined;
   }
 
+  /**
+   * One quiet card in the Pack per pending call: the same dog asking for the
+   * same tool with the same arguments again (on a later scheduled run, or
+   * twice in one run) brings the card it already has up to date and adds
+   * none. A scheduled run's card stays after the run's wait runs out, and an
+   * answer given on it then goes to that dog's next same call.
+   */
   private askUser(
     dog: Dog,
     t: ToolEntry,
-    args: string,
-    why: ToolApproval['why'],
-    reason?: string,
+    args: Record<string, unknown>,
+    argText: string,
+    ask: { why: ToolApproval['why']; reason?: string },
+    hold: boolean,
   ): Promise<ToolDecision> {
-    const id = newId(this.now());
+    const key = approvalKey(dog.id, t.key, args);
+    const given = this.answered.get(key);
+    this.answered.delete(key);
+    if (given && given.until > this.now()) return Promise.resolve(given.decision);
     this.setMood(dog.id, 'waiting', `Wants to use ${t.title}`);
+    let card = this.liveApprovals().find((a) => a.key === key);
+    const id = card?.view.id ?? newId(this.now());
+    const view: ToolApproval = {
+      id,
+      at: this.now(),
+      dogId: dog.id,
+      tool: t.key,
+      toolTitle: `${t.sourceName} › ${t.title}`,
+      args: clip(argText, 600),
+      why: ask.why,
+      ...(ask.reason ? { reason: ask.reason } : {}),
+    };
+    if (card) {
+      card.view = view;
+      delete card.heldUntil;
+    } else {
+      card = { view, key, waiters: new Set() };
+      this.approvals.set(id, card);
+    }
+    const c = card;
     return new Promise<ToolDecision>((resolve) => {
-      const done = (d: ToolDecision) => {
-        const p = this.approvals.get(id);
-        if (!p) return;
-        clearTimeout(p.timer);
-        this.approvals.delete(id);
-        this.changed();
+      const waiter = (d: ToolDecision) => {
+        clearTimeout(timer);
         resolve(d);
       };
-      const timer = setTimeout(() => done('deny'), APPROVAL_WAIT_MS);
+      const timer = setTimeout(() => {
+        c.waiters.delete(waiter);
+        if (!c.waiters.size) {
+          if (hold) c.heldUntil = this.now() + HELD_MS;
+          else this.approvals.delete(id);
+          this.changed();
+        }
+        resolve('deny');
+      }, APPROVAL_WAIT_MS);
       timer.unref?.();
-      this.approvals.set(id, {
-        view: {
-          id,
-          at: this.now(),
-          dogId: dog.id,
-          tool: t.key,
-          toolTitle: `${t.sourceName} › ${t.title}`,
-          args: clip(args, 600),
-          why,
-          ...(reason ? { reason } : {}),
-        },
-        resolve: done,
-        timer,
-      });
+      c.waiters.add(waiter);
       this.changed();
     });
   }
 
+  /** Cards still waiting on the person, without held ones that ran out. */
+  private liveApprovals(): PendingApproval[] {
+    const at = this.now();
+    for (const [id, a] of this.approvals)
+      if (!a.waiters.size && a.heldUntil !== undefined && a.heldUntil <= at)
+        this.approvals.delete(id);
+    return [...this.approvals.values()];
+  }
+
   decideTool(id: string, decision: ToolDecision): void {
-    const p = this.approvals.get(id);
+    const p = this.liveApprovals().find((a) => a.view.id === id);
     if (!p) throw new Error('That request is gone');
-    p.resolve(ToolDecision.parse(decision));
+    const d = ToolDecision.parse(decision);
+    this.approvals.delete(id);
+    // A held card's answer goes to that dog's next same call.
+    if (!p.waiters.size && p.heldUntil !== undefined)
+      this.answered.set(p.key, { decision: d, until: this.now() + HELD_MS });
+    // Allowed once means one call: a second same call waiting on it is refused.
+    let first = true;
+    for (const w of p.waiters) {
+      w(first ? d : 'deny');
+      first = false;
+    }
+    this.changed();
   }
 
   // ---------------------------------------------------------------- demo (development builds)
@@ -1978,8 +2031,8 @@ export class PackService {
           args: '{"repo":"alex/notes","title":"invoice-viewer connected to 3 hosts","body":"Seen 09-30 14:02…"}',
           why: 'mode',
         },
-        resolve: () => this.approvals.delete(id),
-        timer: setTimeout(() => undefined, 0),
+        key: id,
+        waiters: new Set(),
       });
     }
     this.changed();
@@ -2060,6 +2113,21 @@ function failText(reason: string): string {
     default:
       return 'Something went wrong while answering.';
   }
+}
+
+/** Which card a call belongs on: its dog, its tool and its arguments in a stable order. */
+function approvalKey(dogId: string, tool: string, args: unknown): string {
+  const stable = (v: unknown): unknown =>
+    Array.isArray(v)
+      ? v.map(stable)
+      : v && typeof v === 'object'
+        ? Object.fromEntries(
+            Object.keys(v)
+              .sort()
+              .map((k) => [k, stable((v as Record<string, unknown>)[k])]),
+          )
+        : v;
+  return JSON.stringify([dogId, tool, stable(args)]);
 }
 
 function clip(s: string, n: number): string {
