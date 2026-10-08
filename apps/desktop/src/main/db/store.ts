@@ -106,7 +106,12 @@ export function eventViewsQuery(
     where.push('agent_id = ?');
     args.push(q.agent);
   }
-  if (q.before !== undefined) {
+  if (q.before !== undefined && q.beforeId !== undefined) {
+    // Keyset on (ts, id), the feed's order, so events sharing the last ts of
+    // a page aren't skipped. `ts <= ?` keeps the walk on the ts index.
+    where.push('ts <= ? AND (ts < ? OR id < ?)');
+    args.push(q.before, q.before, q.beforeId);
+  } else if (q.before !== undefined) {
     where.push('ts < ?');
     args.push(q.before);
   }

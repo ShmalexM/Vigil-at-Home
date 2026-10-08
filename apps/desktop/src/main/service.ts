@@ -89,6 +89,12 @@ export class VigilCore {
     this.usage = new UsageService(store, now);
     this.events = new EventLog(store, {
       onError: (err) => console.error('[events] write failed:', err),
+      // Numbers that say there are no events must not outlive the first
+      // ones: the page would show "Nothing to show yet" over a full feed.
+      onStored: () => {
+        if (this.statsCache?.stats.newest === null) this.statsCache = undefined;
+        if (this.programsCache?.n === 0) this.programsCache = undefined;
+      },
     });
     this.scheduler = new Scheduler({
       onError: (name, err) => console.error(`[scheduler] ${name} failed:`, err),
