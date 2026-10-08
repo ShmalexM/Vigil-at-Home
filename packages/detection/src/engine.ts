@@ -307,6 +307,21 @@ export class DetectionEngine {
     return out;
   }
 
+  /**
+   * Whether this rule, as it is now, lets the event off: its condition still
+   * fits, but one of its exclusions or the user's exceptions covers it. For
+   * an open alert raised before an exclusion existed. Only an exclusion
+   * counts, never a condition that no longer fits: a chain or a threshold
+   * can't be replayed from one event, so "doesn't match" would be a guess.
+   * Touches no state.
+   */
+  excuses(ruleId: string, e: DetectionEvent): boolean {
+    const c = this.byId.get(ruleId);
+    if (!c || !c.rule.eventKinds.includes(e.kind)) return false;
+    if (!c.condition.test(e, this.state)) return false;
+    return c.exclusions.some((x) => x.test(e, this.state)) || this.isExcepted(ruleId, e);
+  }
+
   /** Resolve the rule's response templates, dropping any the safety floor refuses. */
   private resolveResponse(rule: DetectionRule, e: DetectionEvent, downgrades: string[]): Action[] {
     const actions: Action[] = [];

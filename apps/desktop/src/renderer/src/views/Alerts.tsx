@@ -71,6 +71,7 @@ export function AlertsView({
           Resolved <span className="count">{resolved?.length ?? 0}</span>
         </button>
       </div>
+      {tab === 'open' && <StaleBanner />}
       <div className="split">
         <div className="list split-list scroll">
           {list.length === 0 && (
@@ -101,6 +102,44 @@ export function AlertsView({
           {current ? <AlertDetailView id={current} go={go} /> : null}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Open alerts a rule no longer raises: an update or an exclusion made the
+ * rule quieter after they came in. One tap closes them; nothing is held
+ * back by them, and the rules learn nothing from it.
+ */
+function StaleBanner() {
+  const [stale] = useLive(() => vigil.staleAlerts());
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  if (!stale?.length) return null;
+  const n = stale.length;
+  return (
+    <div className="attn accent">
+      <span className="grow">
+        {n} open {n === 1 ? 'alert is' : 'alerts are'} no longer flagged by{' '}
+        {n === 1 ? 'its rule' : 'their rules'}: a rule update or an exclusion now lets{' '}
+        {n === 1 ? 'it' : 'them'} off.
+      </span>
+      <Button
+        size="sm"
+        kind="primary"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          try {
+            const done = await vigil.clearStale(stale);
+            toast({ text: `Closed ${done} ${done === 1 ? 'alert' : 'alerts'}` });
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        Close {n === 1 ? 'it' : `all ${n}`}
+      </Button>
     </div>
   );
 }

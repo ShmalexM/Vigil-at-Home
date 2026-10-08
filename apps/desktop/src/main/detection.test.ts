@@ -6,6 +6,7 @@ import { Store } from './db/store.js';
 import { Detector, type DetectorOptions } from './detection.js';
 import { DryRunExecutor } from './executor.js';
 import { VigilCore } from './service.js';
+import { makeRule } from './testing.js';
 
 const BAD = 'a'.repeat(64);
 
@@ -411,5 +412,63 @@ describe('built-in rule pack', () => {
     expect(rules).not.toContain('tcc-database-tamper');
     expect(rules).toContain('known-bad-hash');
     expect(rules.some((id) => id.startsWith('agent-'))).toBe(true);
+  });
+});
+
+describe('stale open alerts', () => {
+  /** The read a real Mac raised hourly before the excuse covered it (2026-10-08). */
+  const read = (service: string): SensorEvent => {
+    n++;
+    return {
+      id: `kc-${n}`,
+      ts: Date.now() + n,
+      source: 'santa',
+      kind: 'process.exec',
+      process: {
+        pid: 9000 + n,
+        path: '/bin/sh',
+        args: [
+          '/bin/sh',
+          '-c',
+          `security find-generic-password -a "alexmargaris" -w -s "${service}"`,
+        ],
+        ancestors: ['2.1.283', '2.1.283', '-zsh', 'login'],
+        agent: { id: 'claude-code', session: '0123456789abcdef', depth: 2 },
+      },
+    };
+  };
+
+  it('names the open alerts a rule now excuses, and clears only those', async () => {
+    const { core, store } = setup();
+    const rule = makeRule({ id: 'agent-keychain-secret', mode: 'alert', severity: 'high' });
+    const own = await core.alerts.raise({
+      rule,
+      events: [read('Claude Code-credentials')],
+      actions: [],
+    });
+    const other = await core.alerts.raise({
+      rule,
+      events: [read('Chrome Safe Storage')],
+      actions: [],
+    });
+    expect(core.staleAlerts()).toEqual([own.id]);
+    // Only what is still stale is cleared, whatever the caller passes.
+    expect(await core.clearStale([own.id, other.id])).toBe(1);
+    expect(store.getAlert(own.id)?.status).toBe('resolved');
+    expect(store.getAlert(own.id)?.decision?.note).toBe('Its rule no longer flags this');
+    expect(store.getAlert(other.id)?.status).toBe('open');
+    expect(core.staleAlerts()).toEqual([]);
+  });
+
+  it('leaves alerts that hold something back or were already answered', async () => {
+    const { core } = setup();
+    const rule = makeRule({ id: 'agent-keychain-secret', mode: 'alert', severity: 'high' });
+    const held = await core.alerts.raise({
+      rule,
+      events: [read('Claude Code-credentials')],
+      actions: [],
+    });
+    core.store.saveAlert({ ...held, containment: 'active' });
+    expect(core.staleAlerts()).toEqual([]);
   });
 });

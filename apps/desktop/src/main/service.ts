@@ -34,6 +34,8 @@ import { TEST_RULE } from './test-alert.js';
 import { WORTH_A_LOOK_RULE } from './worth-a-look.js';
 import { UsageService } from './usage.js';
 
+/** Open alerts looked at for staleAlerts, newest first. */
+const STALE_SCAN_LIMIT = 2000;
 /** How long the Activity strip's counts are reused (see eventStats). */
 export const EVENT_STATS_TTL_MS = 5_000;
 /** How long its distinct-programs number is reused: it reads every launch of the hour. */
@@ -211,6 +213,45 @@ export class VigilCore {
         console.info(`[detection] suggested: ${learned.suggestDemotion.message}`);
     }
     return this.store.getAlert(alertId) ?? alert;
+  }
+
+  /**
+   * Open alerts that a rule's exclusion, or the user's exception, now lets
+   * off: raised before that exclusion existed (an update made the rule
+   * quieter, or the user excluded the same thing from another alert). Only
+   * undecided alerts holding nothing back count, and only when the rule
+   * excuses every event the alert points to.
+   */
+  staleAlerts(): string[] {
+    const engine = this.detector?.engine;
+    if (!engine) return [];
+    const out: string[] = [];
+    for (const a of this.store.listAlerts({ status: 'open', limit: STALE_SCAN_LIMIT })) {
+      if (a.decision || a.containment === 'active') continue;
+      const events = this.store.getEvents(a.eventIds);
+      if (events.length === 0) continue;
+      if (events.every((e) => engine.excuses(a.ruleId, e))) out.push(a.id);
+    }
+    return out;
+  }
+
+  /**
+   * Close the given alerts that {@link staleAlerts} still names. Like
+   * clearNoticed it teaches the rules nothing: the exclusion already says it.
+   */
+  async clearStale(ids: readonly string[]): Promise<number> {
+    const stale = new Set(this.staleAlerts());
+    let cleared = 0;
+    for (const id of new Set(ids)) {
+      if (!stale.has(id)) continue;
+      await this.alerts.decide(id, {
+        verdict: 'expected',
+        release: false,
+        note: 'Its rule no longer flags this',
+      });
+      cleared++;
+    }
+    return cleared;
   }
 
   /**

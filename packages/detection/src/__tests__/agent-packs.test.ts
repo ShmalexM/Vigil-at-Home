@@ -897,6 +897,21 @@ describe('agent rule packs', () => {
           expect(fired(e), JSON.stringify(procOf(e)?.args)).not.toContain('agent-keychain-secret');
       });
 
+      it('lets the engine say an old alert on this read is now excused', () => {
+        const eng = engine();
+        expect(eng.excuses('agent-keychain-secret', shRead(READ))).toBe(true);
+        // The condition fits but nothing excuses it.
+        expect(
+          eng.excuses(
+            'agent-keychain-secret',
+            shRead(READ.replace('Claude Code-credentials', 'Chrome Safe Storage')),
+          ),
+        ).toBe(false);
+        // Another rule, or one that doesn't exist.
+        expect(eng.excuses('agent-secret-read', shRead(READ))).toBe(false);
+        expect(eng.excuses('no-such-rule', shRead(READ))).toBe(false);
+      });
+
       it('still alerts on any other read, caller or command', () => {
         const bad = [
           // Another service, or more than the one read.

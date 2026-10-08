@@ -191,6 +191,8 @@ export const calls = {
   decide: z.tuple([Id, DecisionInput]),
   reopen: z.tuple([Id]),
   clearNoticed: z.tuple([z.array(Id).min(1).max(500)]),
+  staleAlerts: z.tuple([]),
+  clearStale: z.tuple([z.array(Id).min(1).max(2000)]),
   undoAction: z.tuple([Id]),
   approveProposal: z.tuple([Id]),
   rejectProposal: z.tuple([Id]),
@@ -560,6 +562,10 @@ export interface CallResults {
   reopen: Alert;
   /** How many of the given alerts were cleared. */
   clearNoticed: number;
+  /** Open alerts a rule's exclusion now lets off (VigilCore.staleAlerts). */
+  staleAlerts: string[];
+  /** How many of them were closed. */
+  clearStale: number;
   undoAction: ActionRecord;
   approveProposal: ActionRecord;
   rejectProposal: void;
