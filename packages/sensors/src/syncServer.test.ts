@@ -321,4 +321,45 @@ describe('unfinished syncs', () => {
     s.dispatch('preflight', 'm1', {});
     expect(statusOf(download('m1'))).toBeUndefined();
   });
+
+  it("never lets other machine ids push out the last confirmed Santa's sync", () => {
+    const rules = new RuleStore(join(dir, 'known-rules.json'));
+    rules.upsert({ ruleType: 'BINARY', identifier: SHA_A, policy: 'BLOCKLIST' });
+    const s = new SantaSyncServer({ store: rules });
+    const download = (m: string) => () => s.dispatch('ruledownload', m, { cursor: '' });
+    const finish = (m: string) => {
+      s.dispatch('preflight', m, {});
+      s.dispatch('ruledownload', m, { cursor: '' });
+      s.dispatch('postflight', m, { rules_received: 1, rules_processed: 1 });
+    };
+    finish('santa');
+    expect(rules.syncedMachineId).toBe('santa');
+    // It is kept with the store, so a restarted helper still knows it.
+    expect(new RuleStore(join(dir, 'known-rules.json')).syncedMachineId).toBe('santa');
+
+    s.dispatch('preflight', 'santa', {});
+    for (let i = 0; i < MAX_SYNC_SESSIONS * 3; i++) s.dispatch('preflight', `x${i}`, {});
+    expect(statusOf(download('santa'))).toBeUndefined();
+    // The others share the remaining slots, oldest out first.
+    const last = MAX_SYNC_SESSIONS * 3 - 1;
+    for (let i = 0; i < MAX_SYNC_SESSIONS - 1; i++)
+      expect(statusOf(download(`x${last - i}`))).toBeUndefined();
+    expect(statusOf(download(`x${last - (MAX_SYNC_SESSIONS - 1)}`))).toBe(409);
+
+    // With every slot taken by others, Santa's preflight still gets one.
+    const t = new SantaSyncServer({ store: rules });
+    for (let i = 0; i < MAX_SYNC_SESSIONS; i++) t.dispatch('preflight', `y${i}`, {});
+    t.dispatch('preflight', 'santa', {});
+    expect(statusOf(() => t.dispatch('ruledownload', 'santa', { cursor: '' }))).toBeUndefined();
+    expect(statusOf(() => t.dispatch('ruledownload', 'y0', { cursor: '' }))).toBe(409);
+  });
+
+  it('does not remember a machine id whose postflight did not confirm everything', () => {
+    const rules = new RuleStore(join(dir, 'unconfirmed-rules.json'));
+    rules.upsert({ ruleType: 'BINARY', identifier: SHA_A, policy: 'BLOCKLIST' });
+    const s = new SantaSyncServer({ store: rules });
+    s.dispatch('preflight', 'm', {});
+    s.dispatch('postflight', 'm', { rules_received: 0, rules_processed: 0 });
+    expect(rules.syncedMachineId).toBeUndefined();
+  });
 });

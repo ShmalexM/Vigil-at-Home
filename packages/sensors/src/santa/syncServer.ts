@@ -191,10 +191,18 @@ export class SantaSyncServer {
 
   private startSession(machineId: string, session: SyncSession): void {
     this.dropExpired();
-    // Re-inserting keeps the map in start order, oldest first.
     this.sessions.delete(machineId);
-    while (this.sessions.size >= MAX_SYNC_SESSIONS) {
-      const oldest = this.sessions.keys().next().value;
+    // Any local account can start syncs under made-up machine ids. Once Santa
+    // has finished a sync, its id always gets a session and the others share
+    // what is left, so they can only push each other out.
+    const known = this.opts.store.syncedMachineId;
+    const isKnown = known !== undefined && machineId === known;
+    const others = () => [...this.sessions.keys()].filter((id) => id !== known);
+    const limit = known === undefined || isKnown ? MAX_SYNC_SESSIONS : MAX_SYNC_SESSIONS - 1;
+    const used = () => (isKnown ? this.sessions.size : others().length);
+    while (used() >= limit) {
+      // The map is in start order, so this is the oldest evictable session.
+      const oldest = others()[0];
       if (oldest === undefined) break;
       this.sessions.delete(oldest);
     }
@@ -252,7 +260,7 @@ export class SantaSyncServer {
     // Only advance when Santa says it applied everything we sent; otherwise
     // the same changes go out again next time.
     if (received === session.rules.length && processed === session.rules.length) {
-      this.opts.store.markSynced(session.snapshotRev, session.clean);
+      this.opts.store.markSynced(session.snapshotRev, session.clean, machineId);
     } else {
       this.opts.log?.(
         `santa postflight mismatch: sent ${session.rules.length}, received ${received}, processed ${processed}`,
