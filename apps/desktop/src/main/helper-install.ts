@@ -228,15 +228,49 @@ async function runWithPkexec(
   }
 }
 
+let running: { kind: string; done: Promise<HelperInstallResult> } | undefined;
+
+/** Is an install, update or removal running now (its password dialog may be open)? */
+export function helperScriptRunning(): boolean {
+  return running !== undefined;
+}
+
 /**
  * Install or remove the helper through the system's admin password dialog.
  * An update runs install.sh too, with a dialog that says why it is asking.
+ * One runs at a time, whichever window asked: a second ask for the same thing
+ * waits for the first, and a different one is refused until it finishes.
  */
-export async function runHelperScript(
+export function runHelperScript(
   kind: 'install' | 'update' | 'uninstall',
   dir = helperBundleDir(),
   run: RunFile = runFile,
   platform: NodeJS.Platform = process.platform,
+): Promise<HelperInstallResult> {
+  if (running) {
+    const same = (running.kind === 'uninstall') === (kind === 'uninstall');
+    return same
+      ? running.done
+      : Promise.resolve({
+          ok: false,
+          error:
+            running.kind === 'uninstall'
+              ? 'The helper is being removed; try again once that finishes'
+              : 'The helper is being installed; try again once that finishes',
+        });
+  }
+  const done = runHelperScriptNow(kind, dir, run, platform).finally(() => {
+    running = undefined;
+  });
+  running = { kind, done };
+  return done;
+}
+
+async function runHelperScriptNow(
+  kind: 'install' | 'update' | 'uninstall',
+  dir: string | null | undefined,
+  run: RunFile,
+  platform: NodeJS.Platform,
 ): Promise<HelperInstallResult> {
   if (platform !== 'darwin' && platform !== 'linux') {
     return { ok: false, error: 'The helper only runs on macOS and Linux' };
@@ -261,8 +295,9 @@ async function viaOsascript(
   const script = kind === 'uninstall' ? 'uninstall' : 'install';
   const out = await run('/usr/bin/osascript', adminScriptArgs(join(dir, `${script}.sh`), kind));
   if (out.code === 0) return { ok: true };
-  // osascript reports a closed password dialog as error -128.
-  if (/-128/.test(out.stderr)) return { ok: false, error: 'cancelled' };
+  // osascript reports a closed password dialog as "User canceled. (-128)" at
+  // the end of its error; a path with -128 in it is not a cancel.
+  if (/\(-128\)\s*$/.test(out.stderr)) return { ok: false, error: 'cancelled' };
   const msg = out.stderr
     .replace(/^\d+:\d+: execution error: /, '')
     .replace(/ \(-?\d+\)\s*$/, '')

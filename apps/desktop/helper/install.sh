@@ -26,13 +26,16 @@ done
 # in, so an update leaves the helper stopped for as short a time as possible.
 # Santa keeps enforcing the rules it already has while the helper restarts.
 install -d -o root -g wheel -m 755 "$TOOLS"
-rm -rf "$DEST.new"
-install -d -o root -g wheel -m 755 "$DEST.new"
-install -o root -g wheel -m 755 "$SRC/node" "$DEST.new/node"
-install -o root -g wheel -m 644 "$SRC/helper.mjs" "$DEST.new/helper.mjs"
+# Each run stages in its own folder, so two runs never share one.
+NEW=$(mktemp -d "$DEST.new.XXXXXX")
+trap 'rm -rf "$NEW"' EXIT
+chown root:wheel "$NEW"
+chmod 755 "$NEW"
+install -o root -g wheel -m 755 "$SRC/node" "$NEW/node"
+install -o root -g wheel -m 644 "$SRC/helper.mjs" "$NEW/helper.mjs"
 launchctl bootout "system/$LABEL" 2>/dev/null || true
 rm -rf "$DEST"
-mv "$DEST.new" "$DEST"
+mv "$NEW" "$DEST"
 install -o root -g wheel -m 755 "$SRC/vigil-helper" "$TOOLS/vigil-helper"
 install -o root -g wheel -m 644 "$SRC/$LABEL.plist" "$PLIST"
 install -d -o root -g wheel -m 755 /Library/Logs/Vigil
