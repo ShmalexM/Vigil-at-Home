@@ -432,7 +432,7 @@ describe('rules still learning', () => {
 });
 
 describe('stale open alerts', () => {
-  /** The read a real Mac raised hourly before the excuse covered it (2026-10-08). */
+  /** The read a real Mac raised hourly before the excuse covered it (2026-10-08), from signed Claude Code. */
   const read = (service: string): SensorEvent => {
     n++;
     return {
@@ -449,7 +449,13 @@ describe('stale open alerts', () => {
           `security find-generic-password -a "alexmargaris" -w -s "${service}"`,
         ],
         ancestors: ['2.1.283', '2.1.283', '-zsh', 'login'],
-        agent: { id: 'claude-code', session: '0123456789abcdef', depth: 2 },
+        // Santa-style: the signed root's team ID, no signing ID.
+        agent: {
+          id: 'claude-code',
+          session: '0123456789abcdef',
+          depth: 2,
+          teamId: 'Q6L2SF6YDW',
+        },
       },
     };
   };
