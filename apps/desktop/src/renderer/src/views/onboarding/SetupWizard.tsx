@@ -12,7 +12,7 @@ import {
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { SetupMode, SetupStepView, SetupView } from '../../../../shared/setup';
 import { useLive, vigil } from '../../api';
-import { computer } from '../../platform';
+import { computer, onLinux } from '../../platform';
 import { PreflightSetup } from '../../components/PreflightSetup';
 import { Shield } from '../../components/Shield';
 import { useToast } from '../../components/Toasts';
@@ -531,7 +531,9 @@ function Review({ view, onDone }: { view: SetupView; onDone: () => void }) {
         <span>
           {left.length
             ? 'You can finish now and come back to the rest from Settings › Run setup again. Vigil shows Fair until protection is complete.'
-            : 'Vigil is watching. It lives in the menu bar and will pop up only when it blocks something or needs you.'}
+            : onLinux
+              ? 'Vigil is watching. It lives in the system tray and will pop up only when it blocks something or needs you. If your desktop shows no tray icons (GNOME needs the AppIndicator extension), open Vigil at Home from your apps instead; it keeps running when you close this window.'
+              : 'Vigil is watching. It lives in the menu bar and will pop up only when it blocks something or needs you.'}
         </span>
       </div>
       <Card>
