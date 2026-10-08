@@ -117,7 +117,7 @@ describe('command lines in copied evidence', () => {
     const ok = (input: string, output: string) =>
       output === WITHHELD || plain(output) === strip(input);
     for (const line of lines) {
-      for (const field of ['command', 'summary', 'program', 'title']) {
+      for (const field of ['command', 'summary', 'program']) {
         const out = (redactEvidence({ [field]: line }, names) as Record<string, string>)[field]!;
         const what = `${field}: ${JSON.stringify(line)} -> ${JSON.stringify(out)}`;
         expect(ok(line, out), what).toBe(true);
@@ -230,5 +230,13 @@ describe('round 5 shapes', () => {
       {},
     ) as { alert: Record<string, unknown> };
     expect(kept.alert).toEqual({ title: 'Downloaded script run directly', summary: WITHHELD });
+  });
+
+  it("keeps a rule's own title even when it names credentials", () => {
+    const out = redactEvidence(
+      { alert: { title: 'Credentials file read', summary: 'ls -la' } },
+      {},
+    ) as { alert: Record<string, unknown> };
+    expect(out.alert).toEqual({ title: 'Credentials file read', summary: 'ls -la' });
   });
 });

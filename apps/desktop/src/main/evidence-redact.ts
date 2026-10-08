@@ -28,9 +28,12 @@ export const WITHHELD = '[withheld: may contain a secret]';
  * The fields that carry a command line, by key, wherever they appear:
  * - lists: a process's argv (`args`) and a persistence item's `programArgs`;
  * - strings: a tool request's `command`, a persistence item's `program` (a
- *   cron job's whole command line), and the alert text rules fill from
- *   commands: `title`, `summary`, a subject's `label`, an AI read's
- *   `details`, an action's `reason` and a proposal's `rationale`;
+ *   cron job's whole command line), and the text rules or the AI fill from
+ *   commands: `summary`, an AI read's `details`, an action's `reason` and a
+ *   proposal's `rationale`. Titles and subject labels are fixed rule text
+ *   or names, so they are not scanned (a rule titled "Credentials file
+ *   read" stays readable); they are withheld only when they repeat a
+ *   withheld command (see `redactEvidence`);
  * - URLs (`url`, `originUrl`), which can carry `user:password@`, and are
  *   withheld if they hold a newline or other control character.
  */
@@ -39,9 +42,7 @@ const COMMAND_STRINGS = new Set([
   'command',
   'commandLine',
   'program',
-  'title',
   'summary',
-  'label',
   'details',
   'reason',
   'rationale',
