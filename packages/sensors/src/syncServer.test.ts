@@ -362,4 +362,22 @@ describe('unfinished syncs', () => {
     s.dispatch('postflight', 'm', { rules_received: 0, rules_processed: 0 });
     expect(rules.syncedMachineId).toBeUndefined();
   });
+
+  it('counts only a postflight that ends a live sync as Santa syncing', () => {
+    let clock = 5_000;
+    const s = new SantaSyncServer({
+      store: new RuleStore(join(dir, 'postflight-rules.json')),
+      now: () => clock,
+    });
+    s.dispatch('postflight', 'stray', { rules_received: 0, rules_processed: 0 });
+    expect(s.lastSyncAt).toBeNull();
+    s.dispatch('preflight', 'm', {});
+    clock = 6_000;
+    s.dispatch('postflight', 'm', { rules_received: 1, rules_processed: 1 });
+    expect(s.lastSyncAt).toBe(6_000);
+    // The session is gone, so repeating the postflight changes nothing.
+    clock = 7_000;
+    s.dispatch('postflight', 'm', {});
+    expect(s.lastSyncAt).toBe(6_000);
+  });
 });

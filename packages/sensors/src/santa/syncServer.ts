@@ -251,10 +251,11 @@ export class SantaSyncServer {
   lastSyncAt: number | null = null;
 
   private postflight(machineId: string, body: unknown): Record<string, never> {
-    this.lastSyncAt = this.opts.now();
     const session = this.session(machineId);
-    this.sessions.delete(machineId);
+    // A postflight with no sync behind it says nothing about Santa.
     if (!session) return {};
+    this.sessions.delete(machineId);
+    this.lastSyncAt = this.opts.now();
     const received = Number(pick(body, 'rules_received') ?? NaN);
     const processed = Number(pick(body, 'rules_processed') ?? NaN);
     // Only advance when Santa says it applied everything we sent; otherwise
