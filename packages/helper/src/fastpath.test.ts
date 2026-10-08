@@ -24,6 +24,9 @@ let server: HelperServer;
 let client: HelperClient;
 let rulesFile: string;
 
+/** Files on the fake disk, by path, with their device:inode. */
+const files = new Map<string, string>();
+
 // Small enough that the oversized-drop test stays fast on a busy runner.
 const RETIRED_TEST_MAX = 5000;
 
@@ -32,6 +35,7 @@ function makeFastPath(executor: Executor): FastPath {
     file: rulesFile,
     now: () => clock,
     retiredMax: RETIRED_TEST_MAX,
+    fileId: (p) => files.get(p),
     run: async (action) => {
       const out = await executor.execute(action);
       if (out.kind !== 'done') throw new Error('needs the admin password');
@@ -268,7 +272,7 @@ describe('blocking rules in the helper', () => {
     await client.call(sync);
   });
 
-  it('lets Vigil narrow its own folder freely, but a saved / grants nothing', async () => {
+  it('asks for the password for anything newly named as Vigil, even inside its folder', async () => {
     const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
     approve = true;
     await sendLists(
@@ -278,8 +282,16 @@ describe('blocking rules in the helper', () => {
     );
     approve = false;
     prompts.length = 0;
-    await client.call({ ...sync, selfPaths: ['/opt/Vigil at Home/resources'] });
+    // The same folder again needs nothing.
+    await client.call({ ...sync, selfPaths: ['/opt/Vigil at Home/'] });
     expect(prompts).toEqual([]);
+    // A program inside it would be exempt from every block, so it is a widening.
+    await expect(
+      client.call({ ...sync, selfPaths: ['/opt/Vigil at Home', '/opt/Vigil at Home/payload'] }),
+    ).rejects.toMatchObject({ code: 'refused' });
+    expect(prompts).toEqual([
+      'Vigil wants to loosen its blocking rules: never block /opt/Vigil at Home/payload.',
+    ]);
     sys.processes.set(7001, { path: '/tmp/payload', started: 'T' });
     expect((await fast.check(exec(7001, BAD))).length).toBeGreaterThan(0);
 
@@ -290,6 +302,50 @@ describe('blocking rules in the helper', () => {
     await expect(
       client.call({ ...sync, selfPaths: ['/', '/home/alex/payload'] }),
     ).rejects.toMatchObject({ code: 'refused' });
+  });
+
+  it('approves an AppImage by identity, so a rename while it runs asks nothing', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    const own = 'c'.repeat(64);
+    const image = { path: '/home/alex/Apps/Vigil.AppImage', id: '2049:5501' };
+    files.set(image.path, image.id);
+    approve = true;
+    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    prompts.length = 0;
+    await client.call({ ...sync, selfImages: [image], selfHashes: [own] });
+    expect(prompts).toEqual([
+      'Vigil wants to loosen its blocking rules: never block /home/alex/Apps/Vigil.AppImage; never block 1 of Vigil’s programs by hash.',
+    ]);
+    expect(fast.self()).toMatchObject({ images: [image.id], hashes: [own] });
+    approve = false;
+    prompts.length = 0;
+
+    // Renamed while running: the app still names the old path, the id matches.
+    files.delete(image.path);
+    files.set('/home/alex/Vigil-old.AppImage', image.id);
+    await client.call({ ...sync, selfImages: [image], selfHashes: [own] });
+    expect(prompts).toEqual([]);
+
+    // A new image needs the password, and must be the file the prompt names.
+    approve = true;
+    await expect(
+      client.call({
+        ...sync,
+        selfImages: [image, { path: '/home/alex/Apps/Vigil.AppImage', id: '2049:9999' }],
+      }),
+    ).rejects.toMatchObject({ code: 'refused' });
+    expect(fast.self().images).toEqual([image.id]);
+    // A program hash Vigil didn't name before is a widening too.
+    approve = false;
+    await expect(
+      client.call({ ...sync, selfImages: [image], selfHashes: [own, 'd'.repeat(64)] }),
+    ).rejects.toMatchObject({ code: 'refused' });
+
+    // No block rule may name one of Vigil's own programs.
+    await expect(
+      client.call({ kind: 'santa.rule.set', ruleType: 'binary', identifier: own, policy: 'block' }),
+    ).rejects.toMatchObject({ code: 'refused' });
+    files.clear();
   });
 
   it('lets a held rule change ride on the next password dialog', async () => {

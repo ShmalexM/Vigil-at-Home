@@ -26,6 +26,7 @@ import {
   SantaRuleSet,
   isRelease,
 } from '@vigil/core';
+import { SELF_HASH_MAX_FILES } from '@vigil/core/self';
 import { DetectionRule } from '@vigil/detection';
 
 export const HelperAction = z.discriminatedUnion('kind', [
@@ -74,16 +75,30 @@ export const RuleExceptionSchema = z.strictObject({
  * `lists` names each indicator list the rules use with a digest of its
  * contents; the helper answers with the lists it needs sent.
  *
+ * Vigil's own programs are named three ways: `selfPaths` (install folders
+ * and files), `selfImages` (a Linux AppImage by device and inode, so a rename
+ * while it runs still matches) and `selfHashes` (the sha256 of the programs
+ * inside that image, which no block rule may name). Only Linux AppImages send
+ * the last two.
+ *
  * The app runs every rule too, but only while it is open. A sync that drops
- * or changes a rule, adds an exception or adds a self path therefore needs
- * the admin password, like a release; one that only adds rules does not.
- * Lists may change freely: an entry a list drops keeps blocking for a week.
+ * or changes a rule, adds an exception or names anything new as Vigil's own
+ * therefore needs the admin password, like a release; one that only adds
+ * rules does not. Lists may change freely: an entry a list drops keeps
+ * blocking for a week.
  */
+export const SelfImageSchema = z.strictObject({
+  path: z.string().min(1).max(1024),
+  id: z.string().regex(/^\d{1,20}:\d{1,20}$/),
+});
+
 export const DetectionSync = z.strictObject({
   kind: z.literal('detection.sync'),
   rules: z.array(DetectionRule).max(64),
   exceptions: z.array(RuleExceptionSchema).max(2000),
   selfPaths: z.array(z.string().min(1).max(1024)).max(8),
+  selfImages: z.array(SelfImageSchema).max(4).optional(),
+  selfHashes: z.array(Digest).max(SELF_HASH_MAX_FILES).optional(),
   lists: z.record(ListName, Digest),
 });
 export type DetectionSync = z.infer<typeof DetectionSync>;

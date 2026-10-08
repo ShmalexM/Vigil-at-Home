@@ -36,7 +36,7 @@ import { PackMemory } from './pack/memory.js';
 import { PackService } from './pack/service.js';
 import { seedPackDemo } from './pack/demo.js';
 import { PowerPolicy } from './power.js';
-import { selfPaths } from './self-path.js';
+import { hashSelf, selfPaths } from './self-path.js';
 import { HEALTH_CHECK_MS, macProbe, reportHealth, type HelperSensors } from './sensor-health.js';
 import { VigilCore } from './service.js';
 import { UpdateChecker } from './updates.js';
@@ -106,7 +106,7 @@ function start(): void {
   const detector = new Detector(db, store, core.alerts, (e, o) => core.ingest(e, o), {
     installedAt: core.installedAt(),
     selfPaths: self.app,
-    helperSelfPaths: self.helper,
+    helperSelf: self.helper,
     // What Vigil itself starts (its AI helpers) is tagged vigil-self, never a watched agent.
     selfPid: process.pid,
     // The tracker reports to the agent service, created just below.
@@ -378,7 +378,16 @@ function start(): void {
     helperRulesSync = next;
     return next;
   };
+  // An AppImage's programs are hashed once, in the background. The helper
+  // gets them with the image in its first sync, so a new image asks for the
+  // password once rather than twice.
+  const selfHashed = self.mount
+    ? hashSelf(self.mount)
+        .then((hashes) => core.detector?.setSelfHashes(hashes))
+        .catch((err: unknown) => console.warn('[self] could not hash Vigil’s programs:', err))
+    : Promise.resolve();
   const sendHelperRules = async (opts: HelperSyncOptions): Promise<HelperSyncOutcome> => {
+    await selfHashed;
     if (!core.detector) return 'unavailable';
     const set = core.detector.helperRules();
     const lists = Object.entries(set.lists).map(([l, entries]) => [l, listDigest(entries)]);

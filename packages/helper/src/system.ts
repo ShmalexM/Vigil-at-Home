@@ -3,7 +3,8 @@
 // shell), and signal delivery. Tests swap in fakes.
 
 import { execFile } from 'node:child_process';
-import { readFileSync, readlinkSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs';
+import { fileId } from '@vigil/core/self';
 import { hostPlatform, type Platform } from './platform.js';
 
 export const BINARIES = {
@@ -65,8 +66,20 @@ export interface System {
    * keeps that link, so argv tricks can't fake it.
    */
   procExe?(pid: number): string | undefined;
-  /** Linux only: a pid's parent, from /proc/<pid>/stat. */
-  procPpid?(pid: number): number | undefined;
+  /** Linux only: the helper's own mount table, /proc/self/mountinfo. */
+  mountInfo?(): string | undefined;
+  /** Linux only: every running pid, from the numbered folders in /proc. */
+  procPids?(): number[];
+  /** Linux only: what a pid's open files are, `[fd, link]` from /proc/<pid>/fd ("pipe:[123]", "/dev/fuse"...). */
+  procFds?(pid: number): [number, string][];
+  /** Linux only: when a pid started, in clock ticks since boot (/proc/<pid>/stat). */
+  procStart?(pid: number): number | undefined;
+  /**
+   * Linux only: the device and inode (`fileId`) of the file a path names,
+   * following links, so /proc/<pid>/exe and /proc/<pid>/fd/<n> give the
+   * file itself even after it was renamed.
+   */
+  fileId?(path: string): string | undefined;
 }
 
 export function realSystem(
@@ -128,12 +141,52 @@ export function realSystem(
         return undefined;
       }
     },
-    procPpid(pid) {
+    mountInfo() {
       try {
-        // "pid (comm) state ppid ...": comm may hold spaces or parens, so read after the last ')'.
+        return readFileSync('/proc/self/mountinfo', 'utf8');
+      } catch {
+        return undefined;
+      }
+    },
+    procPids() {
+      try {
+        return readdirSync('/proc')
+          .filter((n) => /^\d+$/.test(n))
+          .map(Number);
+      } catch {
+        return [];
+      }
+    },
+    procFds(pid) {
+      const out: [number, string][] = [];
+      try {
+        for (const n of readdirSync(`/proc/${pid}/fd`)) {
+          try {
+            out.push([Number(n), readlinkSync(`/proc/${pid}/fd/${n}`)]);
+          } catch {
+            // Closed while listing.
+          }
+        }
+      } catch {
+        // Gone, or a kernel thread.
+      }
+      return out;
+    },
+    procStart(pid) {
+      try {
+        // "pid (comm) state ppid ...": comm may hold spaces or parens, so
+        // count from the last ')'. starttime is field 22, 20 after it.
         const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-        const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
-        return Number.isInteger(ppid) ? ppid : undefined;
+        const start = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]);
+        return Number.isFinite(start) ? start : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+    fileId(path) {
+      try {
+        const st = statSync(path, { bigint: true });
+        return fileId(st.dev, st.ino);
       } catch {
         return undefined;
       }

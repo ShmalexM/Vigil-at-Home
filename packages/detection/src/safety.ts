@@ -1,4 +1,5 @@
 import { authorizeAction, type Action, type ProcessRef } from '@vigil/core';
+import { selfKey, selfRoots, underSelfRoot } from '@vigil/core/self';
 import { BlockList, isIP } from 'node:net';
 import { globToRegExp } from './rules/compile.js';
 import type { DetectionEvent } from './types.js';
@@ -12,49 +13,19 @@ import type { DetectionEvent } from './types.js';
 export interface SafetyConfig {
   /** Paths of Vigil's own binaries or bundle. Vigil never pauses, kills or blocks itself. */
   selfPaths: string[];
+  /**
+   * sha256 of the programs inside Vigil's AppImage. A program is blocked by
+   * hash everywhere at once, so blocking one of these would stop Vigil too.
+   */
+  selfHashes: string[];
   /** Extra process path globs the user never wants touched. */
   protectedPathGlobs: string[];
   /** Networks never firewalled (the user's LAN, a VPN...). Loopback and link-local are always included. */
   neverBlockNetworks: string[];
 }
 
-/**
- * macOS disks ignore case by default, so `/Applications/vigil at home.app` is
- * Vigil too. Linux paths that differ only in case are different files.
- */
-const CASELESS = process.platform === 'darwin';
-
-/**
- * Vigil's own paths without a trailing slash (lower-cased on macOS). A path
- * with fewer than two parts (`/`, `/opt`) is dropped: it would cover every
- * program on the machine, so nothing could ever be paused, killed or
- * quarantined.
- */
-export function selfRoots(paths: readonly string[], caseless = CASELESS): string[] {
-  return paths
-    .map((p) => selfKey(p, caseless))
-    .filter(
-      (p) => p.split('/').filter((part) => part && part !== '.' && part !== '..').length >= 2,
-    );
-}
-
-/** A path without trailing slashes (lower-cased on macOS), for comparing against {@link selfRoots}. */
-export function selfKey(path: string, caseless = CASELESS): string {
-  let end = path.length;
-  while (end > 0 && path[end - 1] === '/') end--;
-  const p = path.slice(0, end);
-  return caseless ? p.toLowerCase() : p;
-}
-
-/** Whether `path` is one of `roots` (from {@link selfRoots}) or inside one. */
-export function underSelfRoot(
-  roots: readonly string[],
-  path: string,
-  caseless = CASELESS,
-): boolean {
-  const p = caseless ? path.toLowerCase() : path;
-  return roots.some((s) => p === s || p.startsWith(`${s}/`));
-}
+// Shared with the helper, so both floors agree on what Vigil is.
+export { selfKey, selfRoots, underSelfRoot };
 
 export const DEFAULT_PROTECTED_PATH_GLOBS = [
   '/System/**',
@@ -109,6 +80,7 @@ export class SafetyFloor {
   private readonly appleTools = APPLE_TOOL_GLOBS.map((g) => globToRegExp(g));
   private readonly systemPersistence = SYSTEM_PERSISTENCE_GLOBS.map((g) => globToRegExp(g));
   private readonly selfPaths: string[];
+  private selfHashes: Set<string>;
   private readonly neverBlock: BlockList;
 
   constructor(cfg: Partial<SafetyConfig> = {}) {
@@ -116,10 +88,17 @@ export class SafetyFloor {
     this.protectedPaths = [...DEFAULT_PROTECTED_PATH_GLOBS, ...extra].map((g) => globToRegExp(g));
     this.protectedFiles = [...PROTECTED_FILE_GLOBS, ...extra].map((g) => globToRegExp(g));
     this.selfPaths = selfRoots(cfg.selfPaths ?? []);
+    this.selfHashes = new Set();
+    this.setSelfHashes(cfg.selfHashes ?? []);
     this.neverBlock = toBlockList(
       [...DEFAULT_NEVER_BLOCK_NETWORKS, ...(cfg.neverBlockNetworks ?? [])],
       'neverBlockNetworks',
     );
+  }
+
+  /** The app hashes its own programs after start-up, so they arrive late. */
+  setSelfHashes(hashes: readonly string[]): void {
+    this.selfHashes = new Set(hashes.map((h) => h.toLowerCase()));
   }
 
   private isSelf(path: string): boolean {
@@ -182,6 +161,8 @@ export class SafetyFloor {
       }
       case 'santa.rule.set': {
         if (action.identifier.startsWith('platform:')) return 'it would block part of macOS';
+        if (this.selfHashes.has(action.identifier.toLowerCase()))
+          return 'it would block Vigil itself';
         const names = proc && [proc.sha256, proc.cdhash, proc.teamId, proc.signingId];
         if (proc && names?.includes(action.identifier)) {
           const why = this.processProtection(proc);

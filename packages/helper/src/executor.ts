@@ -19,7 +19,7 @@ import { needsApproval } from './protocol.js';
 import { Journal, type JournalEntry } from './journal.js';
 import type { Approvals } from './approval.js';
 import type { System } from './system.js';
-import { PolicyRefused, type FastPath } from './fastpath.js';
+import { PolicyRefused, type FastPath, type SelfSet } from './fastpath.js';
 import type { PreexecSync } from './preexec.js';
 import { ActionError } from './commands/errors.js';
 import {
@@ -67,8 +67,8 @@ export interface ExecutorDeps {
   fastPath?: FastPath;
   /** Linux: programs blocked by hash, enforced by fapolicyd and the helper. */
   fapolicyd?: FapolicydBlocks;
-  /** Vigil's own paths as the app last sent them; never paused or stopped. */
-  selfPaths?: () => readonly string[];
+  /** What is Vigil's own: never paused, stopped or blocked. Defaults to fastPath.self(). */
+  self?: () => SelfSet;
 }
 
 export type ExecOutcome =
@@ -103,8 +103,8 @@ export class Executor {
     this.firewall = d.sys.platform === 'linux' ? new NftFirewall(d.sys) : new Firewall(d.sys);
   }
 
-  private self(): readonly string[] {
-    return this.d.selfPaths?.() ?? [];
+  private self(): SelfSet {
+    return this.d.self?.() ?? this.d.fastPath?.self() ?? { paths: [], images: [], hashes: [] };
   }
 
   /** Quarantine settings with the protected folders of the OS the helper acts on. */
@@ -226,6 +226,12 @@ export class Executor {
 
   private async run(cmd: HelperCommand): Promise<unknown> {
     const { sys, journal } = this.d;
+    if (
+      cmd.kind === 'santa.rule.set' &&
+      cmd.policy !== 'allow' &&
+      this.self().hashes.includes(cmd.identifier.toLowerCase())
+    )
+      throw new ActionError('refused', 'that program is part of Vigil');
     if (sys.platform === 'linux' && cmd.kind.startsWith('santa.')) return this.runLinuxBlock(cmd);
     switch (cmd.kind) {
       case 'process.suspend': {

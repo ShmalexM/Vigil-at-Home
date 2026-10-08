@@ -135,6 +135,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       return out.result as ActionOutcome;
     },
     log,
+    ...(sys.fileId ? { fileId: (p: string) => sys.fileId?.(p) } : {}),
   });
   fastPath.load();
 
@@ -167,7 +168,6 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       ...(fapolicyd ? { fapolicyd: fapolicyd.status() } : {}),
     }),
     fastPath,
-    selfPaths: () => fastPath.selfPaths(),
     ...(fapolicyd ? { fapolicyd } : {}),
   });
 

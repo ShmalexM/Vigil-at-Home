@@ -28,3 +28,32 @@ describe('safety floor: Vigil’s own paths', () => {
     expect(underSelfRoot(linux, '/home/alex/Apps/Vigil.AppImage', false)).toBe(true);
   });
 });
+
+describe('safety floor: Vigil’s own programs by hash', () => {
+  const own = 'a'.repeat(64);
+  const block = (identifier: string) =>
+    ({ kind: 'santa.rule.set', ruleType: 'binary', identifier, policy: 'block' }) as const;
+  const event = (sha256: string) =>
+    ({
+      id: 'e',
+      ts: 0,
+      source: 'osquery',
+      kind: 'process.exec',
+      process: { pid: 4242, ppid: 900, path: '/tmp/copy', sha256 },
+    }) as const;
+
+  it('never blocks a program inside Vigil’s image, wherever a copy runs', () => {
+    const floor = new SafetyFloor({ selfHashes: [own.toUpperCase()] });
+    expect(floor.check(block(own), event(own))).toBe('it would block Vigil itself');
+    expect(floor.check(block('b'.repeat(64)), event('b'.repeat(64)))).toBeUndefined();
+    // A copy elsewhere is not Vigil: it can still be stopped, just not blocked by hash.
+    expect(floor.processProtection(event(own).process)).toBeUndefined();
+  });
+
+  it('takes the hashes once the app has computed them', () => {
+    const floor = new SafetyFloor();
+    expect(floor.check(block(own), event(own))).toBeUndefined();
+    floor.setSelfHashes([own]);
+    expect(floor.check(block(own), event(own))).toBe('it would block Vigil itself');
+  });
+});

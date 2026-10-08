@@ -3,10 +3,12 @@
 // expected executable path or start time, and suspend records the identity
 // so resume can check it again.
 
+import { selfRoots, underSelfRoot } from '@vigil/core/self';
 import type { System } from '../system.js';
 import type { Platform } from '../platform.js';
 import { protectionFor } from '../config.js';
 import { ActionError } from './errors.js';
+import { runsFromSelfImage } from './selfImage.js';
 
 export interface ProcessIdentity {
   pid: number;
@@ -48,12 +50,8 @@ export function isProtectedProcess(path: string, platform: Platform = 'darwin'):
 export interface ProcessTarget {
   /** Expected executable path. */
   path?: string;
-  /**
-   * Vigil's own program files. On Linux an AppImage runs Vigil from a fresh
-   * mount under /tmp on every launch, so anything started by the AppImage
-   * file itself counts as Vigil.
-   */
-  self?: readonly string[];
+  /** Linux: what is Vigil's own (FastPath.self()), never paused or stopped. */
+  self?: { paths: readonly string[]; images: readonly string[] };
   /** Expected start time, ms since epoch. ps reports whole seconds, so it matches within a second. */
   startTime?: number;
 }
@@ -63,33 +61,16 @@ export function parseLstart(lstart: string): number {
   return Date.parse(lstart.replace(/\s+/g, ' ').trim());
 }
 
-/** The AppImage mount a program runs from (`/tmp/.mount_VigilXyz/`), if any. */
-function appImageMount(exe: string): string | undefined {
-  return /^(.*\/\.mount_[^/]+\/)/.exec(exe)?.[1];
-}
-
 /**
- * Linux: whether the pid is Vigil. That is a process running one of Vigil's
- * own program files, or one the AppImage started from its own mount (an
- * AppImage runs Vigil from a fresh mount under /tmp on every launch). Programs
- * Vigil starts from anywhere else, such as connectors, are not Vigil.
+ * Linux: whether the pid is Vigil. That is a program at or inside one of
+ * Vigil's own paths (a .deb install folder, the AppImage file), or Vigil
+ * running from its approved AppImage's mount (selfImage.ts). Who started the process doesn't count: programs Vigil
+ * starts from anywhere else, such as connectors, are not Vigil.
  */
-function startedBySelf(sys: System, pid: number, self: readonly string[]): boolean {
-  if (sys.platform !== 'linux' || !sys.procExe || !sys.procPpid || self.length === 0) return false;
-  const below: string[] = [];
-  let at: number | undefined = pid;
-  for (let hop = 0; hop < 16 && at !== undefined && at > 1; hop++) {
-    const exe = sys.procExe(at);
-    if (!exe) return false;
-    if (self.includes(exe)) {
-      if (below.length === 0) return true;
-      const mount = appImageMount(below.at(-1)!);
-      return mount !== undefined && below.every((e) => e.startsWith(mount));
-    }
-    below.push(exe);
-    at = sys.procPpid(at);
-  }
-  return false;
+function isSelf(sys: System, pid: number, exe: string, self: ProcessTarget['self']): boolean {
+  if (sys.platform !== 'linux' || !self) return false;
+  if (underSelfRoot(selfRoots(self.paths, false), exe, false)) return true;
+  return runsFromSelfImage(sys, pid, self.images);
 }
 
 async function checkTarget(
@@ -113,7 +94,7 @@ async function checkTarget(
       );
     }
   }
-  if (startedBySelf(sys, pid, expect.self ?? []))
+  if (isSelf(sys, pid, id.path, expect.self))
     throw new ActionError('refused', `${id.path} is part of Vigil`);
   if (isProtectedProcess(id.path, sys.platform))
     throw new ActionError(

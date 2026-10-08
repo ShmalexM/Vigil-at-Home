@@ -16,22 +16,21 @@
 // Anything running as the user can reach the helper's socket, so a sync may
 // not weaken this policy on its own say-so. With the app closed, this policy
 // and Santa's pre-launch rules are all that block. A sync that turns a rule
-// off or changes it, adds an exception, or adds one of Vigil's own paths
-// needs the admin password (loosening(), checked by the executor). Indicator
-// lists change every day as feeds age entries out, so an entry a list drops
-// keeps blocking for RETIRE_MS instead, and a list cannot drop more than
-// RETIRED_MAX entries in that time. The saved policy and its revision live in
-// a root-owned file the user's account cannot write.
+// off or changes it, adds an exception, or names anything new as Vigil's own
+// (a path, an AppImage, a program hash) needs the admin password
+// (loosening(), checked by the executor). Indicator lists change every day as
+// feeds age entries out, so an entry a list drops keeps blocking for
+// RETIRE_MS instead, and a list cannot drop more than RETIRED_MAX entries in
+// that time. The saved policy and its revision live in a root-owned file the
+// user's account cannot write.
 
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { isRelease, type Action, type SensorEvent } from '@vigil/core';
+import { selfKey, type SelfImage } from '@vigil/core/self';
 import {
   DetectionEngine,
   DetectionRule,
   memoryStores,
-  selfKey,
-  selfRoots,
-  underSelfRoot,
   type RuleException,
   type Stores,
 } from '@vigil/detection';
@@ -64,6 +63,17 @@ export interface FastPathOptions {
   now?: () => number;
   /** For tests: a smaller RETIRED_MAX. */
   retiredMax?: number;
+  /** A file's device and inode (`fileId`), to check an AppImage the app names is that file. */
+  fileId?: (path: string) => string | undefined;
+}
+
+/** What the helper never pauses, kills or blocks, as the app last sent it. */
+export interface SelfSet {
+  paths: readonly string[];
+  /** File ids of approved AppImages. */
+  images: readonly string[];
+  /** sha256 of the programs inside them. */
+  hashes: readonly string[];
 }
 
 /** How long an entry a list drops keeps blocking. */
@@ -80,13 +90,24 @@ const Saved = z.object({
   rules: z.array(DetectionRule),
   exceptions: z.array(RuleExceptionSchema),
   selfPaths: z.array(z.string()),
+  selfImages: z.array(z.object({ path: z.string(), id: z.string() })).default([]),
+  selfHashes: z.array(z.string()).default([]),
   lists: z.record(z.string(), z.array(z.string())),
   /** Entries lists dropped, by list, with when (ms). Still blocking until RETIRE_MS later. */
   retired: z.record(z.string(), z.record(z.string(), z.number())).default({}),
 });
 type Saved = z.infer<typeof Saved>;
 
-const EMPTY: Saved = { rev: 0, rules: [], exceptions: [], selfPaths: [], lists: {}, retired: {} };
+const EMPTY: Saved = {
+  rev: 0,
+  rules: [],
+  exceptions: [],
+  selfPaths: [],
+  selfImages: [],
+  selfHashes: [],
+  lists: {},
+  retired: {},
+};
 
 /** Rule fields that change what an alert says, not what gets blocked. */
 const WORDING = new Set([
@@ -154,12 +175,15 @@ export class FastPath {
     const added = cmd.exceptions.filter((e) => !had.has(canonical(e)));
     if (added.length === 1) out.push(`add an exception to ${added[0]!.ruleId}`);
     else if (added.length) out.push(`add ${added.length} exceptions`);
-    // A path inside one the helper already never blocks loosens nothing. Only
-    // roots the safety floor honours count, so a saved `/` grants nothing.
-    const own = selfRoots(this.state.selfPaths);
-    for (const p of cmd.selfPaths) {
-      if (!underSelfRoot(own, selfKey(p))) out.push(`never block ${p}`);
-    }
+    // Anything named as Vigil's own that wasn't before, even a file inside a
+    // folder already named: being Vigil exempts a program from every block.
+    const paths = new Set(this.state.selfPaths.map((p) => selfKey(p)));
+    for (const p of cmd.selfPaths) if (!paths.has(selfKey(p))) out.push(`never block ${p}`);
+    const images = new Set(this.state.selfImages.map((i) => i.id));
+    for (const i of cmd.selfImages ?? []) if (!images.has(i.id)) out.push(`never block ${i.path}`);
+    const hashes = new Set(this.state.selfHashes);
+    const newHashes = (cmd.selfHashes ?? []).filter((h) => !hashes.has(h)).length;
+    if (newHashes) out.push(`never block ${newHashes} of Vigil’s programs by hash`);
     return out;
   }
 
@@ -174,12 +198,16 @@ export class FastPath {
       if (have) lists[name] = have;
     }
     const retired = this.retire(lists);
+    const selfImages = cmd.selfImages ?? [];
+    this.checkImages(selfImages);
     // Throws RuleCompileError before anything changes.
     this.apply({
       rev: this.state.rev + 1,
       rules: cmd.rules,
       exceptions: cmd.exceptions,
       selfPaths: cmd.selfPaths,
+      selfImages,
+      selfHashes: cmd.selfHashes ?? [],
       lists,
       retired,
     });
@@ -211,9 +239,27 @@ export class FastPath {
     return { complete: true };
   }
 
-  /** Vigil's own paths, as the app last sent them. */
-  selfPaths(): string[] {
-    return this.state.selfPaths;
+  /** What is Vigil's own, as the app last sent it. */
+  self(): SelfSet {
+    return {
+      paths: this.state.selfPaths,
+      images: this.state.selfImages.map((i) => i.id),
+      hashes: this.state.selfHashes,
+    };
+  }
+
+  /**
+   * A newly named AppImage must be the file at the path the password prompt
+   * showed. One already approved matches by id alone, so it still counts
+   * after the image is renamed while Vigil runs.
+   */
+  private checkImages(images: readonly SelfImage[]): void {
+    const known = new Set(this.state.selfImages.map((i) => i.id));
+    for (const i of images) {
+      if (known.has(i.id)) continue;
+      if (!this.opts.fileId || this.opts.fileId(i.path) !== i.id)
+        throw new PolicyRefused(`${i.path} is not the AppImage Vigil runs from`);
+    }
   }
 
   status(): { rev: number; rules: number; lists: Record<string, number>; retired: number } {
@@ -294,7 +340,10 @@ export class FastPath {
       ? new DetectionEngine(
           next.rules.map((r) => ({ ...r, mode: 'block' as const })),
           stores,
-          { safety: { selfPaths: next.selfPaths }, recordHistory: false },
+          {
+            safety: { selfPaths: next.selfPaths, selfHashes: next.selfHashes },
+            recordHistory: false,
+          },
         )
       : undefined;
     this.engine = engine;

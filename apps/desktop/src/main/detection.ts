@@ -47,6 +47,7 @@ import type { EventOutcome } from '../shared/ipc.js';
 import type { AlertService } from './alerts.js';
 import type { Store } from './db/store.js';
 import type { HelperRuleSet } from './helper.js';
+import type { HelperSelf } from './self-path.js';
 
 const KEY_REVIEW = 'detection.review';
 
@@ -93,7 +94,7 @@ export interface DetectorOptions {
   /** Vigil's own executable, which the safety floor never touches. */
   selfPaths: string[];
   /** What the helper is told instead, when it differs (an AppImage's mount changes every launch). */
-  helperSelfPaths?: string[];
+  helperSelf?: HelperSelf;
   feeds?: FeedImporterOptions;
   now?: () => number;
   /** Vigil's own pid: its process tree is tagged `vigil-self` (its AI helpers). */
@@ -132,8 +133,8 @@ export class Detector {
   private reviewer: RuleReviewer | undefined;
   private checkedByKind = new Map<string, number>();
   private readonly now: () => number;
-  /** Vigil's own paths as the helper's safety floor sees them. */
-  private readonly selfPaths: string[];
+  /** What is Vigil's own, as the helper's safety floor sees it. */
+  private readonly helperSelf: HelperSelf;
   /** Set by the app: sends the helper its copy after rules, modes or exceptions change. */
   syncHelper: HelperSync | undefined;
   /** User changes one at a time, so undoing a declined one can't undo another. */
@@ -148,7 +149,7 @@ export class Detector {
     opts: DetectorOptions,
   ) {
     this.now = opts.now ?? Date.now;
-    this.selfPaths = opts.helperSelfPaths ?? opts.selfPaths;
+    this.helperSelf = opts.helperSelf ?? { paths: opts.selfPaths, images: [], hashes: [] };
     // Detection keeps its state in det_* tables in the same database. Replay
     // history reads the app's own event table rather than keeping a second copy.
     this.stores = { ...sqliteStores(db), history: appHistory(store) };
@@ -419,9 +420,20 @@ export class Detector {
     return {
       rules,
       exceptions,
-      selfPaths: this.selfPaths,
+      selfPaths: this.helperSelf.paths,
+      selfImages: this.helperSelf.images,
+      selfHashes: this.helperSelf.hashes,
       lists: Object.fromEntries(lists.map((l) => [l, this.stores.lists.entries(l)])),
     };
+  }
+
+  /**
+   * The sha256 of the programs inside Vigil's AppImage, hashed after
+   * start-up: no rule here or in the helper may block one of them.
+   */
+  setSelfHashes(hashes: readonly string[]): void {
+    this.helperSelf.hashes = [...hashes];
+    this.engine.setSelfHashes(hashes);
   }
 
   hasRule(id: string): boolean {

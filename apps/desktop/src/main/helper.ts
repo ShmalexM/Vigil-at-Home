@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { isRelease, type Action, type ActionResult, type SensorEvent } from '@vigil/core';
+import type { SelfImage } from '@vigil/core/self';
 import {
   LIST_PART_MAX,
   defaultPaths,
@@ -31,6 +32,9 @@ export interface HelperRuleSet {
   rules: DetectionRule[];
   exceptions: z.infer<typeof RuleExceptionSchema>[];
   selfPaths: string[];
+  /** Linux AppImage: the image by device and inode, and its programs' sha256. */
+  selfImages?: SelfImage[];
+  selfHashes?: string[];
   lists: Record<string, string[]>;
 }
 
@@ -181,6 +185,9 @@ export class HelperLink
         rules: set.rules,
         exceptions: set.exceptions,
         selfPaths: set.selfPaths,
+        // Only an AppImage names these; a helper from before them refuses unknown fields.
+        ...(set.selfImages?.length ? { selfImages: set.selfImages } : {}),
+        ...(set.selfHashes?.length ? { selfHashes: set.selfHashes } : {}),
         lists: digests,
       };
       const out = await withTimeout(
