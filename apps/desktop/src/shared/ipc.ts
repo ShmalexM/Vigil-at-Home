@@ -334,6 +334,8 @@ export interface StatusView {
   needsYou: number;
   /** Open alerts Vigil only noticed; they don't badge or lower the level. */
   noticed: number;
+  /** Of those, the ones "Those were me" closes: nothing taken, held or suggested on them. */
+  noticedClearable: number;
   reasons: string[];
   watch: WatchSummary;
   /** The user's Show me less / Show me more choice. */

@@ -278,6 +278,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
           <NoticedList
             alerts={noticed}
             total={status.noticed}
+            clearable={status.noticedClearable}
             view="more"
             open={(id) => go(`alerts/${id}`)}
             limit={8}

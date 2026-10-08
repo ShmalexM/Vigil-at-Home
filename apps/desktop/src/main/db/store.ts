@@ -21,7 +21,7 @@ import {
   type EventView,
 } from '../../shared/ipc.js';
 import { isNoticed, needsDecision } from '../../shared/attention.js';
-import { pileKey } from '../../shared/piles.js';
+import { pileKey, untouched } from '../../shared/piles.js';
 import type { AgentCandidate, AgentSessionView } from '../../shared/agents.js';
 import type { UsageRun } from '../../shared/usage.js';
 import { migrations } from './schema.js';
@@ -163,7 +163,8 @@ export class Store {
   >();
   private txDepth = 0;
   /** Open, undecided alerts: whether each needs a decision, and its pile (openAlertCounts). */
-  private attention: Map<string, { needs: boolean; pile: string | undefined }> | undefined;
+  private attention:
+    Map<string, { needs: boolean; pile: string | undefined; clearable: boolean }> | undefined;
 
   constructor(private readonly db: DatabaseSync) {
     db.exec(`
@@ -589,27 +590,32 @@ export class Store {
    * a rolled-back transaction). Uses shared/attention and shared/piles
    * themselves, so it can't drift from what the lists show.
    */
-  openAlertCounts(): { needsYou: number; noticed: number } {
+  openAlertCounts(): { needsYou: number; noticed: number; noticedClearable: number } {
     if (!this.attention) {
       this.attention = new Map();
       for (const a of this.listAlerts({ status: 'open', limit: -1 })) this.track(a);
     }
     let needsYou = 0;
     let noticed = 0;
+    let noticedClearable = 0;
     const piles = new Set<string>();
     for (const t of this.attention.values()) {
-      if (!t.needs) noticed++;
-      else if (t.pile === undefined) needsYou++;
+      if (!t.needs) {
+        noticed++;
+        if (t.clearable) noticedClearable++;
+      } else if (t.pile === undefined) needsYou++;
       else piles.add(t.pile);
     }
-    return { needsYou: needsYou + piles.size, noticed };
+    return { needsYou: needsYou + piles.size, noticed, noticedClearable };
   }
 
   private track(a: Alert): void {
     if (!this.attention) return;
-    if (needsDecision(a)) this.attention.set(a.id, { needs: true, pile: pileKey(a) });
-    else if (isNoticed(a)) this.attention.set(a.id, { needs: false, pile: undefined });
-    else this.attention.delete(a.id);
+    if (needsDecision(a)) {
+      this.attention.set(a.id, { needs: true, pile: pileKey(a), clearable: false });
+    } else if (isNoticed(a)) {
+      this.attention.set(a.id, { needs: false, pile: undefined, clearable: untouched(a) });
+    } else this.attention.delete(a.id);
   }
 
   getAlert(id: string): Alert | undefined {

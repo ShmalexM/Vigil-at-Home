@@ -69,6 +69,7 @@ export function HistoryView({ go }: { go: (r: string) => void }) {
           <NoticedList
             alerts={noticed}
             total={status?.noticed}
+            clearable={status?.noticedClearable}
             view="more"
             toggle={false}
             open={(id) => go(`alerts/${id}`)}

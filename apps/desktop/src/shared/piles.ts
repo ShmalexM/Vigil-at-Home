@@ -39,8 +39,16 @@ export function pileKey(a: Alert): string | undefined {
 }
 
 function pileable(a: Alert): boolean {
+  return !!a.pile && untouched(a);
+}
+
+/**
+ * Open and undecided, with nothing held, no action taken and no AI
+ * suggestion waiting: safe to group, or to close in bulk ("Those were me")
+ * without quietly expiring something.
+ */
+export function untouched(a: Alert): boolean {
   return (
-    !!a.pile &&
     !a.decision &&
     a.status === 'open' &&
     a.containment === 'none' &&

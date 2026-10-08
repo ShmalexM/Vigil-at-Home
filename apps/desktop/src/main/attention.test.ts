@@ -87,6 +87,27 @@ describe('VigilCore', () => {
     expect(store.getAlert('serious')?.decision).toBeUndefined();
   });
 
+  it('leaves Noticed alerts with an action or AI suggestion out of the bulk clear', async () => {
+    const { core, store } = setup();
+    const ai = {
+      provider: 'x',
+      at: 1,
+      verdict: 'unsure' as const,
+      summary: '',
+      proposalIds: ['p'],
+    };
+    store.saveAlert(alert({ id: 'plain', createdAt: 1 }));
+    store.saveAlert(alert({ id: 'suggested', createdAt: 2, ai }));
+    store.saveAlert(alert({ id: 'acted', createdAt: 3, actionIds: ['x'] }));
+    // The confirm's count is exactly what will be cleared.
+    expect(core.status()).toMatchObject({ noticed: 3, noticedClearable: 1 });
+    expect(await core.clearNoticedUpTo(10)).toBe(1);
+    expect(await core.clearNoticed(['suggested', 'acted'])).toBe(0);
+    expect(store.getAlert('suggested')?.decision).toBeUndefined();
+    expect(store.getAlert('acted')?.decision).toBeUndefined();
+    expect(core.status()).toMatchObject({ noticed: 2, noticedClearable: 0 });
+  });
+
   it('counts exactly as needsDecision and piles do', () => {
     const { store } = setup();
     const pile = (key: string) => ({ key, who: 'claude' });
@@ -108,6 +129,8 @@ describe('VigilCore', () => {
         ai: { provider: 'x', at: 1, verdict: 'unsure', summary: '', proposalIds: ['p'] },
       },
       { pile: pile('d') },
+      { actionIds: ['y'] },
+      { ai: { provider: 'x', at: 1, verdict: 'unsure', summary: '', proposalIds: ['q'] } },
       { status: 'resolved', severity: 'high' },
       { decision },
     ];

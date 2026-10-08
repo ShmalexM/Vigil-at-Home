@@ -106,6 +106,7 @@ export function Popover() {
           <NoticedList
             alerts={noticed}
             total={status.noticed}
+            clearable={status.noticedClearable}
             view={status.alertView}
             open={open}
             limit={5}

@@ -19,6 +19,7 @@ import {
   type StatusView,
 } from '../shared/ipc.js';
 import { isNoticed } from '../shared/attention.js';
+import { untouched } from '../shared/piles.js';
 import { DEFAULT_APPEARANCE, type AppearanceSettings } from '../shared/themes.js';
 import { AlertService, type DecisionInput } from './alerts.js';
 import { EventLog } from './events.js';
@@ -219,7 +220,9 @@ export class VigilCore {
     let cleared = 0;
     for (const id of new Set(ids)) {
       const alert = this.store.getAlert(id);
-      if (!alert || !isNoticed(alert)) continue;
+      // One with an action taken or an AI suggestion waiting stays for a look of its own,
+      // so a bulk tap never quietly expires a suggestion.
+      if (!alert || !isNoticed(alert) || !untouched(alert)) continue;
       await this.alerts.decide(id, {
         verdict: 'expected',
         release: false,
@@ -238,7 +241,7 @@ export class VigilCore {
   async clearNoticedUpTo(at: number): Promise<number> {
     const ids = this.store
       .listAlerts({ status: 'open', limit: -1 })
-      .filter((a) => isNoticed(a) && a.createdAt <= at)
+      .filter((a) => isNoticed(a) && untouched(a) && a.createdAt <= at)
       .map((a) => a.id);
     return this.clearNoticed(ids);
   }

@@ -5,7 +5,7 @@ import { vigil } from '../api';
 import { seenTimes, timeAgo } from '../format';
 import type { AlertView, WatchSummary } from '../../../shared/ipc';
 import { Segmented } from './ui';
-import { pileUp } from '../../../shared/piles';
+import { pileUp, untouched } from '../../../shared/piles';
 
 /** Proof Vigil is running, in one line. */
 export function WatchLine({ watch }: { watch: WatchSummary }) {
@@ -69,6 +69,7 @@ export function NoticedList({
   limit,
   toggle = true,
   total,
+  clearable,
 }: {
   alerts: readonly Alert[];
   view: AlertView;
@@ -81,6 +82,11 @@ export function NoticedList({
    * open alerts, so this can be more than `alerts`; the header shows it.
    */
   total?: number | undefined;
+  /**
+   * How many "Those were me" closes (the status's noticedClearable): those
+   * with an action taken or an AI suggestion waiting are left for a look.
+   */
+  clearable?: number | undefined;
 }) {
   const [busy, setBusy] = useState(false);
   // When the confirm opened, and how many it offered: only those are cleared.
@@ -96,10 +102,12 @@ export function NoticedList({
   const more = view === 'more';
   const shown = limit ? alerts.slice(0, limit) : alerts;
   const count = Math.max(total ?? 0, alerts.length);
+  const closable = clearable ?? alerts.filter(untouched).length;
+  const kept = count - closable;
   const confirming = confirm !== undefined;
   const ask = () => {
     setCleared(undefined);
-    setConfirm({ at: Date.now(), count });
+    setConfirm({ at: Date.now(), count: closable });
   };
   const clear = async () => {
     if (!confirm) return;
@@ -111,7 +119,7 @@ export function NoticedList({
       setConfirm(undefined);
     }
   };
-  const offered = confirm?.count ?? count;
+  const offered = confirm?.count ?? closable;
   const these = offered === 1 ? 'this one' : `all ${offered}`;
   return (
     <section className="col noticed" style={{ gap: 6 }}>
@@ -131,7 +139,7 @@ export function NoticedList({
               {more ? 'Show me less' : 'Show me more'}
             </button>
           )}
-          {!confirming && (
+          {!confirming && closable > 0 && (
             <button
               type="button"
               className="btn sm ghost"
@@ -139,7 +147,7 @@ export function NoticedList({
               title="Marks these as expected. Rules and blocks stay as they are."
               onClick={ask}
             >
-              {count === 1 ? 'That was me' : `Those were me (${count})`}
+              {closable === 1 && count === 1 ? 'That was me' : `Those were me (${closable})`}
             </button>
           )}
         </span>
@@ -149,6 +157,8 @@ export function NoticedList({
           <span className="t-small grow">
             Mark {these} as you? They move to History as expected. Rules and blocks stay as they
             are.
+            {kept > 0 &&
+              ` ${kept === 1 ? 'One has' : `${kept} have`} an action or AI suggestion on ${kept === 1 ? 'it' : 'them'}, so ${kept === 1 ? 'it stays' : 'they stay'} for you to open.`}
           </span>
           <button type="button" className="btn sm ghost" onClick={() => setConfirm(undefined)}>
             Cancel
