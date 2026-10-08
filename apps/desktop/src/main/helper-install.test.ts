@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -5,9 +6,12 @@ import { describe, expect, it } from 'vitest';
 import {
   adminScriptArgs,
   helperBundleDir,
+  helperDigest,
   helperInstallCommand,
+  helperScriptFiles,
   helperMatch,
   installedHelperFiles,
+  rootStageScript,
   runHelperScript,
   shellQuote,
   type RunFile,
@@ -20,6 +24,10 @@ function bundle() {
   for (const f of ['install.sh', 'uninstall.sh', 'node']) writeFileSync(join(dir, f), '');
   mkdirSync(join(dir, 'linux'));
   for (const f of ['install.sh', 'uninstall.sh']) writeFileSync(join(dir, 'linux', f), `# ${f}`);
+  for (const f of ['helper.mjs', 'vigil-helper', 'com.vigilathome.helper.plist'])
+    writeFileSync(join(dir, f), f);
+  for (const f of ['vigil-helper', 'vigil-helper.service', 'com.vigilathome.helper.policy'])
+    writeFileSync(join(dir, 'linux', f), f);
   return { res, dir };
 }
 
@@ -42,22 +50,79 @@ describe('helper install', () => {
 
   it('gives a Terminal command that survives spaces and quotes in the path', () => {
     const { dir } = bundle();
+    const files = helperScriptFiles('install', 'darwin');
     const cmd = helperInstallCommand(dir, 'darwin')!;
-    expect(cmd).toBe(`sudo ${shellQuote(join(dir, 'install.sh'))}`);
-    expect(helperInstallCommand(dir, 'linux')).toBe(
-      `d=$(mktemp -d) && cp -R ${shellQuote(dir)}/. "$d" && sudo sh "$d/linux/install.sh"`,
+    expect(cmd).toBe(
+      `sudo sh -c ${shellQuote(rootStageScript('darwin'))} vigil-helper-setup ${shellQuote(dir)} ` +
+        [files[0]!, helperDigest(dir, files), ...files].map(shellQuote).join(' '),
     );
+    const linux = helperInstallCommand(dir, 'linux')!;
+    expect(
+      linux.startsWith(`d=$(mktemp -d) && cp -R ${shellQuote(dir)}/. "$d" && sudo sh -c `),
+    ).toBe(true);
+    expect(linux).toContain(` vigil-helper-setup "$d" 'linux/install.sh' `);
     expect(shellQuote("a b'c")).toBe(`'a b'\\''c'`);
     expect(helperInstallCommand(null)).toBeUndefined();
+    // A build missing a file the script needs offers no command.
+    rmSync(join(dir, 'node'));
+    expect(helperInstallCommand(dir, 'darwin')).toBeUndefined();
   });
 
-  it('passes the script path to osascript as an argument, never inside the AppleScript', () => {
-    const path = '/Applications/Evil" & do shell script "rm -rf ~".app/helper/install.sh';
-    const args = adminScriptArgs(path, 'install');
-    expect(args.at(-1)).toBe(path);
-    expect(args.slice(0, -1).join(' ')).not.toContain('rm -rf');
-    expect(args.join(' ')).toContain('quoted form of item 1 of argv');
-    expect(args.join(' ')).toContain('with administrator privileges');
+  it('runs only a root-owned copy that matches the files the app checked', () => {
+    const { dir } = bundle();
+    const out = mkdtempSync(join(tmpdir(), 'out-'));
+    writeFileSync(
+      join(dir, 'linux', 'install.sh'),
+      `cd "$(dirname "$0")" && pwd > ${shellQuote(join(out, 'ran-in'))}; cat "$(dirname "$0")/../helper.mjs" > ${shellQuote(join(out, 'saw'))}`,
+    );
+    const files = helperScriptFiles('install', 'linux');
+    const want = helperDigest(dir, files);
+    const stage = (src: string) =>
+      execFileSync(
+        '/bin/sh',
+        ['-c', rootStageScript('linux'), 'vigil-helper-setup', src, files[0]!, want, ...files],
+        { stdio: 'pipe' },
+      );
+
+    stage(dir);
+    expect(readFileSync(join(out, 'saw'), 'utf8')).toBe('helper.mjs');
+    const ranIn = readFileSync(join(out, 'ran-in'), 'utf8').trim();
+    expect(ranIn.startsWith(dir)).toBe(false);
+    // The private copy is gone once the script has run.
+    expect(existsSync(ranIn)).toBe(false);
+
+    // A file changed after the app checked it: nothing runs.
+    rmSync(join(out, 'saw'));
+    writeFileSync(join(dir, 'helper.mjs'), 'something else');
+    expect(() => stage(dir)).toThrow(/changed while installing/);
+    expect(existsSync(join(out, 'saw'))).toBe(false);
+
+    // Moving bytes from one file into the next changes the digest too.
+    writeFileSync(join(dir, 'helper.mjs'), 'helper');
+    writeFileSync(join(dir, 'node'), '.mjs');
+    expect(helperDigest(dir, files)).not.toBe(want);
+  });
+
+  it('passes the command to osascript as an argument, never inside the AppleScript', () => {
+    const { res } = bundle();
+    const evil = join(res, 'Evil" & do shell script "rm -rf ~".app');
+    mkdirSync(evil);
+    const { dir } = { dir: join(res, 'helper') };
+    execFileSync('cp', ['-R', dir, join(evil, 'helper')]);
+    const seen: string[][] = [];
+    const ok: RunFile = async (file, args) => {
+      seen.push([file, ...args]);
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    return runHelperScript('install', join(evil, 'helper'), ok, 'darwin').then((r) => {
+      expect(r).toEqual({ ok: true });
+      const args = seen[0]!.slice(1);
+      expect(args.slice(0, -1).join(' ')).not.toContain('rm -rf');
+      expect(args.join(' ')).toContain('do shell script (item 1 of argv)');
+      expect(args.join(' ')).toContain('with administrator privileges');
+      expect(args.at(-1)).toContain(shellQuote(join(evil, 'helper')));
+      expect(adminScriptArgs('x', 'install').at(-1)).toBe('x');
+    });
   });
 
   it('reports success, a closed password dialog, and failures', async () => {
@@ -71,7 +136,7 @@ describe('helper install', () => {
       };
     expect(await runHelperScript('install', dir, answer(0), 'darwin')).toEqual({ ok: true });
     expect(seen[0]?.[0]).toBe('/usr/bin/osascript');
-    expect(seen[0]?.at(-1)).toBe(join(dir, 'install.sh'));
+    expect(seen[0]?.at(-1)).toContain(` ${shellQuote(dir)} 'install.sh' `);
 
     expect(
       await runHelperScript(
@@ -90,12 +155,12 @@ describe('helper install', () => {
         'darwin',
       ),
     ).toEqual({ ok: false, error: 'The helper did not start.' });
-    expect(seen[2]?.at(-1)).toBe(join(dir, 'uninstall.sh'));
+    expect(seen[2]?.at(-1)).toContain(` 'uninstall.sh' `);
 
     expect(await runHelperScript('install', null, answer(0))).toMatchObject({ ok: false });
   });
 
-  it('on Linux, runs a private copy of the script through pkexec', async () => {
+  it('on Linux, has pkexec copy and check a private copy of the files', async () => {
     const { dir } = bundle();
     const seen: string[][] = [];
     let staged = '';
@@ -103,16 +168,27 @@ describe('helper install', () => {
       (code: number, stderr = ''): RunFile =>
       async (file, args) => {
         seen.push([file, ...args]);
-        staged = args[1]!;
-        // The copy is there while pkexec runs it.
-        expect(readFileSync(staged, 'utf8')).toBe(
-          `# ${staged.endsWith('uninstall.sh') ? 'uninstall' : 'install'}.sh`,
+        staged = args[4]!;
+        // The copy is there while pkexec runs, with the script it names.
+        expect(readFileSync(join(staged, args[5]!), 'utf8')).toBe(
+          `# ${args[5]!.endsWith('uninstall.sh') ? 'uninstall' : 'install'}.sh`,
         );
         return { code, stdout: '', stderr };
       };
     expect(await runHelperScript('install', dir, answer(0), 'linux')).toEqual({ ok: true });
-    expect(seen[0]?.slice(0, 2)).toEqual(['/usr/bin/pkexec', '/bin/sh']);
-    expect(staged).toMatch(/vigil-helper-[^/]+\/linux\/install\.sh$/);
+    const files = helperScriptFiles('install', 'linux');
+    expect(seen[0]).toEqual([
+      '/usr/bin/pkexec',
+      '/bin/sh',
+      '-c',
+      rootStageScript('linux'),
+      'vigil-helper-setup',
+      staged,
+      'linux/install.sh',
+      helperDigest(dir, files),
+      ...files,
+    ]);
+    expect(staged).toMatch(/vigil-helper-[^/]+$/);
     expect(staged.startsWith(dir)).toBe(false);
     // And it is gone afterwards.
     expect(existsSync(staged)).toBe(false);
@@ -129,8 +205,13 @@ describe('helper install', () => {
         'linux',
       ),
     ).toEqual({ ok: false, error: 'The helper needs systemd.' });
-    expect(staged).toMatch(/linux\/uninstall\.sh$/);
+    expect(seen.at(-1)?.[6]).toBe('linux/uninstall.sh');
     expect(await runHelperScript('install', dir, answer(0), 'win32')).toMatchObject({ ok: false });
+    rmSync(join(dir, 'node'));
+    expect(await runHelperScript('install', dir, answer(0), 'linux')).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/missing/),
+    });
   });
 
   it('runs install.sh for an update, with a dialog that says why', async () => {
@@ -141,10 +222,10 @@ describe('helper install', () => {
       return { code: 0, stdout: '', stderr: '' };
     };
     expect(await runHelperScript('update', dir, ok, 'darwin')).toEqual({ ok: true });
-    expect(seen[0]?.at(-1)).toBe(join(dir, 'install.sh'));
+    expect(seen[0]?.at(-1)).toContain(` 'install.sh' `);
     expect(seen[0]?.join(' ')).toContain('was updated and wants to update its helper');
     expect(await runHelperScript('update', dir, ok, 'linux')).toEqual({ ok: true });
-    expect(seen[1]?.at(-1)).toMatch(/linux\/install\.sh$/);
+    expect(seen[1]?.[6]).toBe('linux/install.sh');
   });
 
   for (const platform of ['darwin', 'linux'] as const) {
