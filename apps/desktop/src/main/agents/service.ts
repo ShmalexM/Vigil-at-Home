@@ -83,7 +83,7 @@ import {
 } from './endpoint.js';
 import { hookFiles, hookSnippet, mcpSnippet } from './hook-snippet.js';
 import { processTableReader } from './ps.js';
-import { VigilTools, type StatusFacts } from './tools.js';
+import { VigilTools, type RuleFacts, type StatusFacts } from './tools.js';
 
 const KEY_PREFS = 'agents.prefs';
 const KEY_HOOK = 'agents.hook';
@@ -317,6 +317,9 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
       events: (ids) => o.store.getEventViews(ids),
       ruleName: (id) => o.detector.engine.getRule(id)?.name ?? o.store.getRule(id)?.name,
       searchEvents: (q) => o.store.searchEvents(q),
+      rules: () => this.ruleFacts(),
+      ruleHits: (since) => o.store.ruleMatchCounts(since),
+      actions: (limit) => o.store.listActions({ limit }),
       agents: () => this.listAgents(),
       agentSessions: (id, limit) => o.store.listAgentSessions(id, undefined, limit),
       agentSession: (id, rows) => this.sessionDetail(id, rows, rows),
@@ -713,6 +716,20 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
   private saveToolUse(): void {
     this.o.store.setSetting(KEY_TOOLS, this.toolUse);
     this.toolUseSavedAt = this.now();
+  }
+
+  /** The rules detection runs, for list_rules and get_rule: no conditions, exclusions counted. */
+  private ruleFacts(): RuleFacts[] {
+    const exceptions = this.o.detector.stores.exceptions;
+    return this.o.detector.engine.listRules().map((r) => ({
+      id: r.id,
+      name: r.name,
+      description: r.description,
+      mode: r.effectiveMode,
+      severity: r.severity,
+      exclusions:
+        r.exclusions.length + exceptions.forRule(r.id).filter((x) => x.ruleId === r.id).length,
+    }));
   }
 
   /** What vigil_status reports. */
