@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const sayToLead = vi.fn();
 vi.mock('./api', () => ({ vigil: { sayToLead: (...a: unknown[]) => sayToLead(...a) } }));
-const { leadChat, leadChatState, resetLeadChat } = await import('./lead-chat');
+const { STARTERS, contextStarter, leadChat, leadChatState, resetLeadChat } =
+  await import('./lead-chat');
 const snapshot = async () => leadChatState();
 
 describe('the Lead dog chat box', () => {
@@ -50,5 +51,27 @@ describe('the Lead dog chat box', () => {
     expect(await snapshot()).toMatchObject({ open: true, draft: 'half written' });
     leadChat.close();
     expect((await snapshot()).open).toBe(false);
+  });
+});
+
+describe('the starter questions', () => {
+  it('asks about what is open, and never calls an Activity filter an event', () => {
+    expect(contextStarter({ page: 'alerts', selected: 'a1' })).toBe('What’s this alert?');
+    expect(contextStarter({ page: 'rules', selected: 'r1' })).toBe('What’s this rule?');
+    expect(contextStarter({ page: 'agents', selected: 'claude-code' })).toBe(
+      'What has this agent done?',
+    );
+    expect(contextStarter({ page: 'agents', selected: 'claude-code_0123456789abcdef' })).toBe(
+      'What happened in this session?',
+    );
+    expect(contextStarter({ page: 'activity', selected: 'agent-codex' })).toBe(
+      'What has this agent done?',
+    );
+    expect(contextStarter({ page: 'activity', selected: 'session-0123456789abcdef' })).toBe(
+      'What happened in this session?',
+    );
+    expect(contextStarter({ page: 'activity', selected: 'e1' })).toBeUndefined();
+    expect(contextStarter({ page: 'home' })).toBeUndefined();
+    expect(STARTERS[0]).toBe('Is my Mac OK right now?');
   });
 });

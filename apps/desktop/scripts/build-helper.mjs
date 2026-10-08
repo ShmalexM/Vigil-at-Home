@@ -4,7 +4,7 @@
 //                               and vigil-hook.mjs (the Claude Code pre-flight hook, bundled)
 //                               and linux/ (the systemd unit, polkit policy and Linux scripts)
 //   build/helper/<os>-<arch>/   node, Node.js's own binary for that OS and chip
-//                               (signed and notarized on macOS)
+//                               (signed and notarized on macOS), and NODE-LICENSE
 //   build/helper/dev-<arch>/    both together, which a development build installs from
 // electron-builder copies common and <os>-<arch> into the app's resources/helper.
 //
@@ -12,6 +12,7 @@
 //   --os defaults to this machine's. --dev builds for this machine only.
 
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
@@ -20,6 +21,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -27,6 +29,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { BUNDLE_OPTIONS } from './bundle-options.mjs';
+import { writeLicenses } from './third-party-licenses.mjs';
 
 /** The Node.js release the helper runs on. Bump with the repo's Node version. */
 export const HELPER_NODE_VERSION = 'v22.22.2';
@@ -71,18 +74,26 @@ async function bundle() {
   rmSync(common, { recursive: true, force: true });
   mkdirSync(common, { recursive: true });
   const options = BUNDLE_OPTIONS;
-  await build({
+  const helper = await build({
     ...options,
+    metafile: true,
     entryPoints: [join(repo, 'packages/helper/src/cli.ts')],
     outfile: join(common, 'helper.mjs'),
   });
   // The pre-flight hook runs as the user, from the app bundle, on the same
   // signed node. install.sh doesn't copy it: nothing about it runs as root.
-  await build({
+  const hook = await build({
     ...options,
+    metafile: true,
     entryPoints: [join(repo, 'packages/agent-hook/src/cli.ts')],
     outfile: join(common, 'vigil-hook.mjs'),
   });
+  writeLicenses(
+    'helper',
+    [helper, hook].flatMap((r) =>
+      Object.keys(r.metafile.inputs).map((f) => join(process.cwd(), f)),
+    ),
+  );
   for (const f of ['install.sh', 'uninstall.sh', 'vigil-helper']) {
     copyFileSync(join(app, 'helper', f), join(common, f));
     chmodSync(join(common, f), 0o755);
@@ -122,6 +133,7 @@ async function node(arch) {
   const target = join(dir, 'node');
   const name = `node-${HELPER_NODE_VERSION}-${os}-${arch}`;
   const stamp = join(dir, 'VERSION');
+  const license = join(dir, 'NODE-LICENSE');
   const base = `https://nodejs.org/dist/${HELPER_NODE_VERSION}`;
   const file = `${name}.tar.gz`;
   const expected = HELPER_NODE_SHA256[file];
@@ -138,6 +150,7 @@ async function node(arch) {
   if (
     !process.env.CI &&
     existsSync(target) &&
+    existsSync(license) &&
     existsSync(stamp) &&
     readFileSync(stamp, 'utf8') === `${name} ${expected} ${sha256(readFileSync(target))}`
   ) {
@@ -154,6 +167,9 @@ async function node(arch) {
   const tmp = join(dir, file);
   writeFileSync(tmp, tarball);
   execFileSync('tar', ['-xzf', tmp, '-C', dir, '--strip-components=2', `${name}/bin/node`]);
+  // Node's LICENSE covers the libraries inside the binary (OpenSSL, V8, ICU...).
+  execFileSync('tar', ['-xzf', tmp, '-C', dir, '--strip-components=1', `${name}/LICENSE`]);
+  renameSync(join(dir, 'LICENSE'), license);
   rmSync(tmp);
   chmodSync(target, 0o755);
   writeFileSync(stamp, `${name} ${expected} ${sha256(readFileSync(target))}`);
@@ -170,7 +186,35 @@ function devDir(arch) {
   console.log(`development helper ready in ${dir}`);
 }
 
+/**
+ * electron-builder drops Electron's and Chromium's licenses from Mac builds and
+ * only warns when an extraResources source is missing, so copy them here and
+ * fail loudly instead. electron-builder.yml ships build/electron-licenses.
+ */
+function electronLicenses() {
+  const electron = dirname(
+    createRequire(join(app, 'package.json')).resolve('electron/package.json'),
+  );
+  const dist = join(electron, 'dist');
+  // CI installs can skip Electron's own download (electron-builder fetches its
+  // own copy), so fetch it the way Electron's postinstall does.
+  if (!existsSync(join(dist, 'LICENSES.chromium.html'))) {
+    execFileSync(process.execPath, [join(electron, 'install.js')], { stdio: 'inherit' });
+  }
+  const dir = join(app, 'build', 'electron-licenses');
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  for (const [from, to] of [
+    ['LICENSE', 'LICENSE.electron.txt'],
+    ['LICENSES.chromium.html', 'LICENSES.chromium.html'],
+  ]) {
+    if (!existsSync(join(dist, from))) throw new Error(`${join(dist, from)} is missing`);
+    copyFileSync(join(dist, from), join(dir, to));
+  }
+}
+
 await bundle();
+if (os === 'darwin' && !dev) electronLicenses();
 if (!skipNode) {
   for (const arch of arches) {
     await node(arch);
