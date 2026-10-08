@@ -5,7 +5,9 @@
 import { basename, dirname } from 'node:path';
 import { lstatSync, readFileSync } from 'node:fs';
 import type { System } from '../system.js';
+import { PROTECTED_LABEL_PREFIXES } from '../config.js';
 import { ActionError } from './errors.js';
+import { runsProtectedProgram } from './protectedSet.js';
 import {
   quarantine,
   resolveTarget,
@@ -44,13 +46,7 @@ export function launchdDomain(
  * Launch items of Vigil itself and of the tools it relies on. They are never
  * unloaded, whatever folder they sit in or whatever they are named on disk.
  */
-export const PROTECTED_LABEL_PREFIXES = [
-  'com.vigilathome.',
-  'com.northpolesec.santa',
-  'com.google.santa',
-  'io.osquery.',
-  'com.facebook.osqueryd',
-];
+export { PROTECTED_LABEL_PREFIXES };
 
 function isProtectedLabel(name: string): boolean {
   const lower = name.toLowerCase();
@@ -62,6 +58,17 @@ async function readLabel(sys: System, path: string): Promise<string | undefined>
   const label = r.stdout.trim();
   // Labels are reverse-DNS style; refuse anything that could confuse launchctl.
   return r.code === 0 && /^[A-Za-z0-9._-]{1,255}$/.test(label) ? label : undefined;
+}
+
+/** The program a launch item runs: Program, else the first of ProgramArguments. */
+async function readPrograms(sys: System, path: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const key of ['Program', 'ProgramArguments.0']) {
+    const r = await sys.run('plutil', ['-extract', key, 'raw', '-o', '-', path]);
+    const value = r.stdout.trim();
+    if (r.code === 0 && value) out.push(value);
+  }
+  return out;
 }
 
 export async function disablePersistence(
@@ -93,6 +100,14 @@ export async function disablePersistence(
   const label = await readLabel(sys, path);
   if (label && isProtectedLabel(label))
     throw new ActionError('refused', `${label} belongs to Vigil or its sensors`);
+  // Whatever it is called, an item that runs Vigil or a sensor is theirs.
+  for (const program of await readPrograms(sys, path)) {
+    if (runsProtectedProgram(program, opts))
+      throw new ActionError(
+        'refused',
+        `${basename(path)} runs ${program}, part of Vigil or its sensors`,
+      );
+  }
   const domain = launchdDomain(path, st.uid, sys.consoleUid());
   let wasLoaded = false;
   if (label) {

@@ -237,6 +237,7 @@ describe('Linux startup items', () => {
     expect(existsSync(path)).toBe(false);
     expect(sys.active.has('user:alex miner.service')).toBe(false);
     expect(sys.runs.map((r) => r.args.join(' '))).toEqual([
+      '--user -M alex@ show -p Id,Names,ExecStart miner.service',
       '--user -M alex@ is-active --quiet miner.service',
       '--user -M alex@ stop miner.service',
       '--user -M alex@ daemon-reload',

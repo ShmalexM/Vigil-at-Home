@@ -211,12 +211,103 @@ export const LINUX_PROTECTED_PROCESS_PREFIXES = [
   '/opt/Vigil at Home/',
 ];
 
+/**
+ * The files of Vigil itself and of the tools it relies on (Santa, osquery),
+ * whatever the protected lists above say about their folders. Nothing the
+ * helper does may move, unload or stop them, or the folders they sit in.
+ */
+export const SERVICE_PATHS = [
+  '/Library/PrivilegedHelperTools/vigil-helper',
+  '/Library/PrivilegedHelperTools/vigil-helper.d',
+  '/Library/LaunchDaemons/com.vigilathome.helper.plist',
+  '/Library/Application Support/Vigil',
+  '/Library/Logs/Vigil',
+  '/var/run/vigil-helper.sock',
+  '/var/run/vigil-approvals',
+  '/Applications/Vigil at Home.app',
+  '/Applications/Vigil.app',
+  '/Applications/Santa.app',
+  '/var/db/santa',
+  '/opt/osquery',
+  '/var/osquery',
+  '/var/log/osquery',
+  '/usr/local/bin/osqueryd',
+  '/Library/LaunchDaemons/io.osquery.agent.plist',
+];
+
+/** Launch items whose label or file name starts with one of these belong to Vigil or its sensors. */
+export const PROTECTED_LABEL_PREFIXES = [
+  'com.vigilathome.',
+  'com.northpolesec.santa',
+  'com.google.santa',
+  'io.osquery.',
+  'com.facebook.osqueryd',
+];
+
+/** Units of Vigil itself and of the tools it relies on, never stopped or moved. */
+export const PROTECTED_UNITS = new Set([
+  'vigil-helper.service',
+  'osqueryd.service',
+  'fapolicyd.service',
+]);
+
+/** Where systemd looks for unit files; protected units and their drop-ins are found there. */
+export const LINUX_UNIT_DIRS = [
+  '/etc/systemd/system',
+  '/etc/systemd/user',
+  '/run/systemd/system',
+  '/usr/local/lib/systemd/system',
+  '/usr/lib/systemd/system',
+  '/lib/systemd/system',
+];
+
+export const LINUX_SERVICE_PATHS = [
+  '/usr/libexec/vigil-helper',
+  '/usr/libexec/vigil-helper.d',
+  '/var/lib/vigil',
+  '/run/vigil-helper.sock',
+  '/run/vigil-approvals',
+  '/opt/Vigil at Home',
+  '/usr/share/polkit-1/actions/com.vigilathome.helper.policy',
+  '/opt/osquery',
+  '/etc/osquery',
+  '/var/osquery',
+  '/var/log/osquery',
+  '/usr/bin/osqueryd',
+  '/etc/fapolicyd',
+  '/usr/sbin/fapolicyd',
+  '/usr/bin/fapolicyd',
+  '/var/lib/fapolicyd',
+  '/run/fapolicyd',
+  ...LINUX_UNIT_DIRS.flatMap((dir) =>
+    [...PROTECTED_UNITS].flatMap((unit) => [`${dir}/${unit}`, `${dir}/${unit}.d`]),
+  ),
+];
+
 export interface Protection {
   prefixes: string[];
   exact: Set<string>;
   processPrefixes: string[];
   /** Home folders and their main subfolders, which are never moved as a whole. */
   homes: RegExp[];
+  /** Vigil's and its sensors' own files (SERVICE_PATHS). */
+  services: string[];
+  /** Folders whose entries are checked by name for Vigil's and the sensors' launch items or units. */
+  serviceItemDirs: string[];
+  /** Whether a file name in serviceItemDirs is one of Vigil's or the sensors' own items. */
+  isServiceItem: (name: string) => boolean;
+  /** Where home folders live, and the subfolders of each that are never moved as a whole. */
+  homeRoot: string;
+  homeSubfolders: string[];
+}
+
+function isProtectedLaunchName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return PROTECTED_LABEL_PREFIXES.some((p) => lower.startsWith(p));
+}
+
+function isProtectedUnitName(name: string): boolean {
+  return [...PROTECTED_UNITS].some((u) => name === u || name.startsWith(u + '.'));
 }
 
 const MAC_PROTECTION: Protection = {
@@ -224,6 +315,11 @@ const MAC_PROTECTION: Protection = {
   exact: PROTECTED_EXACT,
   processPrefixes: PROTECTED_PROCESS_PREFIXES,
   homes: [/^\/Users\/[^/]+$/i, /^\/Users\/[^/]+\/(Library|Desktop|Documents|Downloads)$/i],
+  services: SERVICE_PATHS,
+  serviceItemDirs: ['/Library/LaunchDaemons', '/Library/LaunchAgents'],
+  isServiceItem: isProtectedLaunchName,
+  homeRoot: '/Users',
+  homeSubfolders: ['Library', 'Desktop', 'Documents', 'Downloads'],
 };
 
 const LINUX_PROTECTION: Protection = {
@@ -233,6 +329,19 @@ const LINUX_PROTECTION: Protection = {
   homes: [
     /^\/home\/[^/]+$/,
     /^\/home\/[^/]+\/(\.config|\.local|\.local\/share|\.ssh|Desktop|Documents|Downloads)$/,
+  ],
+  services: LINUX_SERVICE_PATHS,
+  serviceItemDirs: LINUX_UNIT_DIRS,
+  isServiceItem: isProtectedUnitName,
+  homeRoot: '/home',
+  homeSubfolders: [
+    '.config',
+    '.local',
+    '.local/share',
+    '.ssh',
+    'Desktop',
+    'Documents',
+    'Downloads',
   ],
 };
 

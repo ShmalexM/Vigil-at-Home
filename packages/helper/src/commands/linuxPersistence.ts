@@ -13,8 +13,9 @@
 import { basename, dirname } from 'node:path';
 import { lstatSync, readFileSync } from 'node:fs';
 import type { System } from '../system.js';
-import { protectionFor } from '../config.js';
+import { PROTECTED_UNITS, protectionFor } from '../config.js';
 import { ActionError } from './errors.js';
+import { runsProtectedProgram } from './protectedSet.js';
 import { quarantine, resolveTarget, restore, type QuarantineOptions } from './quarantine.js';
 import type { PersistenceRecord } from './persistence.js';
 
@@ -69,11 +70,7 @@ function scopeOf(domain: string): UnitScope {
 }
 
 /** Units of Vigil itself and of the tools it relies on, never stopped or moved. */
-export const PROTECTED_UNITS = new Set([
-  'vigil-helper.service',
-  'osqueryd.service',
-  'fapolicyd.service',
-]);
+export { PROTECTED_UNITS };
 
 /** /etc is protected from quarantine in general; its startup folders are the exception. */
 function startupQuarantine(opts: QuarantineOptions): QuarantineOptions {
@@ -83,6 +80,35 @@ function startupQuarantine(opts: QuarantineOptions): QuarantineOptions {
     platform: 'linux',
     protectedPrefixes: base.filter((p) => p !== '/etc/'),
   };
+}
+
+/** The programs a unit's ExecStart= lines or a desktop entry's Exec= line start. */
+export function startCommands(text: string, isDesktop: boolean): string[] {
+  const key = isDesktop ? /^Exec=(.*)$/ : /^ExecStart(?:Pre|Post)?=(.*)$/;
+  const out: string[] = [];
+  for (const line of text.split('\n')) {
+    const m = key.exec(line.trim());
+    if (!m) continue;
+    // systemd prefixes like "-" (ignore failure) or "@" (argv0) come before the path.
+    const cmd = m[1]!.trim().replace(/^[-@:+!|]+/, '');
+    const first = cmd.startsWith('"') ? cmd.slice(1).split('"')[0] : cmd.split(/\s+/)[0];
+    if (first) out.push(first);
+  }
+  return out;
+}
+
+/** Names and program paths from `systemctl show -p Id,Names,ExecStart`. */
+export function parseShow(out: string): { names: string[]; programs: string[] } {
+  const names: string[] = [];
+  const programs: string[] = [];
+  for (const line of out.split('\n')) {
+    if (line.startsWith('Id=')) names.push(line.slice(3).trim());
+    else if (line.startsWith('Names=')) names.push(...line.slice(6).trim().split(/\s+/));
+    else if (line.startsWith('ExecStart=')) {
+      for (const m of line.matchAll(/(?:^|[{;]\s*)(?:path|argv\[\])=(\S+)/g)) programs.push(m[1]!);
+    }
+  }
+  return { names: names.filter(Boolean), programs };
 }
 
 export async function disableLinuxPersistence(
@@ -115,9 +141,36 @@ export async function disableLinuxPersistence(
     throw new ActionError('not_found', `${path} does not exist`);
   }
   if (!st.isFile()) throw new ActionError('refused', `${path} is not a regular file`);
-  readFileSync(path); // readable
+  const text = readFileSync(path, 'utf8');
 
   const scope = unitScope(path, st.uid, passwd);
+  // Whatever it is called, an item that is or runs Vigil or a sensor is theirs:
+  // check the names systemd knows the unit by (aliases too) and what it runs.
+  const names = new Set<string>();
+  const programs = startCommands(text, isDesktop);
+  if (scope.kind !== 'autostart') {
+    const show = await sys.run('systemctl', [
+      ...scopeArgs(scope),
+      'show',
+      '-p',
+      'Id,Names,ExecStart',
+      name,
+    ]);
+    if (show.code === 0) {
+      const parsed = parseShow(show.stdout);
+      parsed.names.forEach((n) => names.add(n));
+      programs.push(...parsed.programs);
+    }
+  }
+  for (const n of names) {
+    if (PROTECTED_UNITS.has(n))
+      throw new ActionError('refused', `${name} is ${n}, part of Vigil or its sensors`);
+  }
+  const linux = { ...opts, platform: 'linux' as const };
+  for (const program of programs) {
+    if (runsProtectedProgram(program, linux))
+      throw new ActionError('refused', `${name} runs ${program}, part of Vigil or its sensors`);
+  }
   let wasLoaded = false;
   if (scope.kind !== 'autostart') {
     const args = scopeArgs(scope);
