@@ -20,7 +20,9 @@
 // (loosening(), checked by the executor). So does naming anything new as
 // Vigil's own (a path, an AppImage, a program hash): the app sends that
 // apart from the rules (self.grant, selfLoosening()), so the rules never wait
-// on that password. Indicator lists change every day as
+// on that password. Until that grant is approved, an app running from
+// outside the installer's folder is not Vigil's own to these rules, so a rule
+// that matches it may act on it like any other program. Indicator lists change every day as
 // feeds age entries out, so an entry a list drops keeps blocking for
 // RETIRE_MS instead, and a list cannot drop more than RETIRED_MAX entries in
 // that time. The saved policy and its revision live in a root-owned file the
