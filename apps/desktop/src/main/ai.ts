@@ -4,6 +4,8 @@ import {
   API_PRESETS,
   createVigilAi,
   defaultAiSettings,
+  MONTHLY_CAP_HELD,
+  PLAN_LIMITS_HELD,
   isCodexSignInShared,
   shareCodexSignIn,
   stopSharingCodexSignIn,
@@ -29,6 +31,7 @@ import {
   type AiView,
 } from '../shared/ai.js';
 import type { AlertDetail, EventOutcome } from '../shared/ipc.js';
+import type { HelperHeld } from '../shared/agents.js';
 import type { DogNoteInput, HelperId } from '../shared/pack.js';
 import type { PackAi } from './pack/service.js';
 import type { ApiKeyProvider, SetupMode } from '../shared/setup.js';
@@ -70,6 +73,13 @@ const REVIEW_PROVIDERS: ProviderId[] = ['claude', 'codex', 'api'];
  * (a burst) go unexplained, so AI work never crowds out Vigil's routine jobs.
  */
 const MAX_QUEUED_BACKGROUND = 3;
+
+/**
+ * Labelling waits while the Mac is busy and retries what failed, so a pause
+ * comes and goes; it is only worth a line once it has lasted this long. The
+ * explainer's is shown at once: an alert is waiting on it.
+ */
+const LABELLER_HELD_SHOWN_AFTER_MS = 60 * 60_000;
 
 const NAMES: Record<AiProvider, string> = {
   claude: 'Claude Code',
@@ -146,6 +156,12 @@ export class AiBridge extends EventEmitter<{
   private toolQueuedAt: number[] = [];
   /** The model behind recent runs, so an explanation can say who wrote it. */
   private readonly models = new Map<string, string>();
+  /**
+   * Why the explainer or labeller has been trying without reaching an AI
+   * since its last answer (the cap, nothing ready, a busy Mac). Cleared by
+   * its next answer. So AI work that stops never stops silently.
+   */
+  private readonly held = new Map<'explainer' | 'labeller', HelperHeld>();
 
   constructor(private readonly o: AiBridgeOptions) {
     super();
@@ -247,6 +263,10 @@ export class AiBridge extends EventEmitter<{
 
   /** Every run, wherever it went, lands in the Usage page's store. */
   private record(entry: PromptLogEntry): void {
+    const helper =
+      entry.purpose === 'explain' ? 'explainer' : entry.purpose === 'classify' ? 'labeller' : null;
+    if (helper && entry.provider === null) this.hold(helper, heldWhy(entry.outcome, entry.detail));
+    else if (helper && entry.outcome === 'ok') this.unhold(helper);
     if (entry.model) {
       this.models.set(entry.id, entry.model);
       if (this.models.size > 100) this.models.delete(this.models.keys().next().value!);
@@ -256,6 +276,29 @@ export class AiBridge extends EventEmitter<{
     } catch (err) {
       console.error('[ai] recording a run failed:', err);
     }
+  }
+
+  /**
+   * Why the explainer or labeller hasn't been answering, when it has been
+   * trying since its last answer without reaching an AI. For the Agents page.
+   */
+  heldBack(helper: HelperId): HelperHeld | undefined {
+    if (helper !== 'explainer' && helper !== 'labeller') return undefined;
+    const h = this.held.get(helper);
+    if (!h) return undefined;
+    if (helper === 'labeller' && this.now() - h.since < LABELLER_HELD_SHOWN_AFTER_MS)
+      return undefined;
+    return { ...h };
+  }
+
+  private hold(helper: 'explainer' | 'labeller', why: string): void {
+    const prev = this.held.get(helper);
+    this.held.set(helper, { since: prev?.since ?? this.now(), why });
+    if (prev?.why !== why) this.emit('changed');
+  }
+
+  private unhold(helper: 'explainer' | 'labeller'): void {
+    if (this.held.delete(helper)) this.emit('changed');
   }
 
   /** What Vigil charged to the user's keys since the 1st, all providers together, for the cap. */
@@ -512,7 +555,13 @@ export class AiBridge extends EventEmitter<{
     this.labelQueue = [...batch.filter((e) => deferred.has(e.id)), ...this.labelQueue].slice(
       -MAX_LABEL_QUEUE,
     );
-    if (!result.ok) return 0;
+    if (!result.ok) {
+      // A batch over the hourly budget isn't held back: the labeller ran recently.
+      if (result.reason === 'busy') this.hold('labeller', 'The Mac has been busy or on battery');
+      else if (result.reason === 'failed') this.hold('labeller', heldWhy('failed', result.detail));
+      return 0;
+    }
+    this.unhold('labeller');
     const at = this.now();
     const labelled = result.labels.map((l) => ({
       eventId: l.eventId,
@@ -706,6 +755,16 @@ const Explanation = z.object({
   summary: z.string().min(1).max(600),
   details: z.string().max(2000).optional(),
 });
+
+/** In words, why a helper's runs aren't reaching an AI. */
+function heldWhy(outcome: string, detail: string | undefined): string {
+  if (detail === MONTHLY_CAP_HELD) return 'This month’s spending cap on your API keys is used up';
+  if (detail === PLAN_LIMITS_HELD || outcome === 'quota')
+    return 'Your AI plans are near their limits';
+  if (outcome === 'no_provider' || detail === 'no_provider') return 'No AI app is ready';
+  if (detail === 'quota') return 'Your AI plans are near their limits';
+  return detail ? `Its tries keep failing (${detail.slice(0, 160)})` : whyNot(outcome);
+}
 
 /** Failures where no AI ran at all. */
 const NOTHING_RAN = new Set(['no_provider', 'quota']);

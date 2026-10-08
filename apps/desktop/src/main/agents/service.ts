@@ -59,6 +59,8 @@ import {
   type PreflightStatus,
   type SaveAgentResult,
   type TreeNode,
+  type HelperHeld,
+  type VigilHelperId,
   type VigilHelperView,
 } from '../../shared/agents.js';
 import {
@@ -206,6 +208,8 @@ export interface AgentServiceDeps {
   userData: string;
   /** The app's protection status, for the vigil_status tool. */
   status?: () => StatusView;
+  /** Why a built-in helper keeps trying without reaching an AI (AiBridge.heldBack). */
+  heldBack?: (id: VigilHelperId) => HelperHeld | undefined;
   now?: () => number;
   /** A development build's helper folder (build/helper/dev-<arch>). */
   devHelperDir?: string;
@@ -578,12 +582,14 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
     const stats = this.o.store.aiRunStats(this.now() - 7 * DAY);
     return HELPERS.map(({ purpose, ...h }) => {
       const s = stats.get(purpose);
+      const held = this.o.heldBack?.(h.id);
       return {
         ...h,
         providers: [...h.providers],
         tools: [...h.tools],
         ...(s ? { lastRunAt: s.lastAt } : {}),
         runs7d: s?.runs ?? 0,
+        ...(held ? { held } : {}),
       };
     });
   }
