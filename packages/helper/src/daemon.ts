@@ -167,6 +167,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       ...(fapolicyd ? { fapolicyd: fapolicyd.status() } : {}),
     }),
     fastPath,
+    selfPaths: () => fastPath.selfPaths(),
     ...(fapolicyd ? { fapolicyd } : {}),
   });
 

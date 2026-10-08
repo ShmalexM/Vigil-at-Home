@@ -115,6 +115,13 @@ export class FakeLinuxSystem implements System {
     return this.processes.get(pid)?.path;
   }
 
+  /** Parent pids; a pid missing here has no known parent. */
+  readonly parents = new Map<number, number>();
+
+  procPpid(pid: number): number | undefined {
+    return this.parents.get(pid);
+  }
+
   signal(pid: number, signal: 'SIGSTOP' | 'SIGCONT' | 'SIGKILL'): void {
     this.signals.push({ pid, signal });
     if (signal === 'SIGKILL') this.processes.delete(pid);

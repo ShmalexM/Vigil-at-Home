@@ -65,6 +65,8 @@ export interface System {
    * keeps that link, so argv tricks can't fake it.
    */
   procExe?(pid: number): string | undefined;
+  /** Linux only: a pid's parent, from /proc/<pid>/stat. */
+  procPpid?(pid: number): number | undefined;
 }
 
 export function realSystem(
@@ -122,6 +124,16 @@ export function realSystem(
     procExe(pid) {
       try {
         return readlinkSync(`/proc/${pid}/exe`).replace(/ \(deleted\)$/, '');
+      } catch {
+        return undefined;
+      }
+    },
+    procPpid(pid) {
+      try {
+        // "pid (comm) state ppid ...": comm may hold spaces or parens, so read after the last ')'.
+        const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+        const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
+        return Number.isInteger(ppid) ? ppid : undefined;
       } catch {
         return undefined;
       }

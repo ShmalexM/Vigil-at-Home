@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 export interface SelfPaths {
   /** What the app's own engine never pauses, kills or quarantines. */
   app: string[];
-  /** What the helper is told. Kept stable across launches, since a new path asks for the password. */
+  /** What the helper is told: stable across launches, since a new path asks for the password. For an AppImage it is the image file, and the helper protects whatever that file started. */
   helper: string[];
 }
 

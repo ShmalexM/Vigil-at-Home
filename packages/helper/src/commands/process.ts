@@ -48,6 +48,12 @@ export function isProtectedProcess(path: string, platform: Platform = 'darwin'):
 export interface ProcessTarget {
   /** Expected executable path. */
   path?: string;
+  /**
+   * Vigil's own program files. On Linux an AppImage runs Vigil from a fresh
+   * mount under /tmp on every launch, so anything started by the AppImage
+   * file itself counts as Vigil.
+   */
+  self?: readonly string[];
   /** Expected start time, ms since epoch. ps reports whole seconds, so it matches within a second. */
   startTime?: number;
 }
@@ -55,6 +61,18 @@ export interface ProcessTarget {
 /** ps -o lstart prints local time like "Sat Sep 26 21:00:00 2026". */
 export function parseLstart(lstart: string): number {
   return Date.parse(lstart.replace(/\s+/g, ' ').trim());
+}
+
+/** Linux: whether the pid or one of its ancestors runs one of Vigil's own program files. */
+function startedBySelf(sys: System, pid: number, self: readonly string[]): boolean {
+  if (sys.platform !== 'linux' || !sys.procExe || !sys.procPpid || self.length === 0) return false;
+  let at: number | undefined = pid;
+  for (let hop = 0; hop < 16 && at !== undefined && at > 1; hop++) {
+    const exe = sys.procExe(at);
+    if (exe && self.includes(exe)) return true;
+    at = sys.procPpid(at);
+  }
+  return false;
 }
 
 async function checkTarget(
@@ -78,6 +96,8 @@ async function checkTarget(
       );
     }
   }
+  if (startedBySelf(sys, pid, expect.self ?? []))
+    throw new ActionError('refused', `${id.path} is part of Vigil`);
   if (isProtectedProcess(id.path, sys.platform))
     throw new ActionError(
       'refused',

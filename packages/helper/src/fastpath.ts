@@ -30,6 +30,7 @@ import {
   DetectionRule,
   memoryStores,
   selfKey,
+  selfRoots,
   underSelfRoot,
   type RuleException,
   type Stores,
@@ -153,10 +154,9 @@ export class FastPath {
     const added = cmd.exceptions.filter((e) => !had.has(canonical(e)));
     if (added.length === 1) out.push(`add an exception to ${added[0]!.ruleId}`);
     else if (added.length) out.push(`add ${added.length} exceptions`);
-    // A path inside one the helper already never blocked loosens nothing. The
-    // old paths aren't filtered here, so an install that was sent `/` (Linux
-    // before 0.1.0-alpha.5) moves to its real folder without asking.
-    const own = this.state.selfPaths.map(selfKey);
+    // A path inside one the helper already never blocks loosens nothing. Only
+    // roots the safety floor honours count, so a saved `/` grants nothing.
+    const own = selfRoots(this.state.selfPaths);
     for (const p of cmd.selfPaths) {
       if (!underSelfRoot(own, selfKey(p))) out.push(`never block ${p}`);
     }
@@ -209,6 +209,11 @@ export class FastPath {
     this.apply({ ...this.state, rev: this.state.rev + 1, lists, retired: this.retire(lists) });
     this.save();
     return { complete: true };
+  }
+
+  /** Vigil's own paths, as the app last sent them. */
+  selfPaths(): string[] {
+    return this.state.selfPaths;
   }
 
   status(): { rev: number; rules: number; lists: Record<string, number>; retired: number } {

@@ -67,6 +67,8 @@ export interface ExecutorDeps {
   fastPath?: FastPath;
   /** Linux: programs blocked by hash, enforced by fapolicyd and the helper. */
   fapolicyd?: FapolicydBlocks;
+  /** Vigil's own paths as the app last sent them; never paused or stopped. */
+  selfPaths?: () => readonly string[];
 }
 
 export type ExecOutcome =
@@ -99,6 +101,10 @@ export class Executor {
 
   constructor(private readonly d: ExecutorDeps) {
     this.firewall = d.sys.platform === 'linux' ? new NftFirewall(d.sys) : new Firewall(d.sys);
+  }
+
+  private self(): readonly string[] {
+    return this.d.selfPaths?.() ?? [];
   }
 
   /** Quarantine settings with the protected folders of the OS the helper acts on. */
@@ -223,7 +229,7 @@ export class Executor {
     if (sys.platform === 'linux' && cmd.kind.startsWith('santa.')) return this.runLinuxBlock(cmd);
     switch (cmd.kind) {
       case 'process.suspend': {
-        const id = await suspendProcess(sys, cmd.pid, target(cmd));
+        const id = await suspendProcess(sys, cmd.pid, { ...target(cmd), self: this.self() });
         return this.record(cmd, `paused ${id.path} (pid ${id.pid})`, { process: id });
       }
       case 'process.resume': {
@@ -241,7 +247,7 @@ export class Executor {
         );
       }
       case 'process.kill': {
-        const id = await killProcess(sys, cmd.pid, target(cmd));
+        const id = await killProcess(sys, cmd.pid, { ...target(cmd), self: this.self() });
         for (const e of journal.active()) {
           if (e.kind === 'process.suspend' && (e.undo?.process as ProcessIdentity).pid === id.pid)
             journal.markUndone(e.id);

@@ -15,7 +15,7 @@ import { Approvals, pkexecArgs } from './approval.js';
 import { defaultPaths, linuxPaths } from './config.js';
 import { Executor, type ActionOutcome } from './executor.js';
 import { Journal } from './journal.js';
-import { identifyProcess, isProtectedProcess } from './commands/process.js';
+import { identifyProcess, isProtectedProcess, suspendProcess } from './commands/process.js';
 import { moveAcrossDisks, vetPath } from './commands/quarantine.js';
 import { NFT_SETUP, NftFirewall, parseNftRules } from './commands/nftables.js';
 import {
@@ -332,6 +332,19 @@ describe('executor on Linux', () => {
     await expect(
       ex.execute({ kind: 'process.kill', pid: 77, path: '/tmp/other' }),
     ).rejects.toMatchObject({ code: 'refused' });
+  });
+
+  it('never pauses what Vigil’s AppImage started, whatever its mount', async () => {
+    const image = '/home/alex/Apps/Vigil.AppImage';
+    sys.processes.set(80, { path: image, started: STARTED });
+    sys.processes.set(81, { path: '/tmp/.mount_VigilX/vigil-at-home', started: STARTED });
+    sys.parents.set(81, 80);
+    sys.processes.set(82, { path: '/tmp/.mount_Other/app', started: STARTED });
+    await expect(
+      suspendProcess(sys, 81, { path: '/tmp/.mount_VigilX/vigil-at-home', self: [image] }),
+    ).rejects.toMatchObject({ code: 'refused' });
+    await suspendProcess(sys, 82, { path: '/tmp/.mount_Other/app', self: [image] });
+    expect(sys.signals).toEqual([{ pid: 82, signal: 'SIGSTOP' }]);
   });
 
   it('quarantines with the Linux protected list', async () => {
