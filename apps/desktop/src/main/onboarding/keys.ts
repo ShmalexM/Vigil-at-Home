@@ -1,6 +1,12 @@
 import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { z } from 'zod';
-import { ApiKeyInput, ApiKeyProvider } from '../../shared/setup.js';
+import {
+  ApiKeyInput,
+  ApiKeyProvider,
+  FeedKey,
+  FeedKeyName,
+  type FeedKeysView,
+} from '../../shared/setup.js';
 import { API_KEYS } from './plan.js';
 
 /** Encrypts with a key only this app can get from the macOS Keychain (Electron's safeStorage). */
@@ -80,20 +86,80 @@ export class KeyStore {
   }
 
   private read(): File {
-    if (!existsSync(this.path)) return {};
-    try {
-      return File.parse(JSON.parse(readFileSync(this.path, 'utf8')));
-    } catch {
-      return {};
-    }
+    return readPrivate(this.path, File);
   }
 
   private write(file: File): void {
-    const tmp = `${this.path}.tmp`;
-    writeFileSync(tmp, JSON.stringify(file), { mode: 0o600 });
-    chmodSync(tmp, 0o600);
-    renameSync(tmp, this.path);
+    writePrivate(this.path, file);
   }
+}
+
+const FeedFile = z.partialRecord(FeedKeyName, z.object({ enc: z.string() }));
+type FeedFile = z.infer<typeof FeedFile>;
+
+/**
+ * Keys for threat feeds, such as the user's abuse.ch Auth-Key. Kept like the
+ * AI keys, in a file of their own, and the renderer only learns whether one
+ * is saved. Vigil never ships a key of its own.
+ */
+export class FeedKeyStore {
+  constructor(
+    private readonly path: string,
+    private readonly cipher: Cipher,
+  ) {}
+
+  view(): FeedKeysView {
+    const file = readPrivate(this.path, FeedFile);
+    return {
+      saved: Object.fromEntries(FeedKeyName.options.map((n) => [n, !!file[n]])) as Record<
+        FeedKeyName,
+        boolean
+      >,
+      canSave: this.cipher.available(),
+    };
+  }
+
+  /** The key itself, for the feed importer in the main process. */
+  get(name: FeedKeyName): string | undefined {
+    const e = readPrivate(this.path, FeedFile)[name];
+    if (!e) return undefined;
+    try {
+      return this.cipher.decrypt(Buffer.from(e.enc, 'base64'));
+    } catch {
+      return undefined;
+    }
+  }
+
+  set(name: FeedKeyName, raw: string): void {
+    const key = FeedKey.parse(raw);
+    if (!this.cipher.available()) throw new Error('The macOS Keychain isn’t available');
+    const file = readPrivate(this.path, FeedFile);
+    file[name] = { enc: this.cipher.encrypt(key).toString('base64') };
+    writePrivate(this.path, file);
+  }
+
+  clear(name: FeedKeyName): void {
+    const file = readPrivate(this.path, FeedFile);
+    delete file[name];
+    writePrivate(this.path, file);
+  }
+}
+
+function readPrivate<T>(path: string, schema: z.ZodType<T>): T {
+  if (!existsSync(path)) return {} as T;
+  try {
+    return schema.parse(JSON.parse(readFileSync(path, 'utf8')));
+  } catch {
+    return {} as T;
+  }
+}
+
+/** Written whole and renamed into place, readable only by the user. */
+function writePrivate(path: string, data: unknown): void {
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, path);
 }
 
 /** Keys must not travel in the clear, except to a gateway on this Mac. */

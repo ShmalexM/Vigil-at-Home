@@ -9,6 +9,7 @@ import type { Connectors } from './pack/connectors.js';
 import type { PackService } from './pack/service.js';
 import type { AgentService } from './agents/service.js';
 import type { UpdateChecker } from './updates.js';
+import type { FeedKeyStore } from './onboarding/keys.js';
 import { onboardingHandlers } from './onboarding/ipc.js';
 import type { OnboardingService } from './onboarding/service.js';
 import type { VigilCore } from './service.js';
@@ -41,6 +42,7 @@ export function registerIpc(
   updates: UpdateChecker,
   agents: AgentService,
   pack: { service: PackService; connectors: Connectors },
+  feedKeys: FeedKeyStore,
   helper: HelperControl = noHelper,
 ): void {
   let ruleSuggestions: RuleSuggestions | undefined;
@@ -120,6 +122,17 @@ export function registerIpc(
     fitPopup: (height) => windows.fitPopup(height),
     quit: () => app.quit(),
     ...onboardingHandlers(setup, () => windows.openMain('home')),
+    getFeedKeys: () => feedKeys.view(),
+    saveFeedKey: (name, key) => {
+      feedKeys.set(name, key);
+      // Fetch the feeds this key turns on now rather than at the next check.
+      void core.detector?.feeds.run().catch((err) => console.error('[feeds] run failed:', err));
+      return feedKeys.view();
+    },
+    clearFeedKey: (name) => {
+      feedKeys.clear(name);
+      return feedKeys.view();
+    },
     installHelper: () => helper.install(),
     uninstallHelper: () => helper.uninstall(),
     getUsage: (days) => core.usage.report(days),

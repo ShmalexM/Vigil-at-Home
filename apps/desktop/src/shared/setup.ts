@@ -52,6 +52,24 @@ export const ApiKeyInput = z.object({
 });
 export type ApiKeyInput = z.input<typeof ApiKeyInput>;
 
+/** Keys for threat feeds that need one (FeedSource.auth in @vigil/detection). */
+export const FeedKeyName = z.enum(['abusech']);
+export type FeedKeyName = z.infer<typeof FeedKeyName>;
+
+export const FeedKey = z
+  .string()
+  .trim()
+  .min(16, 'That looks too short for an Auth-Key')
+  .max(256)
+  .regex(/^[A-Za-z0-9_-]+$/, 'Paste just the key: letters and digits, no spaces');
+
+/** Which feed keys are saved. The keys themselves never leave main. */
+export interface FeedKeysView {
+  saved: Record<FeedKeyName, boolean>;
+  /** False when the Keychain or keyring isn't available, so keys can't be saved. */
+  canSave: boolean;
+}
+
 /** A one-click fix a step offers besides its commands. */
 export const SetupAction = z.enum(['codex-share']);
 export type SetupAction = z.infer<typeof SetupAction>;

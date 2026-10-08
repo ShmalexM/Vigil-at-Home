@@ -4,10 +4,18 @@
  *
  * The defaults are abuse.ch feeds, published under CC0 and chosen for a low
  * false-positive rate: confirmed botnet command servers, hosts currently
- * serving malware, and hashes of confirmed malware samples.
+ * serving malware, and hashes of confirmed malware samples. URLhaus and
+ * MalwareBazaar downloads need the user's own free abuse.ch Auth-Key; Vigil
+ * never ships one.
  */
 
 export type FeedList = 'known_bad_sha256' | 'known_bad_domains' | 'known_bad_ips';
+
+/** Keys the user can add for feeds that need one. */
+export type FeedKeyName = 'abusech';
+
+/** abuse.ch's per-user key, free at https://auth.abuse.ch/ for non-commercial use. */
+const ABUSE_CH_AUTH = { key: 'abusech', header: 'Auth-Key' } as const;
 
 export interface FeedSource {
   /** Stable id, stored with the entries. Lowercase letters, digits and dashes. */
@@ -31,6 +39,12 @@ export interface FeedSource {
   retainDays: number;
   /** Extra request headers, e.g. an API key the provider requires. */
   headers?: Record<string, string>;
+  /**
+   * The user's own key this feed needs, sent in `header`. Until the importer's
+   * `keys` option returns one for `key`, the feed is left out: not fetched,
+   * not counted as failing, and its stored entries are kept.
+   */
+  auth?: { key: FeedKeyName; header: string };
   license: string;
   homepage: string;
 }
@@ -57,6 +71,7 @@ export const DEFAULT_FEEDS: readonly FeedSource[] = [
     retainDays: 0,
     license: 'CC0-1.0',
     homepage: 'https://urlhaus.abuse.ch/',
+    auth: ABUSE_CH_AUTH,
   },
   {
     id: 'malwarebazaar-recent',
@@ -69,5 +84,6 @@ export const DEFAULT_FEEDS: readonly FeedSource[] = [
     retainDays: 180,
     license: 'CC0-1.0',
     homepage: 'https://bazaar.abuse.ch/',
+    auth: ABUSE_CH_AUTH,
   },
 ];

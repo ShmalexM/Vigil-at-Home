@@ -163,7 +163,7 @@ Twenty-two macOS rules in [`packs/macos-core.ts`](src/packs/macos-core.ts), each
 ```ts
 const feeds = new FeedImporter(DEFAULT_FEEDS, stores.lists, stores.feeds);
 await feeds.run(); // fetches only the sources that are due
-feeds.status(); // per source: entries, last fetch, last error, stale
+feeds.status(); // per source: entries, last fetch, last error, stale, needs a key
 ```
 
 | Source (default, CC0)               | List                | Every | Notes                                                |
@@ -171,6 +171,8 @@ feeds.status(); // per source: entries, last fetch, last error, stale
 | Feodo Tracker recommended blocklist | `known_bad_ips`     | 6 h   | Confirmed botnet command servers                     |
 | URLhaus hostfile                    | `known_bad_domains` | 6 h   | Hosts currently serving malware                      |
 | MalwareBazaar recent SHA-256 export | `known_bad_sha256`  | 1 h   | Only the last 48 h, so entries are kept for 180 days |
+
+URLhaus and MalwareBazaar need the user's own free abuse.ch Auth-Key (https://auth.abuse.ch/), sent as the `Auth-Key` header. Pass it with the `keys` option; without one those two sources are left out of every run (status `needs_key`), are not reported as failing or stale, and keep the entries they already contributed. No key is ever shipped.
 
 Feeds can trigger automatic blocks, so the importer distrusts them:
 

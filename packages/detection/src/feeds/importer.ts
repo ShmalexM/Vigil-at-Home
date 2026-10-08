@@ -1,6 +1,6 @@
 import type { ListStore } from '../state/stores.js';
 import { parseFeed } from './parse.js';
-import type { FeedList, FeedSource } from './sources.js';
+import type { FeedKeyName, FeedList, FeedSource } from './sources.js';
 import { cleanEntries, type CleanOptions, type DropReason } from './validate.js';
 
 /** What the importer remembers per source between runs. */
@@ -59,11 +59,17 @@ export interface FeedImporterOptions extends CleanOptions {
    * listed before is treated as broken and its old entries are kept.
    */
   minShrinkRatio?: number;
+  /**
+   * The user's key for a feed that needs one (FeedSource.auth), read on every
+   * run so a key added or removed takes effect at once. Main process only.
+   */
+  keys?: (name: FeedKeyName) => string | undefined;
 }
 
 export interface FeedRunResult {
   sourceId: string;
-  status: 'updated' | 'not_modified' | 'skipped' | 'failed';
+  /** `needs_key`: left out until the user adds the key it needs; not an error. */
+  status: 'updated' | 'not_modified' | 'skipped' | 'needs_key' | 'failed';
   /** Entries this source now contributes. */
   entries: number;
   added?: number;
@@ -79,7 +85,9 @@ export interface FeedStatus {
   entries: number;
   fetchedAt?: number;
   lastError?: string;
-  /** No successful fetch for three intervals. */
+  /** Off until the user adds the key it needs. Its stored entries still count. */
+  needsKey?: boolean;
+  /** No successful fetch for three intervals. Never set while the feed needs a key. */
   stale: boolean;
   nextDueAt: number;
 }
@@ -100,6 +108,8 @@ export class FeedImporter {
   private readonly sources: FeedSource[];
   private readonly fetch: FetchLike;
   private readonly now: () => number;
+  /** The run in progress, so a run asked for meanwhile joins it instead of fetching twice. */
+  private running: Promise<FeedRunResult[]> | undefined;
   private readonly opts: Required<
     Pick<FeedImporterOptions, 'timeoutMs' | 'maxBytes' | 'maxEntries' | 'minShrinkRatio'>
   >;
@@ -145,12 +155,36 @@ export class FeedImporter {
     return last + wait;
   }
 
-  /** Fetch every source that is due (or all of them with `force`), then rebuild the affected lists. */
-  async run(opts: { force?: boolean } = {}): Promise<FeedRunResult[]> {
+  /** The key a source needs, '' when it needs none, undefined when the user hasn't added it. */
+  private keyFor(s: FeedSource): string | undefined {
+    if (!s.auth) return '';
+    return this.options.keys?.(s.auth.key) || undefined;
+  }
+
+  /**
+   * Fetch every source that is due (or all of them with `force`), then rebuild
+   * the affected lists. A source still waiting for its key is left out
+   * entirely: its state and its entries in the list stay as they were.
+   */
+  run(opts: { force?: boolean } = {}): Promise<FeedRunResult[]> {
+    this.running ??= this.runAll(opts).finally(() => (this.running = undefined));
+    return this.running;
+  }
+
+  private async runAll(opts: { force?: boolean }): Promise<FeedRunResult[]> {
     const now = this.now();
     const results: FeedRunResult[] = [];
     const touched = new Set<FeedList>();
     for (const s of this.sources) {
+      const key = this.keyFor(s);
+      if (key === undefined) {
+        results.push({
+          sourceId: s.id,
+          status: 'needs_key',
+          entries: Object.keys(this.state.get(s.id)?.entries ?? {}).length,
+        });
+        continue;
+      }
       if (!opts.force && this.dueAt(s) > now) {
         results.push({
           sourceId: s.id,
@@ -159,7 +193,7 @@ export class FeedImporter {
         });
         continue;
       }
-      const r = await this.fetchSource(s, now);
+      const r = await this.fetchSource(s, key, now);
       results.push(r);
       if (r.status === 'updated') touched.add(s.list);
     }
@@ -176,16 +210,20 @@ export class FeedImporter {
     const now = this.now();
     return this.sources.map((s) => {
       const st = this.state.get(s.id);
+      const needsKey = this.keyFor(s) === undefined;
       const out: FeedStatus = {
         sourceId: s.id,
         name: s.name,
         list: s.list,
         entries: Object.keys(st?.entries ?? {}).length,
-        stale: !st?.fetchedAt || now - st.fetchedAt > 3 * s.intervalHours * 3_600_000,
+        stale:
+          !needsKey && (!st?.fetchedAt || now - st.fetchedAt > 3 * s.intervalHours * 3_600_000),
         nextDueAt: this.dueAt(s),
       };
+      if (needsKey) out.needsKey = true;
       if (st?.fetchedAt !== undefined) out.fetchedAt = st.fetchedAt;
-      if (st?.lastError !== undefined) out.lastError = st.lastError;
+      // An error from before the key was removed (or before keys were needed) is no longer news.
+      if (st?.lastError !== undefined && !needsKey) out.lastError = st.lastError;
       return out;
     });
   }
@@ -199,7 +237,7 @@ export class FeedImporter {
     this.lists.replace(list, union, { source: 'feeds', updatedAt: now });
   }
 
-  private async fetchSource(s: FeedSource, now: number): Promise<FeedRunResult> {
+  private async fetchSource(s: FeedSource, key: string, now: number): Promise<FeedRunResult> {
     const prev: FeedState = this.state.get(s.id) ?? { sourceId: s.id, entries: {} };
     const fail = (error: string): FeedRunResult => {
       this.state.put({ ...prev, lastAttemptAt: now, lastError: error });
@@ -207,6 +245,7 @@ export class FeedImporter {
     };
 
     const headers: Record<string, string> = { ...(s.headers ?? {}) };
+    if (s.auth && key) headers[s.auth.header] = key;
     if (prev.etag) headers['If-None-Match'] = prev.etag;
     if (prev.lastModified) headers['If-Modified-Since'] = prev.lastModified;
 

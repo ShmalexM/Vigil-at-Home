@@ -7,16 +7,19 @@ import { memoryStores } from '../state/stores.js';
  * live-feeds workflow runs it with VIGIL_LIVE_FEEDS=1 on GitHub's runners.
  */
 describe.skipIf(!process.env.VIGIL_LIVE_FEEDS)('default threat feeds (live)', () => {
+  // Feeds that need the user's abuse.ch Auth-Key run only when ABUSE_CH_AUTH_KEY is set.
+  const abuseChKey = process.env.ABUSE_CH_AUTH_KEY || undefined;
   for (const source of DEFAULT_FEEDS) {
-    it(`${source.id} downloads and parses`, { timeout: 120_000 }, async () => {
+    const needsKey = source.auth?.key === 'abusech' && !abuseChKey;
+    it.skipIf(needsKey)(`${source.id} downloads and parses`, { timeout: 120_000 }, async () => {
       const stores = memoryStores();
-      const importer = new FeedImporter([source], stores.lists, new MemoryFeedStateStore());
+      const importer = new FeedImporter([source], stores.lists, new MemoryFeedStateStore(), {
+        keys: () => abuseChKey,
+      });
       const [r] = await importer.run({ force: true });
       console.log(`${source.id}: ${JSON.stringify(r)}`);
       if (r!.error && /HTTP 40[13]/.test(r!.error)) {
-        throw new Error(
-          `${source.id} needs an Auth-Key (${r!.error}); set it in the source's headers`,
-        );
+        throw new Error(`${source.id} was refused (${r!.error}); check its Auth-Key`);
       }
       expect(r!.status).toBe('updated');
       expect(r!.entries).toBeGreaterThan(0);

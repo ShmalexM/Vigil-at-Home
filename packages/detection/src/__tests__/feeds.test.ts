@@ -200,6 +200,87 @@ describe('FeedImporter', () => {
     expect(stores.lists.size('known_bad_ips')).toBe(100);
   });
 
+  it("sends the user's key to a feed that needs one", async () => {
+    const { fetch, calls } = fakeFetch({ 'https://k.test/ips': () => ({ body: '45.9.1.2' }) });
+    const stores = memoryStores();
+    const imp = new FeedImporter(
+      [src({ id: 'k', url: 'https://k.test/ips', auth: { key: 'abusech', header: 'Auth-Key' } })],
+      stores.lists,
+      new MemoryFeedStateStore(),
+      { fetch, keys: (name) => (name === 'abusech' ? 'user-key-0123456789' : undefined) },
+    );
+    expect((await imp.run())[0]).toMatchObject({ status: 'updated', entries: 1 });
+    expect(calls[0]!.headers['Auth-Key']).toBe('user-key-0123456789');
+    expect(imp.status()[0]!.needsKey).toBeUndefined();
+  });
+
+  it('leaves out a feed whose key is missing and keeps what it already listed', async () => {
+    const big = Array.from({ length: 100 }, (_, i) => `45.9.${i}.1`).join('\n');
+    const { fetch, calls } = fakeFetch({
+      'https://k.test/ips': () => ({ body: big }),
+      'https://open.test/ips': () => ({ body: '45.8.1.1' }),
+    });
+    let key: string | undefined = 'user-key-0123456789';
+    let now = T0;
+    const stores = memoryStores();
+    const state = new MemoryFeedStateStore();
+    const imp = new FeedImporter(
+      [
+        src({ id: 'k', url: 'https://k.test/ips', auth: { key: 'abusech', header: 'Auth-Key' } }),
+        src({ id: 'open', url: 'https://open.test/ips' }),
+      ],
+      stores.lists,
+      state,
+      { fetch, keys: () => key, now: () => now },
+    );
+    await imp.run();
+    expect(stores.lists.size('known_bad_ips')).toBe(101);
+
+    // An earlier refusal (as before keys were supported) is not reported while the key is missing.
+    state.put({ ...state.get('k')!, lastError: 'HTTP 401' });
+    key = undefined;
+    now += 7 * HOUR;
+    const before = state.get('k');
+    const r = await imp.run({ force: true });
+    expect(r.map((x) => x.status)).toEqual(['needs_key', 'updated']);
+    expect(r[0]).toMatchObject({ entries: 100 });
+    expect(r[0]!.error).toBeUndefined();
+    expect(calls.filter((c) => c.url === 'https://k.test/ips')).toHaveLength(1);
+    // Nothing recorded as a failure, and the other feed's rebuild keeps its entries.
+    expect(state.get('k')).toEqual(before);
+    expect(stores.lists.size('known_bad_ips')).toBe(101);
+    expect(imp.status()[0]).toMatchObject({ needsKey: true, stale: false, entries: 100 });
+    expect(imp.status()[0]!.lastError).toBeUndefined();
+  });
+
+  it('never fetches a keyed feed before a key is added', async () => {
+    const { fetch, calls } = fakeFetch({});
+    const imp = new FeedImporter(
+      DEFAULT_FEEDS.filter((f) => f.auth),
+      memoryStores().lists,
+      new MemoryFeedStateStore(),
+      { fetch },
+    );
+    expect((await imp.run({ force: true })).map((r) => r.status)).toEqual([
+      'needs_key',
+      'needs_key',
+    ]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('runs once when asked again while a run is in progress', async () => {
+    const { fetch, calls } = fakeFetch({ 'https://a.test/ips': () => ({ body: '45.9.1.2' }) });
+    const imp = new FeedImporter(
+      [src({ id: 'a', url: 'https://a.test/ips' })],
+      memoryStores().lists,
+      new MemoryFeedStateStore(),
+      { fetch },
+    );
+    const [a, b] = await Promise.all([imp.run({ force: true }), imp.run({ force: true })]);
+    expect(a).toBe(b);
+    expect(calls).toHaveLength(1);
+  });
+
   it('accumulates recent-only feeds and expires entries after retainDays', async () => {
     let body = sha('a');
     const { fetch } = fakeFetch({ 'https://h.test/recent': () => ({ body }) });
@@ -306,5 +387,11 @@ describe('FeedImporter', () => {
     expect(new Set(DEFAULT_FEEDS.map((f) => f.list))).toEqual(
       new Set(['known_bad_ips', 'known_bad_domains', 'known_bad_sha256']),
     );
+    // URLhaus and MalwareBazaar need the user's own abuse.ch key; none is shipped.
+    expect(DEFAULT_FEEDS.filter((f) => f.auth).map((f) => f.id)).toEqual([
+      'urlhaus-hosts',
+      'malwarebazaar-recent',
+    ]);
+    for (const f of DEFAULT_FEEDS) expect(f.headers).toBeUndefined();
   });
 });
