@@ -8,14 +8,21 @@
 // only. Every result goes through the same redaction as the data Vigil's own
 // AI gets (home folders, user and host names, keys, tokens, email
 // addresses), and results are cut to 50 rows and 64 KB. Rule conditions and
-// exclusions are never shown, nor (over MCP) which rules a tool request
-// matched, so an agent can't learn how to word its commands around them.
+// exclusions are never shown (a rule's exclusions only as a count), nor (over
+// MCP) which rules a tool request matched, so an agent can't learn how to
+// word its commands around them. A model's label on an event is shown, its
+// reason isn't: that text was written from what the event's own program wrote.
 
 import {
+  AgentId,
   EventKind,
+  RuleMode,
+  isRelease,
+  type Action,
+  type ActionRecord,
   type Alert,
-  type RuleMode,
   type SensorEvent,
+  type Severity,
   type ToolsReply,
 } from '@vigil/core';
 import { localNames, redactValue } from '@vigil/ai/redact';
@@ -25,12 +32,14 @@ import {
   type AgentSessionView,
   type AgentView,
   type TreeNode,
+  type VigilToolInfo,
   type VigilToolName,
 } from '../../shared/agents.js';
 import {
   EVENT_GROUPS,
   EventGroup,
   type AgentSessionDetail,
+  type EventLabel,
   type EventOutcome,
   type EventView,
   type SensorView,
@@ -52,6 +61,8 @@ export const SCAN_ROWS = 10_000;
 const TEXT_CHARS = 1000;
 /** Latest sessions shown per agent by list_agents. */
 const SESSIONS_PER_AGENT = 3;
+/** Rule hits are counted over this many days. */
+export const HIT_DAYS = 7;
 const DAY = 24 * 60 * 60 * 1000;
 
 /** What the tools read. Read methods only: nothing reachable from here writes. */
@@ -67,13 +78,34 @@ export interface VigilToolsSource {
     since: number;
     kinds?: readonly EventKind[];
     text?: string;
+    agent?: string;
+    matchedOnly?: boolean;
+    label?: 'unusual' | 'suspicious';
     limit: number;
     scanRows: number;
   }): { views: EventView[]; partial: boolean };
+  /** Every rule, without its conditions. */
+  rules(): RuleFacts[];
+  /** Matches per rule id since `since`. */
+  ruleHits(since: number): Map<string, number>;
+  /** What Vigil did (blocks, quarantines, releases, undos), newest first. */
+  actions(limit: number): ActionRecord[];
   agents(): AgentView[];
   agentSessions(agentId: string, limit: number): AgentSessionView[];
   /** At most `rows` tree nodes and events. */
   agentSession(id: string, rows: number): AgentSessionDetail | null;
+}
+
+/** What the rule tools show of one rule: never its conditions or exclusions. */
+export interface RuleFacts {
+  id: string;
+  name: string;
+  description: string;
+  /** The mode it actually runs in, after the user's choice. */
+  mode: RuleMode;
+  severity: Severity;
+  /** Its own exclusions and the user's exceptions to it, counted. */
+  exclusions: number;
 }
 
 /** vigil_status's facts, gathered by the agent service. */
@@ -187,10 +219,40 @@ export class VigilTools {
             .max(200)
             .optional()
             .describe('Text anywhere in the event, such as a program name, path or host.'),
+          agent: AgentId.optional().describe(
+            'Only what one agent did: an agent id from list_agents, such as claude-code.',
+          ),
+          matched: z.boolean().optional().describe('true: only events that matched a rule.'),
+          label: z
+            .enum(['unusual', 'suspicious'])
+            .optional()
+            .describe('Only events the AI labelled unusual or suspicious (no rule matched them).'),
           since: Since.optional(),
           limit: Limit.optional(),
         }),
         (a) => this.searchEvents(a),
+      ),
+      list_rules: def(
+        'List rules',
+        z.object({
+          mode: RuleMode.optional().describe(
+            'Only rules in this mode: disabled, shadow (only logs), alert or block.',
+          ),
+          limit: Limit.optional(),
+        }),
+        (a) => this.listRules(a),
+      ),
+      get_rule: def(
+        'Get a rule',
+        z.object({
+          id: z.string().min(1).max(128).describe('A rule id from list_rules or an alert.'),
+        }),
+        (a) => this.getRule(a.id),
+      ),
+      list_actions: def(
+        'List actions',
+        z.object({ since: Since.optional(), limit: Limit.optional() }),
+        (a) => this.listActions(a),
       ),
       list_agents: def('List agents', z.object({}), () => this.listAgents()),
       get_agent_session: def(
@@ -206,9 +268,9 @@ export class VigilTools {
     };
   }
 
-  /** The tools for MCP's tools/list, with JSON Schemas for their arguments. */
-  list(): ToolListing[] {
-    return VIGIL_TOOLS.map((t) => {
+  /** The tools for MCP's tools/list, with JSON Schemas for their arguments. The pack also gets its own. */
+  list(o: { pack?: boolean } = {}): ToolListing[] {
+    return offered(o).map((t) => {
       const { $schema: _schema, ...inputSchema } = z.toJSONSchema(this.defs[t.name].input, {
         io: 'input',
       }) as Record<string, unknown>;
@@ -223,12 +285,14 @@ export class VigilTools {
   }
 
   /** One call, answered as a tools reply: a redacted result within the caps, or why not. */
-  call(name: string, args: Record<string, unknown>): ToolsReply {
-    const tool = VIGIL_TOOLS.find((t) => t.name === name);
+  call(name: string, args: Record<string, unknown>, o: { pack?: boolean } = {}): ToolsReply {
+    const tool = offered(o).find((t) => t.name === name);
     // The name isn't repeated back: an answer carries only Vigil's own words and data.
     if (!tool)
       return fail(
-        `Vigil has no such tool. Its tools: ${VIGIL_TOOLS.map((t) => t.name).join(', ')}.`,
+        `Vigil has no such tool. Its tools: ${offered(o)
+          .map((t) => t.name)
+          .join(', ')}.`,
       );
     const d = this.defs[tool.name];
     const parsed = d.input.safeParse(args);
@@ -297,14 +361,14 @@ export class VigilTools {
 
   private getAlert(id: string): Record<string, unknown> {
     const alert = this.src.alert(id);
-    if (!alert) throw new ToolError(`No alert ${id}. list_alerts gives the ids.`);
+    if (!alert) throw new ToolError('No alert has that id. list_alerts gives the ids.');
     const events = this.src.events(alert.eventIds.slice(0, MAX_ROWS));
     return {
       alert: {
         ...this.alertRow(alert),
         ...(alert.ai?.details ? { explanationDetails: clip(alert.ai.details) } : {}),
       },
-      events: events.map((v) => eventRow(v.event, v.outcome, this.verdicts)),
+      events: events.map((v) => eventRow(v.event, v.outcome, v.label, this.verdicts)),
       ...(alert.eventIds.length > MAX_ROWS ? { more: true } : {}),
     };
   }
@@ -312,6 +376,9 @@ export class VigilTools {
   private searchEvents(a: {
     kind?: (typeof KINDS)[number] | undefined;
     text?: string | undefined;
+    agent?: string | undefined;
+    matched?: boolean | undefined;
+    label?: 'unusual' | 'suspicious' | undefined;
     since?: string | undefined;
     limit?: number | undefined;
   }): Record<string, unknown> {
@@ -326,13 +393,79 @@ export class VigilTools {
       scanRows: SCAN_ROWS,
       ...(kinds ? { kinds } : {}),
       ...(a.text ? { text: a.text } : {}),
+      ...(a.agent ? { agent: a.agent } : {}),
+      ...(a.matched ? { matchedOnly: true } : {}),
+      ...(a.label ? { label: a.label } : {}),
     });
+    // Over MCP, which tool requests matched a rule stays hidden, so `matched`
+    // passes none of them.
+    const shown =
+      a.matched && !this.verdicts
+        ? views.filter((v) => v.event.kind !== 'agent.tool_request')
+        : views;
     return {
       since: iso(since),
-      events: views.map((v) => eventRow(v.event, v.outcome, this.verdicts)),
+      events: shown.map((v) => eventRow(v.event, v.outcome, v.label, this.verdicts)),
       ...(partial
         ? { note: `Only the newest ${SCAN_ROWS.toLocaleString('en')} events were searched.` }
         : {}),
+    };
+  }
+
+  private listRules(a: {
+    mode?: RuleMode | undefined;
+    limit?: number | undefined;
+  }): Record<string, unknown> {
+    const limit = a.limit ?? MAX_ROWS;
+    const hits = this.src.ruleHits(this.src.now() - HIT_DAYS * DAY);
+    // The busiest first, so a cut list keeps the rules that matter today.
+    const rules = this.src
+      .rules()
+      .filter((r) => !a.mode || r.mode === a.mode)
+      .map((r) => ({ r, hits: hits.get(r.id) ?? 0 }))
+      .sort((x, y) => y.hits - x.hits || x.r.name.localeCompare(y.r.name));
+    return {
+      rules: rules.slice(0, limit).map(({ r, hits }) => ({
+        id: r.id,
+        name: clip(r.name),
+        mode: r.mode,
+        enabled: r.mode !== 'disabled',
+        severity: r.severity,
+        hits7d: hits,
+      })),
+      more: rules.length > limit,
+    };
+  }
+
+  private getRule(id: string): Record<string, unknown> {
+    const r = this.src.rules().find((x) => x.id === id);
+    if (!r) throw new ToolError('No rule has that id. list_rules gives the ids.');
+    return {
+      rule: {
+        id: r.id,
+        name: clip(r.name),
+        description: clip(r.description),
+        mode: r.mode,
+        enabled: r.mode !== 'disabled',
+        severity: r.severity,
+        hits7d: this.src.ruleHits(this.src.now() - HIT_DAYS * DAY).get(r.id) ?? 0,
+        exclusionCount: r.exclusions,
+      },
+    };
+  }
+
+  private listActions(a: {
+    since?: string | undefined;
+    limit?: number | undefined;
+  }): Record<string, unknown> {
+    const limit = a.limit ?? DEFAULT_ROWS;
+    const since = a.since !== undefined ? parseSince(a.since, this.src.now()) : undefined;
+    const found = this.src.actions(limit + 1);
+    // Newest first, so those since a time are the front of the list.
+    const recent = since === undefined ? found : found.filter((x) => x.requestedAt >= since);
+    return {
+      actions: recent.slice(0, limit).map((x) => this.actionRow(x)),
+      more: recent.length > limit,
     };
   }
 
@@ -371,7 +504,9 @@ export class VigilTools {
     return {
       session: sessionRow(d.session),
       tree: d.tree.slice(0, MAX_ROWS).map(treeRow),
-      events: d.events.slice(0, MAX_ROWS).map((v) => eventRow(v.event, v.outcome, this.verdicts)),
+      events: d.events
+        .slice(0, MAX_ROWS)
+        .map((v) => eventRow(v.event, v.outcome, v.label, this.verdicts)),
       ...(cut ? { more: true } : {}),
     };
   }
@@ -391,6 +526,24 @@ export class VigilTools {
       ...(a.ai ? { explanation: clip(a.ai.summary), aiVerdict: a.ai.verdict } : {}),
       ...(a.decision ? { userVerdict: a.decision.verdict } : {}),
       events: a.eventIds.length,
+    };
+  }
+
+  /** What was done, to what, by whom, and how it went; an action's own reason stays out. */
+  private actionRow(r: ActionRecord): Record<string, unknown> {
+    return {
+      id: r.id,
+      at: iso(r.requestedAt),
+      did: didOf(r.action),
+      target: clip(targetOf(r.action)),
+      by: r.actor,
+      status: r.status,
+      // Lifting containment, and undoing an earlier action, are worth seeing at a glance.
+      ...(isRelease(r.action) ? { release: true } : {}),
+      ...(r.undoes ? { undoes: r.undoes } : {}),
+      ...(r.result ? { finishedAt: iso(r.result.at) } : {}),
+      ...(r.alertId ? { alertId: r.alertId } : {}),
+      ...(r.ruleId ? { rule: this.src.ruleName(r.ruleId) ?? r.ruleId } : {}),
     };
   }
 }
@@ -455,6 +608,55 @@ function treeRow(n: TreeNode): Record<string, unknown> {
   };
 }
 
+/** What an action did, in a few words. A trusted program reads as trusted, nothing more. */
+function didOf(a: Action): string {
+  switch (a.kind) {
+    case 'process.suspend':
+      return 'paused a process';
+    case 'process.resume':
+      return 'resumed a process';
+    case 'process.kill':
+      return 'stopped a process';
+    case 'network.block':
+      return 'blocked a connection';
+    case 'network.unblock':
+      return 'unblocked a connection';
+    case 'file.quarantine':
+      return 'quarantined a file';
+    case 'file.restore':
+      return 'restored a quarantined file';
+    case 'santa.rule.set':
+      return a.policy === 'allow' ? 'trusted a program' : 'blocked a program';
+    case 'santa.rule.remove':
+      return 'removed a program rule';
+    case 'persistence.disable':
+      return 'turned off a startup item';
+    case 'persistence.enable':
+      return 'turned a startup item back on';
+  }
+}
+
+function targetOf(a: Action): string {
+  switch (a.kind) {
+    case 'process.suspend':
+    case 'process.resume':
+    case 'process.kill':
+      return a.path ?? `pid ${a.pid}`;
+    case 'network.block':
+    case 'network.unblock':
+      return a.port !== undefined ? `${a.address} port ${a.port}` : a.address;
+    case 'file.quarantine':
+    case 'persistence.disable':
+    case 'persistence.enable':
+      return a.path;
+    case 'file.restore':
+      return `quarantined item ${a.quarantineId}`;
+    case 'santa.rule.set':
+    case 'santa.rule.remove':
+      return `${a.ruleType} ${a.identifier}`;
+  }
+}
+
 /** What Vigil's answer to a tool request was, from the rules it matched. */
 function answerOf(o: EventOutcome): 'deny' | 'ask' | 'none' {
   const modes = new Set(o.matches.map((m) => m.mode));
@@ -462,12 +664,14 @@ function answerOf(o: EventOutcome): 'deny' | 'ask' | 'none' {
 }
 
 /**
- * One event, flat, with the fields a person would look at. Without
+ * One event, flat, with the fields a person would look at, and the AI's
+ * label when it has one (not its reason: see the top of this file). Without
  * `verdicts`, a tool request leaves out Vigil's answer and the rules it matched.
  */
 export function eventRow(
   e: SensorEvent,
   outcome?: EventOutcome | null,
+  label?: EventLabel,
   verdicts = true,
 ): Record<string, unknown> {
   const r: Record<string, unknown> = { id: e.id, at: iso(e.ts), kind: e.kind };
@@ -555,6 +759,10 @@ export function eventRow(
   if (outcome?.matches.length && (verdicts || e.kind !== 'agent.tool_request')) {
     r['rules'] = outcome.matches.map((m) => ({ rule: m.ruleName, mode: m.mode }));
   }
+  if (label) {
+    r['aiLabel'] = label.label;
+    r['aiScore'] = label.score;
+  }
   return r;
 }
 
@@ -587,4 +795,9 @@ function fit(result: Record<string, unknown>): Record<string, unknown> {
   }
   if (bytes(out) > MAX_RESULT_BYTES) throw new ToolError('The result is too large to send.');
   return out;
+}
+
+/** The tools one caller may use: watched agents never get the pack's own. */
+function offered(o: { pack?: boolean }): readonly VigilToolInfo[] {
+  return o.pack ? VIGIL_TOOLS : VIGIL_TOOLS.filter((t) => !t.packOnly);
 }

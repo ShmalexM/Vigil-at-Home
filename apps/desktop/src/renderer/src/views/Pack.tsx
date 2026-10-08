@@ -41,7 +41,7 @@ import { Thinking } from '../components/Thinking';
 import { MemoryChangeCard, MemorySheet } from '../components/PackMemory';
 import { BREEDS, Dog, breedName } from '../components/Dog';
 import { useToast } from '../components/Toasts';
-import { leadChat, useLeadChat } from '../lead-chat';
+import { STARTERS, contextStarter, leadChat, useLeadChat } from '../lead-chat';
 import { Button, Card, Chip, Segmented } from '../components/ui';
 import { timeAgo } from '../format';
 import '../styles/dog.css';
@@ -200,13 +200,6 @@ export function PackPage() {
 
 // ---------------------------------------------------------------- the Lead dog
 
-const STARTERS = [
-  'Watch what my coding agents do overnight',
-  'Anything worth a look from today?',
-  'Make me a dog that checks Downloads every hour',
-  'What is the pack up to?',
-];
-
 export function LeadPanel({
   pack,
   reload,
@@ -288,8 +281,8 @@ export function LeadConversation({
               dog for it.
             </span>
             <div className="row wrap" style={{ gap: 6 }}>
-              {(context?.selected ? [`What’s this ${pageThing(context.page)}?`] : [])
-                .concat(STARTERS)
+              {[contextStarter(context), ...STARTERS]
+                .filter((s): s is string => !!s)
                 .map((s) => (
                   <button
                     key={s}
@@ -376,11 +369,6 @@ export function LeadConversation({
       </span>
     </>
   );
-}
-
-/** What "this" is on each page, for the starter question. */
-function pageThing(page: string): string {
-  return { alerts: 'alert', rules: 'rule', agents: 'agent', activity: 'event' }[page] ?? 'item';
 }
 
 function Message({
