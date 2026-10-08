@@ -32,6 +32,8 @@ export interface HelperRuleSet {
   exceptions: z.infer<typeof RuleExceptionSchema>[];
   selfPaths: string[];
   lists: Record<string, string[]>;
+  /** Rules that run an older pattern the linear-time engine can't (legacy.ts). */
+  legacy?: string[];
 }
 
 export interface HelperRulesOutcome {
@@ -182,6 +184,7 @@ export class HelperLink
         exceptions: set.exceptions,
         selfPaths: set.selfPaths,
         lists: digests,
+        ...(set.legacy?.length ? { legacy: set.legacy } : {}),
       };
       const out = await withTimeout(
         opts.hold

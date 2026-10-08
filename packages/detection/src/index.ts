@@ -2,10 +2,17 @@ export * from './types.js';
 export { lintRule, isAnchored, type LintResult, type LintOptions } from './rules/lint.js';
 export { globProblem, globToRegExp, regexProblem, renderTemplate } from './rules/compile.js';
 export { foldCase, linearEngine, linearProblem } from './rules/linear.js';
+export {
+  adoptLegacyPatterns,
+  forgetLegacyPatterns,
+  isLegacyPattern,
+  legacyPatternsOf,
+} from './rules/legacy.js';
 export { isTrustedPattern, TEMPLATE_PATTERNS, TEMPLATE_REGEXES } from './rules/trusted.js';
 export { KNOWN_FIELDS, COMPUTED_FIELDS } from './rules/fields.js';
 export {
   DetectionEngine,
+  admitSavedRules,
   compileRule,
   RuleCompileError,
   SLOW_RULE_BUDGET_MS,

@@ -22,7 +22,7 @@ import {
   RulePipeline,
   RuleReviewer,
   builtinRulesFor,
-  compileRule,
+  admitSavedRules,
   decide,
   mergeRules,
   sqliteStores,
@@ -160,16 +160,12 @@ export class Detector {
     // An agent added, edited or switched off changes the tags of what is running now.
     this.registry.onChange(() => this.tracker.retag());
     const builtins = builtinRulesFor(opts.platform ?? process.platform);
-    // A saved rule that no longer compiles (a newer release checks regexes and
-    // globs more strictly) is left out, rather than keeping every rule from loading.
-    const saved = this.stores.rules.list().filter((r) => {
-      try {
-        compileRule(r);
-        return true;
-      } catch {
-        return false;
-      }
-    });
+    // A saved rule keeps running as it did before. One whose regex the
+    // linear-time engine can't run keeps that regex on the usual engine, as an
+    // older pattern (legacyRules); one that no longer compiles at all is left
+    // out, rather than keeping every rule from loading.
+    const { rules: saved, dropped } = admitSavedRules(this.stores.rules.list());
+    for (const d of dropped) console.error(`[detection] saved rule left out: ${d.error}`);
     this.engine = new DetectionEngine(mergeRules(builtins, saved), this.stores, {
       learningUntil: opts.installedAt + LEARNING_DAYS * DAY,
       safety: { selfPaths: opts.selfPaths },
@@ -431,9 +427,15 @@ export class Detector {
     const { rules, lists } = fastPathRules(
       this.engine.listRules().filter((r) => !needApp.has(r.id)),
     );
+    // The helper runs an older pattern only for a rule it already had; it
+    // skips one it did not, and this engine keeps blocking with it.
+    const legacy = new Set(this.engine.legacyRules());
     return {
       rules,
       exceptions,
+      ...(rules.some((r) => legacy.has(r.id))
+        ? { legacy: rules.filter((r) => legacy.has(r.id)).map((r) => r.id) }
+        : {}),
       selfPaths: this.selfPaths,
       lists: Object.fromEntries(lists.map((l) => [l, this.stores.lists.entries(l)])),
     };
@@ -441,6 +443,11 @@ export class Detector {
 
   hasRule(id: string): boolean {
     return this.engine.getRule(id) !== undefined;
+  }
+
+  /** Saved rules with an older pattern that runs as before, without the time limit. */
+  legacyRules(): ReadonlySet<string> {
+    return new Set(this.engine.legacyRules());
   }
 
   /** Rules that went over their matching budget since they were last loaded, for review. */

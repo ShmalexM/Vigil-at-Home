@@ -26,6 +26,8 @@
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { isRelease, type Action, type SensorEvent } from '@vigil/core';
 import {
+  adoptLegacyPatterns,
+  admitSavedRules,
   compileRule,
   DetectionEngine,
   DetectionRule,
@@ -81,10 +83,35 @@ const Saved = z.object({
   lists: z.record(z.string(), z.array(z.string())),
   /** Entries lists dropped, by list, with when (ms). Still blocking until RETIRE_MS later. */
   retired: z.record(z.string(), z.record(z.string(), z.number())).default({}),
+  /**
+   * By rule id, the regexes it runs on the backtracking engine as it did
+   * before rule patterns moved to the linear-time one (legacy.ts in
+   * @vigil/detection). Missing in a file an earlier release wrote: every rule
+   * in it ran then, so loading it adopts them.
+   */
+  legacy: z.record(z.string(), z.array(z.string())).optional(),
 });
 type Saved = z.infer<typeof Saved>;
 
-const EMPTY: Saved = { rev: 0, rules: [], exceptions: [], selfPaths: [], lists: {}, retired: {} };
+const EMPTY: Saved = {
+  rev: 0,
+  rules: [],
+  exceptions: [],
+  selfPaths: [],
+  lists: {},
+  retired: {},
+  legacy: {},
+};
+
+/** Each rule's regexes that run on the backtracking engine, for the saved file. */
+function legacyOf(rules: DetectionRule[]): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const r of rules) {
+    const legacy = compileRule(r).legacy;
+    if (legacy.length) out[r.id] = legacy;
+  }
+  return out;
+}
 
 /** Rule fields that change what an alert says, not what gets blocked. */
 const WORDING = new Set([
@@ -127,19 +154,31 @@ export class FastPath {
       this.opts.log?.('fast path: ignoring saved rules that do not parse');
       return;
     }
-    // A rule a newer release no longer compiles (stricter regex and glob
-    // checks) is dropped on its own; the rest keep blocking.
-    const rules = parsed.data.rules.filter((r) => {
-      try {
-        compileRule(r);
-        return true;
-      } catch (err) {
-        this.opts.log?.(`fast path: dropping saved rule: ${(err as Error).message}`);
-        return false;
-      }
-    });
+    // A saved rule keeps blocking as it did. Only this root-owned file says
+    // which rules keep an older pattern (legacy.ts): one an earlier release
+    // wrote adopts every rule in it, since each ran then. A rule that no
+    // longer compiles at all is dropped on its own; the rest keep blocking.
+    let rules: DetectionRule[];
+    if (parsed.data.legacy === undefined) {
+      const admitted = admitSavedRules(parsed.data.rules);
+      for (const d of admitted.dropped)
+        this.opts.log?.(`fast path: dropping saved rule: ${d.error}`);
+      rules = admitted.rules;
+    } else {
+      for (const [id, patterns] of Object.entries(parsed.data.legacy))
+        adoptLegacyPatterns(id, patterns);
+      rules = parsed.data.rules.filter((r) => {
+        try {
+          compileRule(r);
+          return true;
+        } catch (err) {
+          this.opts.log?.(`fast path: dropping saved rule: ${(err as Error).message}`);
+          return false;
+        }
+      });
+    }
     try {
-      this.apply({ ...parsed.data, rules });
+      this.apply({ ...parsed.data, rules, legacy: legacyOf(rules) });
     } catch (err) {
       this.opts.log?.(`fast path: saved rules did not load: ${(err as Error).message}`);
     }
@@ -179,17 +218,34 @@ export class FastPath {
       if (have) lists[name] = have;
     }
     const retired = this.retire(lists);
+    // A rule the app runs with an older pattern runs here too only if this
+    // helper had that pattern in that rule already (legacy.ts); otherwise it
+    // is skipped, and the app keeps blocking with it while it is open.
+    const older = new Set(cmd.legacy ?? []);
+    const rules = cmd.rules.filter((r) => {
+      if (!older.has(r.id)) return true;
+      try {
+        compileRule(r);
+        return true;
+      } catch (err) {
+        this.opts.log?.(
+          `fast path: skipping rule with an older pattern: ${(err as Error).message}`,
+        );
+        return false;
+      }
+    });
     // Throws RuleCompileError before anything changes. That includes a regex or
     // glob that could take too long to match (regexProblem, globProblem): adding
     // rules needs no password, so the same checks as the app's keep one rule
     // from stalling every check here.
     this.apply({
       rev: this.state.rev + 1,
-      rules: cmd.rules,
+      rules,
       exceptions: cmd.exceptions,
       selfPaths: cmd.selfPaths,
       lists,
       retired,
+      legacy: legacyOf(rules),
     });
     this.save();
     return {

@@ -379,6 +379,8 @@ export interface RuleView {
   matches: number;
   /** It spent too long matching since it was loaded (a "Slow rule" in Noticed): worth a review. */
   slow?: boolean;
+  /** A saved rule with an older pattern that runs as before, without the time limit new rules have. */
+  legacy?: boolean;
 }
 
 /** Everything the rule editor shows for one rule. */

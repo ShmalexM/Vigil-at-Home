@@ -86,7 +86,7 @@ function RuleRow({
   editing: boolean;
   onEdit: (on: boolean) => void;
 }) {
-  const { rule, matches, slow } = view;
+  const { rule, matches, slow, legacy } = view;
   const toast = useToast();
   const [confirmBlock, setConfirmBlock] = useState(false);
   // A tool rule answers Claude Code's hook: its modes are Record, Ask and Deny.
@@ -129,6 +129,14 @@ function RuleRow({
           <span className="t-small clamp-2" title={rule.description}>
             {rule.description}
           </span>
+          {legacy && (
+            <span
+              className="t-small muted"
+              title="Saved before Vigil ran patterns in limited time. It still runs exactly as it did; a regex without lookaheads or large repeat counts would get the time limit."
+            >
+              Older pattern: runs as before, without the time limit
+            </span>
+          )}
         </div>
         <SeverityMark severity={rule.severity} />
         <Chip title="How often this rule is expected to be right">{rule.fidelity} fidelity</Chip>

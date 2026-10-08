@@ -275,10 +275,12 @@ export class VigilCore {
   rules(): RuleView[] {
     const counts = this.store.ruleMatchCounts(this.now() - RULE_REVIEW_DAYS * DAY);
     const slow = this.detector?.slowRules() ?? new Set<string>();
+    const legacy = this.detector?.legacyRules() ?? new Set<string>();
     const engine = (this.detector?.rules() ?? []).map(({ rule, mode }) => ({
       rule: { ...rule, mode },
       matches: counts.get(rule.id) ?? 0,
       ...(slow.has(rule.id) ? { slow: true } : {}),
+      ...(legacy.has(rule.id) ? { legacy: true } : {}),
     }));
     const own = this.store
       .listRules()

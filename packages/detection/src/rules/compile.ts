@@ -2,6 +2,7 @@ import { BlockList, isIP } from 'node:net';
 import type { Condition, DetectionEvent, FieldTest } from '../types.js';
 import { compileField, keyOf, type FieldGetter, type FieldValue } from './fields.js';
 import { linearRegExp } from './linear.js';
+import { isLegacyPattern } from './legacy.js';
 import { isTrustedPattern } from './trusted.js';
 
 /** Longest string a regex or glob is ever run against. Bounds evaluation time. */
@@ -29,12 +30,27 @@ export interface CompiledCondition {
   firstSeen: FirstSeenSpec[];
   /** Has a regex or glob Vigil does not ship (see isTrustedPattern), so the engine times it. */
   untrusted: boolean;
+  /** Regexes of a saved rule that run on the backtracking engine (legacy.ts). */
+  legacy: string[];
 }
 
 /** The rule a condition is in, which decides how its regexes and globs run. */
 export interface PatternContext {
   ruleId?: string | undefined;
   origin?: string | undefined;
+  /**
+   * A rule saved before this release, being loaded (admitSavedRules): a regex
+   * the linear-time engine can't run keeps the backtracking engine, as it ran
+   * before, instead of failing.
+   */
+  adoptLegacy?: boolean;
+}
+
+interface PatternHooks {
+  /** The value is not one Vigil ships. */
+  untrusted(): void;
+  /** The regex runs on the backtracking engine as a saved rule's (legacy.ts). */
+  legacy(pattern: string): void;
 }
 
 /**
@@ -308,15 +324,15 @@ function buildBlockList(values: string[]): BlockList {
 /**
  * The regex for one regex or glob value of a test: on the usual engine when
  * Vigil ships that test (isTrustedPattern), otherwise on the linear-time one.
- * Throws, with the field and the reason, when the value can't be used.
- *
- * @param onUntrusted called when the value is not one Vigil ships.
+ * Throws, with the field and the reason, when the value can't be used. A
+ * regex the linear-time engine can't run is refused, unless the rule was
+ * saved before and had it (legacy.ts).
  */
 function patternRegExp(
   c: FieldTest & { op: 'regex' | 'glob' },
   value: string,
   ctx: PatternContext,
-  onUntrusted: () => void,
+  hooks: PatternHooks,
 ): RegExp {
   const problem = c.op === 'regex' ? regexProblem(value) : globProblem(value);
   if (problem) throw new Error(`${c.field}: ${problem}`);
@@ -326,13 +342,19 @@ function patternRegExp(
   // any other runs in linear time, so no pattern can stall the checks.
   if (isTrustedPattern(use))
     return c.op === 'regex' ? new RegExp(value, nocase ? 'i' : '') : globToRegExp(value, nocase);
-  onUntrusted();
+  hooks.untrusted();
   try {
     return c.op === 'regex' ? linearRegExp(value, nocase) : globToRegExp(value, nocase, true);
   } catch (err) {
+    if (c.op === 'regex' && (ctx.adoptLegacy || isLegacyPattern(ctx.ruleId, value))) {
+      hooks.legacy(value);
+      return new RegExp(value, nocase ? 'i' : '');
+    }
     throw new Error(`${c.field}: ${(err as Error).message}`, { cause: err });
   }
 }
+
+const NO_HOOKS: PatternHooks = { untrusted: () => undefined, legacy: () => undefined };
 
 /** Why each regex or glob value of `c` can't be used in the rule `ctx`, for the linter. */
 export function patternProblems(c: FieldTest, ctx: PatternContext): string[] {
@@ -341,7 +363,7 @@ export function patternProblems(c: FieldTest, ctx: PatternContext): string[] {
   const out: string[] = [];
   for (const v of values) {
     try {
-      patternRegExp({ ...c, op: c.op }, String(v), ctx, () => undefined);
+      patternRegExp({ ...c, op: c.op }, String(v), ctx, NO_HOOKS);
     } catch (err) {
       out.push((err as Error).message);
     }
@@ -349,8 +371,7 @@ export function patternProblems(c: FieldTest, ctx: PatternContext): string[] {
   return out;
 }
 
-/** @param onUntrusted called when the test has a regex or glob Vigil does not ship. */
-function compileMatch(c: FieldTest, ctx: PatternContext, onUntrusted: () => void): Predicate {
+function compileMatch(c: FieldTest, ctx: PatternContext, hooks: PatternHooks): Predicate {
   const get = compileField(c.field);
   const ic = c.nocase === true;
   const norm = (s: string) => (ic ? s.toLowerCase() : s);
@@ -399,7 +420,7 @@ function compileMatch(c: FieldTest, ctx: PatternContext, onUntrusted: () => void
     case 'glob':
     case 'regex': {
       const op = c.op;
-      const res = values.map((v) => patternRegExp({ ...c, op }, v, ctx, onUntrusted));
+      const res = values.map((v) => patternRegExp({ ...c, op }, v, ctx, hooks));
       return (e) => anyString(e, (s) => res.some((r) => r.test(clip(s))));
     }
     case 'cidr': {
@@ -433,6 +454,11 @@ export function compileCondition(
 ): CompiledCondition {
   const firstSeen: FirstSeenSpec[] = [];
   let untrusted = false;
+  const legacy: string[] = [];
+  const hooks: PatternHooks = {
+    untrusted: () => (untrusted = true),
+    legacy: (p) => legacy.push(p),
+  };
 
   const walk = (c: Condition): Predicate => {
     if ('all' in c) {
@@ -461,11 +487,11 @@ export function compileCondition(
       const get = compileField(c.inList.field);
       return (e, s) => asStrings(get(e)).some((v) => s.listHas(list, v));
     }
-    return compileMatch(c, ctx, () => (untrusted = true));
+    return compileMatch(c, ctx, hooks);
   };
 
   const test = walk(c);
-  return { test, firstSeen, untrusted };
+  return { test, firstSeen, untrusted, legacy };
 }
 
 /**

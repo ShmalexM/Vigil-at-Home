@@ -1,7 +1,13 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { PreflightRequest, SensorEvent } from '@vigil/core';
-import { SLOW_RULE_BUDGET_MS, type SessionStart } from '@vigil/detection';
-import { describe, expect, it, vi } from 'vitest';
+import {
+  DetectionRule,
+  forgetLegacyPatterns,
+  sqliteStores,
+  SLOW_RULE_BUDGET_MS,
+  type SessionStart,
+} from '@vigil/detection';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Store } from './db/store.js';
 import { Detector, type DetectorOptions } from './detection.js';
 import { DryRunExecutor } from './executor.js';
@@ -10,8 +16,10 @@ import { SLOW_RULE } from './slow-rule.js';
 
 const BAD = 'a'.repeat(64);
 
-function setup(extra: Partial<DetectorOptions> = {}) {
+function setup(extra: Partial<DetectorOptions> = {}, saved: DetectionRule[] = []) {
   const db = new DatabaseSync(':memory:');
+  // Rules an earlier release saved, there before the app starts.
+  for (const r of saved) sqliteStores(db).rules.save(r, 1);
   const store = new Store(db);
   const executor = new DryRunExecutor();
   const core = new VigilCore(store, executor, true);
@@ -52,6 +60,60 @@ function exec(path: string, sha256?: string): SensorEvent {
 }
 
 describe('Detector', () => {
+  afterEach(() => {
+    forgetLegacyPatterns();
+  });
+
+  const ownRule = (id: string, value: string, mode: 'alert' | 'block' = 'block') =>
+    DetectionRule.parse({
+      id,
+      version: 1,
+      name: `Rule ${id}`,
+      description: '',
+      origin: 'user',
+      mode,
+      severity: 'high',
+      fidelity: 'high',
+      eventKinds: ['process.exec'],
+      condition: { field: 'process.path', op: 'regex', value },
+      response: [{ kind: 'process.kill', pid: '{{process.pid}}' }],
+      reasons: ['Matched.'],
+      tags: [],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+  it('keeps a saved rule whose pattern needs the usual engine, quietly marked as older', async () => {
+    // A lookahead: compiled before rule patterns moved to the linear-time engine.
+    const older = ownRule('older', '^/tmp/(?=e)evil$');
+    const { core, store, popups } = setup({}, [older, ownRule('newer', '^/tmp/[0-9a-f]{40}$')]);
+    const views = core.rules();
+    expect(views.find((r) => r.rule.id === 'older')).toMatchObject({
+      rule: { mode: 'block' },
+      legacy: true,
+    });
+    expect(views.find((r) => r.rule.id === 'newer')?.legacy).toBeUndefined();
+    // No popup, alert or badge for being older; it blocks as it did.
+    expect(store.listAlerts()).toEqual([]);
+    expect(popups).toEqual([]);
+    await core.handleEvent(exec('/tmp/evil'));
+    expect(store.listAlerts().map((a) => a.ruleId)).toContain('older');
+    // The helper hears it is one, so it can skip it if it never had it.
+    const set = core.detector!.helperRules();
+    expect(set.rules.map((r) => r.id)).toContain('older');
+    expect(set.legacy).toEqual(['older']);
+  });
+
+  it('refuses the same pattern in a new rule, with the reason', () => {
+    const { core } = setup({}, [ownRule('older', '^/tmp/(?=e)evil$')]);
+    const out = core.detector!.editor.validate({
+      ...ownRule('brand-new', '^/tmp/(?=e)evil$'),
+      origin: undefined,
+    });
+    expect(out.ok).toBe(false);
+    expect(out.errors.join()).toMatch(/linear-time.*lookahead/);
+  });
+
   it('stores ordinary events with how many rules checked them', async () => {
     const { core, store, popups } = setup();
     await core.handleEvent(exec('/usr/bin/git'));

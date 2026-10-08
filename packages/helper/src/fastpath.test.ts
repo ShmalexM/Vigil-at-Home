@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DetectionEngine, macosCoreRules, memoryStores } from '@vigil/detection';
@@ -262,6 +262,69 @@ describe('blocking rules in the helper', () => {
     loaded.load();
     expect(loaded.status().rules).toBe(sync.rules.length);
     expect(logs.join('\n')).toMatch(/slow/);
+  });
+
+  it('keeps blocking with a saved rule whose pattern only the usual engine runs', async () => {
+    const { sync } = appSet({});
+    // Ran before rule patterns moved to the linear-time engine, which has no lookahead.
+    const older = {
+      ...sync.rules[0]!,
+      id: 'older-look',
+      condition: { field: 'process.path', op: 'regex' as const, value: '^/tmp/(?=p)payload$' },
+    };
+    const file = join(root, 'saved-with-older-pattern.json');
+    // Written by an earlier release: no `legacy` field.
+    writeFileSync(
+      file,
+      JSON.stringify({ ...sync, rev: 3, rules: [...sync.rules, older], lists: {}, retired: {} }),
+    );
+    const logs: string[] = [];
+    const loaded = new FastPath({
+      file,
+      run: async () => ({ ok: true }) as unknown as ActionOutcome,
+      log: (m) => logs.push(m),
+    });
+    loaded.load();
+    expect(loaded.status().rules).toBe(sync.rules.length + 1);
+    const ran = await loaded.check(exec(6100, 'c'.repeat(64)));
+    expect(ran.map((r) => r.ruleId)).toContain('older-look');
+
+    // The app syncs it back, marked as an older pattern: kept, and recorded.
+    loaded.sync({ ...sync, rules: [...sync.rules, older], legacy: ['older-look'], lists: {} });
+    expect(loaded.status().rules).toBe(sync.rules.length + 1);
+    const saved = JSON.parse(readFileSync(file, 'utf8')) as { legacy: Record<string, string[]> };
+    expect(saved.legacy).toEqual({ 'older-look': ['^/tmp/(?=p)payload$'] });
+
+    // One this helper never had is skipped when marked, refused when not.
+    const fresh = { ...older, id: 'fresh-look' };
+    loaded.sync({
+      ...sync,
+      rules: [...sync.rules, older, fresh],
+      legacy: ['older-look', 'fresh-look'],
+      lists: {},
+    });
+    expect(loaded.status().rules).toBe(sync.rules.length + 1);
+    expect(logs.join('\n')).toMatch(/skipping rule with an older pattern: rule fresh-look/);
+    expect(() => loaded.sync({ ...sync, rules: [...sync.rules, older, fresh], lists: {} })).toThrow(
+      /fresh-look/,
+    );
+
+    // A file this release wrote adopts nothing it does not list.
+    const other = { ...older, id: 'other-look' };
+    const file2 = join(root, 'saved-by-this-release.json');
+    writeFileSync(
+      file2,
+      JSON.stringify({
+        ...sync,
+        rules: [...sync.rules, other],
+        lists: {},
+        retired: {},
+        legacy: {},
+      }),
+    );
+    const again = new FastPath({ file: file2, run: () => Promise.reject(new Error('unused')) });
+    again.load();
+    expect(again.status().rules).toBe(sync.rules.length);
   });
 
   it('needs the admin password to turn a rule off, change it or add a path', async () => {

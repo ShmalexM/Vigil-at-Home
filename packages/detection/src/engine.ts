@@ -15,6 +15,7 @@ import {
   type FirstSeenSpec,
 } from './rules/compile.js';
 import { compileField, keyOf, type FieldGetter } from './rules/fields.js';
+import { adoptLegacyPatterns } from './rules/legacy.js';
 import { SafetyFloor, type SafetyConfig } from './safety.js';
 import type { Stores } from './state/stores.js';
 import {
@@ -61,6 +62,12 @@ interface CompiledRule {
   santaFrom: FieldGetter | undefined;
   /** Has a regex or glob Vigil does not ship: its matching is timed. */
   untrusted: boolean;
+  /**
+   * Regexes this saved rule runs on the backtracking engine, as it did before
+   * rule patterns moved to the linear-time one (rules/legacy.ts). Empty for
+   * any rule that runs entirely in linear time or is Vigil's own.
+   */
+  legacy: string[];
   sequence:
     | {
         steps: { kinds: Set<string>; condition: CompiledCondition }[];
@@ -92,14 +99,20 @@ export class RuleCompileError extends Error {
   }
 }
 
+/**
+ * @param opts.adoptLegacy the rule was saved before this release and is
+ *   being loaded: a regex the linear-time engine can't run keeps the
+ *   backtracking engine instead of failing (admitSavedRules).
+ */
 export function compileRule(
   input: DetectionRuleInput | DetectionRule,
   defaultDedupeWindowSec = 3600,
+  opts: { adoptLegacy?: boolean } = {},
 ): CompiledRule {
   const rule = DetectionRule.parse(input);
   try {
     const scopePrefix = `${[...rule.eventKinds].sort().join('+')}:`;
-    const ctx = { ruleId: rule.id, origin: rule.origin };
+    const ctx = { ruleId: rule.id, origin: rule.origin, adoptLegacy: opts.adoptLegacy === true };
     const condition = compileCondition(rule.condition, scopePrefix, ctx);
     const exclusions = rule.exclusions.map((x) => compileCondition(x, scopePrefix, ctx));
     const steps = (rule.sequence?.steps ?? []).map((st) => ({
@@ -118,6 +131,11 @@ export function compileRule(
       untrusted: [condition, ...exclusions, ...steps.map((st) => st.condition)].some(
         (x) => x.untrusted,
       ),
+      legacy: [
+        ...new Set(
+          [condition, ...exclusions, ...steps.map((st) => st.condition)].flatMap((x) => x.legacy),
+        ),
+      ],
       sequence: rule.sequence
         ? {
             steps,
@@ -129,6 +147,40 @@ export function compileRule(
   } catch (err) {
     throw new RuleCompileError(rule.id, (err as Error).message);
   }
+}
+
+/**
+ * Rules saved by an earlier release, ready to load. A rule whose regexes the
+ * linear-time engine can't run, but which compiled before (regexProblem and
+ * globProblem are unchanged), keeps running as it did: those regexes stay on
+ * the backtracking engine for that rule (rules/legacy.ts), and the engine
+ * lists it in legacyRules(). A rule that no longer compiles at all is left
+ * out and reported in `dropped`, rather than keeping every rule from loading.
+ * Call it once, with what was saved before anything new is added.
+ */
+export function admitSavedRules(saved: ReadonlyArray<DetectionRuleInput | DetectionRule>): {
+  rules: DetectionRule[];
+  dropped: { id: string; error: string }[];
+} {
+  const rules: DetectionRule[] = [];
+  const dropped: { id: string; error: string }[] = [];
+  for (const r of saved) {
+    try {
+      rules.push(compileRule(r).rule);
+      continue;
+    } catch {
+      // Tried again below as a rule saved before.
+    }
+    try {
+      const c = compileRule(r, undefined, { adoptLegacy: true });
+      adoptLegacyPatterns(c.rule.id, c.legacy);
+      rules.push(c.rule);
+    } catch (err) {
+      const id = (r as { id?: unknown }).id;
+      dropped.push({ id: typeof id === 'string' ? id : '?', error: (err as Error).message });
+    }
+  }
+  return { rules, dropped };
 }
 
 /** Bounded map of key -> timestamps, oldest keys evicted first. */
@@ -255,6 +307,14 @@ export class DetectionEngine {
     this.spent.delete(ruleId);
     this.slow.delete(ruleId);
     this.reindex();
+  }
+
+  /**
+   * Saved rules with a regex that runs on the backtracking engine as it did
+   * before (rules/legacy.ts), so it can't be time-limited. Still timed.
+   */
+  legacyRules(): string[] {
+    return [...this.byId.values()].filter((c) => c.legacy.length).map((c) => c.rule.id);
   }
 
   /** Rules that went over their matching budget (onSlowRule), for review. */
