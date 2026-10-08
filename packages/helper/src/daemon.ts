@@ -259,13 +259,8 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     const listenSync = async (): Promise<void> => {
       if (stopped) return;
       try {
-        await new Promise<void>((resolve, reject) => {
-          server.once('error', reject);
-          server.listen(syncPort, '127.0.0.1', () => {
-            server.off('error', reject);
-            resolve();
-          });
-        });
+        await listenUnlessStopped(server, syncPort, () => stopped);
+        if (stopped) return;
         if (live.syncError) log(`Santa sync listening on port ${syncPort}`);
         delete live.syncError;
       } catch (err) {
@@ -399,6 +394,25 @@ export function createSyncHttpsServer(
   );
   server.maxConnections = l.maxConnections;
   return server;
+}
+
+/**
+ * Listens on 127.0.0.1. If the helper stopped while the listen was under
+ * way, closes the server again so the port is not left bound.
+ */
+export function listenUnlessStopped(
+  server: HttpsServer,
+  port: number,
+  stopped: () => boolean,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', () => {
+      server.off('error', reject);
+      if (stopped()) server.close(() => resolve());
+      else resolve();
+    });
+  });
 }
 
 function writeFileAccessPolicy(path: string): void {

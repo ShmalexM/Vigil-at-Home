@@ -20,6 +20,7 @@ import { HelperClient } from './client.js';
 import { defaultPaths, type HelperPaths } from './config.js';
 import {
   createSyncHttpsServer,
+  listenUnlessStopped,
   runDaemon,
   SYNC_SERVER_LIMITS,
   type SensorHealth,
@@ -283,7 +284,7 @@ describe('the Santa sync port', () => {
       maxConnections: 2,
       handshakeTimeoutMs: 200,
     });
-    await new Promise<void>((r) => server.listen(freePort, '127.0.0.1', () => r()));
+    await listenUnlessStopped(server, freePort, () => false);
     try {
       const [a, b] = [await open(freePort), await open(freePort)];
       const third = await open(freePort);
@@ -296,5 +297,18 @@ describe('the Santa sync port', () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()));
     }
+  });
+
+  it('does not stay bound when the helper stops during listen', async () => {
+    const server = createSyncHttpsServer(tlsFiles(), () => {});
+    let stopped = false;
+    const listening = listenUnlessStopped(server, freePort, () => stopped);
+    stopped = true;
+    await listening;
+    expect(server.listening).toBe(false);
+    // The port is free again.
+    const probe = createServer();
+    await new Promise<void>((r) => probe.listen(freePort, '127.0.0.1', () => r()));
+    await new Promise<void>((r) => probe.close(() => r()));
   });
 });
