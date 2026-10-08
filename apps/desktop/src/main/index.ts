@@ -36,6 +36,7 @@ import { PackMemory } from './pack/memory.js';
 import { PackService } from './pack/service.js';
 import { seedPackDemo } from './pack/demo.js';
 import { PowerPolicy } from './power.js';
+import { selfPaths } from './self-path.js';
 import { HEALTH_CHECK_MS, macProbe, reportHealth, type HelperSensors } from './sensor-health.js';
 import { VigilCore } from './service.js';
 import { UpdateChecker } from './updates.js';
@@ -100,11 +101,12 @@ function start(): void {
   const helper = new HelperLink();
   const core = new VigilCore(store, helper, true);
   const demo = !app.isPackaged && !!process.env['VIGIL_DEMO'];
-  // The .app bundle when packaged; the Electron binary in development.
-  const selfPaths = [app.isPackaged ? join(process.execPath, '../../..') : process.execPath];
+  // The .app bundle or install folder when packaged; the Electron binary in development.
+  const self = selfPaths(process.execPath, process.platform, app.isPackaged, process.env);
   const detector = new Detector(db, store, core.alerts, (e, o) => core.ingest(e, o), {
     installedAt: core.installedAt(),
-    selfPaths,
+    selfPaths: self.app,
+    helperSelfPaths: self.helper,
     // What Vigil itself starts (its AI helpers) is tagged vigil-self, never a watched agent.
     selfPid: process.pid,
     // The tracker reports to the agent service, created just below.
@@ -278,7 +280,7 @@ function start(): void {
     cipher,
     onChange: pushPack,
     // Connectors run the user's programs: watched as connectors, never as Vigil.
-    selfPaths,
+    selfPaths: self.app,
     spawned: (pid, running) =>
       running ? detector.tracker.connectorStarted(pid) : detector.tracker.connectorStopped(pid),
   });

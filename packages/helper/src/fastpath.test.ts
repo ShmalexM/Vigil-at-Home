@@ -268,6 +268,25 @@ describe('blocking rules in the helper', () => {
     await client.call(sync);
   });
 
+  it('moves Vigil to a folder inside one it already never blocked without asking', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    approve = true;
+    await sendLists(
+      (await client.call<{ needLists: string[] }>({ ...sync, selfPaths: ['/'] })).needLists,
+      lists,
+    );
+    approve = false;
+    prompts.length = 0;
+    await client.call({ ...sync, selfPaths: ['/opt/Vigil at Home'] });
+    expect(prompts).toEqual([]);
+    // Now only that folder is Vigil, and malware elsewhere is blocked again.
+    sys.processes.set(7001, { path: '/tmp/payload', started: 'T' });
+    expect((await fast.check(exec(7001, BAD))).length).toBeGreaterThan(0);
+    await expect(client.call({ ...sync, selfPaths: ['/home'] })).rejects.toMatchObject({
+      code: 'refused',
+    });
+  });
+
   it('lets a held rule change ride on the next password dialog', async () => {
     const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
     approve = true;

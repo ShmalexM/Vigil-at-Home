@@ -92,6 +92,8 @@ export interface DetectorOptions {
   installedAt: number;
   /** Vigil's own executable, which the safety floor never touches. */
   selfPaths: string[];
+  /** What the helper is told instead, when it differs (an AppImage's mount changes every launch). */
+  helperSelfPaths?: string[];
   feeds?: FeedImporterOptions;
   now?: () => number;
   /** Vigil's own pid: its process tree is tagged `vigil-self` (its AI helpers). */
@@ -130,6 +132,7 @@ export class Detector {
   private reviewer: RuleReviewer | undefined;
   private checkedByKind = new Map<string, number>();
   private readonly now: () => number;
+  /** Vigil's own paths as the helper's safety floor sees them. */
   private readonly selfPaths: string[];
   /** Set by the app: sends the helper its copy after rules, modes or exceptions change. */
   syncHelper: HelperSync | undefined;
@@ -145,7 +148,7 @@ export class Detector {
     opts: DetectorOptions,
   ) {
     this.now = opts.now ?? Date.now;
-    this.selfPaths = opts.selfPaths;
+    this.selfPaths = opts.helperSelfPaths ?? opts.selfPaths;
     // Detection keeps its state in det_* tables in the same database. Replay
     // history reads the app's own event table rather than keeping a second copy.
     this.stores = { ...sqliteStores(db), history: appHistory(store) };

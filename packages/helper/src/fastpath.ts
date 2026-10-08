@@ -29,6 +29,7 @@ import {
   DetectionEngine,
   DetectionRule,
   memoryStores,
+  underSelfRoot,
   type RuleException,
   type Stores,
 } from '@vigil/detection';
@@ -151,8 +152,13 @@ export class FastPath {
     const added = cmd.exceptions.filter((e) => !had.has(canonical(e)));
     if (added.length === 1) out.push(`add an exception to ${added[0]!.ruleId}`);
     else if (added.length) out.push(`add ${added.length} exceptions`);
-    const paths = new Set(this.state.selfPaths);
-    for (const p of cmd.selfPaths) if (!paths.has(p)) out.push(`never block ${p}`);
+    // A path inside one the helper already never blocked loosens nothing. The
+    // old paths aren't filtered here, so an install that was sent `/` (Linux
+    // before 0.1.0-alpha.5) moves to its real folder without asking.
+    const own = this.state.selfPaths.map((p) => p.toLowerCase().replace(/\/+$/, ''));
+    for (const p of cmd.selfPaths) {
+      if (!underSelfRoot(own, p.toLowerCase().replace(/\/+$/, ''))) out.push(`never block ${p}`);
+    }
     return out;
   }
 

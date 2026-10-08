@@ -18,6 +18,25 @@ export interface SafetyConfig {
   neverBlockNetworks: string[];
 }
 
+/**
+ * Vigil's own paths, lower-cased without a trailing slash. A path with fewer
+ * than two parts (`/`, `/opt`) is dropped: it would cover every program on the
+ * machine, so nothing could ever be paused, killed or quarantined.
+ */
+export function selfRoots(paths: readonly string[]): string[] {
+  return paths
+    .map((p) => p.toLowerCase().replace(/\/+$/, ''))
+    .filter(
+      (p) => p.split('/').filter((part) => part && part !== '.' && part !== '..').length >= 2,
+    );
+}
+
+/** Whether `path` is one of `roots` (from {@link selfRoots}) or inside one. */
+export function underSelfRoot(roots: readonly string[], path: string): boolean {
+  const p = path.toLowerCase();
+  return roots.some((s) => p === s || p.startsWith(`${s}/`));
+}
+
 export const DEFAULT_PROTECTED_PATH_GLOBS = [
   '/System/**',
   '/usr/sbin/**',
@@ -77,7 +96,7 @@ export class SafetyFloor {
     const extra = cfg.protectedPathGlobs ?? [];
     this.protectedPaths = [...DEFAULT_PROTECTED_PATH_GLOBS, ...extra].map((g) => globToRegExp(g));
     this.protectedFiles = [...PROTECTED_FILE_GLOBS, ...extra].map((g) => globToRegExp(g));
-    this.selfPaths = (cfg.selfPaths ?? []).map((p) => p.toLowerCase().replace(/\/+$/, ''));
+    this.selfPaths = selfRoots(cfg.selfPaths ?? []);
     this.neverBlock = toBlockList(
       [...DEFAULT_NEVER_BLOCK_NETWORKS, ...(cfg.neverBlockNetworks ?? [])],
       'neverBlockNetworks',
@@ -85,8 +104,7 @@ export class SafetyFloor {
   }
 
   private isSelf(path: string): boolean {
-    const p = path.toLowerCase();
-    return this.selfPaths.some((s) => p === s || p.startsWith(`${s}/`));
+    return underSelfRoot(this.selfPaths, path);
   }
 
   /** Why this process must never be paused, killed or blocklisted, or undefined if it may be. */
