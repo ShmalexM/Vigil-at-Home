@@ -66,6 +66,7 @@ export function AppearanceSection({
     if (!t) {
       toast({
         text: 'That isn’t a Codex theme. Share one from Codex’s Appearance settings and paste it here.',
+        tone: 'error',
       });
       return;
     }

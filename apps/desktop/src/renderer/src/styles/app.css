@@ -589,6 +589,9 @@ select {
   color: var(--tx0);
   animation: rise 0.18s var(--ease-out);
 }
+.toast.error .fuse {
+  background: var(--poor);
+}
 .toast .fuse {
   position: absolute;
   left: 0;
