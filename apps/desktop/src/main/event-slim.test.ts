@@ -259,7 +259,9 @@ describe('storedArgs', () => {
       const a = 'a'.repeat(767 + shift) + '🐕'.repeat(1000) + 'b'.repeat(191 + shift);
       const [kept] = storedArgs([a]);
       expect(kept).toMatch(/characters not stored/);
-      expect(kept!.isWellFormed()).toBe(true);
+      const loneSurrogate =
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+      expect(kept).not.toMatch(loneSurrogate);
       const n = Number(/\[(\d+) characters/.exec(kept!)![1]);
       expect(kept!.length - kept!.indexOf(']…') - 2 + kept!.indexOf('…[') + n).toBe(a.length);
     }
