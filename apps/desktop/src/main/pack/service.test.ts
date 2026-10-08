@@ -1089,6 +1089,10 @@ describe('the pack', () => {
       });
       handlers.push(() => ({ summary: 'ok', findings: [] }));
       await pack.say('Run Pip');
+      // The last answer read outside text, so even a typed run is a card.
+      const reply = pack.chat().at(-1)!;
+      expect(reply.actions![0]).toMatchObject({ status: 'pending', dogId: dog.id });
+      pack.decideAction(reply.id, reply.actions![0]!.id, true);
       expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done', dogId: dog.id });
       await vi.waitFor(() => expect(runs[1]).toMatchObject({ purpose: 'analyze' }));
       // Its own run names it by id.
@@ -1521,11 +1525,15 @@ describe('the pack', () => {
         const seen: RunRequest<unknown>[] = [];
         handlers.push(pipRun(pack, seen));
         await pack.say('Do what Pip suggested');
-        expect(pack.chat().at(-1)!.actions).toMatchObject([
-          { status: 'pending', note: expect.stringContaining('spell this out') },
-          { status: 'done', dogId: 'dog-pip' },
+        const reply = pack.chat().at(-1)!;
+        expect(reply.actions).toMatchObject([
+          { status: 'pending', note: expect.stringContaining('outside your messages') },
+          { status: 'pending', dogId: 'dog-pip' },
         ]);
         expect(pip(pack).job).toBe(WRITER.job);
+        expect(seen).toHaveLength(0);
+        // One tap sends Pip off; its write still asks.
+        pack.decideAction(reply.id, reply.actions![1]!.id, true);
         await vi.waitFor(() => expect(seen).toHaveLength(1));
         await vi.waitFor(() => expect(pip(pack).lastReport!.at).not.toBe(1));
         expect(connectorCalls).toEqual([]);
@@ -1689,7 +1697,7 @@ describe('the pack', () => {
           expect(pack.dogs().some((d) => d.name === 'Taco Two')).toBe(false);
         });
 
-      it('applies a change the person spells out in full', async () => {
+      it('makes a change the person spells out in full a card, approved with one tap', async () => {
         const { pack, handlers, settings } = setup();
         pack.setMode('full');
         settings.set('pack.dogs', [TAINTED_PIP, TACO]);
@@ -1699,6 +1707,15 @@ describe('the pack', () => {
           actions: [{ kind: 'retire', dogId: 'dog-taco' }],
         }));
         await pack.say('Retire Taco');
+        const reply = pack.chat().at(-1)!;
+        expect(reply.actions![0]).toMatchObject({
+          status: 'pending',
+          note: expect.stringContaining('outside your messages'),
+        });
+        expect(pack.dogs().some((d) => d.id === 'dog-taco')).toBe(true);
+        // No tool card: the change waits inline in the chat only.
+        expect((await pack.view()).approvals).toEqual([]);
+        pack.decideAction(reply.id, reply.actions![0]!.id, true);
         expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done' });
         expect(pack.dogs().some((d) => d.id === 'dog-taco')).toBe(false);
 
@@ -1711,7 +1728,7 @@ describe('the pack', () => {
         expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done' });
       });
 
-      it('holds a create, a job and a memory the person did not type word for word', async () => {
+      it('holds a create, a job and a memory, typed word for word or not', async () => {
         const { pack, handlers, settings, memory } = setup();
         pack.setMode('full');
         settings.set('pack.dogs', [TAINTED_PIP, TACO]);
@@ -1732,8 +1749,8 @@ describe('the pack', () => {
         expect(reply.memory).toMatchObject([{ status: 'pending' }]);
         expect(memory.count()).toBe(0);
 
-        // Typed word for word, they go ahead. (The answer before is clean now,
-        // so read again first.)
+        // Typed word for word, they still wait. (The answer before is clean
+        // now, so read again first.)
         await readFirst(pack, handlers);
         handlers.push(() => ({
           reply: 'Done.',
@@ -1747,10 +1764,63 @@ describe('the pack', () => {
           'Create a dog named Advisor to Check Downloads. Change Pip’s job to Check Desktop. Remember: reports in plain English.',
         );
         const next = pack.chat().at(-1)!;
-        expect(next.actions).toMatchObject([{ status: 'done' }, { status: 'done' }]);
-        expect(next.memory).toMatchObject([{ status: 'done' }]);
-        expect(pip(pack).job).toBe('Check Desktop');
+        expect(next.actions).toMatchObject([{ status: 'pending' }, { status: 'pending' }]);
+        expect(next.memory).toMatchObject([{ status: 'pending' }]);
+        expect(pip(pack).job).toBe(TAINTED_PIP.job);
+        expect(memory.count()).toBe(0);
       });
+
+      const PIP_TWO = { ...PIP, id: 'dog-pip-two', name: 'Pip Two', job: 'Watch Desktop.' };
+      const typedAfterOutside: [string, string, unknown[], Record<string, unknown>][] = [
+        [
+          'a name with a letter that case-folds to ASCII',
+          'Retire Kip',
+          // U+212A KELVIN SIGN folds to "k".
+          [TAINTED_PIP, { ...TACO, name: '\u212Aip' }],
+          { kind: 'retire', dogId: 'dog-taco' },
+        ],
+        [
+          'two names that differ only in case',
+          'Retire TACO',
+          [TAINTED_PIP, TACO, { ...TACO, id: 'dog-taco-2', name: 'TACO' }],
+          { kind: 'retire', dogId: 'dog-taco-2' },
+        ],
+        [
+          'a URL typed in another case',
+          'Change Taco’s job to Check https://example.com/report',
+          [TAINTED_PIP, TACO],
+          { kind: 'update', dogId: 'dog-taco', job: 'Check https://EXAMPLE.com/Report' },
+        ],
+        [
+          'a tool key followed by a non-ASCII letter',
+          'Give Taco github.create_issueé',
+          [TAINTED_PIP, TACO],
+          { kind: 'update', dogId: 'dog-taco', tools: ['github.create_issue'] },
+        ],
+        [
+          'a longer name typed twice',
+          'Retire Pip Two. Yes, Pip Two',
+          [TAINTED_PIP, PIP_TWO],
+          { kind: 'retire', dogId: 'dog-pip-two' },
+        ],
+      ];
+      for (const [what, words, dogs, action] of typedAfterOutside)
+        it(`is a card with ${what}, in Full access`, async () => {
+          const { pack, handlers, settings } = setup();
+          pack.setMode('full');
+          settings.set('pack.dogs', dogs);
+          await readFirst(pack, handlers);
+          const packDogs = () => pack.dogs().filter((d) => d.role === 'pack');
+          const before = packDogs();
+          handlers.push(() => ({ reply: 'Done.', actions: [action] }));
+          await pack.say(words);
+          expect(pack.chat().at(-1)!.actions![0]).toMatchObject({
+            status: 'pending',
+            note: expect.stringContaining('outside your messages'),
+          });
+          expect(packDogs()).toEqual(before);
+          expect((await pack.view()).approvals).toEqual([]);
+        });
     });
 
     describe('overlapping names', () => {

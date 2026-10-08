@@ -368,9 +368,10 @@ interface Turn {
   /** Dogs the person named in this message, by id. A change to any other dog is a card. */
   named: ReadonlySet<string>;
   /**
-   * The last answer shown to the person could hold outside text (it read
-   * some, or used a tool). A short "yes" may be agreeing to it, so a change
-   * the person's own message does not spell out in full is a card.
+   * An answer shown to the person since their last message could hold
+   * outside text (it read some, or used a tool). A short "yes" may be
+   * agreeing to it, so every change in this turn is a card, in every mode,
+   * however much of it the person typed.
    */
   afterOutside: boolean;
 }
@@ -747,8 +748,7 @@ export class PackService {
    *   through gateAction as clean, unless the message names a reference
    *   or the answer cites one (the bridge), or it changes or runs a dog
    *   other than one the person named, or it follows an answer that read
-   *   outside text and the person's message does not spell it out: then it
-   *   is a card.
+   *   outside text: then it is a card.
    * - The reading path answers questions that need outside text: what a dog
    *   found, a job, Vigil's data, a connector's output. It runs only when
    *   the acting path asks for a read of named references (no word in the
@@ -799,11 +799,10 @@ export class PackService {
       const v = result.value;
       // Only the acting path's own request sends the turn down the reading path.
       const read = v.read;
-      const lastAnswer = [...before].reverse().find((m) => m.from === 'lead');
       const turn: Turn = {
         words,
         read: !!read,
-        afterOutside: !!lastAnswer && messageTainted(lastAnswer),
+        afterOutside: afterOutside(before),
         named: new Set(typedNames(words, this.dogs()).map((n) => n.dogId)),
         bridge: citesReference([
           words,
@@ -1083,9 +1082,8 @@ export class PackService {
    * for the person. Its fields are the person's request (the acting path saw
    * no outside text), so gateAction takes it as clean, unless the turn is a
    * bridge, or the person named a dog in this message and the change is
-   * about another one, or the last answer read outside text and the
-   * person's message does not spell the change out: then it is a card in
-   * every mode.
+   * about another one, or an answer since the person's last message read
+   * outside text: then it is a card in every mode.
    */
   private consider(
     a: z.infer<typeof LeadAnswer>['actions'][number],
@@ -1121,14 +1119,14 @@ export class PackService {
     const grantsWrite = added.some((k) => !this.treatedAsReadOnly(k));
     // The person named a dog and this is about another one: the model picked it.
     const otherDog = !!target && turn.named.size > 0 && !turn.named.has(target.id);
-    const unsaid = turn.afterOutside && !this.spelledOut(target, dog, added, turn);
-    if (gateAction(this.mode(), a.kind, grantsWrite, turn.bridge || otherDog || unsaid) === 'ask') {
+    const tainted = turn.bridge || turn.afterOutside || otherDog;
+    if (gateAction(this.mode(), a.kind, grantsWrite, tainted) === 'ask') {
       return {
         ...action,
         note: turn.bridge
           ? 'This builds on text from outside your messages, so it waits for your OK'
-          : unsaid
-            ? 'My last answer read text from outside your messages, and you didn’t spell this out, so it waits for your OK'
+          : turn.afterOutside
+            ? 'My last answer read text from outside your messages, so this waits for your OK'
             : otherDog
               ? 'You named a different dog, so this waits for your OK'
               : this.mode() === 'ask'
@@ -1139,25 +1137,6 @@ export class PackService {
       };
     }
     return this.apply(action);
-  }
-
-  /**
-   * The person's own message spells a change out in full: it names the dog
-   * the change is about, holds its new name and job word for word, and types
-   * the key of each connector tool it adds. Breed and schedule are Vigil's
-   * own words, and Vigil's tools only read.
-   */
-  private spelledOut(
-    target: Dog | undefined,
-    dog: Partial<DogInput>,
-    added: readonly string[],
-    turn: Turn,
-  ): boolean {
-    if (target && !turn.named.has(target.id)) return false;
-    if (dog.name !== undefined && !namesFact(turn.words, dog.name)) return false;
-    if (dog.job !== undefined && !namesFact(turn.words, dog.job)) return false;
-    const typed = new Set(this.typedToolKeys(turn.words));
-    return added.every((k) => this.isVigilKey(k) || typed.has(k));
   }
 
   /**
@@ -1352,7 +1331,8 @@ export class PackService {
    * person's words (it saw no outside text), so they apply straight away and
    * stay clean, except that each waits on a card when: the acting path also
    * asked for a read, or the turn is a bridge (names or cites a reference);
-   * a `remember` replaces a fact the person's message doesn't name word for
+   * an answer since the person's last message read outside text; a
+   * `remember` replaces a fact the person's message doesn't name word for
    * word; or a `forget` is for a fact that could hold outside text.
    */
   private considerMemory(
@@ -1366,21 +1346,17 @@ export class PackService {
     const changes: { change: MemoryChange; wait?: string }[] = [];
     const turnWait = turn.bridge
       ? 'This builds on text from outside your messages'
-      : turn.read
-        ? 'This answer also looked things up'
-        : undefined;
-    // After an answer that read outside text, only a fact the person typed word for word.
-    const unsaid = (fact: string) =>
-      turn.afterOutside && !namesFact(turn.words, fact)
+      : turn.afterOutside
         ? 'My last answer read text from outside your messages'
-        : undefined;
+        : turn.read
+          ? 'This answer also looked things up'
+          : undefined;
     for (const r of answer.remember ?? []) {
       const parsed = MemoryInput.safeParse(r);
       if (!parsed.success) continue;
       const replaced = r.replaces ? entry(r.replaces) : undefined;
       const wait =
         turnWait ??
-        unsaid(parsed.data.fact) ??
         (replaced && !namesFact(turn.words, replaced.fact)
           ? 'It replaces something you told me before'
           : undefined);
@@ -1401,9 +1377,7 @@ export class PackService {
       if (!e || seen.has(e.id)) continue;
       seen.add(e.id);
       const wait =
-        turnWait ??
-        (memoryTainted(e) ? 'That fact came from outside your messages' : undefined) ??
-        unsaid(e.fact);
+        turnWait ?? (memoryTainted(e) ? 'That fact came from outside your messages' : undefined);
       changes.push({
         change: {
           id: newId(this.now()),
@@ -2086,6 +2060,18 @@ function nameTainted(d: Dog): boolean {
   if (d.role === 'lead') return d.name !== 'Scout';
   if (d.role === 'helper' && d.helper) return d.name !== HELPERS[d.helper].name;
   return true;
+}
+
+/**
+ * Whether an answer the person saw before this message could hold outside
+ * text: any answer to their last message, or the last answer there is.
+ */
+function afterOutside(chat: readonly ChatMessage[]): boolean {
+  const at = chat.map((m) => m.from).lastIndexOf('you');
+  const last = [...chat].reverse().find((m) => m.from === 'lead');
+  return [...chat.slice(at + 1), ...(last ? [last] : [])].some(
+    (m) => m.from === 'lead' && messageTainted(m),
+  );
 }
 
 /**

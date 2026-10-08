@@ -11,7 +11,10 @@
 //   seeing their text, and a change to a dog the person did not name waits.
 // - `namesFact` is the one check that lets a change through: a memory
 //   `replaces` goes ahead without a card only when the person's own message
-//   names the fact it replaces, word for word.
+//   names the fact it replaces, word for word, in a turn with no taint.
+//
+// None of them lets anything through after an answer that read outside
+// text: every change in that turn is a card, whatever the person typed.
 
 /** Pointers the acting path is given in place of outside text. */
 export const REFERENCE = /\b(answer-\d+|report:[a-z0-9-]+|job:[a-z0-9-]+|memory:[A-Za-z0-9-]+)\b/;

@@ -311,9 +311,10 @@ export interface MemoryEntry {
  * A change the Lead dog's acting path asked for in the pack's memory. The
  * acting path reads no outside text, so the change applies straight away,
  * except that it waits on a "Remember this?" or "Forget this?" card when the
- * turn also went down the reading path, leans on or cites a reference, the
- * fact replaces one the person's message doesn't name word for word, or it
- * forgets a fact that could hold outside text.
+ * turn also went down the reading path, leans on or cites a reference,
+ * follows an answer that read outside text, the fact replaces one the
+ * person's message doesn't name word for word, or it forgets a fact that
+ * could hold outside text.
  */
 export interface MemoryChange {
   id: string;
