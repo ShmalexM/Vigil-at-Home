@@ -17,6 +17,6 @@ rm -f /etc/systemd/system/vigil-helper.service
 systemctl daemon-reload 2>/dev/null || true
 rm -f /usr/share/polkit-1/actions/com.vigilathome.helper.policy
 rm -f /usr/libexec/vigil-helper
-rm -rf /usr/libexec/vigil-helper.d /usr/libexec/vigil-helper.d.*
+rm -rf /usr/libexec/vigil-helper.d
 rm -f /run/vigil-helper.sock
 echo "Vigil helper removed. Quarantined files are still in /var/lib/vigil."
