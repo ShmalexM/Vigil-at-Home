@@ -361,7 +361,9 @@ describe('VigilTools', () => {
       expect(text).not.toContain('sk-ant-');
     }
     expect(results[1]).toContain('/Users/<user>/.aws/credentials');
-    expect(results[2]).toContain('<api-key>');
+    // A secret in a command's arguments withholds the whole list.
+    expect(results[2]).toContain('[withheld: may contain a secret]');
+    expect(results[2]).not.toContain('Authorization');
     expect(results[4]).toContain('/Users/<user>/.local/share/claude');
   });
 

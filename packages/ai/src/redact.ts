@@ -32,31 +32,44 @@ export const MAX_REDACT_CHARS = 512 * 1024;
 // alert, so attacker-written text must never be able to make a redaction hide
 // a command. Every field has exactly one of two outcomes:
 //
-// - Precise: each secret is a single token in a plain value position, made
-//   only of characters no shell acts on, not in command position, on one
-//   line, in a field with no comment, backtick or heredoc. Only those tokens
-//   are replaced; every other character stays, in order.
-// - Withheld: anything else a rule takes for a possible secret replaces the
-//   whole field with WITHHELD. Dropping a field visibly can't make a command
-//   look harmless.
+// - Precise: each secret is a single token, made only of characters no shell
+//   acts on, in a place the field's structure makes a value that nothing
+//   runs. Only those tokens are replaced; every other character stays.
+// - Withheld: any other secret replaces the whole field with WITHHELD.
+//   Dropping a field visibly can't make a command look harmless.
+//
+// Nothing here works out where a command starts inside shell text. A string
+// may be a command line, a script or a word a wrapper runs, so a secret in
+// free text withholds the field. A secret is cut out precisely only where
+// the field's shape alone puts it in a value:
+//
+// - a field that is one NAME=value assignment, its value a single token;
+// - a field that is one URL, with no blank or shell metacharacter in it;
+// - a field that is one JSON document, under a credential-named key, or in a
+//   string that is itself one of these shapes (never an array's element,
+//   which may be an argument list);
+// - in an argument list (argv) whose argv[0] is a known client such as curl
+//   or mysql, the value of that tool's credential flag, or a URL argument.
+//   argv[0] is never replaced, and any other secret in the list withholds
+//   the whole list.
+//
+// User, host and email names are privacy, not secrets: they are replaced
+// wherever their rule finds them, each with a marker that says which name
+// stood there.
 //
 // The rules that hold this up:
 //
 // - A withhold from any rule wins. Nothing read later, such as JSON, undoes it.
-// - A credential trigger (a name, a flag, a header, a .netrc keyword, an XML
-//   element) names a value: the run up to the next whitespace or the end of
-//   the field, or a quoted run closed at once. Unless that value is one clean
-//   token, the field is withheld. No quoting, CDATA or other format is parsed
-//   to find where a messier value ends.
-// - A known token format (ghp_, sk-, AKIA, ...) and a base64 run that hides a
-//   secret are replaced only in a value position: after `=` or `:`, alone in
-//   quotes, or after a credential flag or an auth scheme. Anywhere else the
-//   field is withheld, since a word there could be a command or its operand.
-// - Nothing that spans lines is cut out: a private key withholds the field.
-// - User, host and email names are replaced only where they can't be a
-//   command: a folder in a path, an email or user@host, a host with its domain.
+// - A credential trigger (a name, a flag, a header, an XML element) names a
+//   value: the run up to the next whitespace or the end of the field, or a
+//   quoted run closed at once. Unless that value is one clean token, the field
+//   is withheld. No quoting, CDATA or other format is parsed to find where a
+//   messier value ends.
+// - Nothing that spans lines is cut out: a private key withholds the field,
+//   and so does text shaped like a .netrc file.
 //
-// A field is the string being redacted; in structured data, each string.
+// A field is the string being redacted; in structured data, each string, and
+// each array of strings as a whole.
 //
 // Every pattern here must run in time linear in its input: no unbounded
 // repetition that can be retried from many start positions, and no nested
@@ -107,119 +120,6 @@ function isSpace(code: number): boolean {
   return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d || code === 0x0c;
 }
 
-function isBlankOrQuote(code: number): boolean {
-  return code === 0x20 || code === 0x09 || code === 0x22 || code === 0x27;
-}
-
-/** Where the shell starts a new command: a line, a list or pipeline stage, a group. */
-function isCommandSeparator(code: number): boolean {
-  switch (code) {
-    case 0x0a: // \n
-    case 0x0d: // \r
-    case 0x3b: // ;
-    case 0x7c: // |
-    case 0x26: // &
-    case 0x28: // (
-    case 0x29: // )
-    case 0x60: // `
-    case 0x7b: // {
-    case 0x7d: // }
-    case 0x21: // !
-      return true;
-    default:
-      return false;
-  }
-}
-
-/** NAME=value, as the shell reads it before a command. */
-const ASSIGNMENT_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/;
-/** How far back inCommandPosition reads before it assumes the worst. */
-const MAX_COMMAND_LOOKBACK = 4096;
-
-/**
- * Where the redirection that ends `word` starts, or -1: 2>x, >x, <x, >>x,
- * 2>&1, &>x, 2> (its target in the next word). Only a redirection that is
- * the whole word, or follows a command separator in it, counts.
- */
-function redirectionStart(word: string): number {
-  const op = Math.max(word.lastIndexOf('>'), word.lastIndexOf('<'));
-  if (op < 0) return -1;
-  let s = op;
-  while (s > 0 && (word[s - 1] === '>' || word[s - 1] === '<')) s--;
-  if (s > 0 && word[s - 1] === '&') s--;
-  else while (s > 0 && word.charCodeAt(s - 1) >= 0x30 && word.charCodeAt(s - 1) <= 0x39) s--;
-  return s === 0 || isCommandSeparator(word.charCodeAt(s - 1)) ? s : -1;
-}
-
-/**
- * Where the part of `word` that the shell reads before a command starts, or
- * -1: a redirection, or a NAME=value assignment after any separator.
- */
-function prefixStart(word: string): number {
-  const redirection = redirectionStart(word);
-  if (redirection >= 0) return redirection;
-  let segment = word.length;
-  while (segment > 0 && !isCommandSeparator(word.charCodeAt(segment - 1))) segment--;
-  return ASSIGNMENT_WORD.test(word.slice(segment)) ? segment : -1;
-}
-
-/**
- * True when a word starting at `start` could be a command the shell runs:
- * at the start of the field, a line or a pipeline stage, right after a
- * substitution or group opener, or after any number of NAME=value
- * assignments and redirections there (FLAG=1 2>/dev/null cmd). Quotes and
- * blanks before it don't count. Where the words before it can't be read
- * plainly, the answer is yes.
- */
-function inCommandPosition(text: string, start: number): boolean {
-  let i = start - 1;
-  const floor = start - MAX_COMMAND_LOOKBACK;
-  for (;;) {
-    if (i < floor) return true;
-    const from = i;
-    while (i >= 0 && isBlankOrQuote(text.charCodeAt(i))) i--;
-    if (i < 0) return true;
-    if (isCommandSeparator(text.charCodeAt(i))) return true;
-    // Glued to the text before it, with no blank between: not a new word.
-    let blank = false;
-    for (let j = i + 1; j <= from; j++) {
-      const c = text.charCodeAt(j);
-      if (c === 0x20 || c === 0x09) blank = true;
-    }
-    if (!blank) return false;
-    // The word before ends in a quote the scan can't follow back: it might
-    // end an assignment, as in NAME="a b" cmd, or a redirection's target.
-    if (text[i + 1] === '"' || text[i + 1] === "'") return true;
-    // The word before, back to the blank before it.
-    let w = i;
-    while (w >= 0 && !isSpace(text.charCodeAt(w))) {
-      if (w < floor) return true;
-      w--;
-    }
-    const prefix = prefixStart(text.slice(w + 1, i + 1));
-    if (prefix >= 0) {
-      i = w + prefix;
-      continue;
-    }
-    // The target of a redirection written apart from it: 2> /dev/null cmd.
-    let p = w;
-    while (p >= 0 && (text[p] === ' ' || text[p] === '\t')) p--;
-    if (p < 0 || p === w) return false;
-    let q = p;
-    while (q >= 0 && !isSpace(text.charCodeAt(q))) {
-      if (q < floor) return true;
-      q--;
-    }
-    const before = text.slice(q + 1, p + 1);
-    const redirection = redirectionStart(before);
-    if (redirection < 0 || !/[<>]&?$/.test(before)) return false;
-    i = q + redirection;
-  }
-}
-
-/** A comment, a backtick or a heredoc: text whose shell reading can't be vouched for. */
-const HAZARD = /[#`]|<</;
-
 /** What a rule found: a replacement, or a reason to withhold the field. */
 interface Finding {
   readonly start: number;
@@ -245,31 +145,21 @@ const WITHHOLD: Finding = { start: 0, end: 0, with: '', rank: RANK_KEY, withhold
 class Findings {
   readonly list: Finding[] = [];
   readonly text: string;
-  /**
-   * The text is the content of a JSON string, read again as a field. A token
-   * that is all of it stands alone in quotes in the text, where the rules
-   * read on the whole text have already judged its position.
-   */
-  readonly quoted: boolean;
   /** Set once anything withholds the field: no rule needs to read further. */
   withheld = false;
 
-  constructor(text: string, quoted = false) {
+  constructor(text: string) {
     this.text = text;
-    this.quoted = quoted;
   }
 
-  /** True for a token that is the whole of a quoted field. */
-  alone(start: number, end: number): boolean {
-    return this.quoted && start === 0 && end === this.text.length;
-  }
-
-  /** A secret token: replaced when it can be cut out exactly, else the field is withheld. */
+  /**
+   * A secret token: a candidate for replacement when it is one clean token,
+   * else the field is withheld. Whether the field's shape lets it be
+   * replaced is decided once every rule has read the field.
+   */
   token(start: number, end: number, replacement: string, rank: number): void {
     if (end <= start) return;
-    const precise =
-      isSafeToken(this.text, start, end) &&
-      (this.alone(start, end) || !inCommandPosition(this.text, start));
+    const precise = isSafeToken(this.text, start, end);
     if (!precise) this.withheld = true;
     this.list.push({ start, end, with: replacement, rank, withhold: !precise });
   }
@@ -378,6 +268,9 @@ function addValue(
 // secret, it always follows the fixed text the pattern opens with, and that
 // text stays.
 
+/** What the user:password of a URL is replaced with. */
+const URL_CREDENTIALS = '<credentials>';
+
 const FORMATS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, '<aws-key>'],
   [/\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})\b/g, '<github-token>'],
@@ -410,7 +303,7 @@ const FORMATS: ReadonlyArray<readonly [RegExp, string]> = [
   // user:password in a URL, such as postgres://me:hunter2@db or redis://:pw@db.
   [
     /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{0,30}:\/\/([^\s/?#@:]{0,256}:[^\s/?#]{1,256})(?=@)/gi,
-    '<credentials>',
+    URL_CREDENTIALS,
   ],
 ];
 
@@ -425,35 +318,6 @@ function matchRange(m: RegExpExecArray, offset = 0): readonly [number, number] {
   return [end - m[g]!.length, end];
 }
 
-/** An auth scheme, after which a token is a header's value: Bearer, Authorization:Bearer. */
-const AUTH_WORD = /(?:^|[:="'])(?:Bearer|Basic|Token|Digest|Negotiate|NTLM)$/i;
-const FLAG_WORD = /^--?[A-Za-z][A-Za-z0-9_-]*$/;
-const MAX_FLAG_LENGTH = 128;
-
-/**
- * True when the token at [start, end) sits where a value goes: right after
- * `=` or `:` (and blanks), alone between a pair of quotes, or after a
- * credential flag (--token) or an auth scheme (Bearer).
- */
-function inValuePosition(text: string, start: number, end: number): boolean {
-  const before = text[start - 1];
-  if (before === '=') return true;
-  if ((before === '"' || before === "'") && text[end] === before) return true;
-  let i = start - 1;
-  while (i >= 0 && (text[i] === ' ' || text[i] === '\t')) i--;
-  if (i < 0) return false;
-  if (text[i] === ':') return true;
-  if (i === start - 1) return false;
-  let w = i;
-  while (w >= 0 && !isSpace(text.charCodeAt(w))) {
-    if (i - w >= MAX_FLAG_LENGTH) return false;
-    w--;
-  }
-  const word = text.slice(w + 1, i + 1);
-  if (AUTH_WORD.test(word)) return true;
-  return FLAG_WORD.test(word) && isCredentialName(word.replace(/^-+/, ''));
-}
-
 /** Text without one of these holds none of the formats above. */
 const FORMAT_HINT =
   /AKIA|ASIA|gh[pousr]_|github_pat_|sk-|xox|xapp-|hooks\.slack|eyJ|[sr]k_|AIza|npm_|glpat-|whsec_|hf_|SG\.|ya29\.|shp|do[opr]_v1|pypi-|signature=|sig=|bearer|basic|:\/\//i;
@@ -464,10 +328,6 @@ function addFormats(text: string, f: Findings): void {
     pattern.lastIndex = 0;
     for (let m = pattern.exec(text); m; m = pattern.exec(text)) {
       const [start, end] = matchRange(m);
-      if (m.length === 1 && !f.alone(start, end) && !inValuePosition(text, start, end)) {
-        f.withhold(start);
-        return;
-      }
       f.token(start, end, replacement, RANK_FORMAT);
       if (f.withheld) return;
     }
@@ -747,104 +607,54 @@ function addKeyedValues(text: string, f: Findings): void {
 }
 
 // ---------------------------------------------------------------------------
-// `password hunter2` in .netrc, where the value follows a space. Only text
-// with a .netrc's structure is read so, a machine or default entry with a
-// login: elsewhere, as in `rm password x`, the word after it is any word.
-// The words that follow "password" in a sentence are left alone.
+// .netrc text: a machine or default entry with a login, and a password.
+// Its values follow spaces, so none can be cut out as a token: the field is
+// withheld.
 
-const PASSWORD_WORD = /(?<![A-Za-z0-9_./\\-])password[ \t]+/gi;
 const NETRC_ENTRY = /(?:^|\s)(?:machine[ \t]+\S|default(?:\s|$))/;
 const NETRC_LOGIN = /(?:^|\s)login[ \t]+\S/;
-/** What can't start a value after "password ": a separator, a flag or punctuation. */
-const NOT_A_VALUE = '=:-,;&|)}]>(<{[';
-const PROSE_AFTER_PASSWORD = new Set(
-  (
-    'a an the is are was were be been being for to and or of in on at by with from as it its this that ' +
-    'these those not no must should will would can could cannot may might has have had does did do ' +
-    'reset resets change changed changes expired expires expiry required prompt prompts manager ' +
-    'managers field fields policy policies hash hashes hashed hashing file files protected protection ' +
-    'authentication auth login please here again below above incorrect invalid wrong mismatch strength ' +
-    'length set update updated entry entered input box dialog attempt attempts failed failure accepted ' +
-    'rejected too if when then but so used use using based only via without store stored storage ' +
-    'vault spraying spray guessing cracking brute dump dumping list lists recovery rotation history hint ' +
-    'sync complexity requirements requirement rules rule protect matches match needed need sent '
-  )
-    .trim()
-    .split(/\s+/),
-);
+const NETRC_SECRET = /(?:^|\s)(?:password|account)[ \t]+\S/;
 
-function addPasswordWords(text: string, f: Findings): void {
-  if (!/password/i.test(text) || !NETRC_ENTRY.test(text) || !NETRC_LOGIN.test(text)) return;
-  PASSWORD_WORD.lastIndex = 0;
-  for (let m = PASSWORD_WORD.exec(text); m; m = PASSWORD_WORD.exec(text)) {
-    const at = m.index + m[0].length;
-    const c = text[at];
-    if (c === undefined || isSpace(text.charCodeAt(at)) || NOT_A_VALUE.includes(c)) continue;
-    if (c !== '"' && c !== "'") {
-      let end = at;
-      while (end < text.length && !isSpace(text.charCodeAt(end))) end++;
-      // A word from a sentence, with any punctuation after it.
-      const word = text
-        .slice(at, end)
-        .replace(/[.,;:!?)]+$/, '')
-        .toLowerCase();
-      if (PROSE_AFTER_PASSWORD.has(word) || isBenignValue(word, true)) continue;
-    }
-    addValue(text, at, true, f);
-    if (f.withheld) return;
-  }
+function addNetrc(text: string, f: Findings): void {
+  if (!/password|account/i.test(text)) return;
+  if (NETRC_ENTRY.test(text) && NETRC_LOGIN.test(text) && NETRC_SECRET.test(text)) f.withhold(0);
 }
 
 // ---------------------------------------------------------------------------
-// Passwords given as command-line flags by tools that take them that way.
-// Each command runs to the end of its line or pipeline stage, read once; the
-// value after a flag is read from the field, past that end if it runs on.
+// Passwords given as command-line flags by tools that take them that way:
+// curl -u user:pw, sshpass -p pw, docker login -p pw, openssl -k pw, mysql
+// -ppw, redis-cli -a pw, mongosh -p pw. In free text these only withhold the
+// field, so each flag is looked for anywhere in a field that names its tool:
+// no command is read out of the text. An argument list is read by its
+// structure instead, in redactArgv.
 
-const CURL_COMMAND = /\bcurl\b[^\n;|&]*/g;
-const SSHPASS_COMMAND = /\bsshpass\b[^\n;|&]*/g;
-const DOCKER_COMMAND = /\bdocker\b[^\n;|&]*/g;
-const OPENSSL_COMMAND = /\bopenssl\b[^\n;|&]*/g;
-const MYSQL_COMMAND = /\b(?:mysql|mariadb)[a-z]*\b[^\n;|&]*/g;
-// curl -u user:pass, --user user:pass, -uuser:pass.
-const CURL_USER = /\s(?:-u[ \t]*|--user(?:[ \t]+|=))(?=[^\s-])/g;
-// sshpass -p pw, docker login -p pw: the first -p only, as later ones belong
-// to the command sshpass runs.
-const DASH_P = /\s-p[ \t]*(?=[^\s-])/;
-const OPENSSL_SECRET = /\s(?:-[kK][ \t]+|-pass(?:in|out)?[ \t]+pass:)(?=\S)/g;
-// mysql -phunter2. For the MySQL tools, which take the password glued to -p:
-// elsewhere -p is a port (ssh -p 22) or a plain flag (mkdir -p).
-const MYSQL_GLUED_PASSWORD = /\s-p(?=[^\s-])/g;
+/**
+ * The words a field must hold, then the flag with a value. A value that
+ * starts with < is a marker an argument list's redaction left there.
+ */
+const COMMAND_SECRETS: ReadonlyArray<readonly [readonly RegExp[], RegExp]> = [
+  // curl -u user:pass, --user user:pass, -uuser:pass; with no colon, curl asks.
+  [[/curl/], /\s(?:-[uU][ \t]*|--(?:proxy-)?user(?:[ \t]+|=))["']?[^\s"':]*:[^\s<]/],
+  [[/curl/], /\s--oauth2-bearer[ \t=]+[^\s<]/],
+  [[/sshpass/], /\s-p[ \t]*[^\s<-]/],
+  [[/docker|podman/, /\slogin\b/], /\s(?:-p[ \t]*|--password(?:=|[ \t]+))[^\s<-]/],
+  [[/openssl/], /\s(?:-[kK][ \t]+[^\s<]|-pass(?:in|out)?[ \t]+["']?pass:[^\s<])/],
+  // mysql -phunter2. A bare -p prompts; elsewhere -p is a port or a plain flag.
+  [[/mysql|mariadb/], /\s-p[^\s<-]/],
+  [[/redis-cli/], /\s(?:-a|--pass)[ \t]+[^\s<-]/],
+  [[/mongo/], /\s-p[ \t]*[^\s<-]/],
+];
 
-const COMMAND_HINT = /curl|sshpass|docker|openssl|mysql|mariadb/;
+const COMMAND_HINT = /curl|sshpass|docker|podman|openssl|mysql|mariadb|redis-cli|mongo/;
 
 function addCommandSecrets(text: string, f: Findings): void {
   if (!COMMAND_HINT.test(text)) return;
-  const each = (command: RegExp, flag: RegExp, when?: (c: string) => boolean, userPass = false) => {
-    command.lastIndex = 0;
-    for (let c = command.exec(text); c && !f.withheld; c = command.exec(text)) {
-      const line = c[0];
-      if (when && !when(line)) continue;
-      flag.lastIndex = 0;
-      for (let m = flag.exec(line); m; m = flag.global ? flag.exec(line) : null) {
-        const at = c.index + m.index + m[0].length;
-        if (!userPass) {
-          addValue(text, at, true, f, '', false);
-        } else {
-          // user:password; with no colon, curl asks for the password.
-          const value = readValue(text, at, f);
-          const colon = value ? text.slice(value.start, value.end).indexOf(':') : -1;
-          if (value && colon >= 0)
-            f.token(value.start + colon + 1, value.end, REDACTED, RANK_KEYED);
-        }
-        if (f.withheld) return;
-      }
+  for (const [tools, flag] of COMMAND_SECRETS) {
+    if (tools.every((tool) => tool.test(text)) && flag.test(text)) {
+      f.withhold(0);
+      return;
     }
-  };
-  each(CURL_COMMAND, CURL_USER, undefined, true);
-  each(SSHPASS_COMMAND, DASH_P);
-  each(DOCKER_COMMAND, DASH_P, (c) => /\slogin\b/.test(c));
-  each(OPENSSL_COMMAND, OPENSSL_SECRET);
-  each(MYSQL_COMMAND, MYSQL_GLUED_PASSWORD);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -902,8 +712,7 @@ function addXml(text: string, f: Findings): void {
 // Secrets hidden in base64, such as {"password":"hunter2"} or MYSQL_PWD=x
 // encoded. A run may follow an equals sign, as in data=eyJ... Runs of any
 // length are decoded a bounded chunk at a time, each read with the tail of
-// the one before, by the same rules as plain text. Like a token format, a run
-// is replaced only in a value position.
+// the one before, by the same rules as plain text.
 
 const BASE64_RUN = /(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{16,}={0,2}/g;
 /** Base64 characters decoded at a time: a multiple of 4. */
@@ -951,12 +760,7 @@ function addBase64(text: string, f: Findings): void {
   BASE64_RUN.lastIndex = 0;
   for (let m = BASE64_RUN.exec(text); m; m = BASE64_RUN.exec(text)) {
     if (!hidesSecret(m[0])) continue;
-    const end = m.index + m[0].length;
-    if (!f.alone(m.index, end) && !inValuePosition(text, m.index, end)) {
-      f.withhold(m.index);
-      return;
-    }
-    f.token(m.index, end, '<base64-secret>', RANK_BASE64);
+    f.token(m.index, m.index + m[0].length, '<base64-secret>', RANK_BASE64);
     if (f.withheld) return;
   }
 }
@@ -968,7 +772,8 @@ function addBase64(text: string, f: Findings): void {
 // to the text as written. Nothing is serialized again, so the text keeps its
 // size and layout. JSON with a key twice (which a parser would hide), nested
 // past MAX_DEPTH, or with an object or array under a credential key (not one
-// token) withholds the field.
+// token) withholds the field. What JSON holds is cut out precisely only when
+// the field is one JSON document; JSON inside other text is free text.
 
 /** How deep JSON found in a string, inside JSON found in a string, is read. */
 const MAX_TEXT_DEPTH = 4;
@@ -983,6 +788,8 @@ interface JsonString {
   readonly end: number;
   readonly escaped: boolean;
   readonly secret: Secret | undefined;
+  /** An array's element: it may be an argument of a command list. */
+  readonly element: boolean;
 }
 
 interface JsonRead {
@@ -1091,7 +898,8 @@ function readJson(text: string, open: number): JsonRead {
     } else if (c === 0x22) {
       const { end, escaped } = jsonStringEnd(text, i);
       if (end < 0) return fail(i);
-      strings.push({ start: i + 1, end: end - 1, escaped, secret });
+      const element = frames.length > 0 && !frames[frames.length - 1]!.object;
+      strings.push({ start: i + 1, end: end - 1, escaped, secret, element });
       i = end;
     } else {
       const number = matchAt(JSON_NUMBER, text, i).length;
@@ -1149,12 +957,17 @@ const MAX_CACHED_STRINGS = 4096;
 const MAX_CACHED_LENGTH = 256;
 const stringCache = new Map<string, readonly Finding[]>();
 
-function analyzeString(text: string, options: NameOptions, depth: number): readonly Finding[] {
-  if (text.length > MAX_CACHED_LENGTH) return analyze(text, options, depth);
-  const key = `${depth}\0${text}`;
+function analyzeString(
+  text: string,
+  options: NameOptions,
+  depth: number,
+  shape: Shape,
+): readonly Finding[] {
+  if (text.length > MAX_CACHED_LENGTH) return analyze(text, options, depth, shape);
+  const key = `${depth}\0${shape}\0${text}`;
   let found = stringCache.get(key);
   if (!found) {
-    found = analyze(text, options, depth);
+    found = analyze(text, options, depth, shape);
     if (stringCache.size >= MAX_CACHED_STRINGS) stringCache.clear();
     stringCache.set(key, found);
   }
@@ -1184,17 +997,20 @@ function addJsonFindings(
       continue;
     }
     if (s.end === s.start) continue;
+    // A string of an object is a field of its own; an array's element is
+    // read as a word of a command, where no secret is cut out.
+    const shape: Shape = s.element ? 'word' : 'field';
     if (!s.escaped) {
       const field = text.slice(s.start, s.end);
       if (!mayHoldSecret(field, options)) continue;
-      for (const x of analyzeString(field, options, depth + 1)) {
+      for (const x of analyzeString(field, options, depth + 1, shape)) {
         f.push({ ...x, start: x.start + s.start, end: x.end + s.start });
       }
       continue;
     }
     const value = JSON.parse(text.slice(s.start - 1, s.end + 1)) as string;
     if (!mayHoldSecret(value, options)) continue;
-    const found = analyzeString(value, options, depth + 1);
+    const found = analyzeString(value, options, depth + 1, shape);
     const at = found.length ? decodedPositions(text, s.start, s.end) : undefined;
     for (const x of found) {
       const start = at![x.start]!;
@@ -1247,12 +1063,12 @@ function addJson(
 }
 
 // ---------------------------------------------------------------------------
-// User, host and email names. Each is replaced only where it can't be a
-// command or a command's operand: a folder in a path (/Users/me/, /x/me/),
+// User, host and email names: privacy, not secrets. Each is replaced only in
+// a shape that marks it as a name: a folder in a path (/Users/me/, /x/me/),
 // an email, the user of user@host, the host after @ or //, or a host written
-// with its domain. Anywhere else, such as a bare word equal to the user name,
-// it stays as written. Apart from an email, none is replaced in command
-// position.
+// with its domain. A bare word equal to the user name stays as written. The
+// marker says which name stood there, so a replaced name hides nothing a
+// reviewer needs: <user> and <host> are this Mac's own names.
 
 const HOME = /\/(?:Users|home)\/([^/\s"'`$;&|<>(){}#\\]+)/g;
 const EMAIL = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}\.[A-Za-z]{2,63}/g;
@@ -1304,8 +1120,7 @@ function addNames(text: string, options: NameOptions, f: Findings): void {
       const start = m.index;
       const end = start + m[0].length;
       const folder = text[start - 1] === '/' && text[end] === '/';
-      const user = text[end] === '@' && !inCommandPosition(text, start);
-      if (folder || user) f.name(start, end, '<user>');
+      if (folder || text[end] === '@') f.name(start, end, '<user>');
     }
   }
   if (worthHiding(options.hostname)) {
@@ -1326,7 +1141,7 @@ function addNames(text: string, options: NameOptions, f: Findings): void {
         // Part of a longer name, such as another host in the same domain.
         if (/[A-Za-z0-9_-]/.test(text[end] ?? '') || matchAt(HOST_LABEL, text, end)) continue;
         const after = text[start - 1] === '@' || text.slice(start - 2, start) === '//';
-        if ((after || end > bare) && !inCommandPosition(text, start)) f.name(start, end, '<host>');
+        if (after || end > bare) f.name(start, end, '<host>');
         pattern.lastIndex = Math.max(pattern.lastIndex, end);
       }
     }
@@ -1380,24 +1195,83 @@ function outsideRegions(found: Finding[], regions: readonly number[]): Finding[]
 }
 
 /**
+ * Where a field sits, which decides whether a secret in it may be cut out:
+ *
+ * - field: a string of its own. Only a field that is, whole, one NAME=value
+ *   assignment, one URL with no blank or shell metacharacter, or one JSON
+ *   document, has a place for a secret that nothing runs.
+ * - url: an argument a known client takes as a URL, with no shell between
+ *   them. Only the password of a field that is one URL is cut out.
+ * - word: a word that may be a command, such as an argument or an array's
+ *   element. No secret in it is cut out.
+ */
+type Shape = 'field' | 'url' | 'word';
+
+const URL_START = /^[A-Za-z][A-Za-z0-9+.-]{0,30}:\/\//;
+const ASSIGNMENT_START = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * Where the part after scheme:// starts when the field is one URL, else -1.
+ * Strict, it may hold only characters no shell acts on, and ? # [ ], which
+ * no shell reads as the end of a word; else anything but a blank.
+ */
+function urlValueStart(text: string, strict: boolean): number {
+  const scheme = URL_START.exec(text);
+  if (!scheme) return -1;
+  for (let i = scheme[0].length; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    const ok = strict
+      ? isSafeCode(c) || c === 0x3f || c === 0x23 || c === 0x5b || c === 0x5d
+      : c > 0x20 && c !== 0x7f;
+    if (!ok) return -1;
+  }
+  return scheme[0].length;
+}
+
+/** Where the value starts when the field is one NAME=value with a clean value, else -1. */
+function assignmentValueStart(text: string): number {
+  const name = ASSIGNMENT_START.exec(text);
+  if (!name) return -1;
+  const from = name[0].length;
+  let start = from;
+  let end = text.length;
+  const quote = text[start];
+  if (end - start >= 2 && (quote === '"' || quote === "'") && text[end - 1] === quote) {
+    start++;
+    end--;
+  }
+  return start === end || isSafeToken(text, start, end) ? from : -1;
+}
+
+/** True when the one JSON region read is the whole field, blanks aside. */
+function isJsonDocument(text: string, regions: readonly number[]): boolean {
+  if (regions.length !== 2) return false;
+  for (let i = 0; i < regions[0]!; i++) if (!isSpace(text.charCodeAt(i))) return false;
+  for (let i = regions[1]!; i < text.length; i++) if (!isSpace(text.charCodeAt(i))) return false;
+  return true;
+}
+
+/** The rules that find secrets. Any of them may withhold the field. */
+const DETECTORS = [
+  addPrivateKeys,
+  addNetrc,
+  addFormats,
+  addCommandSecrets,
+  addXml,
+  addKeyedValues,
+  addBase64,
+];
+
+/**
  * What every rule finds in a field: a single withholding finding when any
- * rule withholds it, whatever another rule reads there, or else the spans to
+ * rule withholds it, whatever another rule reads there, or when a secret is
+ * anywhere but in a value the field's shape sets apart; else the spans to
  * replace.
  */
-function analyze(text: string, options: NameOptions, depth: number): Finding[] {
+function analyze(text: string, options: NameOptions, depth: number, shape: Shape): Finding[] {
   if (!mayHoldSecret(text, options)) return [];
-  // Below the top, the text is a JSON string's content.
-  const rules = new Findings(text, depth > 0);
-  const steps = [
-    addPrivateKeys,
-    addFormats,
-    addCommandSecrets,
-    addXml,
-    addKeyedValues,
-    addPasswordWords,
-    addBase64,
-  ];
-  for (const step of steps) {
+  const rules = new Findings(text);
+  for (const step of DETECTORS) {
     step(text, rules);
     if (rules.withheld) return [WITHHOLD];
   }
@@ -1411,8 +1285,17 @@ function analyze(text: string, options: NameOptions, depth: number): Finding[] {
   // Inside JSON, the JSON reading of each precise span stands.
   const found = regions.length ? outsideRegions(rules.list, regions) : rules.list;
   found.push(...json.list);
-  if (found.some((x) => x.rank > RANK_NAME) && HAZARD.test(text)) return [WITHHOLD];
-  return found;
+  if (!found.some((x) => x.rank > RANK_NAME)) return found;
+  // A secret. JSON's own reading placed each one it found, by key.
+  if (shape === 'field' && isJsonDocument(text, regions)) return found;
+  let from = -1;
+  if (shape === 'url') {
+    if (!found.every((x) => x.rank === RANK_NAME || x.with === URL_CREDENTIALS)) return [WITHHOLD];
+    from = urlValueStart(text, false);
+  } else if (shape === 'field')
+    from = Math.max(urlValueStart(text, true), assignmentValueStart(text));
+  if (from < 0) return [WITHHOLD];
+  return found.every((x) => x.rank === RANK_NAME || x.start >= from) ? found : [WITHHOLD];
 }
 
 /**
@@ -1467,14 +1350,19 @@ function render(text: string, spans: readonly Finding[]): string {
  * Redact a field: WITHHELD, or the field with only its safe tokens replaced.
  * The length of a field withheld unread for its size is added to `oversized`.
  */
-function redactText(input: string, options: NameOptions, oversized?: number[]): string {
+function redactText(
+  input: string,
+  options: NameOptions,
+  oversized?: number[],
+  shape: Shape = 'field',
+): string {
   if (input.length > MAX_REDACT_CHARS) {
     oversized?.push(input.length);
     return WITHHELD;
   }
   if (!mayHoldSecret(input, options)) return input;
   stringCache.clear();
-  const found = analyze(input, options, 0);
+  const found = analyze(input, options, 0, shape);
   if (found.some((x) => x.withhold)) return WITHHELD;
   return found.length ? render(input, settle(found)) : input;
 }
@@ -1492,9 +1380,319 @@ export function redactField(text: string, options: NameOptions = {}): string {
   return redactText(text, options);
 }
 
-/** A command's arguments, each its own field: one withheld argument leaves the rest in view. */
+// ---------------------------------------------------------------------------
+// Argument lists. The list is one field. Where argv[0] names a client on a
+// short fixed list, the value of that client's credential flag and the
+// password of a URL argument are cut out; argv[0] never is. Any other
+// secret in the list withholds all of it, so a word that a wrapper (env,
+// sudo, xargs, sh -c, ...) runs is never replaced.
+
+/** How a credential flag's value holds its secret. */
+type Credential =
+  /** All of it. */
+  | 'secret'
+  /** user:password, the part after the first colon; with no colon, the tool asks. */
+  | 'userpass'
+  /** An HTTP header: the value of Authorization or a credential-named header. */
+  | 'header'
+  /** openssl's pass:password; env:, file: and the rest name where it is. */
+  | 'openssl';
+
+/** A credential flag: how its value holds the secret, and whether the next argument is its value. */
+type CredentialFlag = readonly [Credential, boolean];
+
+interface Client {
+  /** The subcommand argv[1] must be, where the tool has aliases or runs others. */
+  readonly subcommands?: ReadonlySet<string>;
+  /** Credential flags: -f value, -fvalue, --flag value or --flag=value. */
+  readonly flags?: Readonly<Record<string, CredentialFlag>>;
+  /** The URL schemes an argument may have to be read as a URL, or every one. */
+  readonly schemes?: ReadonlySet<string> | 'any';
+  /** Flags whose next argument is a URL. */
+  readonly urlFlags?: ReadonlySet<string>;
+  /**
+   * The tool can run code or files it is given, so a flag or URL right after
+   * a flag that may take a value (--eval -p x) isn't read: it may be that
+   * flag's value, and what follows it something the tool runs.
+   */
+  readonly runs?: boolean;
+}
+
+const MYSQL: Client = {
+  // A bare -p or --password prompts, and the next argument is the database.
+  flags: { '-p': ['secret', false], '--password': ['secret', false] },
+};
+const LOGIN: Client = {
+  subcommands: new Set(['login']),
+  flags: { '-p': ['secret', true], '--password': ['secret', true] },
+  schemes: 'any',
+};
+const MONGO: Client = {
+  flags: { '-p': ['secret', true], '--password': ['secret', true] },
+  schemes: new Set(['mongodb', 'mongodb+srv']),
+  runs: true,
+};
+
+const CLIENTS: ReadonlyMap<string, Client> = new Map<string, Client>([
+  [
+    'curl',
+    {
+      flags: {
+        '-u': ['userpass', true],
+        '--user': ['userpass', true],
+        '-U': ['userpass', true],
+        '--proxy-user': ['userpass', true],
+        '-H': ['header', true],
+        '--header': ['header', true],
+        '--proxy-header': ['header', true],
+        '--oauth2-bearer': ['secret', true],
+      },
+      schemes: 'any',
+      urlFlags: new Set(['--url', '-x', '--proxy']),
+    },
+  ],
+  [
+    'wget',
+    {
+      flags: {
+        '--password': ['secret', true],
+        '--http-password': ['secret', true],
+        '--ftp-password': ['secret', true],
+        '--proxy-password': ['secret', true],
+        '--header': ['header', true],
+      },
+      schemes: 'any',
+    },
+  ],
+  [
+    'git',
+    {
+      subcommands: new Set(['clone', 'fetch', 'pull', 'push', 'ls-remote', 'remote', 'submodule']),
+      schemes: 'any',
+      runs: true,
+    },
+  ],
+  [
+    'gh',
+    {
+      subcommands: new Set(['api', 'auth', 'browse', 'issue', 'pr', 'release', 'repo']),
+      schemes: new Set(['http', 'https']),
+      runs: true,
+    },
+  ],
+  [
+    'aws',
+    {
+      subcommands: new Set(['s3', 's3api', 'sts', 'ecr', 'ec2', 'iam', 'lambda', 'logs', 'ssm']),
+      schemes: new Set(['http', 'https']),
+      urlFlags: new Set(['--endpoint-url']),
+      runs: true,
+    },
+  ],
+  ['docker', LOGIN],
+  ['podman', LOGIN],
+  ['mysql', MYSQL],
+  ['mysqldump', MYSQL],
+  ['mysqladmin', MYSQL],
+  ['mariadb', MYSQL],
+  ['mariadb-dump', MYSQL],
+  ['psql', { schemes: new Set(['postgres', 'postgresql']), runs: true }],
+  [
+    'redis-cli',
+    {
+      flags: { '-a': ['secret', true], '--pass': ['secret', true] },
+      schemes: new Set(['redis', 'rediss']),
+      urlFlags: new Set(['-u']),
+    },
+  ],
+  ['mongosh', MONGO],
+  ['mongo', MONGO],
+  [
+    'npm',
+    {
+      subcommands: new Set(['install', 'i', 'ci', 'add', 'publish', 'view', 'info', 'ping']),
+      schemes: 'any',
+      urlFlags: new Set(['--registry']),
+      runs: true,
+    },
+  ],
+  [
+    'openssl',
+    {
+      flags: {
+        '-k': ['secret', true],
+        '-K': ['secret', true],
+        '-pass': ['openssl', true],
+        '-passin': ['openssl', true],
+        '-passout': ['openssl', true],
+      },
+    },
+  ],
+]);
+
+const HEADER = /^([A-Za-z0-9_-]{1,128})[ \t]*:[ \t]*/;
+
+/** A credential flag's value with its secret replaced, or undefined when it holds none. */
+function replaceCredential(value: string, kind: Credential): string | undefined {
+  let keep = 0;
+  switch (kind) {
+    case 'secret':
+      break;
+    case 'userpass':
+      keep = value.indexOf(':') + 1;
+      if (keep === 0) return undefined;
+      break;
+    case 'openssl':
+      if (!value.startsWith('pass:')) return undefined;
+      keep = 5;
+      break;
+    case 'header': {
+      const header = HEADER.exec(value);
+      if (!header) return undefined;
+      const name = describeName(header[1]!);
+      if (!name.credential) return undefined;
+      keep = header[0].length;
+      if (name.authorization) keep += matchAt(AUTH_SCHEME, value, keep).length;
+      break;
+    }
+  }
+  return keep < value.length ? value.slice(0, keep) + REDACTED : undefined;
+}
+
+/** True for a URL a client takes as one, by its scheme. */
+function isClientUrl(arg: string, client: Client): boolean {
+  if (!client.schemes) return false;
+  const scheme = URL_START.exec(arg);
+  if (!scheme) return false;
+  if (client.schemes === 'any') return true;
+  return client.schemes.has(scheme[0].slice(0, -3).toLowerCase());
+}
+
+/** A flag that may take the next argument as its value: -x or --name, nothing glued. */
+function mayTakeValue(arg: string): boolean {
+  return arg.length > 1 && arg.startsWith('-') && !arg.includes('=');
+}
+
+/**
+ * Each argument of a known client's list, read by its place: a credential
+ * flag's value with its secret replaced, a URL to read as a URL, or a word.
+ */
+function readClientArgv(argv: readonly string[], client: Client): Array<[string, Shape]> {
+  const out: Array<[string, Shape]> = argv.map((arg) => [arg, 'word']);
+  let i = client.subcommands ? 2 : 1;
+  let options = true;
+  for (; i < argv.length; i++) {
+    const arg = argv[i]!;
+    // A flag or URL right after a flag that may take a value may be that value.
+    const placed = !client.runs || !mayTakeValue(argv[i - 1]!);
+    if (arg === '--') {
+      options = false;
+      continue;
+    }
+    if (!placed) continue;
+    if (options && client.urlFlags?.has(arg) && i + 1 < argv.length) {
+      const next = argv[i + 1]!;
+      if (isClientUrl(next, client)) out[i + 1] = [next, 'url'];
+      i++;
+      continue;
+    }
+    if (options && client.flags && arg.startsWith('-')) {
+      const flag = credentialFlag(arg, client.flags);
+      if (flag) {
+        const [name, kind, takesNext] = flag;
+        if (arg.length > name.length) {
+          // Glued: -pvalue, --password=value.
+          const glue = name.startsWith('--') ? 1 : 0;
+          const replaced = replaceCredential(arg.slice(name.length + glue), kind);
+          if (replaced !== undefined)
+            out[i] = [arg.slice(0, name.length + glue) + replaced, 'word'];
+        } else if (takesNext && i + 1 < argv.length) {
+          const replaced = replaceCredential(argv[i + 1]!, kind);
+          if (replaced !== undefined) out[i + 1] = [replaced, 'word'];
+          i++;
+        }
+        continue;
+      }
+    }
+    if (isClientUrl(arg, client)) out[i] = [arg, 'url'];
+  }
+  return out;
+}
+
+/**
+ * The credential flag `arg` is, as the flag's name, its kind and whether the
+ * next argument is its value: -p, -pvalue, --password or --password=value.
+ */
+function credentialFlag(
+  arg: string,
+  flags: Readonly<Record<string, CredentialFlag>>,
+): readonly [string, Credential, boolean] | undefined {
+  let name = arg;
+  if (!Object.hasOwn(flags, name)) {
+    // Glued: --name=value, or -xvalue for a one-letter flag.
+    if (arg.startsWith('--')) name = arg.slice(0, Math.max(0, arg.indexOf('=')));
+    else name = arg.slice(0, 2);
+    if (name.length < 2 || name.length === arg.length || !Object.hasOwn(flags, name)) {
+      return undefined;
+    }
+  }
+  const [kind, takesNext] = flags[name]!;
+  return [name, kind, takesNext];
+}
+
+function basename(path: string): string {
+  return path.slice(path.lastIndexOf('/') + 1);
+}
+
+/**
+ * Redact an argument list as one field: WITHHELD for every argument when any
+ * secret in it is anywhere but a known client's credential flag value or URL
+ * password, else the list with those replaced. argv[0] is never replaced;
+ * user, host and email names are, in any argument.
+ */
+function redactArgvWithin(
+  argv: readonly string[],
+  options: NameOptions,
+  oversized?: number[],
+): string[] {
+  if (!argv.length) return [];
+  const client = CLIENTS.get(basename(argv[0]!));
+  const read: ReadonlyArray<readonly [string, Shape]> =
+    client && (!client.subcommands || client.subcommands.has(argv[1] ?? ''))
+      ? readClientArgv(argv, client)
+      : argv.map((arg) => [arg, 'word'] as const);
+  const out: string[] = [];
+  let withheld = false;
+  for (const [i, [arg, shape]] of read.entries()) {
+    // Too long to read: withheld unread, and the list with it.
+    if (argv[i]!.length > MAX_REDACT_CHARS) {
+      oversized?.push(argv[i]!.length);
+      withheld = true;
+      continue;
+    }
+    const redacted = redactText(arg, options, undefined, shape);
+    if (redacted === WITHHELD && arg !== WITHHELD) withheld = true;
+    out.push(redacted);
+  }
+  // Read whole, as a command line, a list still holds no secret: a flag and
+  // its value, such as a wrapper's curl -u user:pass, span two arguments.
+  if (!withheld && holdsSecret(out.join(' '))) withheld = true;
+  return withheld ? argv.map(() => WITHHELD) : out;
+}
+
+/** True when any rule finds a secret in the text, or withholds it. */
+function holdsSecret(text: string): boolean {
+  if (text.length > MAX_REDACT_CHARS) return true;
+  stringCache.clear();
+  return analyze(text, {}, 0, 'word').some((x) => x.withhold || x.rank > RANK_NAME);
+}
+
+/**
+ * Redact a command's arguments as one field: the value of a known client's
+ * credential flag or a URL's password cut out, or every argument WITHHELD.
+ */
 export function redactArgv(argv: readonly string[], options: NameOptions = {}): string[] {
-  return argv.map((arg) => redactText(arg, options));
+  return redactArgvWithin(argv, options);
 }
 
 /**
@@ -1503,7 +1701,9 @@ export function redactArgv(argv: readonly string[], options: NameOptions = {}): 
  * whatever it looks like: with REDACTED when it is one plain token, else
  * WITHHELD. When that value is an object or array, its shape is kept and
  * every string and number inside it is replaced, booleans and null aside,
- * and numbers under names like expires_at. A value nested too deep, a cycle,
+ * and numbers under names like expires_at. Elsewhere, an array of strings
+ * is read as an argument list (see redactArgv), and a string of any other
+ * array as a word that may be a command. A value nested too deep, a cycle,
  * or one that throws when read is withheld whole.
  */
 export function redactValue(value: unknown, options: NameOptions): unknown {
@@ -1537,8 +1737,15 @@ function redactWithin(
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
+      // A list of strings may be a command's arguments: it is one field.
+      if (!secret && value.length && value.every((item) => typeof item === 'string')) {
+        return redactArgvWithin(value as string[], options, oversized);
+      }
+      // Any other list's string may still be a word of a command.
       return value.map((item) =>
-        redactWithin(item, options, secret, depth + 1, ancestors, oversized),
+        typeof item === 'string' && !secret
+          ? redactText(item, options, oversized, 'word')
+          : redactWithin(item, options, secret, depth + 1, ancestors, oversized),
       );
     }
     const out: Record<string, unknown> = {};

