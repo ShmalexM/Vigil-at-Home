@@ -24,6 +24,7 @@ import { AgentsView } from './Agents';
 import { AlertsView } from './Alerts';
 import { HistoryView } from './History';
 import { HomeView } from './Home';
+import { navKey, navShortcut } from './nav-keys';
 import { PackPage } from './Pack';
 import { SetupWizard } from './onboarding/SetupWizard';
 import { RulesView } from './Rules';
@@ -72,6 +73,21 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
     location.hash = r;
     setRoute(r);
   };
+  // ⌘1…⌘6 and ⌘, (Ctrl elsewhere) move between pages without the mouse.
+  useEffect(() => {
+    const mac = navigator.platform.toLowerCase().includes('mac');
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      const typing = !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+      const r = navKey(e, mac, typing);
+      if (!r) return;
+      e.preventDefault();
+      location.hash = r;
+      setRoute(r);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   const [status] = useLive(() => vigil.getStatus());
   const [setup] = useLive(() => vigil.getSetup());
@@ -258,6 +274,8 @@ function NavButton({
       type="button"
       className="nav-item"
       aria-current={current ? 'page' : undefined}
+      aria-keyshortcuts={navShortcut(item.id)?.replace('⌘', 'Meta+')}
+      title={navShortcut(item.id) ? `${item.label} (${navShortcut(item.id)})` : undefined}
       onClick={onClick}
     >
       {item.icon}
