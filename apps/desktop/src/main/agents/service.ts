@@ -555,7 +555,7 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
       endpoint: ep.state,
       ...(ep.error ? { error: ep.error } : {}),
       snippets: files ? mcpSnippet({ ...files, socketPath: ep.socketPath }) : null,
-      tools: VIGIL_TOOLS,
+      tools: VIGIL_TOOLS.filter((t) => !t.packOnly),
       calls: this.toolUse.calls,
       ...(this.toolUse.lastCallAt !== undefined ? { lastCallAt: this.toolUse.lastCallAt } : {}),
       ...(this.toolUse.lastTool !== undefined ? { lastTool: this.toolUse.lastTool } : {}),
@@ -600,7 +600,10 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
     list: () => ReturnType<VigilTools['list']>;
     call: (name: string, args: Record<string, unknown>) => ToolsReply;
   } {
-    return { list: () => this.tools.list(), call: (n, a) => this.tools.call(n, a) };
+    return {
+      list: () => this.tools.list({ pack: true }),
+      call: (n, a) => this.tools.call(n, a, { pack: true }),
+    };
   }
 
   /**
