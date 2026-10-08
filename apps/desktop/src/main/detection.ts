@@ -48,6 +48,7 @@ import type { EventOutcome } from '../shared/ipc.js';
 import type { AlertService } from './alerts.js';
 import type { Store } from './db/store.js';
 import type { HelperRuleSet } from './helper.js';
+import { noteSlowRule } from './slow-rule.js';
 
 const KEY_REVIEW = 'detection.review';
 
@@ -173,6 +174,12 @@ export class Detector {
       learningUntil: opts.installedAt + LEARNING_DAYS * DAY,
       safety: { selfPaths: opts.selfPaths },
       recordHistory: false,
+      // The rule stays on; the user hears of it once, quietly, and Rules flags it.
+      onSlowRule: (rule, ms, e) => {
+        noteSlowRule(this.alerts, rule, ms, e).catch((err: unknown) =>
+          console.error('[detection] could not note a slow rule:', err),
+        );
+      },
     });
     this.feedback = new Feedback(this.engine, undefined, this.now);
     this.feeds = new FeedImporter(DEFAULT_FEEDS, this.stores.lists, this.stores.feeds, {
@@ -434,6 +441,11 @@ export class Detector {
 
   hasRule(id: string): boolean {
     return this.engine.getRule(id) !== undefined;
+  }
+
+  /** Rules that went over their matching budget since they were last loaded, for review. */
+  slowRules(): ReadonlySet<string> {
+    return new Set(this.engine.slowRules());
   }
 
   /**

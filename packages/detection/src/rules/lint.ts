@@ -1,7 +1,9 @@
 import type { ActionKind } from '@vigil/core';
 import { isIP } from 'node:net';
 import type { Condition, DetectionRule, FieldTest } from '../types.js';
-import { globProblem, regexProblem, TEMPLATE_RE, templateFields } from './compile.js';
+import { globProblem, globToRegExp, regexProblem, TEMPLATE_RE, templateFields } from './compile.js';
+import { linearProblem } from './linear.js';
+import { isShippedPattern } from './trusted.js';
 import { KNOWN_FIELDS } from './fields.js';
 
 export interface LintResult {
@@ -163,7 +165,11 @@ function checkMatch(c: FieldTest, errors: string[]): number {
   if (c.op === 'regex') {
     for (const v of values) {
       regexes++;
-      const p = regexProblem(String(v));
+      const p =
+        regexProblem(String(v)) ??
+        (isShippedPattern('regex', String(v))
+          ? undefined
+          : linearProblem(String(v), c.nocase === true));
       if (p) errors.push(`${c.field}: ${p}`);
     }
   }
@@ -172,6 +178,13 @@ function checkMatch(c: FieldTest, errors: string[]): number {
       if (String(v).length > 512) errors.push(`${c.field}: glob too long`);
       const p = globProblem(String(v));
       if (p) errors.push(`${c.field}: ${p}`);
+      else if (!isShippedPattern('glob', String(v))) {
+        try {
+          globToRegExp(String(v), c.nocase !== false, true);
+        } catch (err) {
+          errors.push(`${c.field}: ${(err as Error).message}`);
+        }
+      }
     }
   }
   if (c.op === 'cidr') {

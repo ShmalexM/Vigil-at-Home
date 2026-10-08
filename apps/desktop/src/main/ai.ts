@@ -35,6 +35,7 @@ import type { ApiKeyProvider, SetupMode } from '../shared/setup.js';
 import type { Store } from './db/store.js';
 import type { VigilCore } from './service.js';
 import { labelKey } from './label-filter.js';
+import { SLOW_RULE } from './slow-rule.js';
 import { TEST_RULE } from './test-alert.js';
 import { WORTH_A_LOOK_RULE, WorthALook } from './worth-a-look.js';
 import { monthStart, sumCost, type UsageService } from './usage.js';
@@ -380,11 +381,17 @@ export class AiBridge extends EventEmitter<{
    * Explains each new alert once its response has run. Popups go first, in
    * the scheduler's urgent lane. The test alert is never sent, and neither
    * are "worth a look" alerts: the labeller's reason already explains them,
-   * and the user can still press Explain.
+   * and the user can still press Explain. A "slow rule" note is about a rule,
+   * not the event, so it is not sent either.
    */
   explainAlertsFrom(core: Pick<VigilCore, 'alerts' | 'scheduler' | 'alertDetail'>): void {
     core.alerts.on('raised', (alert) => {
-      if (alert.ruleId === TEST_RULE.id || alert.ruleId === WORTH_A_LOOK_RULE.id) return;
+      if (
+        alert.ruleId === TEST_RULE.id ||
+        alert.ruleId === WORTH_A_LOOK_RULE.id ||
+        alert.ruleId === SLOW_RULE.id
+      )
+        return;
       const urgent = alert.notify === 'popup';
       if (!urgent) {
         if (this.queuedBackground >= MAX_QUEUED_BACKGROUND) return;

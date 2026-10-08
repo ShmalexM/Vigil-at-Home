@@ -86,7 +86,7 @@ function RuleRow({
   editing: boolean;
   onEdit: (on: boolean) => void;
 }) {
-  const { rule, matches } = view;
+  const { rule, matches, slow } = view;
   const toast = useToast();
   const [confirmBlock, setConfirmBlock] = useState(false);
   // A tool rule answers Claude Code's hook: its modes are Record, Ask and Deny.
@@ -117,6 +117,14 @@ function RuleRow({
             <span className="t-h3 ellipsis">{rule.name}</span>
             {rule.origin === 'ai' && <Chip tone="ai">AI-drafted</Chip>}
             {rule.origin === 'user' && <Chip>Yours</Chip>}
+            {slow && (
+              <Chip
+                tone="fair"
+                title="This rule took longer than it should to match. It is still on and decides every event in full. Narrow its fields or shorten its patterns."
+              >
+                Slow: review
+              </Chip>
+            )}
           </div>
           <span className="t-small clamp-2" title={rule.description}>
             {rule.description}

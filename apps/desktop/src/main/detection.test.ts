@@ -1,11 +1,12 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { PreflightRequest, SensorEvent } from '@vigil/core';
-import type { SessionStart } from '@vigil/detection';
+import { SLOW_RULE_BUDGET_MS, type SessionStart } from '@vigil/detection';
 import { describe, expect, it, vi } from 'vitest';
 import { Store } from './db/store.js';
 import { Detector, type DetectorOptions } from './detection.js';
 import { DryRunExecutor } from './executor.js';
 import { VigilCore } from './service.js';
+import { SLOW_RULE } from './slow-rule.js';
 
 const BAD = 'a'.repeat(64);
 
@@ -96,6 +97,46 @@ describe('Detector', () => {
       helper: 'applied',
     });
     expect(core.rules().find((r) => r.rule.id === 'known-bad-hash')?.rule.mode).toBe('alert');
+  });
+
+  it('notes a slow rule of your own once, quietly, and keeps it on', async () => {
+    const { core, store, popups } = setup();
+    core.detector!.engine.upsertRule({
+      id: 'my-rule',
+      version: 1,
+      name: 'My rule',
+      description: '',
+      origin: 'user',
+      mode: 'block',
+      severity: 'high',
+      fidelity: 'high',
+      eventKinds: ['process.exec'],
+      condition: { field: 'process.path', op: 'regex', value: '^/tmp/x[0-9]+$' },
+      response: [],
+      reasons: ['Ran from /tmp.'],
+      tags: [],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    // Every timed condition test looks like it took SLOW_RULE_BUDGET_MS.
+    let t = 0;
+    let calls = 0;
+    const clock = vi
+      .spyOn(performance, 'now')
+      .mockImplementation(() => (calls++ % 2 ? (t += SLOW_RULE_BUDGET_MS) : t));
+    for (let i = 0; i < 3; i++) await core.handleEvent(exec('/usr/bin/git'));
+    clock.mockRestore();
+    await vi.waitFor(() => expect(store.listAlerts()).toHaveLength(1));
+    const [note] = store.listAlerts();
+    expect(note).toMatchObject({
+      ruleId: SLOW_RULE.id,
+      notify: 'silent',
+      title: 'Slow rule: My rule',
+    });
+    expect(popups).toEqual([]);
+    const mine = core.rules().find((r) => r.rule.id === 'my-rule');
+    expect(mine).toMatchObject({ rule: { mode: 'block' }, slow: true });
+    expect(core.rules().some((r) => r.rule.id === SLOW_RULE.id)).toBe(false);
   });
 
   it('the Rules screen hears that a cancelled password left the rule blocking', async () => {

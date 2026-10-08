@@ -297,7 +297,13 @@ export class FastPath {
       ? new DetectionEngine(
           next.rules.map((r) => ({ ...r, mode: 'block' as const })),
           stores,
-          { safety: { selfPaths: next.selfPaths }, recordHistory: false },
+          {
+            safety: { selfPaths: next.selfPaths },
+            recordHistory: false,
+            // The rule keeps blocking; the app times its own copy and tells the user.
+            onSlowRule: (rule, ms) =>
+              this.opts.log?.(`fast path: rule ${rule.id} spent ${Math.round(ms)} ms matching`),
+          },
         )
       : undefined;
     this.engine = engine;

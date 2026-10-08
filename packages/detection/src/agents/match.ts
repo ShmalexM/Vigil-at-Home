@@ -1,5 +1,5 @@
 import type { AgentIdentity } from '@vigil/core';
-import { globToRegExp } from '../rules/compile.js';
+import { clip, globProblem, globToRegExp } from '../rules/compile.js';
 
 /** What matching sees of a program. Sensors give all four; a `ps` seed gives path and args. */
 export interface AgentProc {
@@ -110,7 +110,7 @@ function namesProgram(c: Clause, p: AgentProc, name: string): boolean {
   if (c.teamIds && !(p.teamId !== undefined && c.teamIds.has(p.teamId))) return false;
   if (c.signingIds && !(p.signingId !== undefined && c.signingIds.has(p.signingId))) return false;
   if (c.names && !c.names.has(name)) return false;
-  if (c.paths && !c.paths.some((re) => re.test(p.path))) return false;
+  if (c.paths && !c.paths.some((re) => re.test(clip(p.path)))) return false;
   return true;
 }
 
@@ -148,6 +148,9 @@ export function compileAgentMatchers(ids: readonly AgentIdentity[]): CompiledAge
     const identity = effective(raw);
     byId.set(identity.id, identity);
     for (const m of identity.match) {
+      // A path glob that could take too long to match (saved before the
+      // registry refused those) drops its matcher rather than every check.
+      if (m.paths?.some((g) => globProblem(g) !== undefined)) continue;
       const c: Clause = { order, identity };
       if (m.teamIds?.length) c.teamIds = new Set(m.teamIds);
       if (m.signingIds?.length) c.signingIds = new Set(m.signingIds);
@@ -171,7 +174,7 @@ export function compileAgentMatchers(ids: readonly AgentIdentity[]): CompiledAge
     p.teamId !== undefined ? byTeam.get(p.teamId) : undefined,
     p.signingId !== undefined ? bySigning.get(p.signingId) : undefined,
     byName.get(name),
-    anyGlob?.test(p.path) ? globOnly : undefined,
+    anyGlob?.test(clip(p.path)) ? globOnly : undefined,
   ];
 
   return {

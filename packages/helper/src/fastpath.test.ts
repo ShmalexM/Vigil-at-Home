@@ -232,6 +232,8 @@ describe('blocking rules in the helper', () => {
       { field: 'path', op: 'regex' as const, value: '(a|a)*$' },
       { field: 'path', op: 'regex' as const, value: '((a+))+$' },
       { field: 'path', op: 'regex' as const, value: '(?:x|x)+y' },
+      // Not one Vigil ships, so it must run in linear time, which has no lookahead.
+      { field: 'path', op: 'regex' as const, value: '/tmp/(?=x)' },
     ]) {
       const bad = { ...sync, rules: [...sync.rules, { ...sync.rules[0]!, id: 'slow', condition }] };
       await expect(client.call(bad), condition.value).rejects.toMatchObject({ code: 'invalid' });

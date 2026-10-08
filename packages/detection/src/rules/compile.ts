@@ -1,6 +1,8 @@
 import { BlockList, isIP } from 'node:net';
 import type { Condition, DetectionEvent, FieldTest } from '../types.js';
 import { compileField, keyOf, type FieldGetter, type FieldValue } from './fields.js';
+import { linearProblem, linearRegExp } from './linear.js';
+import { isShippedPattern } from './trusted.js';
 
 /** Longest string a regex or glob is ever run against. Bounds evaluation time. */
 export const MAX_SUBJECT_LENGTH = 4096;
@@ -25,6 +27,8 @@ export interface CompiledCondition {
   test: Predicate;
   /** Baseline keys this condition reads, so the engine can learn them after evaluation. */
   firstSeen: FirstSeenSpec[];
+  /** Has a regex or glob Vigil does not ship (see isShippedPattern), so the engine times it. */
+  untrusted: boolean;
 }
 
 /**
@@ -246,8 +250,11 @@ export function globProblem(glob: string): string | undefined {
  * Path globs. `**` crosses directories, `*` and `?` do not, and a leading `~`
  * means any user's home folder. Case-insensitive by default because APFS is.
  * Rules check globProblem first; this only builds the regex.
+ *
+ * @param linear build it for the linear-time engine (see linear.ts), as for
+ *   a glob Vigil does not ship. Throws when it can't run there.
  */
-export function globToRegExp(glob: string, ignoreCase = true): RegExp {
+export function globToRegExp(glob: string, ignoreCase = true, linear = false): RegExp {
   let src = '';
   let rest = glob;
   if (rest.startsWith('~/')) {
@@ -262,7 +269,10 @@ export function globToRegExp(glob: string, ignoreCase = true): RegExp {
     else if (t.kind === 'any') src += '.*';
     else src += '(?:.*/)?'; // `**/` also matches zero directories
   }
-  return new RegExp(`^${src}$`, ignoreCase ? 'i' : '');
+  if (!linear) return new RegExp(`^${src}$`, ignoreCase ? 'i' : '');
+  // Only a `*` with more than 16 `?` beside it ({17,}) is beyond that engine.
+  if (linearProblem(`^${src}$`)) throw new Error('glob has more than 16 ? next to one *');
+  return linearRegExp(`^${src}$`, ignoreCase);
 }
 
 function asStrings(v: FieldValue): string[] {
@@ -271,7 +281,8 @@ function asStrings(v: FieldValue): string[] {
   return [String(v)];
 }
 
-function clip(s: string): string {
+/** `s`, cut to MAX_SUBJECT_LENGTH: what any regex or glob is tested against. */
+export function clip(s: string): string {
   return s.length > MAX_SUBJECT_LENGTH ? s.slice(0, MAX_SUBJECT_LENGTH) : s;
 }
 
@@ -288,7 +299,8 @@ function buildBlockList(values: string[]): BlockList {
   return bl;
 }
 
-function compileMatch(c: FieldTest): Predicate {
+/** @param onUntrusted called when the test has a regex or glob Vigil does not ship. */
+function compileMatch(c: FieldTest, onUntrusted: () => void): Predicate {
   const get = compileField(c.field);
   const ic = c.nocase === true;
   const norm = (s: string) => (ic ? s.toLowerCase() : s);
@@ -338,7 +350,13 @@ function compileMatch(c: FieldTest): Predicate {
       const res = values.map((g) => {
         const problem = globProblem(g);
         if (problem) throw new Error(`${c.field}: ${problem}`);
-        return globToRegExp(g, c.nocase !== false);
+        const shipped = isShippedPattern('glob', g);
+        if (!shipped) onUntrusted();
+        try {
+          return globToRegExp(g, c.nocase !== false, !shipped);
+        } catch (err) {
+          throw new Error(`${c.field}: ${(err as Error).message}`, { cause: err });
+        }
       });
       return (e) => anyString(e, (s) => res.some((r) => r.test(clip(s))));
     }
@@ -346,7 +364,13 @@ function compileMatch(c: FieldTest): Predicate {
       const res = values.map((p) => {
         const problem = regexProblem(p);
         if (problem) throw new Error(`${c.field}: ${problem}`);
-        return new RegExp(p, ic ? 'i' : '');
+        // Vigil's own patterns keep the usual engine (they need lookarounds);
+        // any other runs in linear time, so no pattern can stall the checks.
+        if (isShippedPattern('regex', p)) return new RegExp(p, ic ? 'i' : '');
+        onUntrusted();
+        const linear = linearProblem(p, ic);
+        if (linear) throw new Error(`${c.field}: ${linear}`);
+        return linearRegExp(p, ic);
       });
       return (e) => anyString(e, (s) => res.some((r) => r.test(clip(s))));
     }
@@ -376,6 +400,7 @@ function compileMatch(c: FieldTest): Predicate {
  */
 export function compileCondition(c: Condition, scopePrefix = ''): CompiledCondition {
   const firstSeen: FirstSeenSpec[] = [];
+  let untrusted = false;
 
   const walk = (c: Condition): Predicate => {
     if ('all' in c) {
@@ -404,10 +429,11 @@ export function compileCondition(c: Condition, scopePrefix = ''): CompiledCondit
       const get = compileField(c.inList.field);
       return (e, s) => asStrings(get(e)).some((v) => s.listHas(list, v));
     }
-    return compileMatch(c);
+    return compileMatch(c, () => (untrusted = true));
   };
 
-  return { test: walk(c), firstSeen };
+  const test = walk(c);
+  return { test, firstSeen, untrusted };
 }
 
 /**

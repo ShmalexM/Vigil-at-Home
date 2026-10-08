@@ -1,6 +1,6 @@
 import { authorizeAction, type Action, type ProcessRef } from '@vigil/core';
 import { BlockList, isIP } from 'node:net';
-import { globToRegExp } from './rules/compile.js';
+import { clip, globProblem, globToRegExp } from './rules/compile.js';
 import type { DetectionEvent } from './types.js';
 
 /**
@@ -75,6 +75,10 @@ export class SafetyFloor {
 
   constructor(cfg: Partial<SafetyConfig> = {}) {
     const extra = cfg.protectedPathGlobs ?? [];
+    for (const g of extra) {
+      const problem = globProblem(g);
+      if (problem) throw new Error(`protectedPathGlobs: ${g}: ${problem}`);
+    }
     this.protectedPaths = [...DEFAULT_PROTECTED_PATH_GLOBS, ...extra].map((g) => globToRegExp(g));
     this.protectedFiles = [...PROTECTED_FILE_GLOBS, ...extra].map((g) => globToRegExp(g));
     this.selfPaths = (cfg.selfPaths ?? []).map((p) => p.toLowerCase().replace(/\/+$/, ''));
@@ -94,13 +98,13 @@ export class SafetyFloor {
     if (!p) return 'there is no process to act on';
     if (p.pid <= 1) return 'it is a core macOS process';
     if (p.signing === 'apple') {
-      const tool = this.appleTools.some((r) => r.test(p.path));
+      const tool = this.appleTools.some((r) => r.test(clip(p.path)));
       if (!tool || p.ppid === 1 || p.ppid === undefined) {
         return 'it is part of macOS (signed by Apple)';
       }
     }
     if (this.isSelf(p.path)) return 'it is Vigil itself';
-    if (this.protectedPaths.some((r) => r.test(p.path))) {
+    if (this.protectedPaths.some((r) => r.test(clip(p.path)))) {
       return 'it lives in a protected system folder';
     }
     return undefined;
@@ -133,12 +137,12 @@ export class SafetyFloor {
         return undefined;
       }
       case 'persistence.disable':
-        return this.systemPersistence.some((r) => r.test(action.path))
+        return this.systemPersistence.some((r) => r.test(clip(action.path)))
           ? 'the launch item belongs to macOS'
           : undefined;
       case 'file.quarantine': {
         if (this.isSelf(action.path)) return 'it is part of Vigil';
-        if (this.protectedFiles.some((r) => r.test(action.path)))
+        if (this.protectedFiles.some((r) => r.test(clip(action.path))))
           return 'the file is part of macOS';
         if (proc && proc.path === action.path) return this.processProtection(proc);
         return undefined;

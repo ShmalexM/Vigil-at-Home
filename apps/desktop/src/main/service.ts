@@ -32,6 +32,7 @@ import { SensorRegistry } from './sensors.js';
 import { computeStatus } from './status.js';
 import { TEST_RULE } from './test-alert.js';
 import { WORTH_A_LOOK_RULE } from './worth-a-look.js';
+import { SLOW_RULE } from './slow-rule.js';
 import { UsageService } from './usage.js';
 
 const HOUR = 60 * 60 * 1000;
@@ -91,6 +92,7 @@ export class VigilCore {
     });
     store.upsertRule(TEST_RULE);
     store.upsertRule(WORTH_A_LOOK_RULE);
+    store.upsertRule(SLOW_RULE);
   }
 
   start(): void {
@@ -272,15 +274,20 @@ export class VigilCore {
 
   rules(): RuleView[] {
     const counts = this.store.ruleMatchCounts(this.now() - RULE_REVIEW_DAYS * DAY);
+    const slow = this.detector?.slowRules() ?? new Set<string>();
     const engine = (this.detector?.rules() ?? []).map(({ rule, mode }) => ({
       rule: { ...rule, mode },
       matches: counts.get(rule.id) ?? 0,
+      ...(slow.has(rule.id) ? { slow: true } : {}),
     }));
     const own = this.store
       .listRules()
       .filter(
         (r) =>
-          r.id !== TEST_RULE.id && r.id !== WORTH_A_LOOK_RULE.id && !this.detector?.hasRule(r.id),
+          r.id !== TEST_RULE.id &&
+          r.id !== WORTH_A_LOOK_RULE.id &&
+          r.id !== SLOW_RULE.id &&
+          !this.detector?.hasRule(r.id),
       )
       .map((rule) => ({ rule, matches: counts.get(rule.id) ?? 0 }));
     return [...engine, ...own];

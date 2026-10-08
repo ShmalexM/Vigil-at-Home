@@ -37,7 +37,18 @@ export interface EngineConfig {
   /** Append every evaluated event to the history store (for replay). Default true. */
   recordHistory?: boolean;
   newId?: () => string;
+  /**
+   * A rule with a regex or glob Vigil does not ship spent more than
+   * SLOW_RULE_BUDGET_MS matching within SLOW_RULE_WINDOW_MS. Called once per
+   * rule until it is loaded again; `e` is the event it was matching when it
+   * went over. The rule stays on and every answer it gave stands.
+   */
+  onSlowRule?: (rule: DetectionRule, ms: number, e: DetectionEvent) => void;
 }
+
+/** Matching time one rule may take within SLOW_RULE_WINDOW_MS before onSlowRule hears of it. */
+export const SLOW_RULE_BUDGET_MS = 250;
+export const SLOW_RULE_WINDOW_MS = 60_000;
 
 interface CompiledRule {
   rule: DetectionRule;
@@ -48,6 +59,8 @@ interface CompiledRule {
   dedupeKey: FieldGetter[];
   dedupeWindowMs: number;
   santaFrom: FieldGetter | undefined;
+  /** Has a regex or glob Vigil does not ship: its matching is timed. */
+  untrusted: boolean;
   sequence:
     | {
         steps: { kinds: Set<string>; condition: CompiledCondition }[];
@@ -88,6 +101,10 @@ export function compileRule(
     const scopePrefix = `${[...rule.eventKinds].sort().join('+')}:`;
     const condition = compileCondition(rule.condition, scopePrefix);
     const exclusions = rule.exclusions.map((x) => compileCondition(x, scopePrefix));
+    const steps = (rule.sequence?.steps ?? []).map((st) => ({
+      kinds: new Set<string>(st.eventKinds),
+      condition: compileCondition(st.condition, scopePrefix),
+    }));
     return {
       rule,
       condition,
@@ -97,12 +114,12 @@ export function compileRule(
       dedupeKey: (rule.dedupe?.key ?? []).map(compileField),
       dedupeWindowMs: (rule.dedupe?.windowSec ?? defaultDedupeWindowSec) * 1000,
       santaFrom: rule.santa ? compileField(rule.santa.from) : undefined,
+      untrusted: [condition, ...exclusions, ...steps.map((st) => st.condition)].some(
+        (x) => x.untrusted,
+      ),
       sequence: rule.sequence
         ? {
-            steps: rule.sequence.steps.map((st) => ({
-              kinds: new Set<string>(st.eventKinds),
-              condition: compileCondition(st.condition, scopePrefix),
-            })),
+            steps,
             key: rule.sequence.key.map(compileField),
             windowMs: rule.sequence.windowSec * 1000,
           }
@@ -185,6 +202,11 @@ export class DetectionEngine {
   private readonly recordHistory: boolean;
   private readonly makeId: () => string;
   private readonly state: EvalState;
+  private readonly onSlowRule: EngineConfig['onSlowRule'];
+  /** Matching time per timed rule in the current window (performance.now() ms). */
+  private readonly spent = new Map<string, { since: number; ms: number }>();
+  /** Rules reported to onSlowRule, until they are loaded again. */
+  private readonly slow = new Set<string>();
 
   constructor(
     rules: Array<DetectionRuleInput | DetectionRule>,
@@ -195,6 +217,7 @@ export class DetectionEngine {
     this.defaultDedupeWindowSec = cfg.defaultDedupeWindowSec ?? 3600;
     this.recordHistory = cfg.recordHistory ?? true;
     this.makeId = cfg.newId ?? (() => newId());
+    this.onSlowRule = cfg.onSlowRule;
     this.safety = new SafetyFloor(cfg.safety);
     this.state = {
       baselineHas: (scope, key) => stores.baseline.has(scope, key),
@@ -212,19 +235,30 @@ export class DetectionEngine {
       ids.add(c.rule.id);
     }
     this.byId = new Map(compiled.map((c) => [c.rule.id, c]));
+    this.spent.clear();
+    this.slow.clear();
     this.reindex();
   }
 
   upsertRule(rule: DetectionRuleInput | DetectionRule): DetectionRule {
     const c = compileRule(rule, this.defaultDedupeWindowSec);
     this.byId.set(c.rule.id, c);
+    this.spent.delete(c.rule.id);
+    this.slow.delete(c.rule.id);
     this.reindex();
     return c.rule;
   }
 
   removeRule(ruleId: string): void {
     this.byId.delete(ruleId);
+    this.spent.delete(ruleId);
+    this.slow.delete(ruleId);
     this.reindex();
+  }
+
+  /** Rules that went over their matching budget (onSlowRule), for review. */
+  slowRules(): string[] {
+    return [...this.slow];
   }
 
   getRule(ruleId: string): DetectionRule | undefined {
@@ -348,8 +382,8 @@ export class DetectionEngine {
       if (c.sequence && !this.chainReady(c, e)) return undefined;
       if (!rule.eventKinds.includes(e.kind)) return undefined;
     }
-    if (!c.condition.test(e, this.state)) return undefined;
-    if (c.exclusions.some((x) => x.test(e, this.state))) return undefined;
+    if (!this.holds(c, c.condition, e)) return undefined;
+    if (c.exclusions.some((x) => this.holds(c, x, e))) return undefined;
     if (this.isExcepted(rule.id, e)) return undefined;
 
     if (rule.threshold && c.thresholdKey) {
@@ -473,7 +507,7 @@ export class DetectionEngine {
     const done = st?.done ?? 0;
     if (done >= seq.steps.length) return true;
     const step = seq.steps[done]!;
-    if (step.kinds.has(e.kind) && step.condition.test(e, this.state)) {
+    if (step.kinds.has(e.kind) && this.holds(c, step.condition, e)) {
       this.chains.delete(ckey); // re-insert to keep recency order
       this.chains.set(ckey, { done: done + 1, start: st?.start ?? e.ts });
       if (this.chains.size > MAX_WINDOW_ENTRIES)
@@ -494,6 +528,41 @@ export class DetectionEngine {
     if (k === undefined) return false;
     const st = this.chains.get(`${c.rule.id}␞${k}`);
     return !!st && e.ts - st.start <= seq.windowMs && st.done >= seq.steps.length;
+  }
+
+  /**
+   * One of the rule's conditions on this event, timed when the rule has a
+   * pattern Vigil does not ship. The linear-time engine already bounds each
+   * test; this catches a rule that is still costly overall, such as many
+   * long patterns on every event.
+   *
+   * Going over the budget never turns the rule off or changes its answer.
+   * The command lines it reads are the attacker's to choose, so a slow input
+   * must not be a way to switch off the rule meant to catch it. A match runs
+   * to the end before its time is known, so the answer is always the full
+   * one; the overrun is only reported, once, for the user to review.
+   */
+  private holds(c: CompiledRule, cond: CompiledCondition, e: DetectionEvent): boolean {
+    if (!c.untrusted) return cond.test(e, this.state);
+    const start = performance.now();
+    try {
+      return cond.test(e, this.state);
+    } finally {
+      const end = performance.now();
+      const id = c.rule.id;
+      let w = this.spent.get(id);
+      if (!w || end - w.since > SLOW_RULE_WINDOW_MS)
+        this.spent.set(id, (w = { since: start, ms: 0 }));
+      w.ms += end - start;
+      if (w.ms > SLOW_RULE_BUDGET_MS && !this.slow.has(id)) {
+        this.slow.add(id);
+        try {
+          this.onSlowRule?.(c.rule, w.ms, e);
+        } catch {
+          // Reporting must not change what the rule decided.
+        }
+      }
+    }
   }
 
   private isExcepted(ruleId: string, e: DetectionEvent): boolean {
