@@ -15,6 +15,8 @@ export class FakeSystem implements System {
   labels = new Map<string, string>();
   /** ProgramArguments[0] of a plist, by path. */
   programs = new Map<string, string>();
+  /** The whole ProgramArguments of a plist, by path. */
+  argv = new Map<string, string[]>();
   console: number | undefined = 501;
 
   async run(bin: BinaryName, args: string[], opts: { input?: string } = {}): Promise<RunResult> {
@@ -46,11 +48,15 @@ export class FakeSystem implements System {
       case 'plutil': {
         const path = args.at(-1)!;
         const key = args[args.indexOf('-extract') + 1];
+        if (key === 'ProgramArguments') {
+          const argv = this.argv.get(path);
+          return argv ? ok(JSON.stringify(argv)) : fail();
+        }
         const value =
           key === 'Label'
             ? this.labels.get(path)
             : key === 'ProgramArguments.0'
-              ? this.programs.get(path)
+              ? (this.programs.get(path) ?? this.argv.get(path)?.[0])
               : undefined;
         return value ? ok(value + '\n') : fail();
       }

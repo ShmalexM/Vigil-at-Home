@@ -22,6 +22,7 @@ import type { System } from './system.js';
 import { PolicyRefused, type FastPath } from './fastpath.js';
 import type { PreexecSync } from './preexec.js';
 import { ActionError } from './commands/errors.js';
+import { lexists } from './commands/safeFs.js';
 import {
   identifyProcess,
   killProcess,
@@ -35,6 +36,7 @@ import {
   quarantine,
   realParentPath,
   restore,
+  StrandedError,
   type QuarantineOptions,
   type QuarantineRecord,
 } from './commands/quarantine.js';
@@ -269,27 +271,22 @@ export class Executor {
       }
       case 'file.quarantine': {
         const id = Journal.newId();
-        const rec = quarantine(cmd.path, id, this.quarantineOpts);
+        const rec = this.stranded(id, () => quarantine(cmd.path, id, this.quarantineOpts));
         return this.record(cmd, `quarantined ${rec.originalPath}`, { quarantine: rec }, id);
       }
       case 'file.restore': {
         const entry = this.findContainment(cmd)!;
         const rec = entry.undo?.quarantine as QuarantineRecord;
-        restore(rec, this.quarantineOpts);
+        this.stranded(Journal.newId(), () => restore(rec, this.quarantineOpts), entry);
         return this.release(entry, cmd, `restored ${rec.originalPath}`);
       }
       case 'persistence.disable': {
         const id = Journal.newId();
-        const rec =
+        const rec = await this.strandedAsync(id, () =>
           sys.platform === 'linux'
-            ? await disableLinuxPersistence(
-                sys,
-                cmd.path,
-                id,
-                this.quarantineOpts,
-                this.d.launchDirs,
-              )
-            : await disablePersistence(sys, cmd.path, id, this.d.quarantine, this.d.launchDirs);
+            ? disableLinuxPersistence(sys, cmd.path, id, this.quarantineOpts, this.d.launchDirs)
+            : disablePersistence(sys, cmd.path, id, this.d.quarantine, this.d.launchDirs),
+        );
         return this.record(
           cmd,
           `disabled startup item ${rec.label ?? rec.quarantine.originalPath}`,
@@ -300,8 +297,14 @@ export class Executor {
       case 'persistence.enable': {
         const entry = this.findContainment(cmd)!;
         const rec = entry.undo?.persistence as PersistenceRecord;
-        if (sys.platform === 'linux') await restoreLinuxPersistence(sys, rec, this.quarantineOpts);
-        else await restorePersistence(sys, rec, this.d.quarantine);
+        await this.strandedAsync(
+          Journal.newId(),
+          () =>
+            sys.platform === 'linux'
+              ? restoreLinuxPersistence(sys, rec, this.quarantineOpts)
+              : restorePersistence(sys, rec, this.d.quarantine),
+          entry,
+        );
         return this.release(
           entry,
           cmd,
@@ -424,6 +427,65 @@ export class Executor {
     return this.record(cmd as HelperAction, `unblocked programs with hash ${sha}`);
   }
 
+  /**
+   * Run a file move. When it fails and the item could not be put back, the
+   * journal records where it is before the error reaches the caller: an item
+   * left in the store gets an active quarantine entry under `id`, so a normal
+   * restore brings it back; one left anywhere else gets a final entry saying
+   * where. A restore that left its item elsewhere ends the old entry, whose
+   * stored copy is gone.
+   */
+  private stranded<T>(id: string, fn: () => T, from?: JournalEntry): T {
+    try {
+      return fn();
+    } catch (err) {
+      throw this.journalStranded(err, id, from);
+    }
+  }
+
+  private async strandedAsync<T>(
+    id: string,
+    fn: () => Promise<T>,
+    from?: JournalEntry,
+  ): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      throw this.journalStranded(err, id, from);
+    }
+  }
+
+  private journalStranded(err: unknown, id: string, from?: JournalEntry): unknown {
+    if (!(err instanceof StrandedError)) return err;
+    const rec = err.recovery;
+    const command: HelperAction = { kind: 'file.quarantine', path: rec.originalPath };
+    if (err.inStore) {
+      this.d.journal.add({
+        id,
+        kind: 'file.quarantine',
+        command,
+        state: 'active',
+        summary: `kept ${rec.originalPath} in quarantine after a move that could not be undone`,
+        undo: { quarantine: rec },
+      });
+      return new ActionError(
+        'failed',
+        `${err.message}. It is recorded as quarantine ${id}; restore that to put it back.`,
+      );
+    }
+    const kept = from && storedPathOf(from);
+    if (from && !(kept && lexists(kept))) this.d.journal.markUndone(from.id);
+    this.d.journal.add({
+      id,
+      kind: 'file.quarantine',
+      command,
+      state: 'final',
+      summary: `could not finish moving ${rec.originalPath}; it is at ${rec.storedPath}`,
+      undo: { stranded: rec },
+    });
+    return new ActionError('failed', `${err.message}. This is recorded in the helper journal.`);
+  }
+
   private async syncSanta(): Promise<void> {
     try {
       await this.d.triggerSantaSync?.();
@@ -479,6 +541,13 @@ function target(cmd: { startTime?: number | undefined; path?: string | undefined
   if (cmd.path !== undefined) t.path = cmd.path;
   if (cmd.startTime !== undefined) t.startTime = cmd.startTime;
   return t;
+}
+
+/** Where the item a quarantine or startup-item entry put away is kept. */
+function storedPathOf(e: JournalEntry): string | undefined {
+  const q = e.undo?.quarantine as QuarantineRecord | undefined;
+  const p = e.undo?.persistence as PersistenceRecord | undefined;
+  return (q ?? p?.quarantine)?.storedPath;
 }
 
 export type { SantaRule };

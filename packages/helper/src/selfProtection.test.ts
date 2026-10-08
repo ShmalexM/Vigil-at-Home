@@ -419,6 +419,7 @@ describe('startup items that run Vigil or a sensor under another name (item 7)',
     ).toEqual({
       names: ['a.service', 'a.service', 'b.service'],
       programs: ['/opt/osquery/bin/osqueryd', '/opt/osquery/bin/osqueryd'],
+      argvs: [['/opt/osquery/bin/osqueryd', '--x']],
     });
     expect(startCommands('[Service]\nExecStart=@/usr/bin/osqueryd osqueryd\n', false)).toEqual([
       '/usr/bin/osqueryd',

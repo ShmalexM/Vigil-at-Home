@@ -23,6 +23,7 @@ import {
   existsSync,
   fchownSync,
   fstatSync,
+  lchownSync,
   lstatSync,
   openSync,
   readlinkSync,
@@ -69,6 +70,15 @@ export const euid = (): number => process.geteuid?.() ?? 0;
 export function fchownIfRoot(fd: number, uid: number, gid: number): void {
   try {
     fchownSync(fd, uid, gid);
+  } catch (err) {
+    if (euid() === 0) throw err;
+  }
+}
+
+/** lchown with the same allowance as fchownIfRoot. */
+export function lchownIfRoot(path: string, uid: number, gid: number): void {
+  try {
+    lchownSync(path, uid, gid);
   } catch (err) {
     if (euid() === 0) throw err;
   }

@@ -12,19 +12,30 @@
 // held open while it is checked, its mode is set through that handle, and
 // the folder on the far side is pinned and checked through the pin
 // (safeFs.ts), so a folder swapped for a link is noticed, not followed.
+//
+// Every move is either one that cannot land on something else (a file is
+// linked into place, which fails if the name is taken, then unlinked), or is
+// checked afterwards and undone when what arrived is not what was checked.
+// When an undo itself fails, the error says where the item is now
+// (StrandedError), so the executor can record it and the user can get it
+// back.
 
 import {
   chmodSync,
   closeSync,
   cpSync,
   fchmodSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   openSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   rmdirSync,
   rmSync,
+  symlinkSync,
+  unlinkSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, normalize } from 'node:path';
 import { protectionFor } from '../config.js';
@@ -37,6 +48,7 @@ import {
   checkSelf,
   protectedIds,
   protectedPaths,
+  idKey,
   sameId,
   type ProtectedIds,
 } from './protectedSet.js';
@@ -45,12 +57,14 @@ import {
   fchownIfRoot,
   fdPath,
   fstatBig,
+  lchownIfRoot,
   lexists,
   lstatOrNull,
   O_CHECK,
   O_FOLDER,
   pinFolder,
   withFolderFd,
+  type Pin,
   type Pinning,
 } from './safeFs.js';
 import type { BigIntStats } from 'node:fs';
@@ -76,8 +90,27 @@ export interface QuarantineOptions {
   selfPaths?: string[];
   /** How folders are held during a move (see safeFs.ts). Picked from the OS when absent. */
   pinning?: Pinning;
-  /** Test hook, called after the checks and right before each move. */
+  /** Test hook, called after the checks and right before each move or folder creation. */
   beforeMove?: (step: 'quarantine' | 'mkdir' | 'restore') => void;
+  /** Test hook, called right after a move, before it is checked. */
+  afterMove?: (step: 'quarantine' | 'restore') => void;
+  /** Test hook, called between making a missing folder and opening it. */
+  afterMkdir?: (name: string) => void;
+}
+
+/**
+ * A move went wrong and could not be undone. `recovery` says where the item
+ * is now and where it came from; `inStore` is true when it is in a folder
+ * only root can reach, from which a normal restore can put it back.
+ */
+export class StrandedError extends ActionError {
+  constructor(
+    message: string,
+    readonly recovery: QuarantineRecord,
+    readonly inStore: boolean,
+  ) {
+    super('failed', message);
+  }
 }
 
 /** Reject relative, unnormalized or protected paths, and user home folders themselves. */
@@ -237,21 +270,131 @@ function moveError(path: string, err: unknown): ActionError {
   return new ActionError('failed', `could not move ${path}: ${(err as Error).message}`);
 }
 
-/** After a move, the thing that arrived must be the one that was checked; otherwise undo it. */
-function confirmMoved(at: string, st: BigIntStats, shown: string, putBack: () => void): void {
-  const now = lstatOrNull(at);
-  if (now && sameId(now, st)) return;
-  if (now) {
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function eexist(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException).code === 'EEXIST';
+}
+
+/**
+ * Move `from` to `to` without ever replacing something already at `to`.
+ * A file is hard-linked to the new name, which fails if the name is taken,
+ * then its old name removed. A link is made again at the new name the same
+ * way. A folder is renamed, which can at worst replace an empty folder; the
+ * caller checks what arrived. `from` is always somewhere only this process
+ * can change (the store, a handoff folder, or a pinned item it just moved).
+ * Returns what is at `to` afterwards.
+ */
+export function moveNoReplace(from: string, to: string, st: BigIntStats): BigIntStats {
+  if (st.isFile() || st.isSymbolicLink()) {
+    if (st.isFile()) linkSync(from, to);
+    else symlinkSync(readlinkSync(from), to);
     try {
-      putBack();
-    } catch {
-      // Left where it is; the error says nothing was quarantined.
+      const now = lstatOrNull(to);
+      if (!now || (st.isFile() && !sameId(now, st))) {
+        throw new ActionError('refused', 'the item changed while it was being moved');
+      }
+      if (st.isSymbolicLink()) lchownIfRoot(to, Number(st.uid), Number(st.gid));
+      unlinkSync(from);
+      return now;
+    } catch (err) {
+      removeQuietly(to);
+      throw err;
     }
   }
-  throw new ActionError(
-    'refused',
-    `${shown} changed while it was being moved; nothing was quarantined`,
-  );
+  if (lexists(to)) {
+    const err = new Error(`${to} already exists`) as NodeJS.ErrnoException;
+    err.code = 'EEXIST';
+    throw err;
+  }
+  renameSync(from, to);
+  const now = lstatOrNull(to);
+  if (!now) throw new ActionError('failed', 'the folder vanished as it was moved');
+  return now;
+}
+
+function removeQuietly(path: string): void {
+  try {
+    unlinkSync(path);
+  } catch {
+    // Already gone.
+  }
+}
+
+/** The record for an item at `storedPath`, as it is now. */
+function recordFor(
+  originalPath: string,
+  storedPath: string,
+  st: BigIntStats,
+  parent: BigIntStats | undefined,
+): QuarantineRecord {
+  const rec: QuarantineRecord = {
+    originalPath,
+    storedPath,
+    mode: Number(st.mode & 0o7777n),
+    uid: Number(st.uid),
+    gid: Number(st.gid),
+    isDirectory: st.isDirectory(),
+  };
+  if (parent) {
+    rec.parent = {
+      uid: Number(parent.uid),
+      gid: Number(parent.gid),
+      mode: Number(parent.mode & 0o7777n),
+    };
+  }
+  return rec;
+}
+
+/**
+ * A move into quarantine failed a check after the item had moved: put back
+ * whatever arrived, without replacing anything that has since appeared at
+ * the original name. When that fails, say exactly where the item is.
+ */
+function undoMoveIn(
+  err: unknown,
+  at: string,
+  back: string,
+  where: { originalPath: string; storedPath: string; inStore: boolean; parent?: BigIntStats },
+): never {
+  const now = lstatOrNull(at);
+  if (!now) throw err;
+  try {
+    moveNoReplace(at, back, now);
+  } catch (undoErr) {
+    const why = eexist(undoErr) ? 'something new is at its old place' : errorText(undoErr);
+    throw new StrandedError(
+      `${errorText(err)}; it could not be put back (${why}) and is now at ${where.storedPath}`,
+      recordFor(where.originalPath, where.storedPath, now, where.parent),
+      where.inStore,
+    );
+  }
+  throw err;
+}
+
+/**
+ * The checks after a move into quarantine: what arrived is the item that
+ * was checked, and nobody gave it another name meanwhile (a hard link
+ * added after the first check would be locked too).
+ */
+function checkArrived(at: string, st: BigIntStats, fd: number | undefined, shown: string): void {
+  const now = lstatOrNull(at);
+  if (!now || !sameId(now, st)) {
+    throw new ActionError(
+      'refused',
+      `${shown} changed while it was being moved; nothing was quarantined`,
+    );
+  }
+  const links =
+    fd !== undefined && st.isFile() ? fstatBig(fd).nlink : now.isFile() ? now.nlink : 1n;
+  if (links > 1n) {
+    throw new ActionError(
+      'refused',
+      `${shown} was given another hard link while it was being moved; nothing was quarantined`,
+    );
+  }
 }
 
 /**
@@ -308,25 +451,13 @@ export function quarantine(
     if (!lexists(storedPath)) rmSync(slot, { recursive: true, force: true });
     throw err;
   }
-  const { st, parent } = moved;
-  return {
-    originalPath: path,
-    storedPath,
-    mode: Number(st.mode & 0o7777n),
-    uid: Number(st.uid),
-    gid: Number(st.gid),
-    isDirectory: st.isDirectory(),
-    parent: {
-      uid: Number(parent.uid),
-      gid: Number(parent.gid),
-      mode: Number(parent.mode & 0o7777n),
-    },
-  };
+  return recordFor(path, storedPath, moved.st, moved.parent);
 }
 
 /**
  * Pin the item's folder, check it and the item through the pin, hold the
- * item open, move it into the store and lock it through the handle.
+ * item open, move it into the store, check what arrived and lock it through
+ * the handle. Anything wrong after the move puts the item back.
  */
 function moveIn(
   path: string,
@@ -347,22 +478,40 @@ function moveIn(
     try {
       opts.beforeMove?.('quarantine');
       if (pin.where() !== dirname(path)) throw hasMoved(dirname(path));
-      let copied = false;
       try {
         renameSync(src, storedPath);
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'EXDEV' || pin.fd === undefined) {
           throw moveError(path, err);
         }
-        copyOut(pin.fd, name, storedPath, st, path);
-        copied = true;
+        copyOut(pin.fd, name, storedPath, (at) => checkArrived(at, st, fd, path), {
+          originalPath: path,
+          parent: chain[0]!,
+        });
+        try {
+          lockStored(undefined, storedPath);
+        } catch (lockErr) {
+          const now = lstatOrNull(storedPath)!;
+          throw new StrandedError(
+            `${path} was moved into quarantine but could not be locked: ${errorText(lockErr)}`,
+            recordFor(path, storedPath, now, chain[0]!),
+            true,
+          );
+        }
+        return { st, parent: chain[0]! };
       }
-      if (!copied) {
-        confirmMoved(storedPath, st, path, () => {
-          if (!lexists(src)) renameSync(storedPath, src);
+      try {
+        opts.afterMove?.('quarantine');
+        checkArrived(storedPath, st, fd, path);
+        lockStored(fd, storedPath);
+      } catch (err) {
+        undoMoveIn(err, storedPath, src, {
+          originalPath: path,
+          storedPath,
+          inStore: true,
+          parent: chain[0]!,
         });
       }
-      lockStored(copied ? undefined : fd, storedPath);
     } finally {
       if (fd !== undefined) closeSync(fd);
     }
@@ -381,32 +530,36 @@ function copyOut(
   pfd: number,
   name: string,
   storedPath: string,
-  st: BigIntStats,
-  shown: string,
+  check: (at: string) => void,
+  item: { originalPath: string; parent: BigIntStats },
 ): void {
   const hold = mkdtempSync(fdPath(pfd, '.vigil-quarantine-'));
   const holdName = basename(hold);
   const hfd = openSync(hold, O_FOLDER);
+  // Where the held item is, for the error if it cannot be put back.
+  const heldShown = join(dirname(item.originalPath), holdName, name);
   try {
-    if (fstatBig(hfd).uid !== BigInt(euid())) throw changed(shown);
+    if (fstatBig(hfd).uid !== BigInt(euid())) throw changed(item.originalPath);
     const src = fdPath(pfd, name);
     const held = fdPath(hfd, name);
     renameSync(src, held);
-    confirmMoved(held, st, shown, () => {
-      if (!lexists(src)) renameSync(held, src);
-    });
+    const where = { ...item, storedPath: heldShown, inStore: false };
+    try {
+      check(held);
+    } catch (err) {
+      undoMoveIn(err, held, src, where);
+    }
     try {
       moveAcrossDisks(held, storedPath);
     } catch (err) {
-      if (lexists(held) && !lexists(src)) renameSync(held, src);
-      throw moveError(shown, err);
+      undoMoveIn(moveError(item.originalPath, err), held, src, where);
     }
   } finally {
     closeSync(hfd);
     try {
       rmdirSync(fdPath(pfd, holdName));
     } catch {
-      // Not empty, or already gone.
+      // Not empty (it holds an item that could not be put back), or already gone.
     }
   }
 }
@@ -464,12 +617,66 @@ function settle(path: string, rec: QuarantineRecord): void {
 }
 
 /**
+ * Make one missing folder inside the pin and enter it. Its owner and mode are
+ * changed only when it is provably the folder just made: opened without
+ * following a link, never seen before, owned by this process with no more
+ * than the mode it was made with, and the very folder the pin then enters.
+ * Otherwise the restore stops, and a folder that is ours is left root-owned
+ * with mode 0755.
+ */
+function makeFolder(
+  pin: Pin,
+  part: string,
+  mode: number,
+  owner: FolderOwner,
+  seen: Set<string>,
+  shown: string,
+  opts: QuarantineOptions,
+): void {
+  try {
+    mkdirSync(pin.at(part), { mode: 0o700 });
+  } catch {
+    throw new ActionError('failed', `could not recreate ${shown}`);
+  }
+  opts.afterMkdir?.(part);
+  let fd: number;
+  try {
+    fd = openSync(pin.at(part), O_FOLDER);
+  } catch {
+    throw changed(shown);
+  }
+  try {
+    const made = fstatBig(fd);
+    const ours =
+      made.isDirectory() &&
+      !seen.has(idKey(made)) &&
+      made.uid === BigInt(euid()) &&
+      (made.mode & 0o7077n) === 0n;
+    let entered = false;
+    if (ours) {
+      seen.add(idKey(made));
+      pin.enter(part);
+      entered = withFolderFd(pin, (pfd) => sameId(fstatBig(pfd), made));
+    }
+    if (!ours || !entered) {
+      if (ours) fchmodSync(fd, 0o755);
+      throw changed(shown);
+    }
+    fchownIfRoot(fd, owner.uid, owner.gid);
+    fchmodSync(fd, mode);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
  * Restore moves the file back as root, so the folder it goes into must be
  * the folder it came from at the moment of the move, not just at the check.
  * The folder (or the nearest one that still exists) is pinned, missing
- * folders are made inside the pin one by one, and the item is renamed into
- * the pinned folder by name. A folder swapped for a link since is noticed
- * when the pin is checked, and the item stays in the store.
+ * folders are made inside the pin one by one, and the item is moved into
+ * the pinned folder by name, never over something already there. Then the
+ * folder's place and what arrived are checked again; when either is wrong
+ * the item goes back into the store.
  */
 export function restore(rec: QuarantineRecord, opts: QuarantineOptions): void {
   if (lexists(rec.originalPath)) {
@@ -495,57 +702,36 @@ export function restore(rec: QuarantineRecord, opts: QuarantineOptions): void {
   }
   checkFolders(base, ids);
   const owner = newFolderOwner(rec, lstatOrNull(base)!);
+  const notThere = () => new ActionError('refused', `${parent} has moved; not restoring into it`);
 
   const pin = pinFolder(base, opts.pinning);
   try {
-    checkChain(pin.chain(), parent, ids);
-    for (const [i, part] of missing.entries()) {
-      opts.beforeMove?.('mkdir');
-      try {
-        mkdirSync(pin.at(part), { mode: 0o700 });
-      } catch {
-        throw new ActionError('failed', `could not recreate ${parent}`);
-      }
-      pin.enter(part);
-      withFolderFd(pin, (fd) => {
-        if (fstatBig(fd).uid !== BigInt(euid())) throw changed(parent);
-        fchownIfRoot(fd, owner.uid, owner.gid);
-        fchmodSync(fd, i === missing.length - 1 ? owner.mode : 0o755);
-      });
-    }
-    if (pin.where() !== parent)
-      throw new ActionError('refused', `${parent} has moved; not restoring into it`);
-    checkChain(pin.chain(), parent, ids);
-
-    // Give the item its mode and owner back while it is still in the store,
-    // where nobody else can reach it, then rename it in by name.
-    settle(rec.storedPath, rec);
     try {
-      opts.beforeMove?.('restore');
-      if (pin.where() !== parent) {
-        throw new ActionError('refused', `${parent} has moved; not restoring into it`);
-      }
-      if (lexists(pin.at(name))) {
-        throw new ActionError(
-          'refused',
-          `something new is already at ${rec.originalPath}; not overwriting it`,
-        );
-      }
-      try {
-        renameSync(rec.storedPath, pin.at(name));
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'EXDEV' || pin.fd === undefined) {
-          throw new ActionError(
-            'failed',
-            `could not move ${rec.originalPath} back: ${(err as Error).message}`,
-          );
-        }
-        copyIn(pin.fd, name, rec);
+      const chain = pin.chain();
+      checkChain(chain, parent, ids);
+      const seen = new Set(chain.map(idKey));
+      for (const [i, part] of missing.entries()) {
+        opts.beforeMove?.('mkdir');
+        const mode = i === missing.length - 1 ? owner.mode : 0o755;
+        makeFolder(pin, part, mode, owner, seen, parent, opts);
       }
     } catch (err) {
       lockStored(undefined, rec.storedPath);
       throw err;
     }
+    const placed = moveOut(pin, name, rec, opts, ids, notThere);
+    const there = (): boolean => {
+      if (pin.where() !== parent) return false;
+      try {
+        checkChain(pin.chain(), parent, ids);
+      } catch {
+        return false;
+      }
+      const now = lstatOrNull(pin.at(name));
+      return now !== null && sameId(now, placed);
+    };
+    opts.afterMove?.('restore');
+    if (!there()) takeBack(pin, name, placed, rec, parent);
   } finally {
     pin.release();
   }
@@ -556,11 +742,91 @@ export function restore(rec: QuarantineRecord, opts: QuarantineOptions): void {
   }
 }
 
+/** Move the stored item into the pinned folder by name. Returns what arrived. */
+function moveOut(
+  pin: Pin,
+  name: string,
+  rec: QuarantineRecord,
+  opts: QuarantineOptions,
+  ids: ProtectedIds,
+  notThere: () => ActionError,
+): BigIntStats {
+  const parent = dirname(rec.originalPath);
+  try {
+    if (pin.where() !== parent) throw notThere();
+    checkChain(pin.chain(), parent, ids);
+    // Give the item its mode and owner back while it is still in the store,
+    // where nobody else can reach it, then move it in by name.
+    settle(rec.storedPath, rec);
+    opts.beforeMove?.('restore');
+    if (pin.where() !== parent) throw notThere();
+    const stored = lstatOrNull(rec.storedPath);
+    if (!stored) throw new ActionError('not_found', 'the quarantined copy is gone');
+    try {
+      return moveNoReplace(rec.storedPath, pin.at(name), stored);
+    } catch (err) {
+      if (eexist(err)) {
+        throw new ActionError(
+          'refused',
+          `something new is already at ${rec.originalPath}; not overwriting it`,
+        );
+      }
+      if ((err as NodeJS.ErrnoException).code !== 'EXDEV' || pin.fd === undefined) {
+        throw new ActionError(
+          'failed',
+          `could not move ${rec.originalPath} back: ${errorText(err)}`,
+        );
+      }
+      return copyIn(pin.fd, name, rec);
+    }
+  } catch (err) {
+    lockStored(undefined, rec.storedPath);
+    throw err;
+  }
+}
+
+/**
+ * The folder moved, or something else is at the name, just after the item
+ * arrived: take the item back into the store through the pin and lock it.
+ * When it cannot be taken back, say where it is.
+ */
+function takeBack(
+  pin: Pin,
+  name: string,
+  placed: BigIntStats,
+  rec: QuarantineRecord,
+  parent: string,
+): never {
+  const at = pin.at(name);
+  const now = lstatOrNull(at);
+  const where = join(pin.where() ?? parent, name);
+  const problem = `${parent} changed while ${rec.originalPath} was being restored`;
+  if (!now || !sameId(now, placed)) {
+    throw new StrandedError(
+      `${problem}, and the restored item was moved away from ${where}`,
+      { ...rec, storedPath: where },
+      false,
+    );
+  }
+  try {
+    moveNoReplace(at, rec.storedPath, now);
+    lockStored(undefined, rec.storedPath);
+  } catch (err) {
+    throw new StrandedError(
+      `${problem}; it could not be taken back into quarantine (${errorText(err)}) and is at ${where}`,
+      { ...rec, storedPath: where },
+      false,
+    );
+  }
+  throw new ActionError('refused', `${problem}; it is back in quarantine`);
+}
+
 /**
  * Linux, store and destination on different disks: copy into a fresh
- * root-only folder inside the pinned destination, then rename from there.
+ * root-only folder inside the pinned destination, then move it in by name,
+ * never over something already there. Returns what arrived.
  */
-function copyIn(pfd: number, name: string, rec: QuarantineRecord): void {
+function copyIn(pfd: number, name: string, rec: QuarantineRecord): BigIntStats {
   const hand = mkdtempSync(fdPath(pfd, '.vigil-restore-'));
   const handName = basename(hand);
   const hfd = openSync(hand, O_FOLDER);
@@ -570,19 +836,32 @@ function copyIn(pfd: number, name: string, rec: QuarantineRecord): void {
     try {
       moveAcrossDisks(rec.storedPath, held);
     } catch (err) {
-      throw new ActionError(
-        'failed',
-        `could not move ${rec.originalPath} back: ${(err as Error).message}`,
-      );
+      throw new ActionError('failed', `could not move ${rec.originalPath} back: ${errorText(err)}`);
     }
     settle(held, rec);
-    renameSync(held, fdPath(pfd, name));
+    const st = lstatOrNull(held);
+    if (!st) throw changed(rec.originalPath);
+    try {
+      return moveNoReplace(held, fdPath(pfd, name), st);
+    } catch (err) {
+      if (eexist(err)) {
+        throw new ActionError(
+          'refused',
+          `something new is already at ${rec.originalPath}; not overwriting it`,
+        );
+      }
+      throw err;
+    }
   } catch (err) {
     if (lexists(held)) {
       try {
         moveAcrossDisks(held, rec.storedPath);
-      } catch {
-        // Stays in the root-only handoff folder.
+      } catch (backErr) {
+        throw new StrandedError(
+          `${errorText(err)}; it could not be put back into quarantine (${errorText(backErr)}) and is at ${join(dirname(rec.originalPath), handName, name)}`,
+          { ...rec, storedPath: join(dirname(rec.originalPath), handName, name) },
+          false,
+        );
       }
     }
     throw err;

@@ -4,6 +4,10 @@
 // the same file. Every protected path that exists is stat'ed and its
 // (device, inode) pair collected; a target is then refused when it, or any
 // folder above it, is one of them.
+//
+// Vigil's and the sensors' folders may hold links to files kept elsewhere
+// (a vendor's bin folder linked in, say). Those links are followed, a few
+// levels deep, and what they point at is protected as well.
 
 import {
   lstatSync,
@@ -32,6 +36,8 @@ export interface ProtectedPaths {
   inside: string[];
   /** Never moved as a whole, though what is inside may be (system and home folders). */
   whole: string[];
+  /** Folders among `inside` whose links are followed, so what they point at is protected too. */
+  linked?: string[];
 }
 
 export interface ProtectedIds {
@@ -39,6 +45,8 @@ export interface ProtectedIds {
   inside: Map<string, string>;
   /** (dev, ino) of folders refused as a whole: system and home folders, and every folder holding a protected path. */
   whole: Map<string, string>;
+  /** Where the links inside protected folders point, protected along with them. */
+  linkTargets: string[];
 }
 
 type Ids = Pick<BigIntStats, 'dev' | 'ino'>;
@@ -122,16 +130,22 @@ export function protectedPaths(opts: ProtectionInput): ProtectedPaths {
     ...(opts.quarantineDir ? [opts.quarantineDir] : []),
   ];
   const whole = [...(opts.protectedExact ?? protection.exact), ...homeFolders(opts.platform)];
-  return { inside: inside.map(strip), whole: whole.map(strip) };
+  return {
+    inside: inside.map(strip),
+    whole: whole.map(strip),
+    linked: ownFolders(opts).map(strip),
+  };
+}
+
+/** Vigil's and the sensors' own files and folders. */
+function ownFolders(opts: ProtectionInput): string[] {
+  return [...protectionFor(opts.platform).services, ...(opts.selfPaths ?? [])];
 }
 
 /** Only Vigil's and the sensors' own files: what a startup item must not run. */
 export function servicePaths(opts: ProtectionInput): ProtectedPaths {
-  const protection = protectionFor(opts.platform);
-  return {
-    inside: [...protection.services, ...(opts.selfPaths ?? [])].map(strip),
-    whole: [],
-  };
+  const own = ownFolders(opts).map(strip);
+  return { inside: own, whole: [], linked: own };
 }
 
 function addAncestors(path: string, into: Map<string, string>, owner: string): void {
@@ -144,11 +158,68 @@ function addAncestors(path: string, into: Map<string, string>, owner: string): v
   }
 }
 
+/** How far links inside a protected folder are looked for. */
+export const LINK_WALK = { depth: 4, entries: 2000 };
+
+/**
+ * Where the links inside `dir` point, looking at most LINK_WALK.depth folders
+ * down and at LINK_WALK.entries entries. Links are not followed during the
+ * walk itself, so the walk stays inside `dir`.
+ */
+export function linkTargetsIn(dir: string): string[] {
+  const top = lstatOrNull(dir);
+  if (!top?.isDirectory()) return [];
+  const out: string[] = [];
+  let seen = 0;
+  let level = [dir];
+  for (let depth = 0; depth <= LINK_WALK.depth && level.length; depth++) {
+    const next: string[] = [];
+    for (const folder of level) {
+      for (const name of readdirOrEmpty(folder)) {
+        if (++seen > LINK_WALK.entries) return out;
+        const path = join(folder, name);
+        const st = lstatOrNull(path);
+        if (st?.isDirectory()) next.push(path);
+        else if (st?.isSymbolicLink()) {
+          try {
+            out.push(realpathSync(path));
+          } catch {
+            // Dangling: the link itself is inside the protected folder.
+          }
+        }
+      }
+    }
+    level = next;
+  }
+  return out;
+}
+
 /** Stat every protected path that exists, and the folders that hold them. */
 export function protectedIds(paths: ProtectedPaths): ProtectedIds {
   const inside = new Map<string, string>();
   const whole = new Map<string, string>();
-  for (const p of paths.inside) {
+  const linkTargets: string[] = [];
+  const wholeSet = new Set(paths.whole);
+  for (const dir of paths.linked ?? []) {
+    let real: string;
+    try {
+      real = realpathSync(dir);
+    } catch {
+      continue;
+    }
+    for (const target of linkTargetsIn(real)) {
+      if (target === real || target.startsWith(real + '/')) continue;
+      // A link to / or to a system or home folder never makes that whole
+      // folder protected; it stays unmovable as a whole, as it already is.
+      if (target === '/' || wholeSet.has(target)) {
+        const st = lstatOrNull(target);
+        if (st) whole.set(idKey(st), dir);
+        continue;
+      }
+      linkTargets.push(target);
+    }
+  }
+  for (const p of [...paths.inside, ...linkTargets]) {
     if (!isAbsolute(p)) continue;
     const st = lstatOrNull(p);
     if (!st) continue;
@@ -175,7 +246,7 @@ export function protectedIds(paths: ProtectedPaths): ProtectedIds {
     if (target) whole.set(idKey(target), p);
   }
   // A protected thing is never movable as a whole either.
-  return { inside, whole };
+  return { inside, whole, linkTargets };
 }
 
 function refuse(path: string, what: string | undefined): never {
@@ -224,12 +295,17 @@ const PROTECTED_PROGRAM_NAMES = ['osqueryd', 'vigil-helper', 'santad', 'fapolicy
  * Whether a program a startup item runs is Vigil or one of its sensors: by
  * name, then by the identity of the file it resolves to and its folders.
  */
-export function runsProtectedProgram(program: string, opts: ProtectionInput): boolean {
+export function runsProtectedProgram(
+  program: string,
+  opts: ProtectionInput,
+  ids: ProtectedIds = protectedIds(servicePaths(opts)),
+): boolean {
   const fold = (s: string) => (opts.platform === 'linux' ? s : s.toLowerCase());
   if (!isAbsolute(program)) return PROTECTED_PROGRAM_NAMES.includes(fold(basename(program)));
   const paths = servicePaths(opts);
+  const roots = [...paths.inside, ...ids.linkTargets];
   const named = (p: string) =>
-    paths.inside.some((q) => fold(p) === fold(q) || fold(p).startsWith(fold(q) + '/'));
+    roots.some((q) => fold(p) === fold(q) || fold(p).startsWith(fold(q) + '/'));
   if (named(program)) return true;
   let real: string;
   try {
@@ -238,7 +314,6 @@ export function runsProtectedProgram(program: string, opts: ProtectionInput): bo
     return false;
   }
   if (named(real)) return true;
-  const ids = protectedIds(paths);
   const st = lstatOrNull(real);
   if (st && ids.inside.has(idKey(st))) return true;
   for (let a = dirname(real); ; a = dirname(a)) {
@@ -246,4 +321,102 @@ export function runsProtectedProgram(program: string, opts: ProtectionInput): bo
     if (s && ids.inside.has(idKey(s))) return true;
     if (a === '/') return false;
   }
+}
+
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash']);
+const WRAPPERS = new Set(['env', 'exec', 'nice', 'nohup']);
+
+/**
+ * Split a command line into words the way a shell roughly would: spaces
+ * separate words, quotes group them, and ; & | ( ) end a command.
+ */
+export function splitCommand(cmd: string): string[] {
+  const out: string[] = [];
+  let word = '';
+  let has = false;
+  let quote: string | null = null;
+  const end = () => {
+    if (has) out.push(word);
+    word = '';
+    has = false;
+  };
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (quote) {
+      if (c === quote) quote = null;
+      else if (c === '\\' && quote === '"' && i + 1 < cmd.length) word += cmd[++i];
+      else word += c;
+    } else if (c === "'" || c === '"') {
+      quote = c;
+      has = true;
+    } else if (c === '\\' && i + 1 < cmd.length) {
+      word += cmd[++i];
+      has = true;
+    } else if (/\s/.test(c) || ';&|()'.includes(c)) {
+      end();
+    } else {
+      word += c;
+      has = true;
+    }
+  }
+  end();
+  return out;
+}
+
+/**
+ * The programs an argument list may start: the program itself and, one
+ * level down, the words of a shell's -c string or what a wrapper such as
+ * env or nohup runs next.
+ */
+export function launchedPrograms(argv: string[]): string[] {
+  const [program, ...rest] = argv;
+  if (!program) return [];
+  const out = [program];
+  const name = basename(program);
+  if (SHELLS.has(name)) {
+    const flag = rest.findIndex((a) => /^-[A-Za-z]*c[A-Za-z]*$/.test(a));
+    const script = flag >= 0 ? rest[flag + 1] : undefined;
+    if (script !== undefined) out.push(...splitCommand(script));
+  } else if (WRAPPERS.has(name)) {
+    let i = 0;
+    while (
+      i < rest.length &&
+      (rest[i]!.startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(rest[i]!))
+    ) {
+      // Options that take a value as the next word.
+      if (/^-(n|u|S|C|-adjustment|-unset|-chdir|-split-string)$/.test(rest[i]!)) i++;
+      i++;
+    }
+    if (rest[i] !== undefined) out.push(rest[i]!);
+  }
+  return out;
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Whether a command line names Vigil or a sensor anywhere: one of their
+ * paths, or a protected program name as a whole word.
+ */
+export function mentionsProtected(line: string, opts: ProtectionInput): boolean {
+  const flags = opts.platform === 'linux' ? '' : 'i';
+  const roots = servicePaths(opts).inside.filter(isAbsolute);
+  for (const root of roots) {
+    if (new RegExp(`${escapeRe(root)}(?=$|[/\\s'";&|)])`, flags).test(line)) return true;
+  }
+  return PROTECTED_PROGRAM_NAMES.some((n) =>
+    new RegExp(`(?<![\\w.-])${escapeRe(n)}(?![\\w.-])`, flags).test(line),
+  );
+}
+
+/** The program or word that makes an argument list start Vigil or a sensor, if any. */
+export function commandRunsProtected(argv: string[], opts: ProtectionInput): string | undefined {
+  const ids = protectedIds(servicePaths(opts));
+  for (const word of launchedPrograms(argv)) {
+    if (runsProtectedProgram(word, opts, ids)) return word;
+  }
+  const line = argv.join(' ');
+  return mentionsProtected(line, opts) ? line : undefined;
 }

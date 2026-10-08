@@ -15,7 +15,7 @@ import { lstatSync, readFileSync } from 'node:fs';
 import type { System } from '../system.js';
 import { PROTECTED_UNITS, protectionFor } from '../config.js';
 import { ActionError } from './errors.js';
-import { runsProtectedProgram } from './protectedSet.js';
+import { commandRunsProtected, splitCommand } from './protectedSet.js';
 import { quarantine, resolveTarget, restore, type QuarantineOptions } from './quarantine.js';
 import type { PersistenceRecord } from './persistence.js';
 
@@ -97,18 +97,36 @@ export function startCommands(text: string, isDesktop: boolean): string[] {
   return out;
 }
 
-/** Names and program paths from `systemctl show -p Id,Names,ExecStart`. */
-export function parseShow(out: string): { names: string[]; programs: string[] } {
+/** The whole command lines a unit's ExecStart= lines or a desktop entry's Exec= line run, as words. */
+export function startCommandLines(text: string, isDesktop: boolean): string[][] {
+  const key = isDesktop ? /^Exec=(.*)$/ : /^ExecStart(?:Pre|Post)?=(.*)$/;
+  const out: string[][] = [];
+  for (const line of text.split('\n')) {
+    const m = key.exec(line.trim());
+    if (!m) continue;
+    const argv = splitCommand(m[1]!.trim().replace(/^[-@:+!|]+/, ''));
+    if (argv.length) out.push(argv);
+  }
+  return out;
+}
+
+/** Names, program paths and argument lists from `systemctl show -p Id,Names,ExecStart`. */
+export function parseShow(out: string): { names: string[]; programs: string[]; argvs: string[][] } {
   const names: string[] = [];
   const programs: string[] = [];
+  const argvs: string[][] = [];
   for (const line of out.split('\n')) {
     if (line.startsWith('Id=')) names.push(line.slice(3).trim());
     else if (line.startsWith('Names=')) names.push(...line.slice(6).trim().split(/\s+/));
     else if (line.startsWith('ExecStart=')) {
       for (const m of line.matchAll(/(?:^|[{;]\s*)(?:path|argv\[\])=(\S+)/g)) programs.push(m[1]!);
+      for (const m of line.matchAll(/argv\[\]=(.*?)(?:\s;\s|\s*}|$)/g)) {
+        const argv = m[1]!.trim().split(/\s+/).filter(Boolean);
+        if (argv.length) argvs.push(argv);
+      }
     }
   }
-  return { names: names.filter(Boolean), programs };
+  return { names: names.filter(Boolean), programs, argvs };
 }
 
 export async function disableLinuxPersistence(
@@ -148,6 +166,7 @@ export async function disableLinuxPersistence(
   // check the names systemd knows the unit by (aliases too) and what it runs.
   const names = new Set<string>();
   const programs = startCommands(text, isDesktop);
+  const commands = startCommandLines(text, isDesktop);
   if (scope.kind !== 'autostart') {
     const show = await sys.run('systemctl', [
       ...scopeArgs(scope),
@@ -160,6 +179,7 @@ export async function disableLinuxPersistence(
       const parsed = parseShow(show.stdout);
       parsed.names.forEach((n) => names.add(n));
       programs.push(...parsed.programs);
+      commands.push(...parsed.argvs);
     }
   }
   for (const n of names) {
@@ -167,8 +187,10 @@ export async function disableLinuxPersistence(
       throw new ActionError('refused', `${name} is ${n}, part of Vigil or its sensors`);
   }
   const linux = { ...opts, platform: 'linux' as const };
-  for (const program of programs) {
-    if (runsProtectedProgram(program, linux))
+  // A shell or a wrapper such as env in front of it changes nothing.
+  for (const argv of [...programs.map((p) => [p]), ...commands]) {
+    const program = commandRunsProtected(argv, linux);
+    if (program !== undefined)
       throw new ActionError('refused', `${name} runs ${program}, part of Vigil or its sensors`);
   }
   let wasLoaded = false;
