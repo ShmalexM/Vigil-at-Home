@@ -121,6 +121,16 @@ export function isSimulated(r: ActionRecord): boolean {
 }
 
 /**
+ * The mark for an action that went through but may not have changed
+ * anything, shown next to it in the popup and in History; undefined for a
+ * real one, and for one that never went through.
+ */
+export function provenanceLabel(r: ActionRecord): string | undefined {
+  if (r.status !== 'done' && r.status !== 'undone') return undefined;
+  return { real: undefined, simulated: 'Simulated', unknown: 'Maybe simulated' }[provenance(r)];
+}
+
+/**
  * What Vigil's own response to an alert really did, over every action that
  * went through (one with no undo, like a kill, included): all `real`, all
  * `simulated`, a `mixed` bag, or `unknown` when any of them doesn't say.

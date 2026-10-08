@@ -4,8 +4,14 @@ import { useLive, vigil } from '../api';
 import { DecisionControls } from '../components/Decision';
 import { Shield } from '../components/Shield';
 import { Button, Chip, IconButton, SeverityMark, StatusMark } from '../components/ui';
-import { describeAction, headline, timeAgo } from '../format';
-import { isSimulated, othersNeedingYou, provenance, responseProvenance } from '../decision';
+import { describeAction, headline, simulatedNote, timeAgo } from '../format';
+import {
+  isSimulated,
+  othersNeedingYou,
+  provenance,
+  provenanceLabel,
+  responseProvenance,
+} from '../decision';
 
 /**
  * The always-on-top detection popup. It appears without taking focus, says
@@ -42,6 +48,7 @@ export function Popup({ initialId }: { initialId: string }) {
   const others = othersNeedingYou(alert, status?.needsYou ?? 0, open ?? []);
   // Worded from what every action really did, not whether the helper is connected now.
   const response = contained ? responseProvenance(actions) : undefined;
+  const note = simulatedNote(response);
   const shown = actions.filter((r) => !r.undoes);
   const allSimulated = shown.length > 0 && shown.every(isSimulated);
   const decided = !!alert.decision;
@@ -71,25 +78,16 @@ export function Popup({ initialId }: { initialId: string }) {
       <div className="col" style={{ gap: 6 }}>
         <div className="row">
           <SeverityMark severity={alert.severity} />
-          {response === 'simulated' && (
+          {note && (
             <Chip
               tone="fair"
-              title="The Vigil helper wasn’t connected when this ran, so nothing was actually changed"
+              title={
+                response === 'unknown'
+                  ? 'An older Vigil recorded this without noting whether the helper was connected'
+                  : 'The Vigil helper wasn’t connected when some or all of this ran, so that part changed nothing'
+              }
             >
-              Simulated
-            </Chip>
-          )}
-          {response === 'mixed' && (
-            <Chip tone="fair" title="Some of this ran while the Vigil helper wasn’t connected">
-              Partly simulated
-            </Chip>
-          )}
-          {response === 'unknown' && (
-            <Chip
-              tone="fair"
-              title="An older Vigil recorded this without noting whether the helper was connected"
-            >
-              May be simulated
+              {note[0]!.toUpperCase() + note.slice(1)}
             </Chip>
           )}
         </div>
@@ -125,13 +123,7 @@ export function Popup({ initialId }: { initialId: string }) {
                         ? 'warn'
                         : 'failed'
                 }
-                label={
-                  r.status !== 'done'
-                    ? r.status
-                    : { real: r.status, simulated: 'Simulated', unknown: 'Maybe simulated' }[
-                        provenance(r)
-                      ]
-                }
+                label={(r.status === 'done' && provenanceLabel(r)) || r.status}
               />
               <span className="grow ellipsis">
                 {describeAction(r.action)}

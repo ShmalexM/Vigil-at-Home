@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { useLive, vigil } from '../api';
 import { NoticedList } from '../components/Attention';
 import { Card, Chip, SeverityMark } from '../components/ui';
+import { responseProvenance } from '../decision';
 import { actorLabel, describeRecord } from '../format';
 import { isNoticed } from '../../../shared/attention';
 import { PageHead } from './AppShell';
@@ -200,7 +201,17 @@ function AlertRow({
             </span>
           )}
         </span>
-        <Chip tone={a.containment === 'active' ? 'good' : undefined}>{outcome(a)}</Chip>
+        <Chip
+          tone={
+            a.containment !== 'active'
+              ? undefined
+              : responseProvenance(e.actions) === 'real'
+                ? 'good'
+                : 'fair'
+          }
+        >
+          {outcome(a, e.actions)}
+        </Chip>
         <span className="t-small nowrap">{time(e.at)}</span>
         <ChevronRight size={14} className="history-chevron" aria-hidden />
       </button>
