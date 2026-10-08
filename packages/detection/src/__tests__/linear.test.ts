@@ -50,7 +50,8 @@ describe('linear-time engine', () => {
   it('refuses what the linear-time engine cannot run, with the reason', () => {
     expect(() => compileRule(onCommandLine('curl(?=\\s)'))).toThrow(RuleCompileError);
     expect(() => compileRule(onCommandLine('curl(?=\\s)'))).toThrow(/linear-time.*lookahead/);
-    expect(() => compileRule(onCommandLine('[0-9a-f]{40}'))).toThrow(/up to 16/);
+    expect(() => compileRule(onCommandLine('[0-9a-f]{65}'))).toThrow(/up to 64/);
+    expect(() => compileRule(onCommandLine('(?:a{10}){2}'))).toThrow(/inside a repeated group/);
     const lint = lintRule(DetectionRule.parse(onCommandLine('curl(?!\\s)')));
     expect(lint.errors.join()).toMatch(/lookahead/);
     // A lookbehind is fine.
@@ -78,7 +79,68 @@ describe('linear-time engine', () => {
       id: 'r-glob2',
       condition: { field: 'process.path', op: 'glob', value: `/tmp/*${'?'.repeat(17)}` },
     });
-    expect(() => compileRule(many)).toThrow(/more than 16/);
+    expect(compileRule(many).untrusted).toBe(true);
+    const m = new DetectionEngine([many], memoryStores());
+    const atMany = (path: string) => m.evaluate(exec(proc({ path, pid: 702 }))).length;
+    expect(atMany(`/tmp/${'x'.repeat(17)}`)).toBe(1);
+    expect(atMany(`/tmp/${'x'.repeat(16)}`)).toBe(0);
+  });
+
+  it('runs a repeat count above 16 as several counts in a row', () => {
+    const sha1 = testRule({
+      id: 'r-sha1',
+      condition: { field: 'process.path', op: 'regex', value: '^[0-9a-f]{40}$' },
+    });
+    expect(compileRule(sha1).untrusted).toBe(true);
+    const eng = new DetectionEngine([sha1], memoryStores());
+    const at = (path: string) => eng.evaluate(exec(proc({ path, pid: 703 }))).length;
+    expect(at('a'.repeat(40))).toBe(1);
+    expect(at('a'.repeat(39))).toBe(0);
+    expect(at('a'.repeat(41))).toBe(0);
+    expect(linearProblem('^[0-9a-f]{64}$')).toBeUndefined();
+  });
+
+  it('splits counts without changing what a pattern matches', () => {
+    const patterns = [
+      '^[0-9a-f]{40}$',
+      '^x{17,}$',
+      '^x{3,20}y$',
+      '^x{17,40}?$',
+      '^(?:ab){20}$',
+      '^(ab){18,19}$',
+      '^(?<h>[0-9a-f]){20}$',
+      '^\\x41{18}$',
+      '^[\\]]{17}$',
+      '^(?:a(b)c){0,33}$',
+      'a{2}b{1,3}',
+      '^x{0,64}$',
+    ];
+    const subjects = [
+      '',
+      'A'.repeat(18),
+      'x'.repeat(16),
+      'x'.repeat(17),
+      'x'.repeat(41),
+      `${'x'.repeat(20)}y`,
+      `${'x'.repeat(21)}y`,
+      'ab'.repeat(20),
+      'ab'.repeat(19),
+      'f'.repeat(20),
+      'f'.repeat(40),
+      ']'.repeat(17),
+      'abc'.repeat(33),
+      'abc'.repeat(34),
+      'x'.repeat(64),
+      'x'.repeat(65),
+      'aabbb',
+    ];
+    for (const p of patterns) {
+      expect(linearProblem(p), p).toBeUndefined();
+      const want = new RegExp(p);
+      const eng = new DetectionEngine([onCommandLine(p)], memoryStores());
+      for (const s of subjects)
+        expect(eng.evaluate(run([s])).length === 1, `${p} on ${s}`).toBe(want.test(s));
+    }
   });
 });
 

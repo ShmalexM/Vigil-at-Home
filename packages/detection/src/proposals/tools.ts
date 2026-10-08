@@ -48,7 +48,7 @@ export function ruleLanguageGuide() {
       'Rules about watched agents and their tool requests (tagged agent-watch or agent-preflight, checking agent.tool_request, or testing an agent field) are tuned and retired only by the user; do not propose tunings or retirements for them.',
       'A behaviour-only rule may respond with process.suspend only at high or critical severity; otherwise give no response and let it alert.',
       'Responses may only contain a threat: nothing that resumes, unblocks, restores or allows.',
-      'Regexes: at most 256 characters, with no backreferences, lookaheads ((?= or (?!), nested quantifiers or repeat counts above 16 ({n,m}); they run on a linear-time matcher. Use * or + rather than a large {0,n}.',
+      'Regexes: at most 256 characters, with no backreferences, lookaheads ((?= or (?!), nested quantifiers or repeat counts above 64 ({n,m}); they run on a linear-time matcher. Use * or + rather than a large {0,n}.',
       'Prefer narrow rules. A rule that would alert more than once a day on replay is marked noisy.',
       'firstSeen means never seen on this Mac before. On a new install Vigil is still learning, so these only record at first.',
       'Write reasons in plain language for someone who is not a security expert. Use {{field.path}} to fill values from the event.',

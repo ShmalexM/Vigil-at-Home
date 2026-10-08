@@ -5,8 +5,9 @@ import { setFlagsFromString } from 'node:v8';
  * own run on it: matching takes time in proportion to pattern × subject
  * length, whatever the pattern, so no regex or glob a user or an AI writes can
  * stall the checks. It understands less than the usual engine: no lookahead,
- * no backreference, no repeat count above 16, and no `i` flag, so foldCase
- * spells case-insensitivity out in the pattern instead.
+ * no backreference, no repeat count above 16, and no `i` flag. foldCase
+ * spells case-insensitivity out in the pattern instead, and splitRepeats
+ * writes a count above 16 as several in a row.
  */
 
 // Held in a variable: as a literal, linters reject `l` as an unknown flag.
@@ -220,19 +221,160 @@ export function foldCase(pattern: string): string {
   return out;
 }
 
+/** Most times one quantifier may repeat in a rule's pattern: {64} fits a SHA-256 in hex. */
+export const MAX_LINEAR_REPEAT = 64;
+/** Most the linear-time engine repeats an atom in one quantifier, nested ones multiplied (V8's kMaxReplication). */
+const ENGINE_REPEAT = 16;
+
+/** Where the class at `i` (a `[`) ends, just past its `]`. */
+function classEnd(p: string, i: number): number {
+  let j = i + 1;
+  if (p[j] === '^') j++;
+  while (j < p.length && p[j] !== ']') j += p[j] === '\\' ? 2 : 1;
+  return j + 1;
+}
+
+/** Where the group at `i` (a `(`) ends, just past its `)`. */
+function groupEnd(p: string, i: number): number {
+  let depth = 0;
+  for (let j = i; j < p.length; j++) {
+    const c = p[j];
+    if (c === '\\') j++;
+    else if (c === '[') j = classEnd(p, j) - 1;
+    else if (c === '(') depth++;
+    else if (c === ')' && --depth === 0) return j + 1;
+  }
+  return p.length;
+}
+
+/** `p` with every capturing group made non-capturing, so a copy of it declares no group twice. */
+function uncapture(p: string): string {
+  let out = '';
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i]!;
+    if (c === '\\') {
+      out += p.slice(i, i + 2);
+      i++;
+    } else if (c === '[') {
+      const end = classEnd(p, i);
+      out += p.slice(i, end);
+      i = end - 1;
+    } else if (c === '(' && p[i + 1] !== '?') {
+      out += '(?:';
+    } else if (c === '(' && p[i + 2] === '<' && p[i + 3] !== '=' && p[i + 3] !== '!') {
+      // (?<name>
+      out += '(?:';
+      i = p.indexOf('>', i);
+    } else {
+      out += c;
+    }
+  }
+  return out;
+}
+
+/** `atom{n,m}` (m Infinity for {n,}) as quantifiers of at most ENGINE_REPEAT in a row. */
+function repeatInChunks(atom: string, n: number, m: number, lazy: string): string {
+  const one = uncapture(atom);
+  let out = '';
+  for (let left = n; left > 0; left -= ENGINE_REPEAT)
+    out += `${one}{${Math.min(left, ENGINE_REPEAT)}}`;
+  if (m === Infinity) return `${out}${one}*${lazy}`;
+  for (let left = m - n; left > 0; left -= ENGINE_REPEAT)
+    out += `${one}{0,${Math.min(left, ENGINE_REPEAT)}}${lazy}`;
+  return out;
+}
+
+/**
+ * `p` with each repeat count above 16 written as several counts of at most
+ * 16 in a row: `x{40}` is `x{16}x{16}x{8}` and `x{20,}` is `x{16}x{4}x*`.
+ * Rules only ask whether a pattern matches, so the copies need no capture
+ * groups. Each count may be at most MAX_LINEAR_REPEAT; a larger one gives
+ * `{ problem }`. The engine still refuses a count inside a repeated group
+ * when the two multiply past 16.
+ */
+export function splitRepeats(p: string): { source: string } | { problem: string } {
+  let out = '';
+  // The atom just written, as it is in `out`, for a quantifier after it.
+  let atom: string | undefined;
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i]!;
+    let next: string | undefined;
+    if (c === '\\') {
+      const e = readEscape(p, i, false);
+      next = e.raw;
+      i = e.end - 1;
+    } else if (c === '[') {
+      const end = classEnd(p, i);
+      next = p.slice(i, end);
+      i = end - 1;
+    } else if (c === '(') {
+      const end = groupEnd(p, i);
+      let open = i + 1;
+      if (p[open] === '?') {
+        open++;
+        while (open < end && !':=!>'.includes(p[open]!)) open++;
+        open++;
+      }
+      const inner = splitRepeats(p.slice(open, end - 1));
+      if ('problem' in inner) return inner;
+      next = `${p.slice(i, open)}${inner.source})`;
+      i = end - 1;
+    } else if (c === '{') {
+      const q = /^\{(\d+)(,(\d*))?\}(\??)/.exec(p.slice(i));
+      if (q && atom !== undefined) {
+        const n = Number(q[1]);
+        const m = q[2] === undefined ? n : q[3] === '' ? Infinity : Number(q[3]);
+        if (n > MAX_LINEAR_REPEAT || (m !== Infinity && m > MAX_LINEAR_REPEAT))
+          return {
+            problem: `it counts repeats only up to ${MAX_LINEAR_REPEAT}, so use * or + for {n,m} above that`,
+          };
+        if (n > ENGINE_REPEAT || (m !== Infinity && m > ENGINE_REPEAT)) {
+          out = out.slice(0, out.length - atom.length) + repeatInChunks(atom, n, m, q[4]!);
+        } else {
+          out += q[0];
+        }
+        atom = undefined;
+        i += q[0].length - 1;
+        continue;
+      }
+      next = c;
+    } else if ('*+?|^$'.includes(c)) {
+      out += c;
+      atom = undefined;
+      continue;
+    } else {
+      next = c;
+    }
+    out += next;
+    atom = next;
+  }
+  return { source: out };
+}
+
+/** The pattern as it runs on the linear-time engine, or why it can't. */
+function linearSource(
+  pattern: string,
+  ignoreCase: boolean,
+): { source: string } | { problem: string } {
+  const split = splitRepeats(ignoreCase ? foldCase(pattern) : pattern);
+  if ('problem' in split || compiles(split.source, LINEAR)) return split;
+  const problem = /\(\?[=!]/.test(pattern)
+    ? 'it has no lookahead, (?= or (?!'
+    : /\{\d+(,\d*)?\}/.test(pattern)
+      ? `it repeats at most ${ENGINE_REPEAT} times inside a repeated group, counts multiplied`
+      : 'it supports no backreferences, lookaheads or large repeat counts';
+  return { problem };
+}
+
 /**
  * Why `pattern` can't run on the linear-time engine, or undefined when it can.
  * Assumes regexProblem already passed it, so it is a valid regex.
  */
 export function linearProblem(pattern: string, ignoreCase = false): string | undefined {
   if (!linearEngine()) return undefined;
-  if (compiles(ignoreCase ? foldCase(pattern) : pattern, LINEAR)) return undefined;
-  const why = /\(\?[=!]/.test(pattern)
-    ? 'it has no lookahead, (?= or (?!'
-    : /\{\d+(,\d*)?\}/.test(pattern)
-      ? 'it counts repeats only up to 16, so use * or + for {n,m} above that'
-      : 'it supports no backreferences, lookaheads or large repeat counts';
-  return `regex can't use the linear-time matcher that rules Vigil did not ship need: ${why}`;
+  const src = linearSource(pattern, ignoreCase);
+  if (!('problem' in src)) return undefined;
+  return `regex can't use the linear-time matcher that rules Vigil did not ship need: ${src.problem}`;
 }
 
 /**
@@ -241,7 +383,10 @@ export function linearProblem(pattern: string, ignoreCase = false): string | und
  */
 export function linearRegExp(pattern: string, ignoreCase: boolean): RegExp {
   if (!linearEngine()) return new RegExp(pattern, ignoreCase ? 'i' : '');
-  const problem = linearProblem(pattern, ignoreCase);
-  if (problem) throw new Error(problem);
-  return new RegExp(ignoreCase ? foldCase(pattern) : pattern, LINEAR);
+  const src = linearSource(pattern, ignoreCase);
+  if ('problem' in src)
+    throw new Error(
+      `regex can't use the linear-time matcher that rules Vigil did not ship need: ${src.problem}`,
+    );
+  return new RegExp(src.source, LINEAR);
 }

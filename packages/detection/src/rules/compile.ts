@@ -265,13 +265,13 @@ export function globToRegExp(glob: string, ignoreCase = true, linear = false): R
   for (const t of globTokens(rest)) {
     if (t.kind === 'text') src += t.src;
     else if (t.kind === 'one') src += '[^/]';
-    else if (t.kind === 'star') src += t.min ? `[^/]{${t.min},}` : '[^/]*';
+    // The linear-time engine takes no count above 16, so there the `?`s are written out.
+    else if (t.kind === 'star')
+      src += !t.min ? '[^/]*' : linear ? `${'[^/]'.repeat(t.min)}[^/]*` : `[^/]{${t.min},}`;
     else if (t.kind === 'any') src += '.*';
     else src += '(?:.*/)?'; // `**/` also matches zero directories
   }
   if (!linear) return new RegExp(`^${src}$`, ignoreCase ? 'i' : '');
-  // Only a `*` with more than 16 `?` beside it ({17,}) is beyond that engine.
-  if (linearProblem(`^${src}$`)) throw new Error('glob has more than 16 ? next to one *');
   return linearRegExp(`^${src}$`, ignoreCase);
 }
 
