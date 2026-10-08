@@ -4,9 +4,9 @@
 // event. macOS: two `ps` spawns, parsed in @vigil/detection (ps-table.ts).
 // Linux: /proc, read directly.
 
-import { execFile } from 'node:child_process';
 import { readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import { execOutputWithin } from '@vigil/ai';
 import { MAX_PS_ARGS, mergePsArgs, parsePsComm, type PsRow } from '@vigil/detection';
 
 const PS = '/bin/ps';
@@ -17,14 +17,7 @@ const MAX_BUFFER = 8 * 1024 * 1024;
 export type RunPs = (args: string[]) => Promise<string>;
 
 const runPs: RunPs = (args) =>
-  new Promise((resolve, reject) =>
-    execFile(
-      PS,
-      args,
-      { env: { LC_ALL: 'C' }, timeout: TIMEOUT_MS, maxBuffer: MAX_BUFFER },
-      (err, stdout) => (err ? reject(err) : resolve(String(stdout))),
-    ),
-  );
+  execOutputWithin(PS, args, TIMEOUT_MS, { env: { LC_ALL: 'C' }, maxBuffer: MAX_BUFFER });
 
 /**
  * Every process with its parent, start time, program and command line. The

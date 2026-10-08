@@ -311,6 +311,21 @@ describe('the pack', () => {
     expect(connectorCalls).toEqual([]);
   });
 
+  it('ends the risk check with the run that asked for it', async () => {
+    const { pack, handlers, runs } = setup();
+    pack.setMode('auto');
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    const run = new AbortController();
+    handlers.push(async (req) => {
+      handlers.push(() => ({ risk: 'low', reason: 'small' }));
+      await tool(req, 'github_create_issue').run({ title: 'x' }, { signal: run.signal });
+      return { summary: 'done', findings: [] };
+    });
+    await pack.runDog(dog.id);
+    const judged = runs.find((r) => r.instructions.includes('Rate how risky'))!;
+    expect(judged.signal).toBe(run.signal);
+  });
+
   it('refuses what a Vigil rule stops, even in Full access', async () => {
     const { pack, handlers, connectorCalls } = setup({ preflight: 'deny' });
     pack.setMode('full');

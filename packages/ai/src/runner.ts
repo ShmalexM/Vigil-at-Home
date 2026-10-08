@@ -251,7 +251,8 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
       const runId = randomUUID();
       let logId = runId;
       let entries = 0;
-      const signal = AbortSignal.timeout(request.deadlineMs);
+      const deadline = AbortSignal.timeout(request.deadlineMs);
+      const signal = request.signal ? AbortSignal.any([deadline, request.signal]) : deadline;
       const tools = redactingTools(request.tools ?? [], signal);
       const systemPrompt = buildSystemPrompt(
         request.purpose,

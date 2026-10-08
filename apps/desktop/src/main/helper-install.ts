@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFileWithin } from '@vigil/ai';
 import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -168,16 +168,10 @@ export type RunFile = (
   args: string[],
 ) => Promise<{ code: number; stdout: string; stderr: string }>;
 
-const runFile: RunFile = (file, args) =>
-  new Promise((resolve) =>
-    execFile(file, args, { timeout: 3 * 60_000 }, (err, stdout, stderr) =>
-      resolve({
-        code: err ? (typeof err.code === 'number' ? err.code : 1) : 0,
-        stdout: String(stdout),
-        stderr: String(stderr),
-      }),
-    ),
-  );
+const runFile: RunFile = async (file, args) => {
+  const r = await execFileWithin(file, args, 3 * 60_000);
+  return { code: r.code ?? 1, stdout: r.stdout, stderr: r.stderr };
+};
 
 export const PKEXEC = '/usr/bin/pkexec';
 

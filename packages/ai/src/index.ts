@@ -26,7 +26,7 @@ export {
 } from './settings.js';
 export { createAiRunner, jsonSchemaFor, type AiRunner, type AiRunnerDeps } from './runner.js';
 export { readTool } from './tools.js';
-export { execFileWithin, type ExecResult } from './execWithin.js';
+export { execFileWithin, execOutputWithin, type ExecResult } from './execWithin.js';
 export type {
   SpendingDay,
   SpendingLimits,

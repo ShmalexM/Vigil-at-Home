@@ -50,3 +50,20 @@ export function execFileWithin(
     timer.unref();
   });
 }
+
+/** Like execFileWithin, but gives stdout and throws if the program fails or runs out of time. */
+export async function execOutputWithin(
+  file: string,
+  args: readonly string[],
+  timeoutMs: number,
+  opts: { env?: NodeJS.ProcessEnv; maxBuffer?: number } = {},
+): Promise<string> {
+  const r = await execFileWithin(file, args, timeoutMs, opts);
+  const what = [file.split('/').pop(), ...args].join(' ');
+  if (r.timedOut) throw new Error(`${what}: no answer in ${Math.round(timeoutMs / 1000)} s`);
+  if (r.code !== 0) {
+    const last = r.stderr.trim().split('\n').pop();
+    throw new Error(`${what} failed (${r.code ?? 'no exit code'})${last ? `: ${last}` : ''}`);
+  }
+  return r.stdout;
+}

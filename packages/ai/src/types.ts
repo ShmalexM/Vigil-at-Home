@@ -40,6 +40,8 @@ export interface RunRequest<T> {
   /** Optional read-only tools. None by default. */
   readonly tools?: readonly ReadTool[];
   readonly deadlineMs: number;
+  /** Ends the run early too: a run made for another run ends with it. */
+  readonly signal?: AbortSignal;
   /** Only these providers, in the usual order. Default: all the settings allow. */
   readonly providers?: readonly ProviderId[];
   /**

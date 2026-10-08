@@ -197,6 +197,32 @@ describe('runner', () => {
     expect(log).toHaveLength(logged);
   });
 
+  it('ends with the run it was made for, even while its provider is being checked', async () => {
+    const claude = fake('claude', () => ({
+      kind: 'ok',
+      json: { verdict: 'benign', summary: 'ok' },
+      audit: audit(),
+    }));
+    let release!: () => void;
+    let checking!: () => void;
+    const checked = new Promise<void>((r) => (checking = r));
+    claude.probe = () =>
+      new Promise((r) => {
+        checking();
+        release = () => r({ provider: 'claude', state: 'ready' });
+      });
+    const { runner } = setup([claude]);
+    const parent = new AbortController();
+    // Its own deadline is far off; the run it serves ends first.
+    const result = runner.run({ ...request, deadlineMs: 60_000, signal: parent.signal });
+    await checked;
+    parent.abort();
+    release();
+    expect(await result).toMatchObject({ ok: false, reason: 'timeout' });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(claude.inputs).toHaveLength(0);
+  });
+
   it('keeps a newer provider check over an older one that answers late', async () => {
     const claude = fake('claude', () => ({
       kind: 'ok',

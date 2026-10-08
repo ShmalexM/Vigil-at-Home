@@ -1,9 +1,8 @@
-import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import { buildChildEnv } from '../env.js';
+import { execOutputWithin } from '../execWithin.js';
 import {
   canShareCodexSignIn,
   DEFAULT_USER_CODEX_HOME,
@@ -30,7 +29,8 @@ import { verifyBinary } from './verifyBinary.js';
 /** Starting Codex's app server or asking it who is signed in; it should answer at once. */
 const RPC_SETUP_MS = 15_000;
 
-const execFileAsync = promisify(execFile);
+/** How long a version or sign-in check may take. */
+const PROBE_MS = 15_000;
 
 /** The Codex version these settings were checked against. */
 export const CODEX_TESTED_VERSION = '0.157.1';
@@ -285,6 +285,7 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
     binaryPath: string,
     cwd: string,
     handlers: ConstructorParameters<typeof JsonRpcStdio>[4],
+    signal?: AbortSignal,
   ) {
     await mkdir(options.codexHome, { recursive: true, mode: 0o700 });
     const sharedSignIn = !apiKeyMode && (await isCodexSignInShared(options.codexHome));
@@ -301,7 +302,11 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
       cwd,
       handlers,
     );
+    // A run that ends while the server starts closes it, so nothing more is sent.
+    const stop = () => rpc.close();
+    signal?.addEventListener('abort', stop, { once: true });
     try {
+      signal?.throwIfAborted();
       await rpc.request(
         'initialize',
         {
@@ -311,9 +316,12 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
         },
         RPC_SETUP_MS,
       );
+      signal?.throwIfAborted();
     } catch (err) {
       rpc.close();
       throw err;
+    } finally {
+      signal?.removeEventListener('abort', stop);
     }
     rpc.notify('initialized');
     return rpc;
@@ -329,9 +337,8 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
         if (!(await serverEnv()))
           return { provider: 'codex', state: 'needs_setup', detail: NO_API_KEY };
         try {
-          const { stdout } = await execFileAsync(binary.path, ['--version'], {
+          const stdout = await execOutputWithin(binary.path, ['--version'], PROBE_MS, {
             env: env(),
-            timeout: 15_000,
           });
           return {
             provider: 'codex',
@@ -358,10 +365,7 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
         };
       let rpc: JsonRpcStdio | undefined;
       try {
-        const { stdout } = await execFileAsync(binary.path, ['--version'], {
-          env: env(),
-          timeout: 15_000,
-        });
+        const stdout = await execOutputWithin(binary.path, ['--version'], PROBE_MS, { env: env() });
         rpc = await connect(binary.path, tmpdir(), {
           onRequest: async () => {
             throw new Error('not expected during probe');
@@ -526,84 +530,93 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
       input.signal.addEventListener('abort', onAbort, { once: true });
 
       try {
-        rpc = await connect(binary.path, cwd, {
-          async onRequest(method, params) {
-            const p = params as Record<string, unknown>;
-            switch (method) {
-              case 'item/commandExecution/requestApproval':
-                audit.denied.push(`command: ${String(p.command ?? '')}`.trim());
-                return { decision: 'decline' };
-              case 'item/fileChange/requestApproval':
-                audit.denied.push('fileChange');
-                return { decision: 'decline' };
-              case 'item/tool/call': {
-                const name = String(p.tool);
-                const tool = p.namespace ? undefined : tools.get(name);
-                if (!tool) {
-                  audit.denied.push(`tool: ${name}`);
+        rpc = await connect(
+          binary.path,
+          cwd,
+          {
+            async onRequest(method, params) {
+              const p = params as Record<string, unknown>;
+              switch (method) {
+                case 'item/commandExecution/requestApproval':
+                  audit.denied.push(`command: ${String(p.command ?? '')}`.trim());
+                  return { decision: 'decline' };
+                case 'item/fileChange/requestApproval':
+                  audit.denied.push('fileChange');
+                  return { decision: 'decline' };
+                case 'item/tool/call': {
+                  const name = String(p.tool);
+                  const tool = p.namespace ? undefined : tools.get(name);
+                  if (!tool) {
+                    audit.denied.push(`tool: ${name}`);
+                    return {
+                      success: false,
+                      contentItems: [{ type: 'inputText', text: 'Not allowed.' }],
+                    };
+                  }
+                  audit.called.push(name);
+                  const result = await callTool(tool, p.arguments);
                   return {
-                    success: false,
-                    contentItems: [{ type: 'inputText', text: 'Not allowed.' }],
+                    success: result.ok,
+                    contentItems: [{ type: 'inputText', text: result.text }],
                   };
                 }
-                audit.called.push(name);
-                const result = await callTool(tool, p.arguments);
-                return {
-                  success: result.ok,
-                  contentItems: [{ type: 'inputText', text: result.text }],
-                };
+                default:
+                  audit.denied.push(method);
+                  throw new Error('Vigil does not allow this.');
               }
-              default:
-                audit.denied.push(method);
-                throw new Error('Vigil does not allow this.');
-            }
-          },
-          onNotification(method, params) {
-            const p = params as CodexNotificationParams;
-            if (method === 'item/completed') {
-              const item = p.item ?? { type: '' };
-              if (item.type === 'agentMessage' && typeof item.text === 'string')
-                lastMessage = item.text;
-              else if (FORBIDDEN_ITEMS.has(item.type)) audit.denied.push(`item: ${item.type}`);
-            } else if (method === 'thread/tokenUsage/updated' && p.tokenUsage) {
-              usage = runUsageFromCodex(p.tokenUsage.total, apiKeyMode);
-            } else if (method === 'account/rateLimits/updated') {
-              usageFromSnapshot(p.rateLimits ?? {}).forEach(input.onUsage);
-            } else if (method === 'error') {
-              const info = p.error?.codexErrorInfo;
-              if (!p.willRetry && (info === 'usageLimitExceeded' || info === 'rateLimitExceeded')) {
-                finish({ kind: 'quota', audit });
-              }
-            } else if (method === 'turn/completed') {
-              const turn = p.turn ?? { status: 'failed', error: null };
-              if (turn.status !== 'completed') {
-                const info = turn.error?.codexErrorInfo;
-                if (info === 'usageLimitExceeded' || info === 'rateLimitExceeded')
+            },
+            onNotification(method, params) {
+              const p = params as CodexNotificationParams;
+              if (method === 'item/completed') {
+                const item = p.item ?? { type: '' };
+                if (item.type === 'agentMessage' && typeof item.text === 'string')
+                  lastMessage = item.text;
+                else if (FORBIDDEN_ITEMS.has(item.type)) audit.denied.push(`item: ${item.type}`);
+              } else if (method === 'thread/tokenUsage/updated' && p.tokenUsage) {
+                usage = runUsageFromCodex(p.tokenUsage.total, apiKeyMode);
+              } else if (method === 'account/rateLimits/updated') {
+                usageFromSnapshot(p.rateLimits ?? {}).forEach(input.onUsage);
+              } else if (method === 'error') {
+                const info = p.error?.codexErrorInfo;
+                if (
+                  !p.willRetry &&
+                  (info === 'usageLimitExceeded' || info === 'rateLimitExceeded')
+                ) {
                   finish({ kind: 'quota', audit });
-                else
-                  finish({
-                    kind: 'error',
-                    message: turn.error?.message ?? `turn ${turn.status}`,
-                    audit,
-                  });
-              } else if (lastMessage === undefined) {
-                finish({ kind: 'error', message: 'Codex returned no answer.', audit });
-              } else {
-                try {
-                  finish({ kind: 'ok', json: JSON.parse(lastMessage), audit });
-                } catch {
-                  finish({ kind: 'error', message: 'Codex answer was not JSON.', audit });
+                }
+              } else if (method === 'turn/completed') {
+                const turn = p.turn ?? { status: 'failed', error: null };
+                if (turn.status !== 'completed') {
+                  const info = turn.error?.codexErrorInfo;
+                  if (info === 'usageLimitExceeded' || info === 'rateLimitExceeded')
+                    finish({ kind: 'quota', audit });
+                  else
+                    finish({
+                      kind: 'error',
+                      message: turn.error?.message ?? `turn ${turn.status}`,
+                      audit,
+                    });
+                } else if (lastMessage === undefined) {
+                  finish({ kind: 'error', message: 'Codex returned no answer.', audit });
+                } else {
+                  try {
+                    finish({ kind: 'ok', json: JSON.parse(lastMessage), audit });
+                  } catch {
+                    finish({ kind: 'error', message: 'Codex answer was not JSON.', audit });
+                  }
                 }
               }
-            }
+            },
           },
-        });
+          input.signal,
+        );
+        // Each step can take a while: send nothing more for a run that has ended.
+        input.signal.throwIfAborted();
         const thread = await rpc.request<{ thread: { id: string } }>(
           'thread/start',
           codexThreadStartParams({ cwd, systemPrompt: input.systemPrompt, tools: input.tools }),
           RPC_SETUP_MS,
         );
-        // Starting the thread can take a while: start no turn for a run that has ended.
         input.signal.throwIfAborted();
         await rpc.request(
           'turn/start',

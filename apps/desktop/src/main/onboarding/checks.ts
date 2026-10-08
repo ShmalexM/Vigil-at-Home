@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFileWithin } from '@vigil/ai';
 import { accessSync, constants, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -215,18 +215,13 @@ export function systemProbe(home = homedir(), helperAnswers?: () => Promise<bool
         return false;
       }
     },
-    run: (file, args, opts) =>
-      new Promise((resolve) => {
-        execFile(
-          file,
-          args,
-          { timeout: opts?.timeoutMs ?? RUN_TIMEOUT_MS, maxBuffer: 256 * 1024, env },
-          (err, stdout) => {
-            const code = err ? (typeof err.code === 'number' ? err.code : 1) : 0;
-            resolve({ code, stdout: String(stdout), ...(err?.killed ? { timedOut: true } : {}) });
-          },
-        );
-      }),
+    run: async (file, args, opts) => {
+      const r = await execFileWithin(file, args, opts?.timeoutMs ?? RUN_TIMEOUT_MS, {
+        maxBuffer: 256 * 1024,
+        env,
+      });
+      return { code: r.code ?? 1, stdout: r.stdout, ...(r.timedOut ? { timedOut: true } : {}) };
+    },
     getJson: async (url) => {
       const res = await fetch(url, { signal: AbortSignal.timeout(1500) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);

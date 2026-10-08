@@ -1239,6 +1239,8 @@ export class PackService {
       },
       output: Judged,
       deadlineMs: JUDGE_DEADLINE_MS,
+      // The judgement ends when the run waiting on it does.
+      ...(signal ? { signal } : {}),
       providers: [...JOB_PROVIDERS],
     });
     if (signal?.aborted) return undefined;
