@@ -1200,6 +1200,10 @@ function outsideRegions(found: Finding[], regions: readonly number[]): Finding[]
  * - field: a string of its own. Only a field that is, whole, one NAME=value
  *   assignment, one URL with no blank or shell metacharacter, or one JSON
  *   document, has a place for a secret that nothing runs.
+ *   A field that is only a URL or only a JSON document is not a realistic
+ *   command name, so its precise replacement is accepted as safe.
+ *   Free text such as a command line is withheld whole when it holds a
+ *   secret: losing precision there is the safe direction.
  * - url: an argument a known client takes as a URL, with no shell between
  *   them. Only the password of a field that is one URL is cut out.
  * - word: a word that may be a command, such as an argument or an array's
