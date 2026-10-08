@@ -1,17 +1,13 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { SensorEvent } from '@vigil/core';
 import { INDICATOR_RULE, type AnalyzeRunner } from '@vigil/detection';
-import { listDigest } from '@vigil/detection/fastpath';
-import { FastPath, type DetectionSync } from '@vigil/helper';
 import { afterAll, describe, expect, it } from 'vitest';
 import { Store } from './db/store.js';
 import { Detector } from './detection.js';
 import { DryRunExecutor } from './executor.js';
 import { RuleSuggestions } from './rule-suggestions.js';
 import { VigilCore } from './service.js';
+import { helperPolicy } from './testing.js';
 
 const pasteRule = {
   id: 'paste-site',
@@ -300,41 +296,13 @@ describe('AI rule suggestions in the app', () => {
   });
 
   describe('weakening a blocking rule only the app runs', () => {
-    const dirs: string[] = [];
-    afterAll(() => {
-      for (const d of dirs) rmSync(d, { recursive: true, force: true });
-    });
-
-    /** The helper's own policy check, with a password dialog the test answers. */
-    function withHelper(detector: Detector) {
-      const dir = mkdtempSync(join(tmpdir(), 'vigil-fp-'));
-      dirs.push(dir);
-      const fast = new FastPath({
-        file: join(dir, 'rules.json'),
-        run: async () => ({ ok: true }) as never,
-      });
-      const asked: string[][] = [];
-      const helper = { approve: true };
-      detector.syncHelper = async () => {
-        const set = detector.helperRules();
-        const cmd: DetectionSync = {
-          kind: 'detection.sync',
-          rules: set.rules,
-          appRules: set.appRules,
-          exceptions: set.exceptions,
-          selfPaths: set.selfPaths,
-          lists: Object.fromEntries(Object.entries(set.lists).map(([l, e]) => [l, listDigest(e)])),
-        };
-        const weakens = fast.loosening(cmd);
-        if (weakens.length) {
-          asked.push(weakens);
-          if (!helper.approve) return 'declined';
-        }
-        fast.sync(cmd);
-        return 'applied';
-      };
-      return { asked, helper };
-    }
+    const cleanups: (() => void)[] = [];
+    afterAll(() => cleanups.forEach((f) => f()));
+    const withHelper = (detector: Detector) => {
+      const h = helperPolicy(detector);
+      cleanups.push(h.done);
+      return h;
+    };
 
     it('asks for the password before Scout’s turn-down of a blocking first-seen rule goes live', async () => {
       const { detector, ui } = setup(answer);

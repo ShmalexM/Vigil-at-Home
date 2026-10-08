@@ -59,21 +59,41 @@ export const FEED_CHECK_MS = 30 * 60 * 1000;
 
 /**
  * What became of a rule change on the helper's copy. `declined`: it loosened
- * the rules, the user cancelled the password, and the change was undone here
- * too. `unavailable`: the helper isn't connected or failed; it gets the change
- * on the next sync.
+ * the rules and the user cancelled the password. `failed`: the helper refused
+ * it for another reason. Either way the change was not made here either.
+ * `unavailable`: the helper isn't connected or didn't answer; the change is
+ * made here and the helper gets it on the next sync.
  */
-export type HelperSyncOutcome = 'applied' | 'declined' | 'unavailable';
+export type HelperSyncOutcome = 'applied' | 'declined' | 'failed' | 'unavailable';
 
 /**
  * How to send the helper its rules. `hold`: let the next password dialog ask
  * for it, and call `onHeld` once it waits on that. `byUser`: the user just
  * made this change, so ask even if they declined the same rules before.
+ * `set`: send this set instead of the rules in force (a change not yet made
+ * here). `settle`: called with the outcome before the next sync starts, so the
+ * change lands here before anything else reads the rules. `onError`: the
+ * helper's reason when it refuses (`failed`).
  */
 export interface HelperSyncOptions {
   hold?: boolean;
   onHeld?: () => void;
   byUser?: boolean;
+  set?: HelperRuleSet;
+  settle?: (outcome: HelperSyncOutcome) => void;
+  onError?: (reason: string) => void;
+}
+
+/** A user change and what the helper made of it; `reason` is the helper's, when it refused. */
+export interface ChangeResult<T> {
+  value: T;
+  helper: HelperSyncOutcome;
+  reason?: string;
+}
+
+/** True when the helper turned a change down, so the app left everything as it was. */
+export function notApplied(helper: HelperSyncOutcome): boolean {
+  return helper === 'declined' || helper === 'failed';
 }
 
 /** Sends the helper the current rules. */
@@ -134,9 +154,8 @@ export class Detector {
   private readonly selfPaths: string[];
   /** Set by the app: sends the helper its copy after rules, modes or exceptions change. */
   syncHelper: HelperSync | undefined;
-  /** User changes one at a time, so undoing a declined one can't undo another. */
+  /** User changes one at a time, so one waiting on the password can't mix with another. */
   private changing: Promise<unknown> = Promise.resolve();
-  private waiting = 0;
 
   constructor(
     private readonly db: DatabaseSync,
@@ -232,9 +251,14 @@ export class Detector {
    * password, nothing changes (`declined`).
    */
   approveProposal(id: string, mode?: RuleMode): Promise<HelperSyncOutcome> {
+    return this.acceptProposal(id, mode).then((r) => r.helper);
+  }
+
+  /** approveProposal, with the helper's reason when it refused. */
+  acceptProposal(id: string, mode?: RuleMode): Promise<ChangeResult<void>> {
     return this.change(() => {
       this.pipeline.approve(id, userOrigin('rules-screen'), mode ? { mode } : {});
-    }).then((r) => r.helper);
+    });
   }
 
   rejectProposal(id: string, note?: string): void {
@@ -267,11 +291,6 @@ export class Detector {
       if (args?.length) f.commandLine = args.join(' ');
       yield f;
     }
-  }
-
-  /** Call after the rule set changes outside setMode (the editor), so event counts stay right. */
-  rulesChanged(): void {
-    this.recount();
   }
 
   /**
@@ -446,53 +465,68 @@ export class Detector {
    * down needs the password; if the user cancels, the mode stays (`declined`).
    */
   setMode(id: string, mode: RuleMode): Promise<HelperSyncOutcome> {
-    return this.change(() => this.feedback.setMode(id, mode, userOrigin('rules-screen'))).then(
-      (r) => r.helper,
-    );
+    return this.changeMode(id, mode).then((r) => r.helper);
+  }
+
+  /** setMode, with the helper's reason when it refused. */
+  changeMode(id: string, mode: RuleMode): Promise<ChangeResult<void>> {
+    return this.change(() => this.feedback.setMode(id, mode, userOrigin('rules-screen')));
   }
 
   /**
-   * Make a user change, then wait for the helper to take it. A change that
-   * loosens the helper's rules needs the admin password there; if the user
-   * cancels, everything the change touched goes back, so the app never shows
-   * a rule as off or excepted while the helper still blocks with it.
+   * A change from the rule editor (save, exclusions, exceptions, revert,
+   * delete), made only once the helper takes it.
    */
-  private change<T>(
-    fn: () => T,
-    opts: HelperSyncOptions = {},
-  ): Promise<{ value: T; helper: HelperSyncOutcome }> {
-    // Applied at once, so the screens show it straight away, unless an earlier
-    // change still waits on the password: then after it, so undoing one can
-    // never undo the other.
-    const apply = () => {
+  userChange<T>(fn: () => T): Promise<ChangeResult<T>> {
+    return this.change(fn);
+  }
+
+  /**
+   * Make a user change only once the helper takes it. The change is worked
+   * out, the helper is sent the rules as they would be, and the app goes on
+   * running the rules as they were until it answers. A change that loosens
+   * the helper's rules, or a blocking rule only the app runs, needs the admin
+   * password there; if the user cancels or the helper refuses, nothing
+   * changes, so the app never runs a rule as off or excepted while the helper
+   * still blocks with it. Changes go one at a time, in order.
+   */
+  private change<T>(fn: () => T, opts: HelperSyncOptions = {}): Promise<ChangeResult<T>> {
+    const run = async (): Promise<ChangeResult<T>> => {
       const before = this.snapshot();
+      // A change refused outright (a proposal that no longer passes its checks) throws here.
       const value = fn();
-      this.recount(false);
-      return { before, value };
-    };
-    const settle = async ({ before, value }: { before: Snapshot; value: T }) => {
-      const helper = this.syncHelper
-        ? await this.syncHelper({ ...opts, byUser: true })
-        : ('unavailable' as const);
-      if (helper === 'declined') {
-        this.restore(before);
+      if (!this.syncHelper) {
+        // No helper link at all (tests, or a platform without the helper):
+        // the app is the only thing enforcing, so there is nobody to ask.
         this.recount(false);
+        return { value, helper: 'unavailable' };
       }
-      return { value, helper };
+      const after = this.snapshot();
+      const set = this.helperRules();
+      this.restore(before);
+      this.recount(false);
+      let reason: string | undefined;
+      let settled = false;
+      const settle = (helper: HelperSyncOutcome) => {
+        if (settled) return;
+        settled = true;
+        // `unavailable` is applied as before: with the helper not installed or
+        // not connected there is no password to ask for, and the app is what
+        // enforces; the helper is sent the change when it connects (and asks then).
+        if (!notApplied(helper)) this.restore(after);
+        this.recount(false);
+      };
+      const helper = await this.syncHelper({
+        ...opts,
+        byUser: true,
+        set,
+        settle,
+        onError: (r) => (reason = r),
+      });
+      settle(helper);
+      return reason === undefined ? { value, helper } : { value, helper, reason };
     };
-    let next: Promise<{ value: T; helper: HelperSyncOutcome }>;
-    if (this.waiting === 0) {
-      // A change refused outright (a proposal that no longer passes its checks) rejects.
-      try {
-        next = settle(apply());
-      } catch (err) {
-        next = Promise.reject(err as Error);
-      }
-    } else {
-      next = this.changing.then(() => settle(apply()));
-    }
-    this.waiting++;
-    const done = next.finally(() => this.waiting--);
+    const done = this.changing.then(run);
     this.changing = done.catch(() => undefined);
     return done;
   }

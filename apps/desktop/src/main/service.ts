@@ -328,10 +328,12 @@ export class VigilCore {
    */
   async setRuleMode(id: string, mode: RuleMode): Promise<RuleModeResult> {
     if (this.detector?.hasRule(id)) {
-      const helper = await this.detector.setMode(id, mode);
+      const { helper, reason } = await this.detector.changeMode(id, mode);
       const view = this.detector.rules().find((r) => r.rule.id === id);
       if (!view) throw new Error(`No rule ${id}`);
-      return { rule: { ...view.rule, mode: view.mode }, helper };
+      const out: RuleModeResult = { rule: { ...view.rule, mode: view.mode }, helper };
+      if (reason !== undefined) out.helperReason = reason;
+      return out;
     }
     const rule = this.store.getRule(id);
     if (!rule) throw new Error(`No rule ${id}`);

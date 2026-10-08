@@ -52,6 +52,12 @@ export function registerIpc(
     );
     return ruleSuggestions;
   };
+  // A rule edit settles once the helper answers; then every screen shows what is in force.
+  const edited = async <T>(change: Promise<T>): Promise<T> => {
+    const out = await change;
+    windows.broadcast('changed');
+    return out;
+  };
   const h: Handlers = {
     getStatus: () => core.status(),
     listAlerts: (status) => core.store.listAlerts(status ? { status } : {}),
@@ -71,18 +77,19 @@ export function registerIpc(
     },
     getRuleEditor: (id) => core.ruleEditing()?.view(id) ?? null,
     previewRule: (json) => editing(core).preview(json),
-    saveRule: (json) => editing(core).save(json),
-    revertRule: (id) => editing(core).revert(id),
-    deleteRule: (id) => editing(core).delete(id),
-    addExclusion: (id, input) => editing(core).addExclusion(id, input),
-    removeExclusion: (id, index) => editing(core).removeExclusion(id, index),
-    removeException: (id) => editing(core).removeException(id),
-    excludeFromAlert: (id, scope) => editing(core).excludeFromAlert(id, scope),
+    // Each waits for the helper (and the password, if it weakens a blocking rule).
+    saveRule: (json) => edited(editing(core).save(json)),
+    revertRule: (id) => edited(editing(core).revert(id)),
+    deleteRule: (id) => edited(editing(core).delete(id)),
+    addExclusion: (id, input) => edited(editing(core).addExclusion(id, input)),
+    removeExclusion: (id, index) => edited(editing(core).removeExclusion(id, index)),
+    removeException: (id) => edited(editing(core).removeException(id)),
+    excludeFromAlert: (id, scope) => edited(editing(core).excludeFromAlert(id, scope)),
     listRuleSuggestions: () => suggestions().view(),
     acceptRuleSuggestion: async (id, mode) => {
-      const helper = await suggestions().accept(id, mode);
+      const result = await suggestions().acceptWithReason(id, mode);
       windows.broadcast('changed');
-      return { helper };
+      return result;
     },
     dismissRuleSuggestion: (id, note) => suggestions().dismiss(id, note),
     reviewRulesNow: () => suggestions().reviewNow(),

@@ -379,14 +379,21 @@ function start(): void {
   // The helper runs the blocking rules it can on its own, so blocks happen
   // even while the app is closed, and hands Santa the pre-launch ones.
   let helperRulesSync: Promise<unknown> = Promise.resolve();
+  // What the helper client says when the password was cancelled or a held change dropped.
+  const PASSWORD_REFUSALS = new Set(['not approved', 'approval was not accepted', 'not sent']);
   const syncHelperRules: HelperSync = (opts = {}) => {
-    const next = helperRulesSync.then(() => sendHelperRules(opts));
+    // `settle` runs inside the queue, so a user change lands before the next sync reads the rules.
+    const next = helperRulesSync.then(async () => {
+      const out = await sendHelperRules(opts);
+      opts.settle?.(out);
+      return out;
+    });
     helperRulesSync = next;
     return next;
   };
   const sendHelperRules = async (opts: HelperSyncOptions): Promise<HelperSyncOutcome> => {
     if (!core.detector) return 'unavailable';
-    const set = core.detector.helperRules();
+    const set = opts.set ?? core.detector.helperRules();
     const lists = Object.entries(set.lists).map(([l, entries]) => [l, listDigest(entries)]);
     const key = JSON.stringify({ ...set, lists });
     if (key === helperRulesSent) return 'applied';
@@ -397,9 +404,20 @@ function start(): void {
       helperRulesSent = key;
       return 'applied';
     } catch (err) {
-      if (err instanceof HelperCallError && err.code === 'refused') {
+      if (
+        err instanceof HelperCallError &&
+        err.code === 'refused' &&
+        PASSWORD_REFUSALS.has(err.message)
+      ) {
         helperRulesDeclined = key;
         return 'declined';
+      }
+      // The helper looked at the rules and turned them down (one doesn't
+      // compile, or a list would drop too much): the change is not made.
+      if (err instanceof HelperCallError && (err.code === 'refused' || err.code === 'invalid')) {
+        helperRulesDeclined = key;
+        opts.onError?.(err.message);
+        return 'failed';
       }
       console.warn('[helper rules] could not update the helper:', err);
       return 'unavailable';

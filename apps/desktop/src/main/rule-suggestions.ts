@@ -70,6 +70,15 @@ export class RuleSuggestions {
     return this.detector.approveProposal(id, mode);
   }
 
+  /** accept, with the helper's reason when it refused the change. */
+  async acceptWithReason(
+    id: string,
+    mode?: RuleMode,
+  ): Promise<{ helper: HelperSyncOutcome; helperReason?: string }> {
+    const { helper, reason } = await this.detector.acceptProposal(id, mode);
+    return reason === undefined ? { helper } : { helper, helperReason: reason };
+  }
+
   dismiss(id: string, note?: string): void {
     this.detector.rejectProposal(id, note);
   }

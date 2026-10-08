@@ -2,7 +2,7 @@ import { Check, RefreshCw, Sparkles, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { RuleSuggestionView, RuleSuggestionsView } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
-import { helperNote, PASSWORD_CANCELLED, timeAgo } from '../format';
+import { helperNote, notChangedText, timeAgo } from '../format';
 import { draftIsToolRule } from '../rule-modes';
 import { ImpactSummary, ReplaySummary } from './RuleEditor';
 import { useToast } from './Toasts';
@@ -121,10 +121,11 @@ function Suggestion({ s, onDone }: { s: RuleSuggestionView; onDone: () => void }
     return () => window.removeEventListener(SHOW, show);
   }, [s.id]);
   const accept = async () => {
-    const { helper } = await vigil.acceptRuleSuggestion(s.id);
-    if (helper === 'declined') {
-      // Everything went back, so the suggestion is still here to accept later.
-      toast({ text: `${s.ruleName}: ${PASSWORD_CANCELLED}` });
+    const { helper, helperReason } = await vigil.acceptRuleSuggestion(s.id);
+    const notChanged = notChangedText(helper, helperReason);
+    if (notChanged) {
+      // Nothing changed, so the suggestion is still here to accept later.
+      toast({ text: `${s.ruleName}: ${notChanged}` });
       onDone();
       return;
     }

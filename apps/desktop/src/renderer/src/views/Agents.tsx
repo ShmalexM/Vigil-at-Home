@@ -46,7 +46,7 @@ import {
   StatusMark,
   type MarkState,
 } from '../components/ui';
-import { clock, timeAgo } from '../format';
+import { clock, notChangedText, timeAgo } from '../format';
 import {
   confirmsFirst,
   groupAgentRules,
@@ -1000,7 +1000,12 @@ function ToolRuleRow({
     setConfirmDeny(confirm);
     if (confirm) return;
     const before = rule.mode;
-    await vigil.setRuleMode(rule.id, mode);
+    const { helper, helperReason } = await vigil.setRuleMode(rule.id, mode);
+    const notChanged = notChangedText(helper, helperReason);
+    if (notChanged) {
+      toast({ text: `${rule.name}: ${notChanged}` });
+      return;
+    }
     toast({
       text: `${rule.name}: ${modeLabel(rule, mode)}`,
       undo: () => void vigil.setRuleMode(rule.id, before),
