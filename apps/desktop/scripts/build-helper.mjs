@@ -31,6 +31,23 @@ import { BUNDLE_OPTIONS } from './bundle-options.mjs';
 /** The Node.js release the helper runs on. Bump with the repo's Node version. */
 export const HELPER_NODE_VERSION = 'v22.22.2';
 
+/**
+ * SHA-256 of each Node.js tarball for HELPER_NODE_VERSION, from that release's
+ * SHASUMS256.txt (check its signature against a key listed in the nodejs/node
+ * README). Pinned here so a tampered download can't pass by bringing its own
+ * checksum file. Update these whenever HELPER_NODE_VERSION changes.
+ */
+const HELPER_NODE_SHA256 = {
+  'node-v22.22.2-darwin-arm64.tar.gz':
+    'db4b275b83736df67533529a18cc55de2549a8329ace6c7bcc68f8d22d3c9000',
+  'node-v22.22.2-darwin-x64.tar.gz':
+    '12a6abb9c2902cf48a21120da13f87fde1ed1b71a13330712949e8db818708ba',
+  'node-v22.22.2-linux-arm64.tar.gz':
+    'b2f3a96f31486bfc365192ad65ced14833ad2a3c2e1bcefec4846902f264fa28',
+  'node-v22.22.2-linux-x64.tar.gz':
+    '978978a635eef872fa68beae09f0aad0bbbae6757e444da80b570964a97e62a3',
+};
+
 const app = join(dirname(fileURLToPath(import.meta.url)), '..');
 const repo = join(app, '..', '..');
 const out = join(app, 'build', 'helper');
@@ -109,16 +126,19 @@ async function node(arch) {
   mkdirSync(dir, { recursive: true });
 
   const base = `https://nodejs.org/dist/${HELPER_NODE_VERSION}`;
-  const sums = (await fetchOk(`${base}/SHASUMS256.txt`)).toString('utf8');
   const file = `${name}.tar.gz`;
-  const expected = sums
-    .split('\n')
-    .map((l) => l.trim().split(/\s+/))
-    .find(([, f]) => f === file)?.[0];
-  if (!expected) throw new Error(`${file} is not listed in SHASUMS256.txt`);
+  const expected = HELPER_NODE_SHA256[file];
+  if (!expected) {
+    throw new Error(
+      `No pinned SHA-256 for ${file}. After changing HELPER_NODE_VERSION, update ` +
+        `HELPER_NODE_SHA256 in scripts/build-helper.mjs from ${base}/SHASUMS256.txt ` +
+        `(after checking its signature).`,
+    );
+  }
   const tarball = await fetchOk(`${base}/${file}`);
   const actual = createHash('sha256').update(tarball).digest('hex');
-  if (actual !== expected) throw new Error(`${file}: checksum ${actual}, expected ${expected}`);
+  if (actual !== expected)
+    throw new Error(`${file}: checksum ${actual}, expected the pinned ${expected}`);
 
   const tmp = join(dir, file);
   writeFileSync(tmp, tarball);
