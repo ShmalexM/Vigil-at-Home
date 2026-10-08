@@ -50,15 +50,7 @@ import type { ConnectorHub, RemoteTool } from './connectors.js';
 import type { Notebook } from './notebook.js';
 import { memoryTainted, type PackMemory, type PromptMemory } from './memory.js';
 import { afterJudge, gateAction, gateTool } from './gate.js';
-import {
-  asksToRead,
-  citesReference,
-  leansOn,
-  namesFact,
-  sharesWords,
-  typedKeys,
-  typedNames,
-} from './provenance.js';
+import { citesReference, namesFact, sharesWords, typedKeys, typedNames } from './provenance.js';
 import { shapeFromJsonSchema } from './schema.js';
 
 const KEY_MODE = 'pack.mode';
@@ -287,15 +279,15 @@ const LEAD_INSTRUCTIONS = [
   '',
   'You see only the person’s own words and the pack’s settings. Anything that could hold someone else’s text (a dog’s report, a job or name the person did not type, an earlier answer that read outside text, a fact remembered from one, Vigil’s data about this Mac, a connector’s output) is shown to you only as a reference: `report:<dogId>`, `job:<dogId>`, `answer-<n>`, `memory:<id>`, or a dog listed by its id with `nameNotShown`. Connector tools are listed by a `tool-<n>` id with a label Vigil wrote.',
   '',
-  'To answer a question that needs any of that (what a dog found, what a job says, what is on this Mac, what an alert or event is, what an earlier answer said, anything about data.lookingAt), put it in `read`: the `question` in your own words and the `refs` it needs. Another helper reads them and answers the person directly; you never see that answer, so do not guess it. When you ask for a read, leave `reply` empty unless you also changed something.',
+  'To answer a question that needs any of that (what a dog found, what a job says, what is on this Mac, what an alert or event is, what an earlier answer said, anything about data.lookingAt, a remembered fact you see only as `memory:<id>`), put it in `read`: the `question` in your own words and the `refs` it needs. Nothing else looks anything up: no read happens unless you ask for one. Another helper reads them and answers the person directly; you never see that answer, so do not guess it. When you ask for a read, leave `reply` empty unless you also changed something. Do not ask for a read just because the message mentions a report, a finding or a recommendation: when the person typed everything a change needs, make it.',
   '',
   'You can ask for changes to the pack in `actions`:',
   '- create: a new pack dog for a standing job. Give `name` (short, fun, fits the breed), `breed`, `job` (clear instructions it follows each run), `schedule` (manual, hourly, daily or nightly) and `tools` (ids from data.tools; give only what the job needs, prefer read-only ones).',
   '- update: change a dog by `dogId` (any of name, breed, job, schedule, tools).',
   '- run: send a dog off on its job now, by `dogId`.',
   '- retire: remove a pack dog by `dogId`.',
-  'Name dogs by `dogId` only. data.youNamed maps names the person typed in this message to dog ids, and data.youNamedTools maps tool keys they typed to tool ids. A connector tool goes in `tools` only by its `tool-<n>` id.',
-  'If a change rests on a reference (the person asks you to do what a report, an answer or a fact says), list those references in `cites`. Such a change always waits for the person.',
+  'Name dogs by `dogId` only. data.youNamed maps names the person typed in this message to dog ids, and data.youNamedTools maps tool keys they typed to tool ids. When the person named a dog, change or run that dog: a change to a dog they did not name waits for them. A connector tool goes in `tools` only by its `tool-<n>` id.',
+  'If a change rests on a reference (the person asks you to do what a report, an answer or a fact says, or says yes to something only an `answer-<n>` holds), list those references in `cites`. Such a change always waits for the person.',
   'Vigil applies changes as the person’s permission mode allows (data.mode): in "ask" they wait for the person, so say you have asked, not that it is done.',
   '',
   'What you cannot do, and must not offer: block, allow, release or quarantine anything; approve, edit or turn off a rule; change Vigil’s settings; touch a built-in helper’s job. If asked, say the person does that themselves in Vigil.',
@@ -358,12 +350,16 @@ interface Turn {
   /** The person's own message. */
   words: string;
   /**
-   * The message leans on text the acting path never saw, or the answer cites
-   * a reference: every change is a card, in every mode.
+   * The changes rest on reading output: the person's message or the acting
+   * path's answer names a reference to text it never saw (an earlier
+   * reading answer, a report, a job, a fact). Every change is a card, in
+   * every mode.
    */
   bridge: boolean;
-  /** The turn also went down the reading path: every memory change is a card. */
+  /** The acting path asked for a read, so the turn went down the reading path: every memory change is a card. */
   read: boolean;
+  /** Dogs the person named in this message, by id. A change to any other dog is a card. */
+  named: ReadonlySet<string>;
 }
 
 /**
@@ -718,12 +714,13 @@ export class PackService {
    * - The acting path proposes changes. Its prompt holds only the person's
    *   messages and clean state, with references for everything else
    *   (actingPrompt), so what it proposes is the person's request and goes
-   *   through gateAction as clean, unless the message leans on a reference
-   *   or the answer cites one (the bridge): then every change is a card.
+   *   through gateAction as clean, unless the message names a reference
+   *   or the answer cites one (the bridge), or it changes or runs a dog
+   *   other than one the person named: then it is a card.
    * - The reading path answers questions that need outside text: what a dog
-   *   found, a job, Vigil's data, a connector's output. It runs when the
-   *   acting path asks for a read (or the message plainly asks about a
-   *   report or the memory), may see anything, and has no way to change
+   *   found, a job, Vigil's data, a connector's output. It runs only when
+   *   the acting path asks for a read of named references (no word in the
+   *   message routes there), may see anything, and has no way to change
    *   anything: its answer is shown to the person and kept as tainted.
    */
   async say(text: string, context?: ChatContext): Promise<void> {
@@ -768,18 +765,18 @@ export class PackService {
         return;
       }
       const v = result.value;
-      const lastAnswer = [...before].reverse().find((m) => m.from === 'lead');
-      const read = v.read ?? (asksToRead(words) ? this.defaultRead(words) : undefined);
+      // Only the acting path's own request sends the turn down the reading path.
+      const read = v.read;
       const turn: Turn = {
         words,
         read: !!read,
-        bridge:
-          leansOn(words, !!lastAnswer && messageTainted(lastAnswer)) ||
-          citesReference([
-            ...(v.cites ?? []),
-            ...v.actions.flatMap((a) => [a.name ?? '', a.job ?? '', ...(a.tools ?? [])]),
-            ...(v.remember ?? []).map((r) => r.fact),
-          ]),
+        named: new Set(typedNames(words, this.dogs()).map((n) => n.dogId)),
+        bridge: citesReference([
+          words,
+          ...(v.cites ?? []),
+          ...v.actions.flatMap((a) => [a.name ?? '', a.job ?? '', ...(a.tools ?? [])]),
+          ...(v.remember ?? []).map((r) => r.fact),
+        ]),
       };
       const actions = v.actions.map((a) => this.consider(a, turn, refs));
       const memoryChanges = this.considerMemory(v, turn, mine.id);
@@ -954,17 +951,6 @@ export class PackService {
     return typedKeys(words, keys);
   }
 
-  /** When the acting path asked for no read but the message plainly asks about a report or memory. */
-  private defaultRead(words: string): z.infer<typeof LeadAnswer>['read'] {
-    const pack = this.dogs().filter((d) => d.role === 'pack');
-    const named = new Set(typedNames(words, pack).map((n) => n.dogId));
-    const about = named.size ? pack.filter((d) => named.has(d.id)) : pack;
-    return {
-      question: words,
-      refs: about.flatMap((d) => [`report:${d.id}`, `job:${d.id}`]).slice(0, 10),
-    };
-  }
-
   /**
    * The reading path's prompt: anything the question needs, outside text
    * included, and the Lead dog's tools. Its answer is words for the person
@@ -1062,7 +1048,8 @@ export class PackService {
    * Checks one change the acting path asked for, then applies it or leaves it
    * for the person. Its fields are the person's request (the acting path saw
    * no outside text), so gateAction takes it as clean, unless the turn is a
-   * bridge: then it is a card in every mode.
+   * bridge, or the person named a dog in this message and the change is
+   * about another one: then it is a card in every mode.
    */
   private consider(
     a: z.infer<typeof LeadAnswer>['actions'][number],
@@ -1096,16 +1083,20 @@ export class PackService {
     const before = target?.tools ?? [];
     const added = (dog.tools ?? []).filter((k) => !before.includes(k));
     const grantsWrite = added.some((k) => !this.treatedAsReadOnly(k));
-    if (gateAction(this.mode(), a.kind, grantsWrite, turn.bridge) === 'ask') {
+    // The person named a dog and this is about another one: the model picked it.
+    const otherDog = !!target && turn.named.size > 0 && !turn.named.has(target.id);
+    if (gateAction(this.mode(), a.kind, grantsWrite, turn.bridge || otherDog) === 'ask') {
       return {
         ...action,
         note: turn.bridge
           ? 'This builds on text from outside your messages, so it waits for your OK'
-          : this.mode() === 'ask'
-            ? 'Waiting for your OK'
-            : a.kind === 'retire'
-              ? 'Retiring a dog always waits for your OK'
-              : 'It would get a tool that can change things, so it waits for your OK',
+          : otherDog
+            ? 'You named a different dog, so this waits for your OK'
+            : this.mode() === 'ask'
+              ? 'Waiting for your OK'
+              : a.kind === 'retire'
+                ? 'Retiring a dog always waits for your OK'
+                : 'It would get a tool that can change things, so it waits for your OK',
       };
     }
     return this.apply(action);
@@ -1301,8 +1292,8 @@ export class PackService {
   /**
    * The memory changes the acting path asked for. Its facts are the
    * person's words (it saw no outside text), so they apply straight away and
-   * stay clean, except that each waits on a card when: the turn also went
-   * down the reading path, or is a bridge (leans on or cites a reference);
+   * stay clean, except that each waits on a card when: the acting path also
+   * asked for a read, or the turn is a bridge (names or cites a reference);
    * a `remember` replaces a fact the person's message doesn't name word for
    * word; or a `forget` is for a fact that could hold outside text.
    */

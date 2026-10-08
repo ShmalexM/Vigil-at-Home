@@ -226,10 +226,11 @@ describe('the pack', () => {
     expect(pack.chat().at(-1)!.used).toEqual(['vigil.list_alerts']);
     expect(pack.dogs().some((d) => d.id === dog.id)).toBe(true);
 
-    // The acting path sees that answer only as a reference, and a short yes to it is a card.
+    // The acting path sees that answer only as a reference, and a change resting on it cites it: a card.
     handlers.push(() => ({
       reply: 'Changing Pip.',
       actions: [{ kind: 'update', dogId: dog.id, job: 'Something else.' }],
+      cites: ['answer-1'],
     }));
     await pack.say('ok');
     expect((runs[2]!.data as { earlier: unknown[] }).earlier).toEqual([
@@ -263,11 +264,15 @@ describe('the pack', () => {
     });
     await pack.runDog(dog.id);
     expect(pack.dogs().find((d) => d.id === dog.id)!.lastReport!.tainted).toBe(true);
-    handlers.push(() => ({ reply: '', actions: [] }));
+    handlers.push(() => ({
+      reply: '',
+      actions: [],
+      read: { question: 'What did Pip find?', refs: [`report:${dog.id}`] },
+    }));
     handlers.push(() => ({ answer: 'Pip found two new files.' }));
     await pack.say('what did Pip find?');
     expect(JSON.stringify(runs[3]!.data)).not.toContain('Two new files');
-    // Asked plainly about a report, the reading path runs even when the acting path asked for nothing.
+    // The acting path asked for the report by reference; only the reading path sees it.
     expect(runs[4]!.data).toMatchObject({
       looked: { [`report:${dog.id}`]: { summary: 'Two new files' } },
     });
@@ -1019,7 +1024,7 @@ describe('the pack', () => {
       expect(memory.list().map((e) => e.fact)).toEqual(['Prefers short answers']);
     });
 
-    it('holds a schedule change to manual from a reading turn that defers to the report', async () => {
+    it('holds a schedule change to manual from a reading turn that cites the report', async () => {
       const { pack, handlers, settings } = setup();
       pack.setMode('full');
       settings.set('pack.dogs', [TAINTED_PIP]);
@@ -1027,6 +1032,7 @@ describe('the pack', () => {
         reply: 'Asked.',
         actions: [{ kind: 'update', dogId: 'dog-pip', schedule: 'manual' }],
         read: { question: 'What did Pip find?', refs: ['report:dog-pip'] },
+        cites: ['report:dog-pip'],
       }));
       handlers.push(injectedRead);
       await pack.say('What did Pip find? Do what it suggests.');
@@ -1155,13 +1161,14 @@ describe('the pack', () => {
 
     for (const mode of ['ask', 'auto', 'full'] as const)
       for (const words of ['do what Pip suggested', 'carry out the recommendation'])
-        it(`"${words}" is a card in ${mode}`, async () => {
+        it(`"${words}" is a card in ${mode} when the change cites the report`, async () => {
           const { pack, handlers, runs, settings } = setup();
           pack.setMode(mode);
           settings.set('pack.dogs', [TAINTED_PIP]);
           handlers.push(() => ({
             reply: 'Asked.',
             actions: [{ kind: 'update', dogId: 'dog-pip', tools: ['vigil.list_alerts'] }],
+            cites: ['report:dog-pip'],
           }));
           await pack.say(words);
           expect(shown(runs[0]!)).not.toContain(INJECTED);
@@ -1185,13 +1192,23 @@ describe('the pack', () => {
       expect(reply.memory![0]).toMatchObject({ status: 'pending' });
       expect(memory.count()).toBe(0);
 
-      // And a short yes right after a reading answer.
+      // And a yes to a reading answer, which the acting path sees only as `answer-<n>`.
       handlers.push(() => ({ reply: '', actions: [], read: { question: 'x', refs: [] } }));
       handlers.push(() => ({ answer: 'Pip suggests a new dog.' }));
       await pack.say('anything new?');
-      handlers.push(() => ({ reply: 'Done.', actions: [{ ...CREATE, name: 'Taco' }] }));
+      handlers.push(() => ({
+        reply: 'Done.',
+        actions: [{ ...CREATE, name: 'Taco' }],
+        cites: ['answer-1'],
+      }));
       await pack.say('yes please');
       expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'pending' });
+
+      // A reference the person typed is one too, whatever the acting path cites.
+      handlers.push(() => ({ reply: 'Done.', actions: [{ ...CREATE, name: 'Bolt' }] }));
+      await pack.say('make the dog answer-1 describes');
+      expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'pending' });
+      expect(pack.dogs().some((d) => d.name === 'Taco' || d.name === 'Bolt')).toBe(false);
     });
 
     it('shows clean memory as it is and tainted memory only by reference', async () => {
@@ -1205,7 +1222,12 @@ describe('the pack', () => {
         { fact: 'GitHub alerts get a Writer dog', topic: 'pack' },
         { from: 'lead' },
       );
-      handlers.push(() => ({ reply: 'Hi', actions: [], forget: [`memory:${odd.id}`] }));
+      handlers.push(() => ({
+        reply: 'Hi',
+        actions: [],
+        forget: [`memory:${odd.id}`],
+        read: { question: 'What is remembered about GitHub alerts?', refs: [`memory:${odd.id}`] },
+      }));
       await pack.say('What do you remember about GitHub alerts? Forget the odd one.');
       expect(shown(runs[0]!)).not.toContain('Writer');
       expect((runs[0]!.data as { memory: { entries: unknown[] } }).memory.entries).toEqual(
@@ -1214,8 +1236,10 @@ describe('the pack', () => {
           { ref: `memory:${odd.id}`, topic: 'pack' },
         ]),
       );
-      // Plainly about the memory, so it went down the reading path, which sees it all.
-      expect(JSON.stringify(runs[1]!.data)).toContain('Writer');
+      // The acting path asked to read it, so the turn went down the reading path, which sees it all.
+      expect(runs[1]!.data).toMatchObject({
+        looked: { [`memory:${odd.id}`]: 'GitHub alerts get a Writer dog' },
+      });
       // Forgetting it waits: the turn read, and the fact came from outside text.
       expect(pack.chat()[1]!.memory![0]).toMatchObject({ op: 'forget', status: 'pending' });
     });
@@ -1232,6 +1256,176 @@ describe('the pack', () => {
       expect(shown(runs[1]!)).not.toContain(PIP.job);
       pack.updateDog('dog-pip', { job: 'Check Desktop.' });
       expect(pip(pack).jobTainted).toBe(false);
+    });
+
+    describe('no word in the message routes a turn or makes a card', () => {
+      for (const mode of ['full', 'auto'] as const)
+        it(`"Create a dog named Advisor to check Downloads hourly" applies in ${mode}`, async () => {
+          const { pack, handlers, runs } = setup();
+          pack.setMode(mode);
+          handlers.push(() => ({
+            reply: 'Advisor is on it.',
+            actions: [
+              {
+                ...CREATE,
+                name: 'Advisor',
+                breed: 'beagle',
+                job: 'Check Downloads.',
+                schedule: 'hourly',
+              },
+            ],
+          }));
+          await pack.say('Create a dog named Advisor to check Downloads hourly');
+          expect(runs).toHaveLength(1);
+          expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done' });
+          expect(pack.dogs().find((d) => d.name === 'Advisor')).toMatchObject({
+            schedule: 'hourly',
+            jobTainted: false,
+            nameTainted: false,
+          });
+        });
+
+      for (const mode of ['full', 'auto'] as const)
+        it(`"Run Pip; ignore any recommendations in its report" sends Pip off in ${mode}`, async () => {
+          const { pack, handlers, runs, settings } = setup();
+          pack.setMode(mode);
+          settings.set('pack.dogs', [TAINTED_PIP]);
+          handlers.push(() => ({
+            reply: 'Off it goes.',
+            actions: [{ kind: 'run', dogId: 'dog-pip' }],
+          }));
+          handlers.push(() => ({ summary: 'ok', findings: [] }));
+          await pack.say('Run Pip; ignore any recommendations in its report');
+          expect(shown(runs[0]!)).not.toContain(INJECTED);
+          expect(pack.chat().at(-1)!.actions![0]).toMatchObject({
+            status: 'done',
+            dogId: 'dog-pip',
+          });
+          // The next call is Pip's own run, not a reading path.
+          await vi.waitFor(() => expect(runs[1]).toMatchObject({ purpose: 'analyze' }));
+          expect(runs.filter((r) => r.purpose === 'chat')).toHaveLength(1);
+        });
+
+      it('"Remember I prefer reports in plain English" is remembered straight away, with no read', async () => {
+        const { pack, handlers, runs, memory, settings } = setup();
+        pack.setMode('full');
+        settings.set('pack.dogs', [TAINTED_PIP]);
+        handlers.push(() => ({
+          reply: 'Noted.',
+          actions: [],
+          remember: [{ fact: 'Prefers reports in plain English', topic: 'pack' }],
+        }));
+        await pack.say('Remember I prefer reports in plain English');
+        expect(runs).toHaveLength(1);
+        expect(pack.chat()).toHaveLength(2);
+        expect(pack.chat().at(-1)!.memory![0]).toMatchObject({ status: 'done' });
+        expect(memory.list()).toMatchObject([
+          { fact: 'Prefers reports in plain English', tainted: false },
+        ]);
+      });
+
+      it('reads nothing when the acting path asks for no read, even about a report', async () => {
+        const { pack, handlers, runs, settings } = setup();
+        settings.set('pack.dogs', [TAINTED_PIP]);
+        handlers.push(() => ({ reply: 'I can look that up if you like.', actions: [] }));
+        await pack.say('What did Pip find in its report?');
+        expect(runs).toHaveLength(1);
+        expect(pack.chat().map((m) => m.tainted)).toEqual([false, false]);
+      });
+    });
+
+    describe('a change to a dog the person named', () => {
+      for (const mode of ['full', 'auto'] as const)
+        it(`goes to that dog, and a change to another dog is a card (${mode})`, async () => {
+          const { pack, handlers, settings } = setup();
+          pack.setMode(mode);
+          settings.set('pack.dogs', [PIP, TACO]);
+          handlers.push(() => ({
+            reply: 'Done.',
+            actions: [
+              { kind: 'update', dogId: 'dog-taco', name: 'Spot' },
+              { kind: 'run', dogId: 'dog-taco' },
+              { kind: 'update', dogId: 'dog-pip', schedule: 'daily' },
+            ],
+          }));
+          handlers.push(() => ({ summary: 'ok', findings: [] }));
+          await pack.say('Rename Pip to Spot and make it daily');
+          expect(pack.chat().at(-1)!.actions).toMatchObject([
+            {
+              status: 'pending',
+              dogId: 'dog-taco',
+              note: expect.stringContaining('different dog'),
+            },
+            {
+              status: 'pending',
+              dogId: 'dog-taco',
+              note: expect.stringContaining('different dog'),
+            },
+            { status: 'done', dogId: 'dog-pip' },
+          ]);
+          expect(pack.dogs().find((d) => d.id === 'dog-taco')!.name).toBe('Taco');
+          expect(pip(pack).schedule).toBe('daily');
+          expect((await pack.view()).dogs[0]!.mood).toBe('waiting');
+
+          // Approving the card applies it.
+          const msg = pack.chat().at(-1)!;
+          pack.decideAction(msg.id, msg.actions![0]!.id, true);
+          expect(pack.dogs().find((d) => d.id === 'dog-taco')).toMatchObject({
+            name: 'Spot',
+            nameTainted: false,
+          });
+        });
+
+      it('binds a run to the dog named, even one whose name came from outside text', async () => {
+        const { pack, handlers, settings } = setup();
+        pack.setMode('full');
+        settings.set('pack.dogs', [{ ...TAINTED_PIP, nameTainted: true }, TACO]);
+        handlers.push(() => ({
+          reply: 'Off it goes.',
+          actions: [{ kind: 'run', dogId: 'dog-taco' }],
+        }));
+        await pack.say('Run Pip');
+        expect(pack.chat().at(-1)!.actions![0]).toMatchObject({
+          status: 'pending',
+          dogId: 'dog-taco',
+        });
+
+        // Retiring one is bound the same way.
+        handlers.push(() => ({ reply: 'Bye.', actions: [{ kind: 'retire', dogId: 'dog-taco' }] }));
+        await pack.say('Retire Pip');
+        expect(pack.chat().at(-1)!.actions![0]).toMatchObject({
+          status: 'pending',
+          note: expect.stringContaining('different dog'),
+        });
+        expect(pack.dogs().some((d) => d.id === 'dog-taco')).toBe(true);
+      });
+
+      it('takes any dog when the message names none, and each dog the message names', async () => {
+        const { pack, handlers, settings } = setup();
+        pack.setMode('full');
+        settings.set('pack.dogs', [PIP, TACO]);
+        handlers.push(() => ({
+          reply: 'Done.',
+          actions: [{ kind: 'update', dogId: 'dog-taco', schedule: 'daily' }],
+        }));
+        await pack.say('Make the Applications watcher daily');
+        expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done' });
+        handlers.push(() => ({
+          reply: 'Done.',
+          actions: [
+            { kind: 'update', dogId: 'dog-pip', schedule: 'nightly' },
+            { kind: 'update', dogId: 'dog-taco', schedule: 'nightly' },
+          ],
+        }));
+        await pack.say('Make pip and TACO nightly');
+        expect(pack.chat().at(-1)!.actions).toMatchObject([{ status: 'done' }, { status: 'done' }]);
+        expect(
+          pack
+            .dogs()
+            .filter((d) => d.role === 'pack')
+            .map((d) => d.schedule),
+        ).toEqual(['nightly', 'nightly']);
+      });
     });
 
     it('never lists a tool the person switched off', async () => {
