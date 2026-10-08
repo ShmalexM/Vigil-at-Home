@@ -37,6 +37,8 @@ let n = 0;
 const newDir = () => join(root, `s${n++}`, 'santa-sync');
 
 const DAY = 86_400_000;
+/** Some tests make dozens of keys and certificates with openssl. */
+const OPENSSL_TIMEOUT_MS = 120_000;
 const WRITE_STEPS: IdentityStep[] = [
   ...(Object.keys(IDENTITY_FILES) as IdentityStep[]),
   'swap',
@@ -107,7 +109,7 @@ async function legacyLayout(o: { clientAuth: boolean; required: boolean }): Prom
   return dir;
 }
 
-describe("Santa's sync identity on a new install", () => {
+describe("Santa's sync identity on a new install", { timeout: OPENSSL_TIMEOUT_MS }, () => {
   it('writes one complete version, private except what Santa reads, and requires the certificate', async () => {
     const s = await started();
     const t = s.paths;
@@ -162,7 +164,7 @@ describe("Santa's sync identity on a new install", () => {
   });
 });
 
-describe("Santa's sync identity over time", () => {
+describe("Santa's sync identity over time", { timeout: OPENSSL_TIMEOUT_MS }, () => {
   it('keeps taking the replaced certificate for 30 days after a renewal, under the same password', async () => {
     const s = await started();
     const old = s.current!.pin;
@@ -226,7 +228,7 @@ describe("Santa's sync identity over time", () => {
   });
 });
 
-describe('changes to the identity, one at a time', () => {
+describe('changes to the identity, one at a time', { timeout: OPENSSL_TIMEOUT_MS }, () => {
   it('never lowers the requirement without approval when Santa presents its certificate during reissues', async () => {
     const s = await notRequired();
     const pin = s.current!.pin;
@@ -367,7 +369,7 @@ describe('changes to the identity, one at a time', () => {
   });
 });
 
-describe('moving from the flat layout of earlier versions', () => {
+describe('moving from the flat layout of earlier versions', { timeout: OPENSSL_TIMEOUT_MS }, () => {
   it('keeps the CA and identity, and serves an old profile until Santa presents the certificate', async () => {
     const dir = await legacyLayout({ clientAuth: true, required: false });
     const ca = readFileSync(join(dir, 'ca.pem'));
