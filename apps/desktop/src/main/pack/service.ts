@@ -16,7 +16,6 @@
 
 import { newId, type PreflightReply, type PreflightRequest, type ToolsReply } from '@vigil/core';
 import type { ReadTool, RunRequest, RunResult } from '@vigil/ai';
-import { redactString, redactValue } from '@vigil/ai/redact';
 import { z } from 'zod';
 import {
   Breed,
@@ -44,6 +43,7 @@ import {
   type MemoryChange,
   type MemoryEntry,
   type NoteToolCall,
+  type NoteToolCallInput,
   type NoteUsage,
   type PackView,
   type ToolApproval,
@@ -54,6 +54,7 @@ import type { ConnectorHub, RemoteTool } from './connectors.js';
 import type { Notebook } from './notebook.js';
 import type { PackMemory } from './memory.js';
 import { afterJudge, gateAction, gateTool } from './gate.js';
+import { redactDataForPack, redactTextForPack } from './redaction.js';
 import { shapeFromJsonSchema } from './schema.js';
 
 const KEY_MODE = 'pack.mode';
@@ -118,7 +119,8 @@ export interface PackDeps {
   scheduler?: { every(name: string, ms: number, fn: () => Promise<void> | void): void };
   isBusy?: () => boolean;
   /** Where each dog writes down what it was asked, looked at and answered. */
-  notebook?: Pick<Notebook, 'write' | 'list' | 'clear' | 'tally'>;
+  notebook?: Pick<Notebook, 'write' | 'list' | 'clear' | 'tally'> &
+    Partial<Pick<Notebook, 'prune'>>;
   /** Lasting facts from the person's own words; background for runs, never a decision. */
   memory?: Pick<
     PackMemory,
@@ -321,8 +323,8 @@ interface RunCtx {
   /** A scheduled run nobody is watching: it never waits on the person. */
   background: boolean;
   used: string[];
-  /** Every call it made or tried, for the notebook's Details. */
-  calls: NoteToolCall[];
+  /** Every call it made or tried, for the notebook's Details. The notebook redacts them. */
+  calls: NoteToolCallInput[];
   /** Set when the run has ended, so a late tool call or answer goes nowhere. */
   over: boolean;
   approvals: Set<string>;
@@ -361,6 +363,9 @@ export class PackService {
   }
 
   start(): void {
+    // Notes of a dog that's gone, such as one retired while its run or its
+    // risk check was finishing, go now rather than in 30 days.
+    this.o.notebook?.prune?.(new Set(this.dogs().map((d) => d.id)));
     this.o.scheduler?.every('pack-dogs', SCHEDULE_CHECK_MS, () => this.runDue());
   }
 
@@ -536,6 +541,9 @@ export class PackService {
 
   private note(input: DogNoteInput, logId?: string): void {
     if (!this.o.notebook) return;
+    // Retired while it ran: its notebook is gone, so nothing is written back
+    // to start a new one.
+    if (!this.dogs().some((d) => d.id === input.dog)) return;
     const model = input.model ?? (logId ? this.o.ai.modelOf?.(logId) : undefined);
     const usage = input.usage ?? (logId ? this.o.ai.usageOf?.(logId) : undefined);
     try {
@@ -1222,17 +1230,18 @@ export class PackService {
     args: Record<string, unknown>,
     ctx: RunCtx,
   ): Promise<unknown> {
-    const argText = clip(JSON.stringify(redactValue(args, {})), 4000);
-    // What the notebook keeps of this call: redacted like an approval card.
+    const argText = clip(redactDataForPack(args), 4000);
+    // What the notebook keeps of this call, as it was: the notebook redacts
+    // every field, the arguments and result as data, before it cuts them.
     const record = (outcome: NoteToolCall['outcome'], reason?: string, result?: unknown) => {
       if (ctx.calls.length >= MAX_CALLS_NOTED) return;
       ctx.calls.push({
         tool: t.key,
         title: `${t.sourceName} › ${t.title}`,
-        args: clip(argText, 600),
+        args,
         outcome,
-        ...(reason ? { reason: clip(reason, 300) } : {}),
-        ...(result !== undefined ? { result: preview(result) } : {}),
+        ...(reason ? { reason } : {}),
+        ...(result !== undefined ? { result } : {}),
       });
     };
     const notRun = (reason: string, toModel = `Not run: ${reason}`) => {
@@ -1298,9 +1307,10 @@ export class PackService {
       record('ran', undefined, out);
       return out;
     } catch (err) {
-      const why = err instanceof Error ? err.message.slice(0, 300) : String(err);
+      const why = err instanceof Error ? err.message : String(err);
       record('failed', why);
-      return `The tool failed: ${why}`;
+      // Redacted whole before it's cut, so a cut can't leave half a key unseen.
+      return `The tool failed: ${clip(redactTextForPack(why), 300)}`;
     } finally {
       if (!ctx.over) this.setMood(dog.id, 'thinking', 'Thinking');
     }
@@ -1660,12 +1670,6 @@ function failText(reason: string): string {
 
 function clip(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}…` : s;
-}
-
-/** The start of a tool's result for the notebook, redacted like the arguments. */
-function preview(result: unknown): string {
-  const text = typeof result === 'string' ? result : (JSON.stringify(result) ?? '');
-  return clip(redactString(text.slice(0, 64_000), {}), 800);
 }
 
 /**

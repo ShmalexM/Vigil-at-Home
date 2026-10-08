@@ -1,8 +1,10 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { RunRequest, RunResult } from '@vigil/ai';
 import type { PreflightReply } from '@vigil/core';
+import { redactValue } from '@vigil/ai/redact';
 import { describe, expect, it, vi } from 'vitest';
 import type { z } from 'zod';
+import { notesJson, notesMarkdown } from '../../renderer/src/notebook-export.js';
 import type { ToolListing } from '../agents/tools.js';
 import type { ConnectorHub, ConnectorRecord, RemoteTool } from './connectors.js';
 import { PackMemory } from './memory.js';
@@ -53,6 +55,12 @@ function setup(
     hour?: number;
     /** What every connector call answers. */
     connectorReply?: string;
+    /** Every connector call throws this instead. */
+    connectorError?: string;
+    /** The connector's tools, in place of REMOTE. */
+    remote?: RemoteTool[];
+    /** What Vigil's own tools answer. */
+    vigilResult?: unknown;
   } = {},
 ) {
   const vigil = opts.vigil ?? ['list_alerts', 'search_events'];
@@ -66,10 +74,11 @@ function setup(
   const connectors: ConnectorHub = {
     list: () => [GITHUB],
     view: () => [],
-    tools: async () => REMOTE,
-    knownTools: () => REMOTE,
+    tools: async () => opts.remote ?? REMOTE,
+    knownTools: () => opts.remote ?? REMOTE,
     call: async (id, tool, args) => {
       connectorCalls.push([id, tool, args]);
+      if (opts.connectorError) throw new Error(opts.connectorError);
       return opts.connectorReply ?? 'ok';
     },
   };
@@ -103,7 +112,7 @@ function setup(
       list: () => vigil.map(LISTING),
       call: (name) => {
         vigilCalls.push(name);
-        return { v: 1, ok: true, result: { rows: [] } };
+        return { v: 1, ok: true, result: opts.vigilResult ?? { rows: [] } };
       },
     },
     preflight: () => ({ v: 1, decision: opts.preflight ?? 'none', reason: 'A rule says so' }),
@@ -121,6 +130,15 @@ const tool = (req: RunRequest<unknown>, name: string) => {
   if (!t) throw new Error(`no tool ${name}`);
   return t;
 };
+
+/** Joined at run time so code scanning doesn't take the samples for real keys. */
+const KEY = ['sk', 'ant', 'Abc123Def456Ghi789Jkl012Mno'].join('-');
+const PASSWORD = ['hunter2', 'Plain', 'Word'].join('');
+const TOKEN = ['tok', 'Plain', 'Value9'].join('');
+/** main's redactor ignores what a key is called; PR #133's withholds {"password": ...}. */
+const KEY_AWARE =
+  JSON.stringify(redactValue({ password: PASSWORD }, {})) !==
+  JSON.stringify({ password: PASSWORD });
 
 const CREATE = {
   kind: 'create',
@@ -844,6 +862,111 @@ describe('the pack', () => {
           .map((n) => n.kind)
           .sort(),
       ).toEqual(['chat', 'explain']);
+    });
+
+    it('keeps API keys out of Details and both Copy outputs: arguments, results, titles, errors, prompt', async () => {
+      const remote = REMOTE.map((t) => ({ ...t, title: `${t.title} ${KEY}` }));
+      const { pack, handlers } = setup({ remote, connectorError: `401: bad key ${KEY}` });
+      pack.setToolChoice('github.list_issues', 'allow');
+      const dog = pack.adopt({
+        ...CREATE,
+        tools: ['vigil.search_events', 'github.list_issues'],
+      } as never);
+      handlers.push(async (req) => {
+        await tool(req, 'search_events').run({ query: `files with ${KEY}` });
+        await tool(req, 'github_list_issues').run({ q: KEY });
+        return { summary: 'ok', findings: [] };
+      });
+      await pack.runDog(dog.id);
+      handlers.push(() => ({ reply: `You pasted ${KEY}.`, actions: [], why: [`saw ${KEY}`] }));
+      await pack.say(`Is this key still good? ${KEY}`);
+
+      const [job] = pack.notes({ dog: dog.id });
+      expect(job!.calls!.map((c) => c.outcome)).toEqual(['ran', 'failed']);
+      const [chat] = pack.notes({ dog: 'lead' });
+      expect(chat!.ask).toMatch(/^Is this key still good\?|withheld/);
+      for (const notes of [pack.notes({ dog: dog.id }), pack.notes({ dog: 'lead' })]) {
+        for (const text of [
+          JSON.stringify(notes),
+          notesMarkdown('Notebook', notes),
+          notesJson(undefined, notes),
+        ]) {
+          expect(text).not.toContain(KEY);
+          expect(text).not.toContain('sk-ant');
+        }
+      }
+    });
+
+    it.skipIf(!KEY_AWARE)(
+      '[needs #133’s redactor] keeps a {"password"} argument and a {"token"} result out of Details and both Copy outputs',
+      async () => {
+        const { pack, handlers } = setup({
+          vigilResult: { token: TOKEN, rows: [] },
+          connectorReply: JSON.stringify({ token: TOKEN }),
+        });
+        pack.setToolChoice('github.list_issues', 'allow');
+        const dog = pack.adopt({
+          ...CREATE,
+          tools: ['vigil.search_events', 'github.list_issues'],
+        } as never);
+        handlers.push(async (req) => {
+          await tool(req, 'search_events').run({ password: PASSWORD, limit: 5 });
+          await tool(req, 'github_list_issues').run({ password: PASSWORD });
+          return { summary: 'ok', findings: [] };
+        });
+        await pack.runDog(dog.id);
+        const notes = pack.notes({ dog: dog.id });
+        expect(notes[0]!.calls).toHaveLength(2);
+        for (const text of [
+          JSON.stringify(notes),
+          notesMarkdown('Notebook', notes),
+          notesJson(dog.id, notes),
+        ]) {
+          expect(text).not.toContain(PASSWORD);
+          expect(text).not.toContain(TOKEN);
+        }
+      },
+    );
+
+    it('writes no risk check for a dog retired while the AI was rating its call', async () => {
+      const { pack, handlers, notebook } = setup();
+      pack.setMode('auto');
+      const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+      let judged: (v: unknown) => void = () => undefined;
+      handlers.push(async (req) => {
+        const call = tool(req, 'github_create_issue').run({ title: 'x' });
+        await rating;
+        pack.retire(dog.id);
+        judged({ risk: 'low', reason: 'files one issue' });
+        await call;
+        return { summary: 'done', findings: [] };
+      });
+      // The judge's run starts while the job waits on it.
+      const rating = new Promise<void>((started) =>
+        handlers.push(
+          () =>
+            new Promise((r) => {
+              judged = r;
+              started();
+            }),
+        ),
+      );
+      await pack.runDog(dog.id);
+      expect(pack.dogs().some((d) => d.id === dog.id)).toBe(false);
+      expect(notebook.list({ dog: dog.id })).toEqual([]);
+      expect(notebook.countsSince(0)).not.toHaveProperty(dog.id);
+    });
+
+    it('drops notes left by a dog that no longer exists when it starts, and keeps the rest', () => {
+      const { pack, notebook } = setup();
+      const dog = pack.adopt(CREATE as never);
+      const sunny = pack.dogs().find((d) => d.helper === 'explainer')!;
+      for (const id of ['lead', sunny.id, dog.id, 'retired-long-ago'])
+        notebook.write({ dog: id, kind: 'job', ok: true, ask: 'a', answer: 'b' });
+      pack.start();
+      expect(Object.keys(notebook.countsSince(0)).sort()).toEqual(
+        ['lead', sunny.id, dog.id].sort(),
+      );
     });
 
     it('files a built-in helper’s note under that helper', () => {

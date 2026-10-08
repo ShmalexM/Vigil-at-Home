@@ -68,7 +68,7 @@ Vigil's rules come first in every mode, Full access included. Connector calls ar
 The Pack page sits under Advanced. Two parts of it reach the rest of the app:
 
 - **Scout on Home.** The Lead dog sits next to Home's status line and acts it out: relaxed when nothing needs you, ears up (the waiting pose) when something needs your decision (the Needs you count) or a protection layer has stopped, and busy while a dog's AI job runs. The status words don't change; the dog only shows them. Clicking it opens Ask.
-- **Today the pack.** Under the status line, one line per dog that did something since midnight ("Biscuit sniffed through new events 5 times"), counted from the notebooks. The wording is fixed, never written by an AI; runs that didn't finish are counted separately, and background runs that never reached an AI aren't noted. When a pack dog's latest run today found something of medium or high severity, one more line says so ("Pip found 2 things worth a look"); info and low findings add nothing. That line is not an alert: no notification, nothing in Needs you. Each line opens that dog's notebook.
+- **Today the pack.** Under the status line, one line per dog that did something since midnight ("The labeller sniffed through new events 5 times"), counted from the notebooks. The wording is fixed, never written by an AI, and names each dog by its role, never by its name, since the Lead dog can name dogs; runs that didn't finish are counted separately, and background runs that never reached an AI aren't noted. When a pack dog's latest run today found something of medium or high severity, one more line says so ("A pack dog found 2 things worth a look"); info and low findings add nothing. That line is not an alert: no notification, nothing in Needs you. Each line opens that dog's notebook.
 - **Scout on a pile.** When Needs you holds a pile of three or more alerts (the alerts' own grouping: same rule, same agent run or program), the biggest one shows as Scout's card instead of a row: who set it off, how many times, and one button to look at them all, where "That was me, all N" and "Looks fine, all N" decide them together. Scout adds no grouping of its own and the wording is fixed.
 - **Ask.** A bar at the bottom of every page (except Pack and setup) opens a chat drawer with the Lead dog. It is closed until you open it (click the bar or press ⌘K; Esc closes it). It is the same conversation as the Pack page, sent as your own chat, so the same rules apply: a Claude plan only if you turned it on, and no dog blocks, allows or changes a rule. The drawer tells the Lead dog which page you're on and what you have selected there (an alert, a rule, an agent or one of its sessions, or Activity's filter to one agent or session), so "what's this?" works; the Lead dog reads the details with its read-only tools. Its tools are the ones listed in [agents.md](agents.md#the-tools): status, alerts, events (by agent, rule matches or Biscuit's labels), rules, what Vigil did, and agents. When you ask how to stop an alert repeating, it points you to "Stop alerting on this" on the alert or to the rule on Rules; it can't change either itself.
 
@@ -128,15 +128,20 @@ flowchart LR
   itself (no migration), for 30 days and at most 2,000 notes per dog. Each
   write trims that dog's notes and every start trims them all, so a dog that
   went quiet doesn't keep old ones. Retiring a dog deletes its notebook; the
-  Lead dog's and the helpers' are never touched by that.
+  Lead dog's and the helpers' are never touched by that. A run or risk check
+  that finishes after its dog was retired writes nothing, and every start
+  drops any notes left from a dog that no longer exists, whatever their age.
 - Nothing reads notes back to decide anything. They are for the person.
 
 **Details**, closed until you open it, is for digging deeper. It lists each
 tool call the run made: the tool, its arguments, whether it ran, didn't run
 (and why: the gate, you, a scheduled run that can't ask, or the run ending)
-or failed, and the first 800 characters of what it returned. Arguments and
-results go through the same redaction as an approval card before they are
-stored. It also shows the model and, from the Usage page's ledger, the tokens
+or failed, and the first 800 characters of what it returned. Every field of
+a note (what was asked, the answer, reasons, tool titles, error text, and the
+arguments and results as data, before they are written out as text) goes
+through Vigil's redactor before it is stored, and is cut to size only after
+that. Notes are redacted again each time they are read for the page, so the
+Copy buttons and older notes get the same treatment. It also shows the model and, from the Usage page's ledger, the tokens
 and estimated cost of the attempt that answered. Notes from before this was
 added simply have no Details.
 

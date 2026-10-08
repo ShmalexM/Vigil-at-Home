@@ -341,13 +341,31 @@ const PLAIN: Record<DogNoteKind, (n: number) => string> = {
 };
 const ORDER: DogNoteKind[] = ['chat', 'job', 'explain', 'label', 'review', 'judge'];
 
+const HELPER_LABEL: Record<HelperId, string> = {
+  explainer: 'The explainer',
+  labeller: 'The labeller',
+  'rule-reviewer': 'The rule reviewer',
+};
+
+/**
+ * Who a diary line is about, in the app's own words. Never the dog's name:
+ * the Lead dog can name or rename a dog, so a name is model text, and a fixed
+ * sentence must not read out whatever a model chose to put in it.
+ */
+export function dogLabel(d: Pick<Dog, 'role' | 'helper'>): string {
+  if (d.role === 'lead') return 'The Lead dog';
+  if (d.role === 'helper' && d.helper) return HELPER_LABEL[d.helper];
+  if (d.role === 'helper') return 'A helper';
+  return 'A pack dog';
+}
+
 /**
  * The pack diary: one plain line per dog that did something today, Lead dog
  * first, in the order the pack is listed. Fixed wording from counts, never
- * written by an AI.
+ * written by an AI, and naming each dog by its role (see dogLabel).
  */
 export function diaryLines(
-  dogs: readonly Pick<Dog, 'id' | 'name'>[],
+  dogs: readonly Pick<Dog, 'id' | 'role' | 'helper'>[],
   today: readonly DiaryTally[],
   voice: PackVoice = 'pack',
 ): { dog: string; text: string; failed: number }[] {
@@ -361,10 +379,11 @@ export function diaryLines(
       const t = mine.find((x) => x.kind === k);
       return t && t.n > t.failed ? [words[k](t.n - t.failed)] : [];
     });
+    const who = dogLabel(d);
     const text =
       did.length === 0
-        ? `${d.name} tried ${times(failed)} but couldn’t finish`
-        : `${d.name} ${did.length > 1 ? `${did.slice(0, -1).join(', ')} and ${did.at(-1)}` : did[0]}`;
+        ? `${who} tried ${times(failed)} but couldn’t finish`
+        : `${who} ${did.length > 1 ? `${did.slice(0, -1).join(', ')} and ${did.at(-1)}` : did[0]}`;
     return [{ dog: d.id, text, failed: did.length === 0 ? 0 : failed }];
   });
 }
@@ -376,7 +395,7 @@ export function diaryLines(
  * an alert or asks anything of the person.
  */
 export function foundLines(
-  dogs: readonly Pick<Dog, 'id' | 'name' | 'role' | 'lastReport'>[],
+  dogs: readonly Pick<Dog, 'id' | 'role' | 'helper' | 'lastReport'>[],
   since: number,
   voice: PackVoice = 'pack',
 ): { dog: string; text: string; found: number }[] {
@@ -388,8 +407,8 @@ export function foundLines(
     const things = found === 1 ? 'thing' : 'things';
     const text =
       voice === 'plain'
-        ? `${d.name} found ${found} ${things} worth a look`
-        : `${d.name} sniffed out ${found} ${things} worth a look`;
+        ? `${dogLabel(d)} found ${found} ${things} worth a look`
+        : `${dogLabel(d)} sniffed out ${found} ${things} worth a look`;
     return [{ dog: d.id, text, found }];
   });
 }
@@ -460,10 +479,20 @@ export interface NoteUsage {
   costUsd: number | null;
 }
 
-export type DogNoteInput = Omit<DogNote, 'id' | 'at' | 'lookedAt' | 'reasons'> & {
-  lookedAt?: string[];
+/**
+ * A tool call as a run hands it to the notebook: the arguments and result as
+ * they were, objects or text. The notebook redacts them before it serializes
+ * or cuts anything.
+ */
+export type NoteToolCallInput = Omit<NoteToolCall, 'args' | 'result'> & {
+  args: unknown;
+  result?: unknown;
+};
 
+export type DogNoteInput = Omit<DogNote, 'id' | 'at' | 'lookedAt' | 'reasons' | 'calls'> & {
+  lookedAt?: string[];
   reasons?: string[];
+  calls?: NoteToolCallInput[];
 };
 
 export const NoteSubject = z.object({

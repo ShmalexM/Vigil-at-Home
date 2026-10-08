@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { redactValue } from '@vigil/ai/redact';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Connectors, type ConnectorRecord } from './connectors.js';
 
@@ -141,6 +142,48 @@ describe('connectors', () => {
     expect(out).toContain('<email>');
     expect(out).toContain('/Users/<user>/notes.txt');
   });
+
+  /** A hub whose one connector answers `result` to every call. */
+  const answering = (result: unknown) => {
+    const { c } = hub({
+      connect: async () =>
+        ({ callTool: async () => result, close: async () => undefined }) as never,
+    });
+    open.push(c);
+    c.add({ kind: 'http', name: 'Leaky', url: 'https://mcp.example.test/mcp' });
+    return c;
+  };
+  /** Joined at run time so code scanning doesn't take the sample for a real key. */
+  const KEY = ['sk', 'ant', 'Abc123Def456Ghi789Jkl012Mno'].join('-');
+
+  it('redacts structured content as data before writing it out', async () => {
+    const out = await answering({ content: [], structuredContent: { rows: [{ key: KEY }] } }).call(
+      'leaky',
+      'read',
+      {},
+    );
+    expect(out).not.toContain(KEY);
+    expect(out).toMatch(/^\{"rows":\[\{"key":/);
+  });
+
+  const KEY_AWARE =
+    JSON.stringify(redactValue({ token: 'plainValue9' }, {})) !== '{"token":"plainValue9"}';
+  it.skipIf(!KEY_AWARE)(
+    '[needs #133’s redactor] withholds a {"token"} value in a reply, as text or structured',
+    async () => {
+      const token = ['tok', 'Plain', 'Value9'].join('');
+      const asText = await answering({
+        content: [{ type: 'text', text: JSON.stringify({ token }) }],
+      }).call('leaky', 'read', {});
+      const structured = await answering({ content: [], structuredContent: { token } }).call(
+        'leaky',
+        'read',
+        {},
+      );
+      expect(asText).not.toContain(token);
+      expect(structured).not.toContain(token);
+    },
+  );
 
   it('refuses a command inside Vigil’s own app, even through a link', () => {
     const { c, dir } = hub({ selfPaths: [process.execPath] });

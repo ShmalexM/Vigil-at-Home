@@ -28,11 +28,11 @@ import {
 } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { redactString } from '@vigil/ai/redact';
 import { newId } from '@vigil/core';
 import { z } from 'zod';
 import { ConnectorInput, isSafeConnectorUrl, type ConnectorView } from '../../shared/pack.js';
 import type { Cipher } from '../onboarding/keys.js';
+import { redactDataForPack, redactTextForPack } from './redaction.js';
 
 /** A connection with no calls for this long is closed; the next call reopens it. */
 const IDLE_MS = 5 * 60_000;
@@ -225,17 +225,19 @@ export class Connectors implements ConnectorHub {
     const result = await client.callTool({ name: tool, arguments: args }, undefined, {
       timeout: CALL_MS,
     });
+    // Secrets in a response (keys, tokens, emails, home paths) are hidden
+    // before anything else sees it: the notebook, the risk judge, a cloud
+    // model. Each text part is redacted whole, and structured content as
+    // data, so a value under a key like "token" goes before it is written
+    // out as text. Only then is anything cut. The AI runner redacts tool
+    // results again on their way out.
     const parts = Array.isArray(result.content) ? result.content : [];
     const text = parts
       .map((p: { type: string; text?: string }) =>
-        p.type === 'text' ? (p.text ?? '') : `[${p.type} content not shown]`,
+        p.type === 'text' ? redactTextForPack(p.text ?? '') : `[${p.type} content not shown]`,
       )
       .join('\n');
-    const body = text || JSON.stringify(result.structuredContent ?? {});
-    // Secrets in a response (keys, tokens, emails, home paths) are hidden
-    // before anything else sees it: the notebook, the risk judge, a cloud
-    // model. The AI runner redacts tool results again on their way out.
-    const clean = redactString(body.slice(0, MAX_RESULT_CHARS * 2), {});
+    const clean = text || redactDataForPack(result.structuredContent ?? {});
     const clipped =
       clean.length > MAX_RESULT_CHARS ? `${clean.slice(0, MAX_RESULT_CHARS)}…` : clean;
     return result.isError ? `The tool reported an error: ${clipped}` : clipped;
