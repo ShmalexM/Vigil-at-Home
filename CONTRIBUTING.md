@@ -29,7 +29,7 @@ The action policy in `packages/core/src/action.ts` is the single place that says
 
 ## Naming
 
-The product is **Vigil** (or **Vigil at Home**). `pnpm check:naming` fails the build if the former company name, or `dt-` style tokens derived from it, appear in any file or file name. When porting code from upstream Vigil, rename those leftovers.
+The product is **Vigil** (or **Vigil at Home**). `pnpm check:naming` fails the build if the former company name, or `dt-` style tokens derived from it, appear in any file or file name.
 
 ## Checks
 
