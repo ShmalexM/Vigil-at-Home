@@ -25,4 +25,13 @@ describe('lineEventId', () => {
     const bare = 'action=EXIT|pid=5|ppid=1|uid=501';
     expect(santaLogLineToEvent(bare, () => 1)!.id).toBe(santaLogLineToEvent(bare, () => 2)!.id);
   });
+
+  it('leaves a Santa time without a zone out of the id, so the time zone can’t change it', () => {
+    const local = '[2026-09-26T21:00:00.123] I santad: action=EXIT|pid=5|ppid=1|uid=501';
+    expect(santaLogLineToEvent(local)!.id).toBe(lineEventId('santa-log:', local));
+    const offset = '[2026-09-26T21:00:00.123+02:00] I santad: action=EXIT|pid=5|ppid=1|uid=501';
+    expect(santaLogLineToEvent(offset)!.id).toBe(
+      lineEventId('santa-log:', offset, Date.parse('2026-09-26T19:00:00.123Z')),
+    );
+  });
 });
