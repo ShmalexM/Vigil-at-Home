@@ -86,6 +86,8 @@ export class FileTailer {
     try {
       st = await stat(this.opts.path);
     } catch {
+      // Gone, perhaps with its folder: a watch on that folder may be dead.
+      this.unwatch();
       return;
     }
     if (!this.pos || this.pos.ino !== st.ino) {
@@ -171,10 +173,16 @@ export class FileTailer {
   /** Watch the file's folder; retried after each poll until the folder exists. */
   private arm(): void {
     if (!this.running || this.opts.watch === false || this.watcher) return;
+    const folder = dirname(this.opts.path);
     const name = basename(this.opts.path);
     try {
-      const w = watch(dirname(this.opts.path), { persistent: false }, (_event, file) => {
-        if (file == null || file.toString() === name) this.kick();
+      const w = watch(folder, { persistent: false }, (_event, file) => {
+        const f = file?.toString();
+        // The folder itself was removed or renamed: this watch is dead (on
+        // Linux it never fires again, without an error), so drop it and poll
+        // at the fast rate until the next poll arms a new one.
+        if (f === basename(folder)) this.unwatch();
+        if (f == null || f === name || !this.watcher) this.kick();
       });
       w.on('error', () => this.unwatch());
       this.watcher = w;
@@ -184,8 +192,14 @@ export class FileTailer {
   }
 
   private unwatch(): void {
-    this.watcher?.close();
+    if (!this.watcher) return;
+    this.watcher.close();
     this.watcher = undefined;
+    // Back to the fast fallback poll at once, not after the slow one is due.
+    if (this.running) {
+      clearTimeout(this.timer);
+      this.schedule();
+    }
   }
 
   /**
