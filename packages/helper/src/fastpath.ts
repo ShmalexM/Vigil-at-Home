@@ -28,6 +28,7 @@ import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { isRelease, type Action, type SensorEvent } from '@vigil/core';
 import { selfKey, selfRoots, underSelfRoot, type SelfImage } from '@vigil/core/self';
 import {
+  compileRule,
   DetectionEngine,
   DetectionRule,
   memoryStores,
@@ -159,8 +160,19 @@ export class FastPath {
       this.opts.log?.('fast path: ignoring saved rules that do not parse');
       return;
     }
+    // A rule a newer release no longer compiles (stricter regex and glob
+    // checks) is dropped on its own; the rest keep blocking.
+    const rules = parsed.data.rules.filter((r) => {
+      try {
+        compileRule(r);
+        return true;
+      } catch (err) {
+        this.opts.log?.(`fast path: dropping saved rule: ${(err as Error).message}`);
+        return false;
+      }
+    });
     try {
-      this.apply(parsed.data);
+      this.apply({ ...parsed.data, rules });
     } catch (err) {
       this.opts.log?.(`fast path: saved rules did not load: ${(err as Error).message}`);
     }
@@ -220,7 +232,10 @@ export class FastPath {
     const retired = this.retire(lists);
     const selfImages = cmd.selfImages ?? [];
     this.checkImages(selfImages);
-    // Throws RuleCompileError before anything changes.
+    // Throws RuleCompileError before anything changes. That includes a regex or
+    // glob that could take too long to match (regexProblem, globProblem): adding
+    // rules needs no password, so the same checks as the app's keep one rule
+    // from stalling every check here.
     this.apply({
       rev: this.state.rev + 1,
       rules: cmd.rules,

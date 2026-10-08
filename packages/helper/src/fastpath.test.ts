@@ -228,6 +228,45 @@ describe('blocking rules in the helper', () => {
     expect(fast.status()).toEqual(before);
   });
 
+  it('refuses a rule whose regex or glob could take too long, as the app does', async () => {
+    const before = fast.status();
+    const { sync } = appSet({});
+    for (const condition of [
+      { field: 'path', op: 'glob' as const, value: '**a**a**a**a**a**a!' },
+      { field: 'path', op: 'glob' as const, value: '**a**a**a!' },
+      { field: 'path', op: 'regex' as const, value: '(a|a)*$' },
+      { field: 'path', op: 'regex' as const, value: '((a+))+$' },
+      { field: 'path', op: 'regex' as const, value: '(?:x|x)+y' },
+    ]) {
+      const bad = { ...sync, rules: [...sync.rules, { ...sync.rules[0]!, id: 'slow', condition }] };
+      await expect(client.call(bad), condition.value).rejects.toMatchObject({ code: 'invalid' });
+      expect(fast.status()).toEqual(before);
+    }
+  });
+
+  it('drops a saved rule that no longer compiles and keeps the rest', () => {
+    const { sync } = appSet({});
+    const slow = {
+      ...sync.rules[0]!,
+      id: 'slow',
+      condition: { field: 'path', op: 'glob' as const, value: '**a**a**a!' },
+    };
+    const file = join(root, 'saved-with-slow-rule.json');
+    writeFileSync(
+      file,
+      JSON.stringify({ ...sync, rev: 3, rules: [...sync.rules, slow], lists: {}, retired: {} }),
+    );
+    const logs: string[] = [];
+    const loaded = new FastPath({
+      file,
+      run: () => Promise.reject(new Error('not used')),
+      log: (m) => logs.push(m),
+    });
+    loaded.load();
+    expect(loaded.status().rules).toBe(sync.rules.length);
+    expect(logs.join('\n')).toMatch(/slow/);
+  });
+
   it('needs the admin password to turn a rule off, change it or add a path', async () => {
     const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
     approve = true;
