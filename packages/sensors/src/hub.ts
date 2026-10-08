@@ -4,7 +4,11 @@
 
 import { FileTailer, type TailPosition } from './tail.js';
 import { santaLogLineToEvent } from './santa/logParser.js';
-import { osqueryHealth, osqueryLineToEvents } from './osquery/resultParser.js';
+import {
+  osqueryResultHealth,
+  osqueryResultToEvents,
+  parseOsqueryLine,
+} from './osquery/resultParser.js';
 import { DEFAULT_PATHS } from './santa/profile.js';
 import { OSQUERY_RESULTS_LOG } from './osquery/config.js';
 import type { SensorEvent, SensorEventSink } from './types.js';
@@ -79,7 +83,10 @@ export class SensorHub {
     const osq = opts.osqueryResultsPath ?? OSQUERY_RESULTS_LOG;
     if (osq)
       this.addTailer('osquery', osq, (line) => {
-        const health = osqueryHealth(line);
+        // Parsed once for both the health check and the events.
+        const parsed = parseOsqueryLine(line);
+        if (parsed === undefined) return;
+        const health = osqueryResultHealth(parsed);
         if (health) {
           // Differential queries are silent when nothing changes; the health
           // query's rows are what show osquery is still running.
@@ -91,7 +98,7 @@ export class SensorHub {
             );
           return;
         }
-        for (const e of osqueryLineToEvents(line)) this.emit(e);
+        for (const e of osqueryResultToEvents(line, parsed)) this.emit(e);
       });
   }
 

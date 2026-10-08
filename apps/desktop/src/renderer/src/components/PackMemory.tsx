@@ -1,5 +1,6 @@
 import { Brain, Check, Copy, Plus, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   MEMORY_TOPIC_LABEL,
   MemoryTopic,
@@ -47,7 +48,8 @@ export function MemorySheet({ onClose }: { onClose: () => void }) {
       });
     });
 
-  return (
+  // On body: inside a sticky parent such as the Lead panel, the scrim would sit under the drag strip.
+  return createPortal(
     <div className="scrim" onClick={onClose}>
       <div
         ref={box}
@@ -164,7 +166,8 @@ export function MemorySheet({ onClose }: { onClose: () => void }) {
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

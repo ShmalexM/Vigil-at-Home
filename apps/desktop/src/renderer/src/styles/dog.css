@@ -14,6 +14,10 @@
   fill: var(--tx0);
   opacity: 0.08;
 }
+/* A faint rim so the dark coats (husky, doberman) don't vanish on a dark page. */
+.theme-dark .dog-all {
+  filter: drop-shadow(0 0 0.75px rgba(255, 255, 255, 0.45));
+}
 .dog-eye-shut {
   display: none;
 }

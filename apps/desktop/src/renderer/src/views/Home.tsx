@@ -75,7 +75,6 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               What Vigil handled
             </button>
           </div>
-          {pack && <PackDiary pack={pack} />}
           {status.reasons.length > 0 && (
             <ul className="reasons">
               {status.reasons.map((r) => (
@@ -107,6 +106,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               </span>
             </div>
           )}
+          {pack && <PackDiary pack={pack} />}
         </Card>
       )}
 
