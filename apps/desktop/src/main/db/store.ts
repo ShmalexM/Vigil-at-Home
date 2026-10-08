@@ -166,6 +166,10 @@ export class Store {
    * rows added since; deletes drop it. The menu bar and every open window ask
    * "checked today" after each change, and counting a busy day from scratch
    * walks millions of index entries (30 ms and more each time).
+   *
+   * Both memos rely on every write to the events table going through this
+   * class (writeEvent and pruneEvents), which keeps them right. A raw write
+   * elsewhere would leave them stale; store.test.ts checks there is none.
    */
   private readonly countMemo = new Map<number, { n: number; rowid: number }>();
   /**
