@@ -50,6 +50,12 @@ export function HomeView({ go }: { go: (r: string) => void }) {
   const lead = pack?.dogs.find((d) => d.role === 'lead');
   // Ears up for a decision, or for protection that has stopped; a layer that
   // was never installed is the status line's to explain, not a reason to fret.
+  const showLayers = () => {
+    const el = document.getElementById('home-layers') as HTMLDetailsElement | null;
+    if (!el) return;
+    el.open = true;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
   const scout = homeMood(pack, !!status && (status.needsYou > 0 || status.level === 'poor'));
 
   return (
@@ -95,11 +101,16 @@ export function HomeView({ go }: { go: (r: string) => void }) {
           </div>
           {pack && <PackDiary pack={pack} />}
           {status.reasons.length > 0 && (
-            <ul className="reasons">
-              {status.reasons.map((r) => (
-                <li key={r}>{r}</li>
-              ))}
-            </ul>
+            // One line: the Protection card below lists every layer, so the list isn't repeated here.
+            <div className="row wrap home-why" style={{ gap: 8 }}>
+              <span>
+                {status.reasons[0]}
+                {status.reasons.length > 1 && ` and ${status.reasons.length - 1} more`}.
+              </span>
+              <button type="button" className="btn sm ghost" onClick={showLayers}>
+                See the layers
+              </button>
+            </div>
           )}
           <details className="level-rules">
             <summary>How is this worked out?</summary>
@@ -190,7 +201,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
 
       <Card>
         <SectionHead title="Protection" sub="The layers that watch and block" />
-        <details className="layers" open={!allRunning}>
+        <details id="home-layers" className="layers" open={!allRunning}>
           <summary className="row t-small">
             {allRunning ? (
               <>

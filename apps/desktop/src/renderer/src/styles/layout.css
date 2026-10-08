@@ -103,9 +103,7 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
 }
-.reasons {
-  margin: 0;
-  padding-left: 18px;
+.home-why {
   color: var(--tx1);
 }
 .split {
