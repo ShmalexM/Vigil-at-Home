@@ -7,6 +7,7 @@ import { Button, Card, SectionHead } from '../components/ui';
 import { aboutText, systemName } from './about';
 import { AiSection } from './Ai';
 import { AppearanceSection } from './Appearance';
+import { ThreatFeedsSection } from './ThreatFeeds';
 import { UpdatesRow } from './Updates';
 import { ADVANCED_NAV, PageHead } from './AppShell';
 import { SetupPanel } from './onboarding/SetupPanel';
@@ -86,8 +87,8 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
       <details className="settings-advanced">
         <summary className="t-h2">Advanced</summary>
         <span className="t-small">
-          The detail behind what Vigil does: every alert, the rules, raw activity, AI providers and
-          spending. Nothing here is needed day to day.
+          The detail behind what Vigil does: every alert, the rules, raw activity, AI providers,
+          threat feeds and spending. Nothing here is needed day to day.
         </span>
         <Card>
           <SectionHead
@@ -104,6 +105,9 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
         </Card>
         <Card>
           <AiSection />
+        </Card>
+        <Card>
+          <ThreatFeedsSection />
         </Card>
         <Card>
           <SectionHead

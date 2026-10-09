@@ -22,7 +22,7 @@ import { HelperSyncer } from './helper-sync.js';
 import { registerIpc } from './ipc.js';
 import { systemProbe } from './onboarding/checks.js';
 import { demoProbe } from './onboarding/demo.js';
-import { KeyStore } from './onboarding/keys.js';
+import { FeedKeyStore, KeyStore, type Cipher } from './onboarding/keys.js';
 import { linuxDistro, type LinuxDistro } from './onboarding/plan.js';
 import { OnboardingService } from './onboarding/service.js';
 import { Connectors, ConnectorRecord } from './pack/connectors.js';
@@ -105,10 +105,22 @@ function start(): void {
   const demo = !app.isPackaged && !!process.env['VIGIL_DEMO'];
   // The .app bundle or install folder when packaged; the Electron binary in development.
   const self = selfPaths(process.execPath, process.platform, app.isPackaged, process.env);
+  // API keys, feed keys and connector secrets: encrypted with a key held in the Keychain.
+  const cipher: Cipher = {
+    available: () => safeStorage.isEncryptionAvailable(),
+    encrypt: (s) => safeStorage.encryptString(s),
+    decrypt: (b) => safeStorage.decryptString(b),
+  };
+  // Accepted limit: on Linux (GNOME keyring and similar) safeStorage's key is open to any
+  // app running as the same user, so this does not keep the abuse.ch key from them. That
+  // is the platform's limit, and the key is for a free feed, so it is stored the same way.
+  const feedKeys = new FeedKeyStore(join(dataDir, 'feed-keys.json'), cipher);
   const detector = new Detector(db, store, core.alerts, (e, o) => core.ingest(e, o), {
     installedAt: core.installedAt(),
     selfPaths: self.app,
     helperSelf: self.helper,
+    // URLhaus and MalwareBazaar send the user's abuse.ch key once they add one.
+    feeds: { keys: (name) => feedKeys.get(name) },
     // What Vigil itself starts (its AI helpers) is tagged vigil-self, never a watched agent.
     selfPid: process.pid,
     // The tracker reports to the agent service, created just below.
@@ -199,11 +211,7 @@ function start(): void {
     ),
   );
 
-  const keys = new KeyStore(join(dataDir, 'api-keys.json'), {
-    available: () => safeStorage.isEncryptionAvailable(),
-    encrypt: (s) => safeStorage.encryptString(s),
-    decrypt: (b) => safeStorage.decryptString(b),
-  });
+  const keys = new KeyStore(join(dataDir, 'api-keys.json'), cipher);
   const setup: OnboardingService = new OnboardingService({
     store,
     keys,
@@ -304,11 +312,6 @@ function start(): void {
       windows.broadcast('pack');
     }, 150);
   };
-  const cipher = {
-    available: () => safeStorage.isEncryptionAvailable(),
-    encrypt: (s: string) => safeStorage.encryptString(s),
-    decrypt: (b: Buffer) => safeStorage.decryptString(b),
-  };
   const connectors = new Connectors({
     load: () => store.getSetting('pack.connectors', z.array(ConnectorRecord), []),
     save: (records) => store.setSetting('pack.connectors', records),
@@ -340,21 +343,12 @@ function start(): void {
     seedPackDemo(pack, connectors, join(app.getAppPath(), 'src/main/pack/fixtures/demo-mcp.mjs'));
   app.on('before-quit', () => void connectors.closeAll());
 
-  registerIpc(
-    core,
-    windows,
-    setup,
-    ai,
-    updates,
-    agents,
-    { service: pack, connectors },
-    {
-      install: installHelper,
-      uninstall: unlessDemo(demo, async () =>
-        afterHelperScript(await runHelperScript('uninstall', helperDir())),
-      ),
-    },
-  );
+  registerIpc(core, windows, setup, ai, updates, agents, { service: pack, connectors }, feedKeys, {
+    install: installHelper,
+    uninstall: unlessDemo(demo, async () =>
+      afterHelperScript(await runHelperScript('uninstall', helperDir())),
+    ),
+  });
   windows.createTray();
   windows.applyTheme(core.theme(), core.appearance());
   // After start-up settles, so the menu-bar item appears first.
