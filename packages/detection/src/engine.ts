@@ -43,6 +43,8 @@ interface CompiledRule {
   rule: DetectionRule;
   condition: CompiledCondition;
   exclusions: CompiledCondition[];
+  /** The fields each exclusion reads, in the same order. */
+  exclusionFields: Set<string>[];
   usesBaseline: boolean;
   thresholdKey: FieldGetter[] | undefined;
   dedupeKey: FieldGetter[];
@@ -70,6 +72,36 @@ const DEFAULT_DEDUPE_KEYS = [
 const MAX_WINDOW_ENTRIES = 20_000;
 const MODE_RANK: Record<RuleMode, number> = { disabled: 0, shadow: 1, alert: 2, block: 3 };
 
+/** For `check`. */
+export interface CheckOptions {
+  /**
+   * Exclusions that read any of these fields, and exceptions that match on
+   * any of them, are not applied: only the rule's own condition decides.
+   * For a check against a lookalike of the real value (the pack checks a
+   * connector call by its name as well as its id), so that a skip written
+   * for the lookalike never lifts a rule. It can only add matches.
+   */
+  noSkipsOn?: readonly string[];
+}
+
+/** Every field a condition reads, at any depth. */
+function fieldsOf(cond: unknown): Set<string> {
+  const out = new Set<string>();
+  const walk = (v: unknown): void => {
+    if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === 'object')
+      for (const [k, x] of Object.entries(v)) {
+        if (k === 'field' && typeof x === 'string') out.add(x);
+        // A firstSeen key lists field names.
+        else if (k === 'key' && Array.isArray(x))
+          x.forEach((f) => typeof f === 'string' && out.add(f));
+        else walk(x);
+      }
+  };
+  walk(cond);
+  return out;
+}
+
 export class RuleCompileError extends Error {
   constructor(
     readonly ruleId: string,
@@ -92,6 +124,7 @@ export function compileRule(
       rule,
       condition,
       exclusions,
+      exclusionFields: rule.exclusions.map(fieldsOf),
       usesBaseline: condition.firstSeen.length > 0,
       thresholdKey: rule.threshold?.groupBy?.map(compileField) ?? (rule.threshold ? [] : undefined),
       dedupeKey: (rule.dedupe?.key ?? []).map(compileField),
@@ -349,10 +382,11 @@ export class DetectionEngine {
    * chain rule matches only once its earlier steps are already done (the
    * check never advances a chain).
    */
-  check(e: DetectionEvent): Detection[] {
+  check(e: DetectionEvent, opts: CheckOptions = {}): Detection[] {
     const out: Detection[] = [];
+    const ignore = new Set(opts.noSkipsOn ?? []);
     for (const c of this.byKind.get(e.kind) ?? []) {
-      const d = this.evaluateRule(c, e, true);
+      const d = this.evaluateRule(c, e, true, ignore);
       if (d) out.push(d);
     }
     return out;
@@ -398,8 +432,16 @@ export class DetectionEngine {
     return actions;
   }
 
-  /** @param dry for `check`: decide only, touching no state. */
-  private evaluateRule(c: CompiledRule, e: DetectionEvent, dry = false): Detection | undefined {
+  /**
+   * @param dry for `check`: decide only, touching no state.
+   * @param ignore fields whose exclusions and exceptions are not applied (CheckOptions).
+   */
+  private evaluateRule(
+    c: CompiledRule,
+    e: DetectionEvent,
+    dry = false,
+    ignore: ReadonlySet<string> = new Set(),
+  ): Detection | undefined {
     const { rule } = c;
     let mode = this.modeOf(rule);
     if (mode === 'disabled') return undefined;
@@ -415,8 +457,13 @@ export class DetectionEngine {
       if (!rule.eventKinds.includes(e.kind)) return undefined;
     }
     if (!c.condition.test(e, this.state)) return undefined;
-    if (c.exclusions.some((x) => x.test(e, this.state))) return undefined;
-    if (this.isExcepted(rule.id, e)) return undefined;
+    if (
+      c.exclusions.some(
+        (x, i) => ![...c.exclusionFields[i]!].some((f) => ignore.has(f)) && x.test(e, this.state),
+      )
+    )
+      return undefined;
+    if (this.isExcepted(rule.id, e, ignore)) return undefined;
 
     if (rule.threshold && c.thresholdKey) {
       const g = c.thresholdKey.length ? keyOf(c.thresholdKey, e) : '';
@@ -562,10 +609,15 @@ export class DetectionEngine {
     return !!st && e.ts - st.start <= seq.windowMs && st.done >= seq.steps.length;
   }
 
-  private isExcepted(ruleId: string, e: DetectionEvent): boolean {
+  private isExcepted(
+    ruleId: string,
+    e: DetectionEvent,
+    ignore: ReadonlySet<string> = new Set(),
+  ): boolean {
     for (const ex of this.stores.exceptions.forRule(ruleId)) {
       const entries = Object.entries(ex.match);
       if (entries.length === 0) continue;
+      if (entries.some(([field]) => ignore.has(field))) continue;
       const all = entries.every(([field, want]) => {
         const v = compileField(field)(e);
         if (v === undefined) return false;

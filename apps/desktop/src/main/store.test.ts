@@ -466,12 +466,12 @@ describe('Store: agents', () => {
 
     const db = new DatabaseSync(join(dir, 'copy.db'));
     const s = new Store(db);
-    expect(migrations).toHaveLength(7);
-    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 7 });
+    expect(migrations).toHaveLength(8);
+    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 8 });
     const columns = (db.prepare('PRAGMA table_info(events)').all() as { name: string }[]).map(
       (c) => c.name,
     );
-    expect(columns).toEqual(expect.arrayContaining(['agent_session', 'agent_id']));
+    expect(columns).toEqual(expect.arrayContaining(['agent_session', 'agent_id', 'args']));
     const indexes = (
       db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index'`).all() as { name: string }[]
     ).map((r) => r.name);
