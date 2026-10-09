@@ -14,11 +14,17 @@
 //               wrote the file as, so a copy, or a backup put back, is not
 //               the pin either, and a generation the running helper only
 //               ever raises, so an older pin of its own can't come back.
+//               The highest generation written is also kept in a signed
+//               counter beside them (app-pin.gen), read at start, so an
+//               older pin put back while the helper was stopped is refused
+//               too.
 //               Having no pin is itself signed, so a missing file is never
 //               taken to mean "no pin".
-//   In memory   The helper keeps the pin and key it loaded. A pin file that
-//               vanishes or stops verifying changes nothing until the helper
-//               itself writes a new one (or a signed one appears).
+//   In memory   The helper keeps the pin and key it loaded, and checks pins
+//               only with that key from then on. A pin file that vanishes
+//               or stops verifying changes nothing until the helper itself
+//               writes a new one (or a signed one appears). A key with no
+//               pin file beside it at start is reported.
 //   Immutable   Both files carry the immutable flag (chflags uchg on macOS,
 //               chattr +i on Linux where the filesystem has it). The helper
 //               clears it only around its own writes.
@@ -27,9 +33,10 @@
 //               complete and flagged, and a repair writes what is in memory
 //               when its turn comes, never something read before.
 //   Tripwire    intact() says whether the files are still the device and
-//               inode the helper left; file commands check it before and
-//               after every move, and refuse and log when it is not. It
-//               never moves or rewrites anything.
+//               inode the helper left (as it wrote or loaded them; reading
+//               the pin for status never moves the wire); file commands
+//               check it before and after every move, and refuse and log
+//               when it is not. It never moves or rewrites anything.
 //
 // A readable copy of the pin (config appPin) is written beside the state for
 // the app to see what is pinned. It is never read here.
@@ -55,6 +62,10 @@ import { AppPin } from './appPin.js';
 import type { System } from './system.js';
 
 const DOMAIN = 'vigil-app-pin-v1\n';
+const GEN_DOMAIN = 'vigil-app-pin-gen-v1\n';
+
+/** The files in the pin folder. */
+export const PIN_FILES = ['app-pin.json', 'app-pin.key', 'app-pin.gen'] as const;
 const MAX_FILE = 64 * 1024;
 
 export interface PinStoreOptions {
@@ -133,6 +144,8 @@ function canonical(body: Record<string, unknown>): string {
 export class AppPinStore {
   readonly file: string;
   readonly keyFile: string;
+  /** The signed high-water generation. */
+  readonly genFile: string;
   private key: Buffer | undefined;
   private pin: AppPin | undefined;
   private seen: string | undefined;
@@ -150,6 +163,7 @@ export class AppPinStore {
   ) {
     this.file = join(opts.dir, 'app-pin.json');
     this.keyFile = join(opts.dir, 'app-pin.key');
+    this.genFile = join(opts.dir, 'app-pin.gen');
   }
 
   /** Run `fn` after everything queued before it. */
@@ -164,8 +178,14 @@ export class AppPinStore {
     return this.enqueue(async () => {
       this.ensureDir();
       this.key = this.readKey();
+      const hadKey = !!this.key;
       if (!this.key && lstatId(this.keyFile) === undefined) await this.writeKey();
-      this.refresh();
+      this.gen = Math.max(this.gen, this.readGen());
+      this.refresh(true);
+      if (hadKey && lstatId(this.file) === undefined) {
+        this.problem = 'the pin file is missing; no app is pinned until the helper writes one';
+        this.opts.log?.(`app pin: ${this.problem}`);
+      }
     });
   }
 
@@ -227,7 +247,7 @@ export class AppPinStore {
     return this.enqueue(async () => {
       // A newer pin the helper signed (pin-app, say) is adopted, never overwritten.
       this.seen = undefined;
-      this.refresh();
+      this.refresh(true);
       const keyId = this.ids.get(this.keyFile);
       if (this.key && keyId !== undefined && lstatId(this.keyFile) !== keyId) {
         const key = this.key;
@@ -235,6 +255,8 @@ export class AppPinStore {
       }
       const pinId = this.ids.get(this.file);
       if (pinId !== undefined && lstatId(this.file) !== pinId) await this.commit(this.pin);
+      const genId = this.ids.get(this.genFile);
+      if (genId !== undefined && lstatId(this.genFile) !== genId) await this.writeGen();
     });
   }
 
@@ -253,7 +275,44 @@ export class AppPinStore {
     this.gen = gen;
     this.problem = undefined;
     this.seen = stamp(this.file);
+    await this.writeGen();
     this.writePublic(pin);
+  }
+
+  /** Record the generation in force as the lowest any pin may have from now on. */
+  private async writeGen(): Promise<void> {
+    const key = this.key;
+    if (!key) return;
+    const gen = this.gen;
+    await this.writeFile(this.genFile, 0o600, (file) => {
+      const body: Record<string, unknown> = { gen, file };
+      body.mac = createHmac('sha256', key)
+        .update(GEN_DOMAIN + canonical(body))
+        .digest('hex');
+      return JSON.stringify(body) + '\n';
+    });
+  }
+
+  /** The signed high-water generation, or 0 when there is none that verifies. */
+  private readGen(): number {
+    const read = readSmall(this.genFile);
+    if (!read || !this.key) return 0;
+    try {
+      const body = JSON.parse(read.text) as Record<string, unknown>;
+      if (body.file !== read.id || typeof body.gen !== 'number' || typeof body.mac !== 'string')
+        throw new Error('unreadable');
+      const want = createHmac('sha256', this.key)
+        .update(GEN_DOMAIN + canonical(body))
+        .digest();
+      const got = Buffer.from(body.mac, 'hex');
+      if (got.length !== want.length || !timingSafeEqual(got, want)) throw new Error('unsigned');
+      const id = lstatId(this.genFile);
+      if (id) this.ids.set(this.genFile, id);
+      return body.gen;
+    } catch {
+      this.opts.log?.('app pin: the generation file is not the one this helper signed');
+      return 0;
+    }
   }
 
   /** The app's readable copy; a failure only means the app may ask to set the helper up again. */
@@ -287,7 +346,8 @@ export class AppPinStore {
   }
 
   /** Re-read the pin file when it changed since last looked at; keep memory unless it verifies. */
-  private refresh(): void {
+  /** Read the pin file again if it changed; `adopt` (load, repair) also moves the tripwire to it. */
+  private refresh(adopt = false): void {
     // A write in progress is not the pin until it is committed.
     if (this.writing) return;
     const now = stamp(this.file);
@@ -307,6 +367,7 @@ export class AppPinStore {
     this.pin = verified.pin;
     this.gen = verified.gen;
     this.problem = undefined;
+    if (!adopt) return;
     const id = lstatId(this.file);
     if (id) this.ids.set(this.file, id);
   }
@@ -324,21 +385,18 @@ export class AppPinStore {
     // Signed as written to this very file (not a copy), and not older than what is in force.
     const { file, gen, none, mac: _mac, ...rest } = body;
     if (file !== read.id || typeof gen !== 'number' || gen < this.gen) return 'invalid';
-    // A key changed by the helper in another process (pin-app) is picked up once.
-    for (const key of [this.key, this.readKey()]) {
-      if (!key) continue;
-      const want = createHmac('sha256', key)
-        .update(DOMAIN + canonical(body))
-        .digest();
-      const got = Buffer.from(body.mac, 'hex');
-      if (got.length !== want.length || !timingSafeEqual(got, want)) continue;
-      this.key = key;
-      if (none === true && Object.keys(rest).length === 0) return { pin: undefined, gen };
-      if (none !== undefined) return 'invalid';
-      const parsed = AppPin.safeParse(rest);
-      return parsed.success ? { pin: parsed.data, gen } : 'invalid';
-    }
-    return 'invalid';
+    // Only the key loaded at start (or written since) signs a pin.
+    const key = this.key;
+    if (!key) return 'invalid';
+    const want = createHmac('sha256', key)
+      .update(DOMAIN + canonical(body))
+      .digest();
+    const got = Buffer.from(body.mac, 'hex');
+    if (got.length !== want.length || !timingSafeEqual(got, want)) return 'invalid';
+    if (none === true && Object.keys(rest).length === 0) return { pin: undefined, gen };
+    if (none !== undefined) return 'invalid';
+    const parsed = AppPin.safeParse(rest);
+    return parsed.success ? { pin: parsed.data, gen } : 'invalid';
   }
 
   /** The key, if the key file is a 0600 file of the owner's holding one. */
@@ -411,7 +469,7 @@ function setImmutable(sys: System, path: string, on: boolean) {
  * pin-remove`): clear the immutable flag on each file in it, then remove it.
  */
 export async function removePinStore(sys: System, dir: string, publicFile?: string): Promise<void> {
-  for (const name of ['app-pin.json', 'app-pin.key']) {
+  for (const name of PIN_FILES) {
     const path = join(dir, name);
     if (lstatId(path) !== undefined) await setImmutable(sys, path, false);
   }

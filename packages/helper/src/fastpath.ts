@@ -59,7 +59,15 @@ export interface HelperRan {
   at: number;
   outcome?: ActionOutcome;
   error?: string;
+  /** Why it was not done, when the app words that itself (core ActionRecord result errorCode). */
+  errorCode?: 'move-stalled';
 }
+
+/** Actions that move an item, which can take a while; everything else is quick containment. */
+const MOVES = new Set<Action['kind']>(['file.quarantine', 'persistence.disable']);
+
+/** How long the next event waits on a move before it is looked at anyway. */
+export const MOVE_WAIT_MS = 15_000;
 
 export interface FastPathOptions {
   /** Where the synced rules are kept between restarts. */
@@ -70,6 +78,8 @@ export interface FastPathOptions {
   now?: () => number;
   /** For tests: a smaller RETIRED_MAX. */
   retiredMax?: number;
+  /** For tests: a shorter MOVE_WAIT_MS. */
+  moveWaitMs?: number;
   /** A file's device and inode (`fileId`), to check an AppImage the app names is that file. */
   fileId?: (path: string) => string | undefined;
   /**
@@ -371,26 +381,67 @@ export class FastPath {
       return [];
     }
     const ran: HelperRan[] = [];
+    const moves: { ruleId: string; action: Action; parsed: HelperAction }[] = [];
+    // Pauses, kills and blocks first, all of them, before any move starts:
+    // none of them waits on a move, so a move that stalls leaves them in force.
     for (const d of detections) {
       if (d.mode !== 'block') continue;
       for (const action of d.execute) {
         const parsed = HelperAction.safeParse(action);
         // Containment only. Rules never carry releases, but the helper checks.
         if (!parsed.success || isRelease(action)) continue;
-        try {
-          const outcome = await this.opts.run(parsed.data);
-          ran.push({ ruleId: d.match.ruleId, action, at: Date.now(), outcome });
-        } catch (err) {
-          ran.push({
-            ruleId: d.match.ruleId,
-            action,
-            at: Date.now(),
-            error: (err as Error).message,
-          });
+        if (MOVES.has(action.kind)) {
+          moves.push({ ruleId: d.match.ruleId, action, parsed: parsed.data });
+          continue;
         }
+        ran.push(await this.runOne(d.match.ruleId, action, this.opts.run(parsed.data)));
+      }
+    }
+    // Then the moves, each waited on for a while only. One still running
+    // after that goes on by itself (transfer.ts bounds it), and the next
+    // event is looked at.
+    const wait = this.opts.moveWaitMs ?? MOVE_WAIT_MS;
+    for (const m of moves) {
+      const run = this.opts.run(m.parsed);
+      let timer: NodeJS.Timeout | undefined;
+      const stalled = new Promise<'stalled'>((resolve) => {
+        timer = setTimeout(() => resolve('stalled'), wait);
+      });
+      const first = await Promise.race([
+        run.then(
+          () => 'done' as const,
+          () => 'done' as const,
+        ),
+        stalled,
+      ]);
+      clearTimeout(timer);
+      if (first === 'stalled') {
+        run.catch((err: Error) => this.opts.log?.(`fast path: ${m.action.kind}: ${err.message}`));
+        this.opts.log?.(`fast path: ${m.action.kind} is taking long; not waiting on it`);
+        ran.push({
+          ruleId: m.ruleId,
+          action: m.action,
+          at: Date.now(),
+          error: 'Not moved in time; what was stopped or blocked stays that way',
+          errorCode: 'move-stalled',
+        });
+      } else {
+        ran.push(await this.runOne(m.ruleId, m.action, run));
       }
     }
     return ran;
+  }
+
+  private async runOne(
+    ruleId: string,
+    action: Action,
+    run: Promise<ActionOutcome>,
+  ): Promise<HelperRan> {
+    try {
+      return { ruleId, action, at: Date.now(), outcome: await run };
+    } catch (err) {
+      return { ruleId, action, at: Date.now(), error: (err as Error).message };
+    }
   }
 
   /**

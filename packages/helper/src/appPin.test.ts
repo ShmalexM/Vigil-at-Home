@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs';
+import { PIN_MAX_BYTES, openRegularFile } from './openedFile.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RuleStore } from '@vigil/sensors';
@@ -487,6 +488,26 @@ describe('the app pinned at install (macOS)', () => {
       expect(currentPin()).toEqual(before);
     });
 
+    it('reads one grant at a time, and a newer grant replaces the one waiting', async () => {
+      const { ex, committed } = grantExecutor();
+      const grant: HelperCommand = { kind: 'self.grant', selfPaths: [BUNDLE] };
+      // Two at once: the second is refused while the first's app is read.
+      const [a, b] = await Promise.allSettled([ex.execute(grant), ex.execute(grant)]);
+      expect(a.status).toBe('fulfilled');
+      expect(b).toMatchObject({ status: 'rejected', reason: { message: /still checking/ } });
+      const first = (a as PromiseFulfilledResult<{ nonce: string }>).value.nonce;
+      // A newer grant: the first can no longer be approved.
+      await approve(ex, grant);
+      Approvals.writeApproval(join(root, 'approvals'), first);
+      const again = await ex.execute(grant, first);
+      expect(again.kind).toBe('needs_approval');
+      expect(committed).toEqual([]);
+      const latest = (again as { nonce: string }).nonce;
+      Approvals.writeApproval(join(root, 'approvals'), latest);
+      expect((await ex.execute(grant, latest)).kind).toBe('done');
+      expect(committed).toHaveLength(1);
+    });
+
     it('pins nothing for a grant naming code not signed as Vigil', async () => {
       const before = currentPin();
       const other = '/Users/a/Downloads/Other.app';
@@ -709,6 +730,32 @@ describe('a FIFO on a real disk', () => {
     dir = mkdtempSync(join(tmpdir(), 'vigil-fifo-'));
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('hashes off the event loop, the same as the direct hash, and not past the cap', async () => {
+    const f = join(dir, 'Vigil.AppImage');
+    writeFileSync(f, Buffer.alloc(3 * 1024 * 1024 + 7, 7));
+    const opened = openRegularFile(f)!;
+    try {
+      let ticks = 0;
+      const tick = setInterval(() => ticks++, 0);
+      const hash = await opened.sha256Async();
+      clearInterval(tick);
+      expect(hash).toBe(opened.sha256());
+      expect(ticks).toBeGreaterThan(0);
+    } finally {
+      opened.close();
+    }
+    // A sparse file just over the cap is refused without reading it.
+    const big = join(dir, 'big.AppImage');
+    writeFileSync(big, '');
+    truncateSync(big, PIN_MAX_BYTES + 1);
+    const large = openRegularFile(big)!;
+    try {
+      expect(await large.sha256Async()).toBeUndefined();
+    } finally {
+      large.close();
+    }
+  });
 
   it.skipIf(process.platform === 'win32')(
     'is refused promptly as a pin candidate, on either system',

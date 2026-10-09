@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type ChildProcess } from 'node:child_process';
 import {
   chmodSync,
   chownSync,
@@ -25,6 +25,7 @@ import {
   rootOnly,
   self,
   transfer,
+  transferLimits,
   type Actor,
 } from './commands/transfer.js';
 import { disablePersistence } from './commands/persistence.js';
@@ -340,7 +341,7 @@ describe.skipIf(!isRoot)('moves as the user (root only)', () => {
     expect(lstatSync(store.file).isFile()).toBe(true);
     expect(readFileSync(store.file)).not.toEqual(pinBefore); // the write landed
     expect(store.current()?.path).toBe('/y');
-    expect(readdirNames(pinDir).sort()).toEqual(['app-pin.json', 'app-pin.key']);
+    expect(readdirNames(pinDir).sort()).toEqual(['app-pin.gen', 'app-pin.json', 'app-pin.key']);
     expect(existsSync(join(root, 'Quarantine', 'q2'))).toBe(false);
     expect(readFileSync(join(`${parent}.old`, 'app-pin.json'), 'utf8')).toBe('x');
     expect(readlinkSync(parent)).toBe(pinDir);
@@ -593,6 +594,93 @@ describe('groups when placing as a user', () => {
   });
 });
 
+describe('bounds on a move', () => {
+  const saved = { ...transferLimits };
+  let children: ChildProcess[];
+  beforeEach(() => {
+    children = [];
+    transferLimits.onSpawn = (c) => children.push(c);
+  });
+  afterEach(() => {
+    for (const c of children) if (c.exitCode === null && c.signalCode === null) c.kill('SIGKILL');
+    Object.assign(transferLimits, saved);
+  });
+  const gone = (c: ChildProcess) => c.exitCode !== null || c.signalCode !== null;
+  const qopts = (): QuarantineOptions => ({
+    quarantineDir: join(root, 'Quarantine'),
+    platform: 'linux',
+    protectedPrefixes: [],
+  });
+  /** Stop the reading child of the next move as soon as it starts. */
+  const stopReader = () => {
+    transferLimits.onSpawn = (c, op) => {
+      children.push(c);
+      if (op === 'pack' || op === 'read') c.kill('SIGSTOP');
+    };
+  };
+  const sys = new FakeLinuxSystem();
+  const item = (name = 'app', files = 1) => {
+    const p = join(root, name);
+    mkdirSync(p);
+    for (let i = 0; i < files; i++) writeFileSync(join(p, `f${i}`), 'x'.repeat(10));
+    return p;
+  };
+
+  it('stops a move whose reader is stopped, kills both processes and keeps the original', async () => {
+    transferLimits.deadlineMs = 300;
+    transferLimits.graceMs = 300;
+    stopReader();
+    const app = item();
+    const t0 = Date.now();
+    await expect(quarantine(sys, app, 's1', qopts())).rejects.toThrow(/took too long/);
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(existsSync(join(app, 'f0'))).toBe(true);
+    expect(existsSync(join(root, 'Quarantine', 's1'))).toBe(false);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(children).toHaveLength(2);
+    expect(children.every(gone)).toBe(true);
+  });
+
+  it('stops a read whose process is stopped', async () => {
+    transferLimits.deadlineMs = 300;
+    stopReader();
+    writeFileSync(join(root, 'small'), 'x');
+    await expect(readAs(self(), join(root, 'small'))).rejects.toThrow(/took too long/);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(children.every(gone)).toBe(true);
+  });
+
+  it('refuses an item with too many entries or bytes, leaving it in place', async () => {
+    transferLimits.maxEntries = 3;
+    const many = item('many', 5);
+    await expect(quarantine(sys, many, 'c1', qopts())).rejects.toThrow(/too many files/);
+    expect(existsSync(join(many, 'f4'))).toBe(true);
+    transferLimits.maxEntries = saved.maxEntries;
+    transferLimits.maxBytes = 15;
+    const big = item('big', 2);
+    await expect(quarantine(sys, big, 'c2', qopts())).rejects.toThrow(/too large/);
+    expect(existsSync(join(big, 'f1'))).toBe(true);
+    expect(existsSync(join(root, 'Quarantine', 'c1'))).toBe(false);
+    expect(existsSync(join(root, 'Quarantine', 'c2'))).toBe(false);
+  });
+
+  it('refuses a move past the number running at once, and takes one again once they end', async () => {
+    transferLimits.maxActive = 1;
+    transferLimits.deadlineMs = 500;
+    transferLimits.graceMs = 100;
+    stopReader();
+    const first = quarantine(sys, item('a'), 'm1', qopts());
+    while (children.length < 2) await new Promise((r) => setTimeout(r, 5));
+    transferLimits.onSpawn = (c) => children.push(c);
+    await expect(quarantine(sys, item('b'), 'm2', qopts())).rejects.toThrow(/already moving/);
+    await expect(first).rejects.toThrow(/took too long/);
+    const rec = await quarantine(sys, join(root, 'b'), 'm3', qopts());
+    expect(existsSync(join(root, 'b'))).toBe(false);
+    // The stored copy is locked; unlocked here so the test's cleanup can remove it as any user.
+    chmodSync(rec.storedPath, 0o700);
+  });
+});
+
 describe('the daemon lock for pin-app', () => {
   it('sees a daemon on the socket, and none when nothing listens', async () => {
     const sock = join(root, 'helper.sock');
@@ -620,11 +708,26 @@ describe('startup items are read as the path’s user', () => {
     protectedExact: new Set(),
   });
 
+  it('turns off a user’s agent only when that user asks', async () => {
+    const dir = launch();
+    const plist = join(dir, 'com.evil.agent.plist');
+    writeFileSync(plist, '<plist/>');
+    const sys = new FakeSystem();
+    sys.console = process.getuid!() + 1;
+    sys.labels.set(plist, 'com.evil.agent');
+    await expect(
+      disablePersistence(sys, plist, 'p0', opts(), /LaunchAgents$/),
+    ).rejects.toMatchObject({ code: 'refused', message: /another user/ });
+    expect(existsSync(plist)).toBe(true);
+    expect(sys.runs.filter((r) => r.bin === 'launchctl')).toEqual([]);
+  });
+
   it('hands plutil the bytes, never the path', async () => {
     const dir = launch();
     const plist = join(dir, 'com.evil.agent.plist');
     writeFileSync(plist, '<plist/>');
     const sys = new FakeSystem();
+    sys.console = process.getuid!();
     sys.labels.set(plist, 'com.evil.agent');
     const rec = await disablePersistence(sys, plist, 'p1', opts(), /LaunchAgents$/);
     expect(rec.label).toBe('com.evil.agent');

@@ -6,10 +6,11 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { RuleStore } from '@vigil/sensors';
 import { Approvals, pkexecArgs } from './approval.js';
 import { defaultPaths, linuxPaths } from './config.js';
@@ -231,6 +232,7 @@ describe('Linux startup items', () => {
     writeFileSync(path, '[Service]\nExecStart=/home/alex/.cache/miner\n');
     sys.active.add('user:alex miner.service');
     const uid = statSync(path).uid;
+    sys.console = uid;
     const passwd = () => `alex:x:${uid}:${uid}::/home/alex:/bin/bash\n`;
     const rec = await disableLinuxPersistence(sys, path, 'act1', qopts(), dirs(), passwd);
     expect(rec).toMatchObject({ label: 'miner.service', domain: 'user:alex', wasLoaded: true });
@@ -250,11 +252,46 @@ describe('Linux startup items', () => {
   it('moves an autostart entry without touching systemd', async () => {
     const path = join(autostart, 'updater.desktop');
     writeFileSync(path, '[Desktop Entry]\nExec=/tmp/x\n');
+    sys.console = statSync(path).uid;
     const rec = await disableLinuxPersistence(sys, path, 'act2', qopts(), dirs(), () => PASSWD);
     expect(rec.domain).toBe('autostart');
     expect(sys.runs).toEqual([]);
     await restoreLinuxPersistence(sys, rec, qopts());
     expect(existsSync(path)).toBe(true);
+  });
+
+  it('turns off a user’s own item only for that user, asking', async () => {
+    const path = join(autostart, 'updater.desktop');
+    writeFileSync(path, '[Desktop Entry]\nExec=/tmp/x\n');
+    sys.console = statSync(path).uid + 1;
+    await expect(
+      disableLinuxPersistence(sys, path, 'o1', qopts(), dirs(), () => PASSWD),
+    ).rejects.toMatchObject({ code: 'refused', message: /another user/ });
+    sys.console = undefined;
+    await expect(
+      disableLinuxPersistence(sys, path, 'o2', qopts(), dirs(), () => PASSWD),
+    ).rejects.toMatchObject({ code: 'refused' });
+    expect(existsSync(path)).toBe(true);
+    expect(sys.runs).toEqual([]);
+  });
+
+  it('refuses a startup folder that is a link to another folder', async () => {
+    // A user's startup folder pointing at a system one: checked as written, acted on for real.
+    const system = join(root, 'etc', 'systemd', 'system');
+    mkdirSync(system, { recursive: true });
+    writeFileSync(join(system, 'sshd.service'), '[Service]\n');
+    const linked = join(root, 'home', 'bob', '.config', 'systemd', 'user');
+    mkdirSync(dirname(linked), { recursive: true });
+    symlinkSync(system, linked);
+    sys.console = statSync(join(system, 'sshd.service')).uid;
+    const both = new RegExp(
+      `^(${linked.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}|${system.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})$`,
+    );
+    await expect(
+      disableLinuxPersistence(sys, join(linked, 'sshd.service'), 'l1', qopts(), both, () => PASSWD),
+    ).rejects.toMatchObject({ code: 'refused', message: /another folder/ });
+    expect(existsSync(join(system, 'sshd.service'))).toBe(true);
+    expect(sys.runs).toEqual([]);
   });
 
   it('refuses files outside startup folders and the wrong kind of file', async () => {

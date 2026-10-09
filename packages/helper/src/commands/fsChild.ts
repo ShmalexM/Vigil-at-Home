@@ -70,6 +70,30 @@ export interface FsRequest {
   owners?: boolean;
   /** pack: the item is in the helper's own root-only folder, where no one else reaches. */
   ownTree?: boolean;
+  /** pack and place: at most this many entries, and bytes of file data (never above the built-in caps). */
+  maxEntries?: number;
+  maxBytes?: number;
+}
+
+const MAX_ENTRIES = 200_000;
+const MAX_BYTES = 8 * 1024 ** 3;
+
+/** Counts entries and file bytes against the request's caps, refusing past either. */
+class Budget {
+  private entries = 0;
+  private bytes = 0;
+  private readonly maxEntries: number;
+  private readonly maxBytes: number;
+  constructor(req: FsRequest) {
+    this.maxEntries = Math.min(req.maxEntries ?? MAX_ENTRIES, MAX_ENTRIES);
+    this.maxBytes = Math.min(req.maxBytes ?? MAX_BYTES, MAX_BYTES);
+  }
+  take(bytes: number): void {
+    if (!Number.isSafeInteger(bytes) || bytes < 0) throw new Refusal('the archive is not readable');
+    if (++this.entries > this.maxEntries) throw new Refusal('the item has too many files');
+    this.bytes += bytes;
+    if (this.bytes > this.maxBytes) throw new Refusal('the item is too large');
+  }
 }
 
 export type Frame =
@@ -205,6 +229,7 @@ function packFile(top: string, rel: string, st: BigIntStats, out: number): void 
     if (!f.isFile() || idOf(f) !== idOf(st))
       throw new Refusal(`${at(top, rel)} changed while it was read`);
     const size = Number(f.size);
+    budget.take(size);
     const frame: Frame = {
       t: 'f',
       rel,
@@ -233,11 +258,14 @@ function packFile(top: string, rel: string, st: BigIntStats, out: number): void 
 
 /** Set for a pack of the helper's own store (FsRequest ownTree). */
 let ownTree = false;
+/** The pack's caps (FsRequest maxEntries, maxBytes). */
+let budget = new Budget({ op: 'pack', path: '', uid: 0, gid: 0 });
 
 function packEntry(top: string, rel: string, out: number, packed: Packed[]): void {
   const path = at(top, rel);
   const st = lstatSync(path, { bigint: true });
   const owner = { uid: Number(st.uid), gid: Number(st.gid) };
+  if (!st.isFile()) budget.take(0);
   if (st.isSymbolicLink()) {
     const frame: Frame = { t: 'l', rel, target: readlinkSync(path), ...owner };
     writeAll(out, Buffer.from(JSON.stringify(frame) + '\n'));
@@ -284,6 +312,7 @@ function removePacked(top: string, packed: Packed[]): void {
 export function pack(req: FsRequest, input: FdReader, out = 1): void {
   const packed: Packed[] = [];
   ownTree = req.ownTree === true;
+  budget = new Budget(req);
   packEntry(req.path, '', out, packed);
   writeAll(out, Buffer.from(JSON.stringify({ t: 'end' } satisfies Frame) + '\n'));
   closeSync(out);
@@ -360,6 +389,7 @@ const nsToDate = (ns: string) => {
 export function place(req: FsRequest, input: FdReader): void {
   const created: Created[] = [];
   const dirs: { path: string; mode: number; mtime: string }[] = [];
+  const budget = new Budget(req);
   const asRoot = process.getuid?.() === 0;
   /** Owners to give once everything is written, in the order things were made. */
   const owners: Owner[] = [];
@@ -387,6 +417,7 @@ export function place(req: FsRequest, input: FdReader): void {
     for (;;) {
       const frame = parseFrame(input.line());
       if (frame.t === 'end') break;
+      budget.take(frame.t === 'f' ? frame.size : 0);
       if (first !== (frame.rel === '')) throw new Refusal('the archive is not readable');
       if (!first) {
         const parent = frame.rel.includes('/')

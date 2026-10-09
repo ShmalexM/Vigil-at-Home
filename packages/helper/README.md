@@ -137,8 +137,25 @@ an event while working fine; Santa logs every program launch.
   anywhere else, anything a user owns is restored as that user, keeping each entry's
   group when it is one of theirs, and when they can't write where it goes back, the
   restore is refused. Startup items are read the same way before they are turned off.
+- **Bounded moves.** A move (or read) still running after two minutes is stopped: its
+  reading process is killed, and its writing process removes what it made and is killed
+  too. An item may hold at most 200,000 entries and 8 GiB, and at most four moves run at
+  once. The helper's own rules never wait on a move: pauses, kills and blocks are all
+  done first, and a move still running after 15 seconds goes on by itself while the
+  next event is looked at. The app then shows that the item was not moved in time.
+- **Startup items.** One is turned off only in the startup folder as written: a folder
+  that is a link elsewhere is refused. An item in a user's folder must be that user's,
+  and that user must be the one asking (the console user, who owns the socket).
+- **App grants.** The app named in a self grant is hashed off the event loop (up to
+  1 GiB), one grant at a time; a newer grant replaces one still waiting for the
+  password. At most 64 approvals wait at once, and a nonce offered with a command it
+  was not issued for is left as it is.
 - **One pin writer.** `pin-app` refuses to run while the daemon answers on its socket,
-  and the daemon re-reads the signed pin before repairing it, adopting a newer one.
+  and the daemon re-reads the signed pin before repairing it, adopting a newer one. The
+  highest generation signed is kept in a signed counter (`pin/app-pin.gen`), so an
+  older pin put back while the helper was stopped is refused at start, and pins are
+  checked only with the key loaded at start. `vigil-helper pin-remove`, which the
+  uninstallers run, clears the immutable flag and removes the pin folder.
 - **Network blocks.** Loopback, link-local and multicast addresses are refused, and so
   are ranges wider than /8 (IPv4) or /24 (IPv6). Single ports are not supported yet.
   pf forgets its tables at reboot, so the helper re-applies active blocks from its

@@ -3,13 +3,42 @@
 // from this one descriptor, never from looking the path up again, so the
 // facts can't come from different files when the path is swapped meanwhile.
 
-import { closeSync, fstatSync, readSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { closeSync, fstatSync, read, readSync } from 'node:fs';
+import { promisify } from 'node:util';
 import { fileId } from '@vigil/core/self';
 import { openNonBlocking, sha256OfFd } from '@vigil/sensors';
 import type { FileStat } from './system.js';
 
 /** Largest file the helper hashes for a pin (an AppImage or Electron binary). */
-export const PIN_MAX_BYTES = 4 * 1024 ** 3;
+export const PIN_MAX_BYTES = 1024 ** 3;
+
+const readAsync = promisify(read);
+
+/**
+ * The sha256 of what `fd` holds, read in chunks off the event loop, so a
+ * large file never holds up the helper. Undefined when it isn't a regular
+ * file or is larger than `maxBytes`.
+ */
+export async function sha256OfFdAsync(fd: number, maxBytes: number): Promise<string | undefined> {
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.size > maxBytes) return undefined;
+    const hash = createHash('sha256');
+    const buf = Buffer.allocUnsafe(1024 * 1024);
+    let pos = 0;
+    for (;;) {
+      const { bytesRead } = await readAsync(fd, buf, 0, buf.length, pos);
+      if (bytesRead <= 0) break;
+      pos += bytesRead;
+      if (pos > maxBytes) return undefined;
+      hash.update(buf.subarray(0, bytesRead));
+    }
+    return hash.digest('hex');
+  } catch {
+    return undefined;
+  }
+}
 
 export interface OpenedFile {
   /** fstat of the descriptor when it was opened. */
@@ -20,6 +49,8 @@ export interface OpenedFile {
   read(pos: number, len: number): Buffer;
   /** The sha256 of the whole file, read through the descriptor. */
   sha256(): string | undefined;
+  /** The same, read off the event loop (for a file someone else names, like a self grant's). */
+  sha256Async(): Promise<string | undefined>;
   close(): void;
 }
 
@@ -72,6 +103,7 @@ export function openRegularFile(path: string, opts: OpenOptions = {}): OpenedFil
       return buf.subarray(0, got);
     },
     sha256: () => sha256OfFd(fd, PIN_MAX_BYTES),
+    sha256Async: () => sha256OfFdAsync(fd, PIN_MAX_BYTES),
     close: () => closeSync(fd),
   };
 }

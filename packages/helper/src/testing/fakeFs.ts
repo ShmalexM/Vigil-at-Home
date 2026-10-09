@@ -46,10 +46,11 @@ export class FakeFs {
     };
     const stat = statOf();
     if (!stat) return undefined;
-    return {
+    const opened: OpenedFile = {
       stat,
       restat: statOf,
       read: (pos, len) => (this.inodes.get(id)?.data ?? Buffer.alloc(0)).subarray(pos, pos + len),
+      sha256Async: async () => opened.sha256(),
       sha256: () => {
         this.duringHash?.();
         const ino = this.inodes.get(id) ?? {};
@@ -62,5 +63,6 @@ export class FakeFs {
       },
       close: () => undefined,
     };
+    return opened;
   }
 }

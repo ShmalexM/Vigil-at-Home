@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DetectionEngine, macosCoreRules, memoryStores } from '@vigil/detection';
@@ -12,6 +12,7 @@ import { FastPath, PolicyRefused, RETIRE_MS, type HelperRan } from './fastpath.j
 import { Journal } from './journal.js';
 import { LIST_PART_MAX, type DetectionSync, type SelfGrant } from './protocol.js';
 import { HelperServer } from './server.js';
+import { transferLimits } from './commands/transfer.js';
 import { FakeSystem } from './testing/fakeSystem.js';
 
 const BAD = 'b'.repeat(64);
@@ -742,4 +743,109 @@ describe('Vigil’s own programs, granted apart from the rules', () => {
     await client.call({ ...sync, selfPaths: [] });
     expect(fast.selfLoosening(grant([SELF]))).toEqual([`never block ${SELF}`]);
   });
+});
+
+describe('a move that stalls', () => {
+  const saved = { ...transferLimits };
+  afterEach(() => Object.assign(transferLimits, saved));
+
+  it('never holds up blocking: the next event is blocked on time and the block stays', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vigil-fastpath-move-'));
+    const stopped: { kill(sig: NodeJS.Signals): boolean }[] = [];
+    try {
+      const fake = new FakeSystem();
+      const rules = new RuleStore(join(dir, 'rules.json'));
+      const ex = new Executor({
+        sys: fake,
+        journal: new Journal(join(dir, 'journal.json')),
+        approvals: new Approvals({
+          dir: join(dir, 'approvals'),
+          requiredOwnerUid: process.getuid!(),
+        }),
+        rules,
+        quarantine: { quarantineDir: join(dir, 'Quarantine'), protectedPrefixes: [] },
+        syncPort: 47821,
+      });
+      // The known-malware rule, with a move listed before the kill and the block.
+      const { sync } = appSet({});
+      const known = sync.rules.find((r) => r.id === 'known-bad-hash')!;
+      const withMove = {
+        ...known,
+        response: [
+          { kind: 'file.quarantine' as const, path: '{{process.path}}' },
+          ...known.response,
+        ],
+      };
+      const file = join(dir, 'helper-rules.json');
+      writeFileSync(
+        file,
+        JSON.stringify({
+          ...sync,
+          rules: [withMove],
+          lists: { known_bad_sha256: [BAD] },
+          retired: {},
+        }),
+      );
+      const fp = new FastPath({
+        file,
+        moveWaitMs: 300,
+        run: async (action) => {
+          const out = await ex.execute(action);
+          if (out.kind !== 'done') throw new Error('needs the admin password');
+          return out.result as ActionOutcome;
+        },
+      });
+      fp.load();
+      // Every move's reading process is stopped as it starts, and the move is given up after a while.
+      transferLimits.deadlineMs = 2_000;
+      transferLimits.graceMs = 200;
+      transferLimits.onSpawn = (c, op) => {
+        if (op === 'pack') {
+          c.kill('SIGSTOP');
+          stopped.push(c);
+        }
+      };
+      const first = join(dir, 'payload-1');
+      const second = join(dir, 'payload-2');
+      writeFileSync(first, 'bad');
+      writeFileSync(second, 'bad');
+      fake.processes.set(5001, { path: first, started: 'T' });
+      fake.processes.set(5002, { path: second, started: 'T' });
+
+      const t0 = Date.now();
+      const ran = await fp.check(exec(5001, BAD, first));
+      expect(ran.map((r) => r.action.kind)).toEqual([
+        'process.kill',
+        'santa.rule.set',
+        'file.quarantine',
+      ]);
+      expect(ran[2]).toMatchObject({ errorCode: 'move-stalled' });
+      expect(fake.signals).toEqual([{ pid: 5001, signal: 'SIGKILL' }]);
+      expect(
+        rules.active().some((r) => r.rule.identifier === BAD && r.rule.policy === 'BLOCKLIST'),
+      ).toBe(true);
+
+      // The next event, while the first move is still stopped: killed on time.
+      const ran2 = await fp.check(exec(5002, BAD, second));
+      expect(Date.now() - t0).toBeLessThan(1_800);
+      expect(fake.signals).toEqual([
+        { pid: 5001, signal: 'SIGKILL' },
+        { pid: 5002, signal: 'SIGKILL' },
+      ]);
+      expect(ran2[0]).toMatchObject({
+        action: { kind: 'process.kill' },
+        outcome: expect.anything(),
+      });
+
+      // Once the stopped moves are given up, the files are where they were and the block is in force.
+      await new Promise((r) => setTimeout(r, 3_000));
+      expect(existsSync(first) && existsSync(second)).toBe(true);
+      expect(
+        rules.active().some((r) => r.rule.identifier === BAD && r.rule.policy === 'BLOCKLIST'),
+      ).toBe(true);
+    } finally {
+      for (const c of stopped) c.kill('SIGKILL');
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
 });

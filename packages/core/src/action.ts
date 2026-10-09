@@ -196,8 +196,12 @@ export const ActionRecord = z.object({
     .object({
       at: Timestamp,
       error: z.string().optional(),
-      /** Why it failed, when the app words that itself: an item an installer or the system owns. */
-      errorCode: z.enum(['installer-owned', 'owner-cannot-write']).optional(),
+      /**
+       * Why it failed, when the app words that itself: an item an installer
+       * or the system owns, one its owner can't put back, or a move the
+       * helper's own rules didn't wait on.
+       */
+      errorCode: z.enum(['installer-owned', 'owner-cannot-write', 'move-stalled']).optional(),
       quarantineId: Id.optional(),
     })
     .optional(),

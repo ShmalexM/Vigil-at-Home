@@ -40,6 +40,31 @@ export function launchdDomain(
   return `gui/${ownerUid}`;
 }
 
+/**
+ * The real location of a startup item at `path`, which must be the folder
+ * as written: a startup folder that is a link elsewhere is refused, so the
+ * folder checked is the one acted on. Vetted like any quarantine.
+ */
+export function startupTarget(path: string, opts: QuarantineOptions): string {
+  const real = resolveTarget(path, opts);
+  if (dirname(real) !== dirname(path))
+    throw new ActionError(
+      'refused',
+      `${dirname(path)} leads to another folder; Vigil only turns off items in the startup folder itself`,
+    );
+  return real;
+}
+
+/**
+ * A user's own startup item (one in a home folder) is turned off only for
+ * that user: it must be theirs, and they must be the one asking (the
+ * helper's socket belongs to the console user).
+ */
+export function checkOwnItem(path: string, ownerUid: number, consoleUid: number | undefined): void {
+  if (consoleUid === undefined || ownerUid !== consoleUid)
+    throw new ActionError('refused', `${path} belongs to another user`);
+}
+
 async function readLabel(sys: System, plist: Buffer): Promise<string | undefined> {
   // From stdin: plutil never opens a path here.
   const r = await sys.run('plutil', ['-extract', 'Label', 'raw', '-o', '-', '-'], {
@@ -64,12 +89,15 @@ export async function disablePersistence(
     );
   }
   // Vetted before launchd is touched, so a protected file is never even unloaded.
-  const real = resolveTarget(path, opts);
+  const real = startupTarget(path, opts);
   // Read as whoever controls the path (commands/transfer.ts), never by root through it.
   const file = await readAs(await (opts.actorFor ?? actorFor)(sys, real), real);
+  // Anywhere but the two system folders, an agent is a user's own.
+  if (!['/Library/LaunchDaemons', '/Library/LaunchAgents'].includes(dirname(real)))
+    checkOwnItem(real, file.uid, sys.consoleUid());
 
   const label = await readLabel(sys, file.data);
-  const domain = launchdDomain(path, file.uid, sys.consoleUid());
+  const domain = launchdDomain(real, file.uid, sys.consoleUid());
   let wasLoaded = false;
   if (label) {
     const print = await sys.run('launchctl', ['print', `${domain}/${label}`]);

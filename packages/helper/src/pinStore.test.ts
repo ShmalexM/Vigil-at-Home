@@ -174,15 +174,19 @@ describe('the signed app pin', () => {
       sys.runs = [];
       await store.write(OTHER);
       await store.write(PIN);
+      const genFile = join(state, 'app-pin.gen');
       expect(sys.runs.map((r) => [r.args[0], r.args[1]])).toEqual([
         [set, file],
+        [set, genFile],
         [clear, file],
         [set, file],
+        [clear, genFile],
+        [set, genFile],
       ]);
       // Cleared while the old pin was still there, set once the new one was.
-      expect(sys.runs[1]!.held).toContain(OTHER.cdhash);
-      expect(sys.runs[2]!.held).toContain(PIN.cdhash);
-      expect(sys.immutable).toEqual(new Set([keyFile, file]));
+      expect(sys.runs[2]!.held).toContain(OTHER.cdhash);
+      expect(sys.runs[3]!.held).toContain(PIN.cdhash);
+      expect(sys.immutable).toEqual(new Set([keyFile, file, genFile]));
       // Reading, checking and status never touch the flag.
       sys.runs = [];
       store.current();
@@ -285,6 +289,59 @@ describe('one queue for the pin', () => {
   });
 });
 
+describe('what the pin store trusts at start', () => {
+  it('refuses an older signed pin put back while the helper was stopped', async () => {
+    const store = await open();
+    await store.write(OTHER);
+    linkSync(file, join(root, 'old-link'));
+    await store.write(PIN);
+    // Stopped; the pin it signed earlier is put back, inode and all.
+    renameSync(join(root, 'old-link'), file);
+    const next = await open();
+    expect(next.current()).toBeUndefined();
+    expect(next.status().problem).toMatch(/not the one/);
+  });
+
+  it('reports a key with no pin file beside it', async () => {
+    const store = await open();
+    await store.write(PIN);
+    rmSync(file);
+    const next = await open();
+    expect(next.status()).toMatchObject({
+      pinned: false,
+      problem: expect.stringMatching(/missing/),
+    });
+    // A new install (no key yet) has nothing to report.
+    rmSync(state, { recursive: true });
+    expect((await open()).status()).toEqual({ pinned: false });
+  });
+
+  it('checks pins only with the key it loaded', async () => {
+    const store = await open();
+    await store.write(OTHER);
+    // A new key and a pin signed with it, put in place behind the running helper.
+    rmSync(state, { recursive: true });
+    const other = await open();
+    await other.write(PIN);
+    expect(store.current()).toEqual(OTHER);
+    expect(store.status().problem).toMatch(/not the one/);
+  });
+
+  it('moves the tripwire only for its own writes, loads and repairs, never for a status read', async () => {
+    const daemon = await open();
+    await daemon.write(OTHER);
+    expect(await daemon.intact()).toBe(true);
+    // A newer pin signed with the same key appears (another helper process).
+    const other = await open();
+    await other.write(PIN);
+    expect(daemon.current()).toEqual(PIN);
+    // Taken as the pin, but the file is not the one this helper left: the wire stays tripped.
+    expect(await daemon.intact()).toBe(false);
+    await daemon.repair();
+    expect(await daemon.intact()).toBe(true);
+  });
+});
+
 describe('removing the pin', () => {
   it('clears the immutable flag on both files before removing the folder and the copy', async () => {
     const sys = new Flags('linux');
@@ -296,7 +353,7 @@ describe('removing the pin', () => {
     });
     await store.load();
     await store.write(PIN);
-    expect([...sys.immutable].sort()).toEqual([file, keyFile]);
+    expect([...sys.immutable].sort()).toEqual([join(state, 'app-pin.gen'), file, keyFile]);
     await removePinStore(sys as unknown as System, state, publicFile);
     expect(sys.immutable.size).toBe(0);
     expect(existsSync(state)).toBe(false);

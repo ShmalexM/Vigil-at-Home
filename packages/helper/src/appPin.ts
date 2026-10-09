@@ -185,7 +185,7 @@ export async function pinFor(
     // Only Vigil's own code is ever pinned, by the identifier it is signed with.
     if (code.identifier !== VIGIL_BUNDLE_ID)
       throw new Error(`${exe} is not signed as ${VIGIL_BUNDLE_ID}`);
-    const sha256 = f.sha256();
+    const sha256 = await f.sha256Async();
     if (!sha256 || !sameStat(f.stat, f.restat())) throw new Error(`${exe} changed while read`);
     const checked = await codesign(sys, exe);
     if (checked?.cdhash !== code.cdhash || !sameStat(f.stat, f.restat()))
@@ -197,7 +197,7 @@ export async function pinFor(
 }
 
 /** Linux: the pin for the AppImage at `path`, all read from one descriptor (see pinFor). */
-function pinImage(sys: System, path: string, opts: PinOptions): AppPin | undefined {
+async function pinImage(sys: System, path: string, opts: PinOptions): Promise<AppPin | undefined> {
   const inside = inInstalled(sys, opts.installed, path, false);
   const f = sys.openFile?.(path, { nofollow: true });
   if (!f) {
@@ -211,7 +211,7 @@ function pinImage(sys: System, path: string, opts: PinOptions): AppPin | undefin
     const { id: image, ctime, size } = f.stat;
     if (opts.expectId !== undefined && image !== opts.expectId)
       throw new Error(`${path} is no longer the file that was named`);
-    const sha256 = f.sha256();
+    const sha256 = await f.sha256Async();
     if (!sha256 || !sameStat(f.stat, f.restat())) throw new Error(`${path} changed while read`);
     return { platform: 'linux', path, image, ctime, size, sha256 };
   } finally {

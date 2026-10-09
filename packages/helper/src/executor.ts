@@ -158,6 +158,11 @@ export class Executor {
     return this.d.sys.platform === 'linux' ? { platform: 'linux', ...opts } : opts;
   }
 
+  /** Whether a self grant's app is being read now. */
+  private grantReading = false;
+  /** The self grant waiting for the password, if any. */
+  private grantWaiting: string | undefined;
+
   /** The app each pending self-grant approval re-pins (appPin.ts pinCandidate), by nonce. */
   private readonly pinBindings = new Map<string, { bound: PinCandidate; expiresAt: number }>();
 
@@ -200,15 +205,36 @@ export class Executor {
       } catch (err) {
         throw policyError(err);
       }
+      // Only the approval issued for this very grant releases its binding.
+      const ours = !!approval && this.d.approvals.issuedFor(approval, cmd);
       if (grants.length && (!approval || !this.d.approvals.consume(approval, cmd))) {
-        this.takePin(approval);
-        // Before the dialog: the app this grant would re-pin, as its code is
-        // on disk now. The approval re-pins that code and nothing else.
-        const candidate = await this.d.repin?.candidate(cmd).catch(() => undefined);
+        if (ours) this.takePin(approval);
+        // One grant at a time: its app is read (and hashed) once, and a newer
+        // grant replaces the one still waiting for the password.
+        if (this.grantReading)
+          throw new ActionError(
+            'refused',
+            'Vigil is still checking its app; try again in a moment',
+          );
+        this.grantReading = true;
+        let candidate: PinCandidate | undefined;
+        try {
+          // Before the dialog: the app this grant would re-pin, as its code is
+          // on disk now. The approval re-pins that code and nothing else.
+          candidate = await this.d.repin?.candidate(cmd).catch(() => undefined);
+        } finally {
+          this.grantReading = false;
+        }
+        if (this.grantWaiting) {
+          this.d.approvals.cancel(this.grantWaiting);
+          this.takePin(this.grantWaiting);
+        }
         const nonce = this.d.approvals.request(cmd);
+        this.grantWaiting = nonce;
         if (candidate) this.bindPin(nonce, candidate);
         return { kind: 'needs_approval', nonce, prompt: selfPrompt(grants) };
       }
+      if (approval === this.grantWaiting) this.grantWaiting = undefined;
       if (grants.length) bound = this.takePin(approval);
     } else if (needsApproval(cmd)) {
       // Check the release can actually happen before bothering the user.

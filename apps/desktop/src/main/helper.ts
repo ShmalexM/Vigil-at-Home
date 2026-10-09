@@ -374,7 +374,11 @@ export class HelperLink
       const at = typeof r.at === 'number' ? r.at : now;
       const result: ActionResult = r.outcome
         ? { at, ...(r.outcome.quarantineId ? { quarantineId: r.outcome.quarantineId } : {}) }
-        : { at, error: r.error ?? 'The Vigil helper could not do this' };
+        : {
+            at,
+            error: r.error ?? 'The Vigil helper could not do this',
+            ...(r.errorCode === 'move-stalled' ? { errorCode: 'move-stalled' as const } : {}),
+          };
       const key = JSON.stringify(r.action);
       const entry = this.helperRan.get(key);
       if (entry) entry.results.push(result);

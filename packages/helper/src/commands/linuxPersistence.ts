@@ -16,8 +16,8 @@ import { actorFor, readAs } from './transfer.js';
 import type { System } from '../system.js';
 import { protectionFor } from '../config.js';
 import { ActionError } from './errors.js';
-import { quarantine, resolveTarget, restore, type QuarantineOptions } from './quarantine.js';
-import type { PersistenceRecord } from './persistence.js';
+import { quarantine, restore, type QuarantineOptions } from './quarantine.js';
+import { checkOwnItem, startupTarget, type PersistenceRecord } from './persistence.js';
 
 /** Folders whose items persistence.disable accepts on Linux. */
 export const LINUX_STARTUP_DIR_RE =
@@ -99,11 +99,13 @@ export async function disableLinuxPersistence(
     throw new ActionError('invalid', `${name} does not belong in ${dirname(path)}`);
   }
   // Vetted before systemd is touched, so a protected file is never even stopped.
-  const real = resolveTarget(path, startupQuarantine(opts));
+  const real = startupTarget(path, startupQuarantine(opts));
   // Read as whoever controls the path (commands/transfer.ts), never by root through it.
   const file = await readAs(await (opts.actorFor ?? actorFor)(sys, real), real);
+  // Anywhere but /etc, an item is a user's own.
+  if (!dirname(real).startsWith('/etc/')) checkOwnItem(real, file.uid, sys.consoleUid());
 
-  const scope = unitScope(path, file.uid, passwd);
+  const scope = unitScope(real, file.uid, passwd);
   let wasLoaded = false;
   if (scope.kind !== 'autostart') {
     const args = scopeArgs(scope);

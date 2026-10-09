@@ -18,6 +18,31 @@ import type { System } from '../system.js';
 import { ActionError } from './errors.js';
 import type { FsRequest } from './fsChild.js';
 
+/**
+ * Bounds on the processes a move starts, so no item (or user stopping a
+ * process of theirs) can hold the helper up for good.
+ *
+ *   deadlineMs   a move or read still running after this is stopped: the
+ *                reading side is killed, the writing side gets graceMs to
+ *                remove what it made, and is then killed too.
+ *   maxActive    moves at once; more are refused until one ends.
+ *   maxEntries   files, folders and links in one item.
+ *   maxBytes     bytes of file data in one item.
+ *
+ * Tests lower them.
+ */
+export const transferLimits = {
+  deadlineMs: 120_000,
+  graceMs: 5_000,
+  maxActive: 4,
+  maxEntries: 200_000,
+  maxBytes: 8 * 1024 ** 3,
+  /** Tests: each child as it starts. */
+  onSpawn: undefined as ((child: ChildProcess, op: FsRequest['op']) => void) | undefined,
+};
+
+let activeTransfers = 0;
+
 /** Who a side of a move runs as. */
 export interface Actor {
   uid: number;
@@ -252,7 +277,13 @@ export async function readAs(
   const chunks: Buffer[] = [];
   run.child.stdout!.on('data', (c: Buffer) => chunks.push(c));
   run.child.stdin!.end();
-  const r = await run.done;
+  let late = false;
+  const timer = setTimeout(() => {
+    late = true;
+    run.child.kill('SIGKILL');
+  }, transferLimits.deadlineMs);
+  const r = await run.done.finally(() => clearTimeout(timer));
+  if (late) throw new ActionError('failed', `reading ${path} took too long and was stopped`);
   if (r.code !== 0) {
     if (/ENOENT/.test(r.message)) throw new ActionError('not_found', `${path} does not exist`);
     throw new ActionError('refused', `could not read ${path}: ${r.message}`);
@@ -278,6 +309,7 @@ interface Run {
 function start(req: FsRequest): Run {
   const [bin, args] = childCommand();
   const child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'], env: {}, cwd: '/' });
+  transferLimits.onSpawn?.(child, req.op);
   let err = '';
   child.stderr!.setEncoding('utf8');
   child.stderr!.on('data', (d: string) => {
@@ -321,36 +353,72 @@ export async function transfer(
   to: { path: string; actor: Actor },
   opts: TransferOptions = {},
 ): Promise<void> {
+  if (activeTransfers >= transferLimits.maxActive)
+    throw new ActionError('refused', 'Vigil is already moving other items; try again in a moment');
+  activeTransfers++;
+  try {
+    await transferOnce(from, to, opts);
+  } finally {
+    activeTransfers--;
+  }
+}
+
+async function transferOnce(
+  from: { path: string; actor: Actor; ownTree?: boolean },
+  to: { path: string; actor: Actor },
+  opts: TransferOptions,
+): Promise<void> {
+  const caps = { maxEntries: transferLimits.maxEntries, maxBytes: transferLimits.maxBytes };
   const packer = start({
     op: 'pack',
     path: from.path,
     uid: from.actor.uid,
     gid: from.actor.gid,
+    ...caps,
     ...(from.ownTree ? { ownTree: true } : {}),
   });
   const placer = start({
     op: 'place',
     path: to.path,
     ...to.actor,
+    ...caps,
     ...(opts.parents ? { parents: true } : {}),
     ...(opts.topMode !== undefined ? { topMode: opts.topMode } : {}),
     ...(opts.owners ? { owners: true } : {}),
   });
-  packer.child.stdout!.pipe(placer.child.stdin!);
-  const placed = await placer.done;
-  if (placed.code !== 0) {
-    packer.child.stdin!.end('keep\n');
+  // Past the deadline the reader is killed; the writer, its input gone,
+  // removes what it made, and is killed too if it hasn't ended by then.
+  let late = false;
+  let grace: NodeJS.Timeout | undefined;
+  const timer = setTimeout(() => {
+    late = true;
+    packer.child.kill('SIGKILL');
+    grace = setTimeout(() => placer.child.kill('SIGKILL'), transferLimits.graceMs);
+  }, transferLimits.deadlineMs);
+  const tooLong = () =>
+    new ActionError('failed', `moving ${from.path} took too long and was stopped`);
+  try {
+    packer.child.stdout!.pipe(placer.child.stdin!);
+    const placed = await placer.done;
+    if (placed.code !== 0) {
+      packer.child.stdin!.end('keep\n');
+      const packed = await packer.done;
+      if (late) throw tooLong();
+      // The reader's reason comes first: a placer that saw the archive end early only echoes it.
+      const why = packed.code !== 0 && packed.message ? packed.message : placed.message;
+      throw new ActionError('failed', `could not move ${from.path}: ${why}`);
+    }
+    packer.child.stdin!.end(opts.removeSource ? 'remove\n' : 'keep\n');
     const packed = await packer.done;
-    // The reader's reason comes first: a placer that saw the archive end early only echoes it.
-    const why = packed.code !== 0 && packed.message ? packed.message : placed.message;
-    throw new ActionError('failed', `could not move ${from.path}: ${why}`);
-  }
-  packer.child.stdin!.end(opts.removeSource ? 'remove\n' : 'keep\n');
-  const packed = await packer.done;
-  if (packed.code !== 0) {
-    throw Object.assign(
-      new ActionError('failed', `copied ${from.path} but could not remove it: ${packed.message}`),
-      { copied: true },
-    );
+    if (packed.code !== 0) {
+      const why = late ? 'it took too long and was stopped' : packed.message;
+      throw Object.assign(
+        new ActionError('failed', `copied ${from.path} but could not remove it: ${why}`),
+        { copied: true },
+      );
+    }
+  } finally {
+    clearTimeout(timer);
+    clearTimeout(grace);
   }
 }

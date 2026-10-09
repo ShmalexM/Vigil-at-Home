@@ -147,3 +147,15 @@ describe('a restore its owner can’t write back', () => {
     );
   });
 });
+
+describe('a move the helper stopped waiting on', () => {
+  it('shows one calm line for it', () => {
+    const r = rec(
+      { kind: 'file.quarantine', path: '/home/a/miner' },
+      { status: 'failed', result: { at: 1, error: 'x', errorCode: 'move-stalled' } },
+    );
+    expect(actionErrorText(r, [r])).toBe(
+      'Vigil couldn’t move this in time. Anything it stopped or blocked stays that way.',
+    );
+  });
+});

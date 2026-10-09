@@ -140,8 +140,21 @@ describe('HelperLink', () => {
           action: { kind: 'network.block', address: '203.0.113.9' },
           error: 'pf is off',
         },
+        {
+          ruleId: 'known-bad-hash',
+          at: 3,
+          action: { kind: 'file.quarantine', path: '/tmp/payload' },
+          error: 'Not moved in time',
+          errorCode: 'move-stalled',
+        },
       ],
     );
+    // A move the helper stopped waiting on keeps its code, for the app's own line.
+    expect(await link.execute({ kind: 'file.quarantine', path: '/tmp/payload' })).toEqual({
+      at: 3,
+      error: 'Not moved in time',
+      errorCode: 'move-stalled',
+    });
     // The helper's own finish time, so time-to-block stays honest.
     expect(await link.execute(kill)).toEqual({ at: 1 });
     expect(await link.execute({ kind: 'network.block', address: '203.0.113.9' })).toMatchObject({

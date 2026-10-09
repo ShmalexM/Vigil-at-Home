@@ -183,7 +183,10 @@ export async function quarantine(
       { owners: true, removeSource: true },
     );
   } catch (err) {
-    // Whatever was copied is the helper's own; the original was not removed.
+    // A complete copy whose original could not be (fully) removed is kept.
+    if ((err as { copied?: boolean }).copied)
+      throw new ActionError('failed', `${(err as Error).message}; the copy is at ${storedPath}`);
+    // Otherwise whatever was copied is the helper's own; the original was not removed.
     rmSync(slot, { recursive: true, force: true });
     throw err;
   }
