@@ -6,7 +6,7 @@ import {
   Rule,
   RuleMatch,
   SensorEvent,
-  type EventKind,
+  EventKind,
   type RuleMode,
 } from '@vigil/core';
 import { z } from 'zod';
@@ -106,7 +106,12 @@ export function eventViewsQuery(
     where.push('agent_id = ?');
     args.push(q.agent);
   }
-  if (q.before !== undefined) {
+  if (q.before !== undefined && q.beforeId !== undefined) {
+    // Keyset on (ts, id), the feed's order, so events sharing the last ts of
+    // a page aren't skipped. `ts <= ?` keeps the walk on the ts index.
+    where.push('ts <= ? AND (ts < ? OR id < ?)');
+    args.push(q.before, q.before, q.beforeId);
+  } else if (q.before !== undefined) {
     where.push('ts < ?');
     args.push(q.before);
   }
@@ -404,43 +409,55 @@ export class Store {
     });
   }
 
-  eventStats(since: number): Omit<EventStats, 'retentionDays'> {
-    const byKind = this.db
-      .prepare(
-        `SELECT kind, COUNT(*) AS n,
-           SUM(matched) AS matched
-         FROM events WHERE ts >= ? GROUP BY kind`,
-      )
-      .all(since) as { kind: string; n: number; matched: number }[];
+  /**
+   * The Activity strip's counts since `since`, without the distinct-programs
+   * number (see {@link programsSince}). Each kind is its own range count on
+   * events_kind_ts and matched events have their own partial index, so an
+   * hour of a busy Mac (200,000 events and more) takes a few milliseconds and
+   * never reads an event's body. A GROUP BY over kind would walk the whole
+   * index instead.
+   */
+  eventCounts(since: number): Omit<EventStats, 'retentionDays' | 'programsLastHour'> {
+    const perKind = this.stmt('SELECT COUNT(*) AS n FROM events WHERE kind = ? AND ts >= ?');
     const byGroup = Object.fromEntries(
       Object.keys(EVENT_GROUPS).map((g) => [g, 0]),
     ) as EventStats['byGroup'];
     let lastHour = 0;
-    let matchedLastHour = 0;
-    for (const row of byKind) {
-      lastHour += row.n;
-      matchedLastHour += row.matched;
+    for (const kind of EventKind.options) {
+      const n = Number((perKind.get(kind, since) as { n: number }).n);
+      if (!n) continue;
+      lastHour += n;
       const group = (Object.keys(EVENT_GROUPS) as EventGroup[]).find((g) =>
-        (EVENT_GROUPS[g] as string[]).includes(row.kind),
+        (EVENT_GROUPS[g] as string[]).includes(kind),
       );
-      if (group) byGroup[group] += row.n;
+      if (group) byGroup[group] += n;
     }
-    const programs = this.db
-      .prepare(
-        `SELECT COUNT(DISTINCT json_extract(body, '$.process.path')) AS n
-         FROM events WHERE kind = 'process.exec' AND ts >= ?`,
-      )
-      .get(since) as { n: number };
-    const newest = this.db.prepare('SELECT MAX(ts) AS ts FROM events').get() as {
-      ts: number | null;
-    };
+    const matched = this.stmt('SELECT COUNT(*) AS n FROM events WHERE matched = 1 AND ts >= ?').get(
+      since,
+    ) as { n: number };
     return {
       lastHour,
-      matchedLastHour,
-      programsLastHour: programs.n,
+      matchedLastHour: Number(matched.n),
       byGroup,
-      newest: newest.ts,
+      newest: this.newestEventAt(),
     };
+  }
+
+  /**
+   * Distinct programs launched since `since`. This reads every launch's body,
+   * which on a busy Mac costs far more than {@link eventCounts}, so callers
+   * should ask for it less often.
+   */
+  programsSince(since: number): number {
+    const row = this.stmt(
+      `SELECT COUNT(DISTINCT json_extract(body, '$.process.path')) AS n
+       FROM events WHERE kind = 'process.exec' AND ts >= ?`,
+    ).get(since) as { n: number };
+    return Number(row.n);
+  }
+
+  eventStats(since: number): Omit<EventStats, 'retentionDays'> {
+    return { ...this.eventCounts(since), programsLastHour: this.programsSince(since) };
   }
 
   /** Events stored since `since`. */
