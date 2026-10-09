@@ -37,6 +37,58 @@ export function releaseStep(r: ActionRecord): string | undefined {
   }
 }
 
+/** Whether `path` is a macOS app bundle or something inside one. */
+const inAppBundle = (path: string) => /\.app(\/|$)/i.test(path);
+
+/** Whether this alert's response includes a block on the program that is still in force. */
+function programBlocked(actions: readonly ActionRecord[]): boolean {
+  return actions.some(
+    (r) =>
+      r.action.kind === 'santa.rule.set' &&
+      r.action.policy !== 'allow' &&
+      r.status === 'done' &&
+      !r.undoes,
+  );
+}
+
+/**
+ * The one line shown where the user asked for a quarantine the helper
+ * refused because an installer or the system owns the item (it says the
+ * app is blocked only when this alert really blocked it), or for a restore
+ * refused because the item's owner can't write where it goes back, for a
+ * move the helper's own rules stopped waiting on, or for a startup item it
+ * won't turn off (its folder is a link elsewhere, or it is another user's).
+ */
+export function refusalNote(r: ActionRecord, actions: readonly ActionRecord[]): string | undefined {
+  if (r.result?.errorCode === 'owner-cannot-write')
+    return 'Vigil can’t put this back because its owner can’t write to that folder.';
+  if (r.result?.errorCode === 'move-stalled')
+    return 'Vigil couldn’t move this in time. Anything it stopped or blocked stays that way.';
+  if (r.result?.errorCode === 'startup-folder-linked')
+    return 'Vigil couldn’t turn off this startup item because its folder is a link to somewhere else.';
+  if (r.result?.errorCode === 'not-your-item')
+    return 'Vigil only acts on startup items that belong to you.';
+  if (r.action.kind !== 'file.quarantine' || r.result?.errorCode !== 'installer-owned') return;
+  if (!inAppBundle(r.action.path))
+    return 'Vigil can’t move this item because it belongs to the system. Remove it yourself if you don’t need it.';
+  return programBlocked(actions)
+    ? 'Vigil blocked this app from running but can’t move apps an installer put in Applications. Drag it to the Trash to remove it.'
+    : 'Vigil can’t move apps an installer put in Applications. Drag it to the Trash to remove it.';
+}
+
+/** What to show for a failed action: the note above when it applies, else the error. */
+export function actionErrorText(
+  r: ActionRecord,
+  actions: readonly ActionRecord[],
+): string | undefined {
+  return refusalNote(r, actions) ?? r.result?.error;
+}
+
+/** The actions taken for the same alert as `r` (just `r` when it answers none). */
+export function sameAlert(all: readonly ActionRecord[], r: ActionRecord): ActionRecord[] {
+  return r.alertId ? all.filter((x) => x.alertId === r.alertId) : [r];
+}
+
 type Kind = Action['kind'];
 const one = (records: readonly { action: Action }[]): Kind | undefined => {
   const kinds = new Set(records.map((r) => r.action.kind));

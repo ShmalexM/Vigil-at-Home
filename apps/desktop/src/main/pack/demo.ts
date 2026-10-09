@@ -63,6 +63,7 @@ export function seedPackDemo(
     'you',
   );
   pack.demoChat(now, { bolt: bolt.id, pip: pip.id, noodle: noodle.id, github });
+  pack.demoJob(pip.id, now);
   pack.demoMoods();
 }
 

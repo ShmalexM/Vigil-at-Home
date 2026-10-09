@@ -1,5 +1,72 @@
 import { describe, expect, it } from 'vitest';
-import { mountContaining, parseMountInfo, runsFromMount, selfMount } from './self.js';
+import {
+  installedRoots,
+  insideInstalledRoot,
+  looksLikeAppImage,
+  mountContaining,
+  parseMountInfo,
+  runsFromMount,
+  selfMount,
+} from './self.js';
+
+describe('the installer’s own folder', () => {
+  it('is compared without case on macOS', () => {
+    for (const path of [
+      '/Applications/Vigil at Home.app',
+      '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home',
+      '/applications/vigil at home.app/Contents/MacOS/Vigil at Home',
+      '/APPLICATIONS/VIGIL AT HOME.APP/Contents/Frameworks/x',
+    ])
+      expect(insideInstalledRoot(path, 'darwin'), path).toBe(true);
+    for (const path of [
+      '/Applications/Vigil at Home Evil.app/Contents/MacOS/x',
+      '/Applications/Vigil at Home.apps/x',
+      '/Users/a/Downloads/Vigil at Home.app/Contents/MacOS/Vigil at Home',
+      '/opt/Vigil at Home/vigil-at-home',
+    ])
+      expect(insideInstalledRoot(path, 'darwin'), path).toBe(false);
+  });
+
+  it('is compared with case on Linux', () => {
+    expect(insideInstalledRoot('/opt/Vigil at Home', 'linux')).toBe(true);
+    expect(insideInstalledRoot('/opt/Vigil at Home/vigil-at-home', 'linux')).toBe(true);
+    for (const path of [
+      '/opt/vigil at home/vigil-at-home',
+      '/opt/VIGIL AT HOME/vigil-at-home',
+      '/opt/Vigil at Home2/vigil-at-home',
+      '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home',
+    ])
+      expect(insideInstalledRoot(path, 'linux'), path).toBe(false);
+  });
+
+  it('takes other roots, and never one that would cover everything', () => {
+    expect(insideInstalledRoot('/srv/app/x', 'linux', { roots: ['/srv/app'] })).toBe(true);
+    expect(insideInstalledRoot('/usr/bin/x', 'linux', { roots: ['/'] })).toBe(false);
+    expect(installedRoots('linux')).toEqual(['/opt/Vigil at Home']);
+    expect(installedRoots('darwin')).toEqual(['/Applications/Vigil at Home.app']);
+  });
+
+  it('never holds an AppImage, while an unpacked install there stays inside', () => {
+    const image = '/opt/Vigil at Home/Vigil-0.1.0.AppImage';
+    expect(insideInstalledRoot(image, 'linux')).toBe(true);
+    expect(insideInstalledRoot(image, 'linux', { appImage: true })).toBe(false);
+    expect(insideInstalledRoot('/opt/Vigil at Home', 'linux', { appImage: true })).toBe(false);
+    expect(insideInstalledRoot('/opt/Vigil at Home/vigil-at-home', 'linux')).toBe(true);
+  });
+
+  it('tells an AppImage by its name or its ELF header', () => {
+    const elf = (ai: number[]) => Uint8Array.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, ...ai]);
+    expect(looksLikeAppImage('/opt/Vigil at Home/Vigil.AppImage')).toBe(true);
+    expect(looksLikeAppImage('/opt/Vigil at Home/vigil.appimage')).toBe(true);
+    expect(looksLikeAppImage('/opt/Vigil at Home/vigil-at-home')).toBe(false);
+    expect(looksLikeAppImage('/opt/x/vigil', elf([0x41, 0x49, 2]))).toBe(true);
+    expect(looksLikeAppImage('/opt/x/vigil', elf([0x41, 0x49, 1]))).toBe(true);
+    // A plain ELF program, an unknown type, or too few bytes.
+    expect(looksLikeAppImage('/opt/x/vigil', elf([0, 0, 0]))).toBe(false);
+    expect(looksLikeAppImage('/opt/x/vigil', elf([0x41, 0x49, 3]))).toBe(false);
+    expect(looksLikeAppImage('/opt/x/vigil', elf([0x41, 0x49]))).toBe(false);
+  });
+});
 
 const MOUNTINFO = [
   '22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw',

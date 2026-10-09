@@ -35,7 +35,7 @@ server.registerTool(
       content: [
         {
           type: 'text',
-          text: `created ${repo}#2 "${title}" token=${process.env.DEMO_TOKEN ? 'set' : 'missing'}`,
+          text: `created ${repo}#2 "${title}" (token ${process.env.DEMO_TOKEN ? 'set' : 'missing'})`,
         },
       ],
     };

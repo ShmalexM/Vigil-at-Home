@@ -21,6 +21,7 @@ import { toolRequestFields } from '../components/ToolRequestFields';
 import { Button, Card, Chip, SectionHead, SeverityMark, StatusMark } from '../components/ui';
 import { evidenceSub, isHookRequest, realProcess, STOPPED_ANSWER } from '../evidence';
 import { actorLabel, clock, describeAction, describeEvent, seenTimes, timeAgo } from '../format';
+import { actionErrorText } from '../decision';
 import { helperNote, PASSWORD_CANCELLED } from '../format';
 import { modeLabel, quieterMode } from '../rule-modes';
 import { ExcludeFromAlert } from '../components/ExcludeFromAlert';
@@ -303,7 +304,9 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
               />
               <span className="grow ellipsis">
                 {describeAction(r.action)}
-                {r.result?.error ? <span className="t-small"> · {r.result.error}</span> : null}
+                {actionErrorText(r, actions) ? (
+                  <span className="t-small"> · {actionErrorText(r, actions)}</span>
+                ) : null}
               </span>
               <span className="t-small">{actorLabel(r.actor)}</span>
               {r.status === 'done' && !r.undoes && isUndoable(r.action.kind) && (

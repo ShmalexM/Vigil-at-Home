@@ -40,7 +40,7 @@ import {
 } from '../shared/ai.js';
 import type { AlertDetail, EventOutcome } from '../shared/ipc.js';
 import type { HelperHeld } from '../shared/agents.js';
-import type { DogNoteInput, HelperId } from '../shared/pack.js';
+import type { DogNoteInput, HelperId, NoteUsage } from '../shared/pack.js';
 import type { PackAi } from './pack/service.js';
 import type { ApiKeyProvider, SetupMode } from '../shared/setup.js';
 import type { Store } from './db/store.js';
@@ -48,7 +48,7 @@ import type { VigilCore } from './service.js';
 import { labelKey } from './label-filter.js';
 import { TEST_RULE } from './test-alert.js';
 import { WORTH_A_LOOK_RULE, WorthALook } from './worth-a-look.js';
-import { monthStart, sumCost, type UsageService } from './usage.js';
+import { monthStart, sumCost, toRun, type UsageService } from './usage.js';
 import { isKeyBilled } from '../shared/usage.js';
 
 const KEY_PREFS = 'ai.prefs';
@@ -243,6 +243,8 @@ export class AiBridge extends EventEmitter<{
   private toolQueuedAt: number[] = [];
   /** The model behind recent runs, so an explanation can say who wrote it. */
   private readonly models = new Map<string, string>();
+  /** Tokens and cost of the same recent runs, for the pack's notebooks. */
+  private readonly spent = new Map<string, NoteUsage>();
   /**
    * Why the explainer or labeller has been trying without reaching an AI
    * since its last answer (the cap, nothing ready, a busy Mac). Cleared by
@@ -504,11 +506,25 @@ export class AiBridge extends EventEmitter<{
       this.models.set(entry.id, entry.model);
       if (this.models.size > 100) this.models.delete(this.models.keys().next().value!);
     }
+    // The Usage page's own reading of the run, so a notebook shows the same numbers.
+    const run = entry.usage ? toRun(entry) : undefined;
+    if (run) {
+      const { inputTokens, cachedInputTokens, outputTokens, costUsd } = run;
+      this.spent.set(entry.id, { inputTokens, cachedInputTokens, outputTokens, costUsd });
+      if (this.spent.size > 100) this.spent.delete(this.spent.keys().next().value!);
+    }
     try {
       this.o.usage.record(entry);
     } catch (err) {
       console.error('[ai] recording a run failed:', err);
     }
+  }
+
+  /** The model and spend behind a run, for a helper's notebook entry. */
+  private ranOn(logId: string): Pick<DogNoteInput, 'model' | 'usage'> {
+    const model = this.models.get(logId);
+    const usage = this.spent.get(logId);
+    return { ...(model ? { model } : {}), ...(usage ? { usage } : {}) };
   }
 
   /**
@@ -765,7 +781,7 @@ export class AiBridge extends EventEmitter<{
             : whyNot(r.reason),
           reasons: proposed,
           ...(r.ok ? { provider: r.provider } : {}),
-          ...(this.models.has(r.logId) ? { model: this.models.get(r.logId)! } : {}),
+          ...this.ranOn(r.logId),
         });
         if (r.ok) return { ok: true, value: r.value, provider: r.provider };
         return { ok: false, reason: r.reason, ...(r.detail ? { detail: r.detail } : {}) };
@@ -893,6 +909,7 @@ export class AiBridge extends EventEmitter<{
     return {
       run: (req) => this.ai().run(req),
       modelOf: (logId) => this.models.get(logId),
+      usageOf: (logId) => this.spent.get(logId),
       status: async () => {
         const v = await this.view();
         const ready = (p: AiProvider) =>
@@ -987,7 +1004,7 @@ export class AiBridge extends EventEmitter<{
         answer: `${VERDICT_WORDS[v.verdict]}. ${v.summary}`,
         reasons: v.details ? [v.details] : [],
         provider: result.provider,
-        ...(this.models.has(result.logId) ? { model: this.models.get(result.logId)! } : {}),
+        ...this.ranOn(result.logId),
       });
       return {
         provider: result.provider,

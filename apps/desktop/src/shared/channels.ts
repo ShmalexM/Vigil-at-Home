@@ -110,6 +110,7 @@ export const CALL_NAMES = [
   'refreshConnector',
   'listPackNotes',
   'clearPackNotes',
+  'exportPackNotes',
   'listPackMemory',
   'addPackMemory',
   'forgetPackMemory',

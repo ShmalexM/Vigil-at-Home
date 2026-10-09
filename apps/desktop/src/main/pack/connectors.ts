@@ -33,6 +33,7 @@ import { selfRoots, underSelfRoot } from '@vigil/detection';
 import { z } from 'zod';
 import { ConnectorInput, isSafeConnectorUrl, type ConnectorView } from '../../shared/pack.js';
 import type { Cipher } from '../onboarding/keys.js';
+import { redactDataForPack, redactJsonText } from './redaction.js';
 
 /** A connection with no calls for this long is closed; the next call reopens it. */
 const IDLE_MS = 5 * 60_000;
@@ -239,14 +240,22 @@ export class Connectors implements ConnectorHub {
       timeout: CALL_MS,
       ...(signal ? { signal } : {}),
     });
+    // Secrets in a response (keys, tokens, emails, home paths) are hidden
+    // before anything else sees it: the notebook, the risk judge, a cloud
+    // model. Each text part is redacted whole, and structured content, or a
+    // text part that is JSON, as data with its keys, so a value under a key
+    // like "token", or a key that is itself a token, goes before it is
+    // written out as text. Only then is anything cut. The AI runner redacts tool
+    // results again on their way out.
     const parts = Array.isArray(result.content) ? result.content : [];
     const text = parts
       .map((p: { type: string; text?: string }) =>
-        p.type === 'text' ? (p.text ?? '') : `[${p.type} content not shown]`,
+        p.type === 'text' ? redactJsonText(p.text ?? '') : `[${p.type} content not shown]`,
       )
       .join('\n');
-    const body = text || JSON.stringify(result.structuredContent ?? {});
-    const clipped = body.length > MAX_RESULT_CHARS ? `${body.slice(0, MAX_RESULT_CHARS)}…` : body;
+    const clean = text || redactDataForPack(result.structuredContent ?? {});
+    const clipped =
+      clean.length > MAX_RESULT_CHARS ? `${clean.slice(0, MAX_RESULT_CHARS)}…` : clean;
     return result.isError ? `The tool reported an error: ${clipped}` : clipped;
   }
 
