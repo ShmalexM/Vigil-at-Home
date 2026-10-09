@@ -5,7 +5,7 @@ import type { SensorEvent } from '@vigil/core';
 import type { HelperRan } from '@vigil/helper';
 import { HelperCallError, type HelperClient } from '@vigil/helper/client';
 import { describe, expect, it, vi } from 'vitest';
-import { HelperLink } from './helper.js';
+import { HelperLink, RELEASE_TIMEOUT_MS } from './helper.js';
 
 function fakeClient(answer: (cmd: { kind: string }) => unknown) {
   const listeners: ((e: SensorEvent, ran: HelperRan[]) => void)[] = [];
@@ -185,32 +185,100 @@ describe('HelperLink', () => {
     link.stop();
   });
 
-  it('sends the helper its rules, then only the lists it asks for, in parts', async () => {
+  it('sends rules and their lists as one sync, then list-only changes on their own', async () => {
     const fake = fakeClient((cmd) =>
-      cmd.kind === 'detection.sync' ? { needLists: ['big'], preexec: null } : { complete: true },
+      cmd.kind === 'detection.sync'
+        ? { applied: true, needLists: [], preexec: 'pending' }
+        : { complete: true },
     );
     const link = new HelperLink(socket(), async () => fake.client);
     await link.tryConnect();
     const big = Array.from({ length: 2500 }, (_, i) => `h${i}`);
-    const out = await link.syncRules({
+    const set = {
       rules: [],
+      appRules: [],
       exceptions: [],
       selfPaths: ['/x'],
       lists: { big, small: ['a'] },
-    });
-    expect(out).toMatchObject({ needLists: ['big'] });
+    };
+    const out = await link.syncRules(set, { syncId: 'abc' });
+    expect(out).toMatchObject({ applied: true });
+    // One command: the rules and every list's contents, so they go in together.
+    const syncs = fake.sent.filter((c) => c.kind === 'detection.sync') as unknown as {
+      syncId: string;
+      entries: Record<string, string[]>;
+    }[];
+    expect(syncs).toHaveLength(1);
+    expect(syncs[0]!.syncId).toBe('abc');
     // Vigil's own programs go in a self grant of their own.
-    expect(fake.sent[0]).not.toHaveProperty('selfPaths');
+    expect(syncs[0]).not.toHaveProperty('selfPaths');
+    expect(Object.keys(syncs[0]!.entries).sort()).toEqual(['big', 'small']);
+    expect(syncs[0]!.entries['big']).toHaveLength(2500);
+    expect(fake.sent.filter((c) => c.kind === 'detection.list.set')).toEqual([]);
+
+    // Only a list changed (a feed refresh): it goes on its own, in parts.
+    await link.syncRules({ ...set, lists: { big: [...big, 'h-new'], small: ['a'] } });
     const parts = fake.sent.filter((c) => c.kind === 'detection.list.set') as unknown as {
+      list: string;
       part: number;
       parts: number;
       entries: string[];
     }[];
-    expect(parts.map((p) => [p.part, p.parts, p.entries.length])).toEqual([
-      [0, 3, 1000],
-      [1, 3, 1000],
-      [2, 3, 500],
+    expect(parts.map((p) => [p.list, p.part, p.parts, p.entries.length])).toEqual([
+      ['big', 0, 3, 1000],
+      ['big', 1, 3, 1000],
+      ['big', 2, 3, 501],
     ]);
+    expect(fake.sent.filter((c) => c.kind === 'detection.sync')).toHaveLength(1);
+    link.stop();
+  });
+
+  it('gives each sync a deadline no later than when the app stops waiting', async () => {
+    const fake = fakeClient((cmd) =>
+      cmd.kind === 'detection.sync' ? { applied: true, needLists: [], preexec: null } : {},
+    );
+    const link = new HelperLink(socket(), async () => fake.client);
+    await link.tryConnect();
+    const before = Date.now();
+    await link.syncRules(
+      { rules: [], appRules: [], exceptions: [], selfPaths: [], lists: {} },
+      { syncId: 'd1' },
+    );
+    const after = Date.now();
+    const [sync] = fake.sent.filter((c) => c.kind === 'detection.sync') as unknown as {
+      notAfter: number;
+    }[];
+    // The helper refuses it past this point, so a late password can't apply
+    // a change the app already counted as cancelled.
+    expect(sync!.notAfter).toBeGreaterThan(before);
+    expect(sync!.notAfter).toBeLessThan(after + RELEASE_TIMEOUT_MS);
+    link.stop();
+  });
+
+  it('sends the sync again with the lists the helper says it lacks', async () => {
+    let first = true;
+    const fake = fakeClient((cmd) => {
+      if (cmd.kind !== 'detection.sync') return { complete: true };
+      const carried = Object.keys((cmd as { entries?: object }).entries ?? {});
+      if (first) {
+        first = false;
+        // The helper says it still lacks a list and changes nothing.
+        return { applied: false, needLists: ['small'], preexec: null };
+      }
+      expect(carried).toContain('small');
+      return { applied: true, needLists: [], preexec: null };
+    });
+    const link = new HelperLink(socket(), async () => fake.client);
+    await link.tryConnect();
+    const out = await link.syncRules({
+      rules: [],
+      appRules: [],
+      exceptions: [],
+      selfPaths: [],
+      lists: { small: ['a'] },
+    });
+    expect(out).toMatchObject({ applied: true });
+    expect(fake.sent.filter((c) => c.kind === 'detection.sync')).toHaveLength(2);
     link.stop();
   });
 

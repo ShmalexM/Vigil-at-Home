@@ -7,7 +7,7 @@ import { HoldButton } from '../components/HoldButton';
 import { NewRulePanel, RuleEditorPanel } from '../components/RuleEditor';
 import { RuleSuggestions } from '../components/RuleSuggestions';
 import { useToast } from '../components/Toasts';
-import { helperNote, PASSWORD_CANCELLED } from '../format';
+import { helperNote, notChangedText } from '../format';
 import { Button, Card, Chip, Segmented, SeverityMark } from '../components/ui';
 import {
   confirmsFirst,
@@ -179,9 +179,10 @@ function RuleRow({
     setConfirmBlock(confirm);
     if (confirm) return;
     const before = rule.mode;
-    const { helper } = await vigil.setRuleMode(rule.id, mode);
-    if (helper === 'declined') {
-      toast({ text: `${rule.name}: ${PASSWORD_CANCELLED}` });
+    const { helper, helperReason } = await vigil.setRuleMode(rule.id, mode);
+    const notChanged = notChangedText(helper, helperReason);
+    if (notChanged) {
+      toast({ text: `${rule.name}: ${notChanged}` });
       return;
     }
     toast({

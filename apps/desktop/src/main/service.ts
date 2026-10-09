@@ -130,18 +130,18 @@ export class VigilCore {
 
   start(): void {
     if (this.detector) {
-      const feeds = this.detector.feeds;
+      const detector = this.detector;
       // Threat lists refresh in the background; the engine sees them on its next lookup.
       this.scheduler.every(
         'threat-feeds',
         FEED_CHECK_MS,
         async () => {
-          for (const r of await feeds.run()) {
+          for (const r of await detector.refreshFeeds()) {
             if (r.status === 'failed')
               console.warn(`[feeds] ${r.sourceId}: ${r.error ?? 'failed'}`);
           }
           // A feed whose update was refused shows as one quiet line under Protection.
-          reportFeedHealth(this.sensors, feeds.status());
+          reportFeedHealth(this.sensors, detector.feeds.status());
         },
         true,
       );
@@ -476,10 +476,12 @@ export class VigilCore {
    */
   async setRuleMode(id: string, mode: RuleMode): Promise<RuleModeResult> {
     if (this.detector?.hasRule(id)) {
-      const helper = await this.detector.setMode(id, mode);
+      const { helper, reason } = await this.detector.changeMode(id, mode);
       const view = this.detector.rules().find((r) => r.rule.id === id);
       if (!view) throw new Error(`No rule ${id}`);
-      return { rule: { ...view.rule, mode: view.mode }, helper };
+      const out: RuleModeResult = { rule: { ...view.rule, mode: view.mode }, helper };
+      if (reason !== undefined) out.helperReason = reason;
+      return out;
     }
     const rule = this.store.getRule(id);
     if (!rule) throw new Error(`No rule ${id}`);
@@ -498,9 +500,17 @@ export class VigilCore {
    */
   async quietRule(id: string): Promise<QuietRuleResult> {
     if (this.detector?.hasRule(id)) {
-      const { value, helper } = await this.detector.quiet(id);
+      const { value, helper, reason } = await this.detector.quiet(id);
       if (!value.ok) return value;
-      return { ok: true, prior: value.prior, token: value.token, rule: this.ruleNow(id), helper };
+      const rule = this.ruleNow(id);
+      return {
+        ok: true,
+        prior: value.prior,
+        token: value.token,
+        rule,
+        helper,
+        ...(reason === undefined ? {} : { reason }),
+      };
     }
     const rule = this.store.getRule(id);
     if (!rule) throw new Error(`No rule ${id}`);
@@ -515,9 +525,14 @@ export class VigilCore {
   /** Undo `quietRule`, only while nothing about the rule has changed since. */
   async undoQuietRule(id: string, token: string): Promise<UndoQuietRuleResult> {
     if (this.detector?.hasRule(id)) {
-      const { value, helper } = await this.detector.undoQuiet(id, token);
+      const { value, helper, reason } = await this.detector.undoQuiet(id, token);
       if (!value.ok) return value;
-      return { ok: true, rule: this.ruleNow(id), helper };
+      return {
+        ok: true,
+        rule: this.ruleNow(id),
+        helper,
+        ...(reason === undefined ? {} : { reason }),
+      };
     }
     const rule = this.store.getRule(id);
     if (!rule) throw new Error(`No rule ${id}`);

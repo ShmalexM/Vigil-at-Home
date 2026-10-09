@@ -197,8 +197,7 @@ export function releaseFailed(a: Alert): string {
     : 'Couldn’t finish releasing it, so it still needs you.';
 }
 
-/** Shown when a rule change was cancelled at the password, instead of the change. */
-export const PASSWORD_CANCELLED = 'Not changed: the password was cancelled';
+export { notChangedText, PASSWORD_CANCELLED } from '../../shared/helper-outcome';
 
 /** Added to a change's toast when the helper didn't take it yet. */
 export function helperNote(helper: HelperOutcome): string {

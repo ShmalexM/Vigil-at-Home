@@ -14,7 +14,7 @@ import {
   type RuleType,
   type SantaRule,
 } from '@vigil/sensors';
-import type { HelperAction, HelperCommand, SelfGrant } from './protocol.js';
+import type { DetectionSync, HelperAction, HelperCommand, SelfGrant } from './protocol.js';
 import { needsApproval } from './protocol.js';
 import { Journal, type JournalEntry } from './journal.js';
 import type { System } from './system.js';
@@ -70,6 +70,8 @@ export interface ExecutorDeps {
   fastPath?: FastPath;
   /** Linux: programs blocked by hash, enforced by fapolicyd and the helper. */
   fapolicyd?: FapolicydBlocks;
+  /** The clock a sync's `notAfter` is held to; Date.now by default. */
+  now?: () => number;
   /** What is Vigil's own: never paused, stopped or blocked. Defaults to fastPath.self(). */
   self?: () => SelfSet;
   /**
@@ -225,6 +227,20 @@ export class Executor {
     // Refuse what Linux can't do before asking for a password for it.
     if (this.d.sys.platform === 'linux') checkLinuxBlock(cmd);
     if (cmd.kind === 'detection.sync') {
+      this.inTime(cmd);
+      // A sync with a rule that doesn't compile, or missing list contents,
+      // changes nothing; say so before asking for a password.
+      try {
+        this.d.fastPath?.checkRules(cmd);
+      } catch (err) {
+        throw policyError(err);
+      }
+      const need = this.d.fastPath?.missingLists(cmd) ?? [];
+      if (need.length)
+        return {
+          kind: 'done',
+          result: { applied: false, needLists: need, preexec: null },
+        };
       // Whether a sync weakens anything depends on the policy in force.
       let weakens: string[];
       try {
@@ -544,18 +560,27 @@ export class Executor {
         return journal.recent(cmd.limit ?? 100);
       case 'detection.sync': {
         if (!this.d.fastPath) throw new ActionError('failed', 'helper rules are not set up');
+        // From here to the save nothing waits, so a detection.status read
+        // after this sync's line always sees whether it went in.
+        this.inTime(cmd);
         let synced;
         try {
           synced = this.d.fastPath.sync(cmd);
         } catch (err) {
           throw policyError(err);
         }
-        if (!this.d.preexec) return { ...synced, preexec: null };
-        const before = this.d.rules.rev;
-        const preexec = await this.d.preexec.apply(cmd.rules);
-        if (this.d.rules.rev !== before) await this.syncSanta();
-        return { ...synced, preexec };
+        if (!this.d.preexec || !synced.applied) return { ...synced, preexec: null };
+        // The rules and lists are in force and saved: answer now. Santa's
+        // pre-launch rules follow in the background; detection.status says how.
+        this.startPreexec(cmd.rules);
+        return { ...synced, preexec: 'pending' };
       }
+      case 'detection.status':
+        return {
+          ...(this.d.fastPath?.status() ?? {}),
+          syncId: this.d.fastPath?.syncId() ?? null,
+          preexec: this.preexecState,
+        };
       case 'self.grant': {
         if (!this.d.fastPath) throw new ActionError('failed', 'helper rules are not set up');
         try {
@@ -578,6 +603,42 @@ export class Executor {
         // Handled by the server, which owns the connection.
         throw new ActionError('invalid', 'events.subscribe is handled by the connection');
     }
+  }
+
+  /**
+   * Refuse a sync the app has stopped waiting for. The admin password is
+   * asked for in the app, between two sends of the same sync; once the app
+   * gives up it counts the change as cancelled, so a late yes must not
+   * apply it.
+   */
+  private inTime(cmd: DetectionSync): void {
+    if (cmd.notAfter !== undefined && (this.d.now ?? Date.now)() > cmd.notAfter)
+      throw new ActionError('refused', 'the app stopped waiting for this change');
+  }
+
+  /** How the last hand-off of pre-launch rules to Santa went: pending, its outcome, or the error. */
+  private preexecState: unknown = null;
+  private preexecChain: Promise<void> = Promise.resolve();
+
+  /** Hand Santa the pre-launch rules for these rules, one hand-off at a time, without waiting. */
+  private startPreexec(rules: DetectionSync['rules']): void {
+    this.preexecState = 'pending';
+    this.preexecChain = this.preexecChain.then(async () => {
+      try {
+        const before = this.d.rules.rev;
+        const outcome = await this.d.preexec!.apply(rules);
+        if (this.d.rules.rev !== before) await this.syncSanta();
+        this.preexecState = outcome;
+      } catch (err) {
+        this.preexecState = { error: (err as Error).message };
+      }
+    });
+  }
+
+  /** Wait for pre-launch rules already handed off (tests). */
+  async preexecSettled(): Promise<unknown> {
+    await this.preexecChain;
+    return this.preexecState;
   }
 
   /**
