@@ -27,9 +27,16 @@ VH_GROUP=wheel
 # Older helpers don't have this command, so a failure here doesn't stop the removal.
 "$TOOLS/vigil-helper" osquery-remove 2>/dev/null || true
 launchctl bootout "system/$LABEL" 2>/dev/null || true
+# Remove the pin and its key once the helper has stopped. Older helpers lack
+# the command; the lines below cover them.
+"$TOOLS/vigil-helper" pin-remove 2>/dev/null || true
 rm -f "/Library/LaunchDaemons/$LABEL.plist"
 rm -f "$TOOLS/vigil-helper"
 # Every version and DEST/current, and what older installs left beside them.
 if [ -d "$TOOLS" ]; then vh_remove_dest; fi
+# The pin and its key are kept immutable by the helper; clear that before removing them.
+chflags nouchg "/Library/Application Support/Vigil/pin/app-pin.json" "/Library/Application Support/Vigil/pin/app-pin.key" "/Library/Application Support/Vigil/pin/app-pin.gen" 2>/dev/null || true
+rm -rf "/Library/Application Support/Vigil/pin"
+rm -f "/Library/Application Support/Vigil/app-pin.json" "/Library/Application Support/Vigil/app-pin.json.tmp"
 rm -f /var/run/vigil-helper.sock
 echo "Vigil helper removed. Quarantined files are still in /Library/Application Support/Vigil."

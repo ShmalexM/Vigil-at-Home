@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { installedRoots } from '@vigil/core/self';
 import { hostPlatform, type Platform } from './platform.js';
 
 export interface HelperPaths {
@@ -11,6 +12,10 @@ export interface HelperPaths {
   fileAccessPolicy: string;
   /** The blocking rules the app last handed the helper (fastpath.ts). */
   helperRules: string;
+  /** A readable copy of the app pin, for the app to see what is pinned; the helper never reads it. */
+  appPin: string;
+  /** The pin itself and the key that signs it, in a root-only folder (pinStore.ts). */
+  appPinDir: string;
   /** False on Linux, where there is no Santa. */
   santaLog: string | false;
   osqueryResults: string | false;
@@ -37,6 +42,8 @@ export function macPaths(supportDir = '/Library/Application Support/Vigil'): Hel
     tlsDir: join(supportDir, 'santa-sync'),
     fileAccessPolicy: join(supportDir, 'santa-file-access.plist'),
     helperRules: join(supportDir, 'helper-rules.json'),
+    appPin: join(supportDir, 'app-pin.json'),
+    appPinDir: join(supportDir, 'pin'),
     santaLog: '/var/db/santa/santa.log',
     osqueryResults: '/var/log/osquery/osqueryd.results.log',
     socket: '/var/run/vigil-helper.sock',
@@ -60,6 +67,8 @@ export function linuxPaths(supportDir = '/var/lib/vigil'): HelperPaths {
     tlsDir: join(supportDir, 'santa-sync'),
     fileAccessPolicy: join(supportDir, 'santa-file-access.plist'),
     helperRules: join(supportDir, 'helper-rules.json'),
+    appPin: join(supportDir, 'app-pin.json'),
+    appPinDir: join(supportDir, 'pin'),
     santaLog: false,
     osqueryResults: '/var/log/osquery/osqueryd.results.log',
     socket: '/run/vigil-helper.sock',
@@ -76,6 +85,13 @@ export const ADMIN_ENV = {
 };
 
 /**
+ * The app's bundle id (appId in apps/desktop/electron-builder.yml), which
+ * codesign reports as the Identifier of Vigil's own code. On macOS only code
+ * signed with it is ever pinned (appPin.ts).
+ */
+export const VIGIL_BUNDLE_ID = 'app.vigilathome.desktop';
+
+/**
  * Paths the helper will never quarantine or unload, whoever asks. Moving
  * these could break macOS, Santa or Vigil itself. /usr/local is fine.
  */
@@ -90,6 +106,8 @@ export const PROTECTED_PREFIXES = [
   '/usr/share/',
   '/private/var/db/',
   '/Library/Apple/',
+  // The helper's whole state folder (journal, rules, app pin); see Protection stateDir.
+  '/Library/Application Support/Vigil/',
   '/Applications/Santa.app',
   '/Library/PrivilegedHelperTools/vigil-helper',
   // The helper's Node runtime and code (versions/<id> and the current link to
@@ -127,7 +145,7 @@ export const PROTECTED_PROCESS_PREFIXES = [
   '/Library/SystemExtensions/',
   '/Library/PrivilegedHelperTools/vigil-helper',
   '/Applications/Vigil.app/',
-  '/Applications/Vigil at Home.app/',
+  // The installer's own folder is checked by insideInstalledRoot (process.ts).
   // osquery 5 and later lives in /opt/osquery; older releases in /usr/local/bin.
   '/opt/osquery/',
   '/usr/local/bin/osqueryd',
@@ -209,7 +227,7 @@ export const LINUX_PROTECTED_PROCESS_PREFIXES = [
   '/usr/bin/osqueryd',
   '/opt/osquery/',
   '/usr/libexec/vigil-helper',
-  '/opt/Vigil at Home/',
+  // The installer's own folder is checked by insideInstalledRoot (process.ts).
 ];
 
 /**
@@ -291,10 +309,16 @@ export const LINUX_SERVICE_PATHS = [
  * password (FastPath `installed`); nothing else.
  */
 export function installedSelf(platform: Platform = 'darwin'): string[] {
-  return platform === 'linux' ? ['/opt/Vigil at Home'] : ['/Applications/Vigil at Home.app'];
+  return installedRoots(platform);
 }
 
 export interface Protection {
+  /**
+   * The helper's own state folder as installed (defaultPaths supportDir):
+   * its journal, rules, approvals and the app pin. No file command ever
+   * touches anything in it or above it, whatever lists a caller passes.
+   */
+  stateDir: string;
   prefixes: string[];
   exact: Set<string>;
   processPrefixes: string[];
@@ -321,6 +345,7 @@ function isProtectedUnitName(name: string): boolean {
 }
 
 const MAC_PROTECTION: Protection = {
+  stateDir: macPaths().supportDir,
   prefixes: PROTECTED_PREFIXES,
   exact: PROTECTED_EXACT,
   processPrefixes: PROTECTED_PROCESS_PREFIXES,
@@ -333,6 +358,7 @@ const MAC_PROTECTION: Protection = {
 };
 
 const LINUX_PROTECTION: Protection = {
+  stateDir: linuxPaths().supportDir,
   prefixes: LINUX_PROTECTED_PREFIXES,
   exact: LINUX_PROTECTED_EXACT,
   processPrefixes: LINUX_PROTECTED_PROCESS_PREFIXES,

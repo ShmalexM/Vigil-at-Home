@@ -2,6 +2,8 @@
 # Installs the Vigil helper as a root systemd service. Vigil at Home runs this
 # through your desktop's password dialog (pkexec), or you can run it yourself:
 #   sudo sh <Vigil's resources>/helper/linux/install.sh
+# Its one optional argument is the AppImage Vigil runs from, which the helper
+# pins (by device and inode) as the app it was installed for.
 # Everything it installs is root-owned, so nothing running as you can change
 # what runs as root. uninstall.sh (next to this file) reverses it.
 set -eu
@@ -60,6 +62,13 @@ vh_switch "$VH_VERSION"
 # Point osquery at Vigil's queries, keeping any config it had before. Does
 # nothing when osquery isn't installed yet; setup runs this again after.
 "$LIBEXEC/vigil-helper" osquery-setup || echo "osquery setup failed; Vigil retries it later." >&2
+
+# Pin the app that asked for this install, so the helper's rules stay off it
+# (nothing is pinned for an app in the installer's folder). Without a pin the
+# helper still works, unpinned.
+if [ -n "${1:-}" ]; then
+  "$LIBEXEC/vigil-helper" pin-app "$1" || echo "Could not pin the app; the helper runs without it." >&2
+fi
 
 systemctl daemon-reload
 systemctl enable vigil-helper.service

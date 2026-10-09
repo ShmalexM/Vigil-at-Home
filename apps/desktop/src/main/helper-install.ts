@@ -1,17 +1,24 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  closeSync,
+  constants,
   cpSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
+  readSync,
+  realpathSync,
   rmSync,
   statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
+import { fileId, insideInstalledRoot, looksLikeAppImage } from '@vigil/core/self';
 import type { HelperInstallResult } from '../shared/ipc.js';
 
 const hasHelper = (dir: string) =>
@@ -96,6 +103,115 @@ export function installedHelperFiles(
   ];
 }
 
+/** The running app, as install.sh pins it (packages/helper/src/appPin.ts). */
+export interface AppIdentity {
+  execPath: string;
+  env: NodeJS.ProcessEnv;
+}
+
+const thisApp = (): AppIdentity => ({ execPath: process.execPath, env: process.env });
+
+/**
+ * What install.sh pins as the app: the main executable on macOS, the
+ * AppImage on Linux (its real path, as the kernel names it). install.sh
+ * pins nothing for an app inside the installer's folder, which it recognises
+ * from the same path.
+ */
+export function appPinTarget(
+  platform: NodeJS.Platform = process.platform,
+  app: AppIdentity = thisApp(),
+): string {
+  const image = platform === 'linux' ? app.env['APPIMAGE'] : undefined;
+  if (!image) return app.execPath;
+  try {
+    return realpathSync(image);
+  } catch {
+    return image;
+  }
+}
+
+/** The readable copy of the helper's pin (the signed pin itself is root-only); root-owned. */
+export function appPinFile(platform: NodeJS.Platform = process.platform, root = ''): string {
+  return join(
+    root,
+    platform === 'linux' ? '/var/lib/vigil' : '/Library/Application Support/Vigil',
+    'app-pin.json',
+  );
+}
+
+/**
+ * Whether the app is inside the installer's own folder (config
+ * installedSelf), which the helper protects by path: such an app is never
+ * pinned, so an update in place never asks for a helper update.
+ */
+export function inInstallerFolder(
+  platform: NodeJS.Platform = process.platform,
+  app: AppIdentity = thisApp(),
+): boolean {
+  const target = appPinTarget(platform, app);
+  return insideInstalledRoot(target, platform, { appImage: isAppImage(platform, app, target) });
+}
+
+/**
+ * Linux: whether the app runs from an AppImage, which is never inside the
+ * installer's folder (insideInstalledRoot), so one copied into /opt is still
+ * pinned. The AppImage runtime sets APPIMAGE; the file's name or first bytes
+ * tell otherwise.
+ */
+function isAppImage(platform: NodeJS.Platform, app: AppIdentity, target: string): boolean {
+  if (platform !== 'linux') return false;
+  if (app.env['APPIMAGE'] || looksLikeAppImage(target)) return true;
+  let fd: number | undefined;
+  try {
+    fd = openSync(target, constants.O_RDONLY | constants.O_NONBLOCK);
+    if (!fstatSync(fd).isFile()) return false;
+    const head = Buffer.alloc(16);
+    const n = readSync(fd, head, 0, head.length, 0);
+    return looksLikeAppImage(target, head.subarray(0, n));
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/**
+ * This app's identity in the terms of the pin: on macOS its executable's
+ * sha256, on Linux its AppImage's device and inode. Undefined when nothing
+ * needs pinning.
+ */
+function appIdentity(platform: NodeJS.Platform, app: AppIdentity): string | undefined {
+  if (inInstallerFolder(platform, app)) return undefined;
+  const target = appPinTarget(platform, app);
+  if (platform === 'linux') {
+    const st = statSync(target, { bigint: true });
+    return fileId(st.dev, st.ino);
+  }
+  return sha256(target);
+}
+
+/**
+ * Whether the helper's pin names this app. After an update that replaced
+ * the app it names the old one, and the helper update pins this one.
+ */
+export function appPinned(
+  platform: NodeJS.Platform = process.platform,
+  app: AppIdentity = thisApp(),
+  root = '',
+): boolean {
+  const want = appIdentity(platform, app);
+  if (want === undefined) return true;
+  try {
+    const pin = JSON.parse(readFileSync(appPinFile(platform, root), 'utf8')) as {
+      image?: unknown;
+      sha256?: unknown;
+    };
+    return (platform === 'linux' ? pin.image : pin.sha256) === want;
+  } catch {
+    return false;
+  }
+}
+
 export interface HelperMatch {
   /** current: the installed helper is the one this app ships; outdated: it isn't. */
   installed: 'none' | 'current' | 'outdated';
@@ -107,11 +223,19 @@ export interface HelperMatch {
  * Compares the installed helper with the one this app carries. After the app
  * is updated by replacing it, the old helper keeps running until install.sh
  * runs again. Every installed file is root-owned but readable.
+ *
+ * Given `app` outside the installer's folder, a helper pinned to another
+ * app (appPinned) is outdated too, and the bundle names this app as well, so
+ * each new such app asks once to be pinned even when the helper's own files
+ * didn't change. An app inside the installer's folder is never pinned and
+ * changes neither. The self grant's password re-pins as well, so the app
+ * checks again before asking (see index.ts).
  */
 export function helperMatch(
   dir: string,
   platform: NodeJS.Platform = process.platform,
   root = '',
+  app?: AppIdentity,
 ): HelperMatch {
   const files = installedHelperFiles(dir, platform, root);
   const fingerprint = (path: string, by: 'content' | 'size') =>
@@ -119,8 +243,18 @@ export function helperMatch(
       ? String(statSync(path).size)
       : createHash('sha256').update(readFileSync(path)).digest('hex');
   const shipped = files.filter((f) => existsSync(f.bundled));
+  let identity: string | undefined;
+  try {
+    identity = app && appIdentity(platform, app);
+  } catch {
+    identity = undefined; // the app's own file is unreadable: nothing to compare
+  }
   const bundle = createHash('sha256')
-    .update(shipped.map((f) => fingerprint(f.bundled, f.by)).join('\n'))
+    .update(
+      [...shipped.map((f) => fingerprint(f.bundled, f.by)), ...(identity ? [identity] : [])].join(
+        '\n',
+      ),
+    )
     .digest('hex')
     .slice(0, 16);
   if (!existsSync(files[0]!.installed)) {
@@ -136,7 +270,8 @@ export function helperMatch(
       return false;
     }
   });
-  return { installed: same ? 'current' : 'outdated', bundle };
+  const pinned = !identity || !app || appPinned(platform, app, root);
+  return { installed: same && pinned ? 'current' : 'outdated', bundle };
 }
 
 /** How ELEVATED_ENTRY starts its message when it refuses to run anything. */
@@ -160,6 +295,7 @@ const REFUSED = 'Not running the helper script';
  * environment.
  *
  * Arguments: the folder to copy from, the script to run (relative to it),
+ * the one argument to run it with (install.sh's app to pin; may be empty),
  * then pairs of a file (relative) and its SHA-256.
  *
  * The remaining limit: a process running as the user that can already change
@@ -173,7 +309,7 @@ const REFUSED = 'Not running the helper script';
 export const ELEVATED_ENTRY = [
   'set -eu;',
   'PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; umask 077;',
-  'src=$1; script=$2; shift 2;',
+  'src=$1; script=$2; app=$3; shift 3;',
   'vh_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; };',
   `vh_refuse() { echo "${REFUSED}: $*" >&2; exit 1; };`,
   'd=$(mktemp -d /tmp/vigil-helper.XXXXXX);',
@@ -194,7 +330,7 @@ export const ELEVATED_ENTRY = [
   '[ "$f" != "$script" ] || found=1;',
   'done;',
   'if [ "$#" -ne 0 ] || [ -z "$found" ]; then vh_refuse "$script was not among the files checked"; fi;',
-  'status=0; /bin/sh "$d/$script" || status=$?; exit "$status"',
+  'status=0; /bin/sh "$d/$script" "$app" || status=$?; exit "$status"',
 ].join(' ');
 
 const ROOT_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
@@ -294,9 +430,17 @@ function checkedManifest(
   return manifest;
 }
 
-/** ELEVATED_ENTRY's arguments: copy from `src`, run `script`, check these files. */
-export function elevatedArgs(src: string, script: string, manifest: [string, string][]): string[] {
-  return [src, script, ...manifest.flat()];
+/**
+ * ELEVATED_ENTRY's arguments: copy from `src`, run `script` with `app` (the
+ * app install.sh pins, appPinTarget; empty for none), check these files.
+ */
+export function elevatedArgs(
+  src: string,
+  script: string,
+  app: string,
+  manifest: [string, string][],
+): string[] {
+  return [src, script, app, ...manifest.flat()];
 }
 
 /** The Terminal command that installs the helper, for the setup wizard. */
@@ -312,6 +456,7 @@ export function helperInstallCommand(
     return undefined; // a link in the folder, or a file the script needs is missing
   }
   const script = scriptFor('install', platform);
+  const app = shellQuote(appPinTarget(platform));
   const checks = manifest
     .flat()
     .map((a) => shellQuote(a))
@@ -320,8 +465,8 @@ export function helperInstallCommand(
   // Linux: root can't read an AppImage's mount, so copy the helper out first,
   // as runWithPkexec does. The entry checks the copy before root runs any of it.
   if (platform === 'linux')
-    return `d=$(mktemp -d) && cp -R ${shellQuote(dir)}/. "$d" && ${entry} "$d" ${script} ${checks}; rm -rf "$d"`;
-  return `${entry} ${shellQuote(dir)} ${script} ${checks}`;
+    return `d=$(mktemp -d) && cp -R ${shellQuote(dir)}/. "$d" && ${entry} "$d" ${script} ${app} ${checks}; rm -rf "$d"`;
+  return `${entry} ${shellQuote(dir)} ${script} ${app} ${checks}`;
 }
 
 const PROMPTS = {
@@ -404,7 +549,12 @@ async function runWithPkexec(
       ...ROOT_SHELL,
       ELEVATED_ENTRY,
       'vigil-helper',
-      ...elevatedArgs(stage, scriptFor(kind, 'linux'), manifest),
+      ...elevatedArgs(
+        stage,
+        scriptFor(kind, 'linux'),
+        kind === 'install' ? appPinTarget('linux') : '',
+        manifest,
+      ),
     ]);
     if (out.code === 0) return { ok: true };
     if (out.missing) {
@@ -512,7 +662,15 @@ async function viaOsascript(
   const manifest = checkedManifest(dir, script, 'darwin');
   const out = await run(
     '/usr/bin/osascript',
-    adminScriptArgs(elevatedArgs(dir, scriptFor(script, 'darwin'), manifest), kind),
+    adminScriptArgs(
+      elevatedArgs(
+        dir,
+        scriptFor(script, 'darwin'),
+        script === 'install' ? appPinTarget('darwin') : '',
+        manifest,
+      ),
+      kind,
+    ),
   );
   if (out.code === 0) return { ok: true };
   // osascript reports a closed password dialog as "User canceled. (-128)" at

@@ -1,22 +1,26 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { RuleStore } from '@vigil/sensors';
 import { Approvals, pkexecArgs } from './approval.js';
 import { defaultPaths, linuxPaths } from './config.js';
 import { Executor, type ActionOutcome } from './executor.js';
 import { Journal } from './journal.js';
 import { identifyProcess, isProtectedProcess, suspendProcess } from './commands/process.js';
-import { moveAcrossDisks, vetPath } from './commands/quarantine.js';
+import { quarantine, restore, vetPath } from './commands/quarantine.js';
 import { NFT_SETUP, NftFirewall, parseNftRules } from './commands/nftables.js';
 import {
   disableLinuxPersistence,
@@ -243,6 +247,7 @@ describe('Linux startup items', () => {
     writeFileSync(path, '[Service]\nExecStart=/home/alex/.cache/miner\n');
     sys.active.add('user:alex miner.service');
     const uid = statSync(path).uid;
+    sys.console = uid;
     const passwd = () => `alex:x:${uid}:${uid}::/home/alex:/bin/bash\n`;
     const rec = await disableLinuxPersistence(sys, path, 'act1', qopts(), dirs(), passwd);
     expect(rec).toMatchObject({ label: 'miner.service', domain: 'user:alex', wasLoaded: true });
@@ -263,11 +268,122 @@ describe('Linux startup items', () => {
   it('moves an autostart entry without touching systemd', async () => {
     const path = join(autostart, 'updater.desktop');
     writeFileSync(path, '[Desktop Entry]\nExec=/tmp/x\n');
+    sys.console = statSync(path).uid;
     const rec = await disableLinuxPersistence(sys, path, 'act2', qopts(), dirs(), () => PASSWD);
     expect(rec.domain).toBe('autostart');
     expect(sys.runs).toEqual([]);
     await restoreLinuxPersistence(sys, rec, qopts());
     expect(existsSync(path)).toBe(true);
+  });
+
+  it('turns off a user’s own item only for that user, asking', async () => {
+    const path = join(autostart, 'updater.desktop');
+    writeFileSync(path, '[Desktop Entry]\nExec=/tmp/x\n');
+    sys.console = statSync(path).uid + 1;
+    await expect(
+      disableLinuxPersistence(sys, path, 'o1', qopts(), dirs(), () => PASSWD),
+    ).rejects.toMatchObject({ code: 'not-your-item', message: /another user/ });
+    sys.console = undefined;
+    await expect(
+      disableLinuxPersistence(sys, path, 'o2', qopts(), dirs(), () => PASSWD),
+    ).rejects.toMatchObject({ code: 'not-your-item' });
+    expect(existsSync(path)).toBe(true);
+    expect(sys.runs).toEqual([]);
+  });
+
+  it('refuses a startup folder that is a link to another folder', async () => {
+    // A user's startup folder pointing at a system one: checked as written, acted on for real.
+    const system = join(root, 'etc', 'systemd', 'system');
+    mkdirSync(system, { recursive: true });
+    writeFileSync(join(system, 'sshd.service'), '[Service]\n');
+    const linked = join(root, 'home', 'bob', '.config', 'systemd', 'user');
+    mkdirSync(dirname(linked), { recursive: true });
+    symlinkSync(system, linked);
+    sys.console = statSync(join(system, 'sshd.service')).uid;
+    const both = new RegExp(
+      `^(${linked.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}|${system.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})$`,
+    );
+    await expect(
+      disableLinuxPersistence(sys, join(linked, 'sshd.service'), 'l1', qopts(), both, () => PASSWD),
+    ).rejects.toMatchObject({ code: 'startup-folder-linked' });
+    expect(existsSync(join(system, 'sshd.service'))).toBe(true);
+    expect(sys.runs).toEqual([]);
+  });
+
+  it('follows a /home link only root could make, as on ostree systems, and no other', async () => {
+    // Stands in for /home -> var/home (Fedora Silverblue and other ostree systems).
+    const os = join(root, 'os');
+    const auto = join(os, 'var', 'home', 'alex', '.config', 'autostart');
+    mkdirSync(auto, { recursive: true });
+    symlinkSync('var/home', join(os, 'home'));
+    const written = join(os, 'home', 'alex', '.config', 'autostart');
+    const path = join(written, 'updater.desktop');
+    writeFileSync(join(auto, 'updater.desktop'), '[Desktop Entry]\nExec=/tmp/x\n');
+    sys.console = statSync(join(auto, 'updater.desktop')).uid;
+    const startup = new RegExp(`^${written.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
+    const disable = () => disableLinuxPersistence(sys, path, 'h1', qopts(), startup, () => PASSWD);
+    if (process.getuid!() !== 0) {
+      // Not root: the link and its folders are a user's, so nothing is followed.
+      await expect(disable()).rejects.toMatchObject({ code: 'startup-folder-linked' });
+      expect(existsSync(path)).toBe(true);
+      return;
+    }
+    const rec = await disable();
+    expect(rec.quarantine.originalPath).toBe(join(realpathSync(auto), 'updater.desktop'));
+    expect(existsSync(path)).toBe(false);
+    await restoreLinuxPersistence(sys, rec, qopts());
+    expect(existsSync(path)).toBe(true);
+    // The same link, but leading into a folder others can write to: refused.
+    const open = join(os, 'var', 'open');
+    mkdirSync(join(open, 'alex', '.config', 'autostart'), { recursive: true });
+    chmodSync(open, 0o777);
+    writeFileSync(
+      join(open, 'alex', '.config', 'autostart', 'updater.desktop'),
+      '[Desktop Entry]\n',
+    );
+    rmSync(join(os, 'home'));
+    symlinkSync('var/open', join(os, 'home'));
+    await expect(disable()).rejects.toMatchObject({ code: 'startup-folder-linked' });
+    // A link at the home itself, even root's, is refused.
+    rmSync(join(os, 'home'));
+    mkdirSync(join(os, 'home'));
+    symlinkSync(join(os, 'var', 'home', 'alex'), join(os, 'home', 'alex'));
+    await expect(disable()).rejects.toMatchObject({ code: 'startup-folder-linked' });
+    expect(existsSync(join(auto, 'updater.desktop'))).toBe(true);
+  });
+
+  it('follows a root link outside any home, like /var -> private/var on macOS', async () => {
+    const os = join(root, 'mac');
+    const units = join(os, 'private', 'var', 'units');
+    mkdirSync(units, { recursive: true });
+    symlinkSync('private/var', join(os, 'var'));
+    const written = join(os, 'var', 'units');
+    const path = join(written, 'miner.service');
+    writeFileSync(join(units, 'miner.service'), '[Service]\n');
+    sys.console = statSync(join(units, 'miner.service')).uid;
+    const startup = new RegExp(`^${written.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
+    const disable = (id: string) =>
+      disableLinuxPersistence(sys, path, id, qopts(), startup, () => PASSWD);
+    if (process.getuid!() !== 0) {
+      // Not root: the link is a user's, so it is not followed.
+      await expect(disable('v0')).rejects.toMatchObject({ code: 'startup-folder-linked' });
+      expect(existsSync(path)).toBe(true);
+      return;
+    }
+    const rec = await disable('v1');
+    expect(rec.quarantine.originalPath).toBe(join(realpathSync(units), 'miner.service'));
+    await restoreLinuxPersistence(sys, rec, qopts());
+    expect(existsSync(path)).toBe(true);
+    // The same link in a folder others can write to (they could replace it): refused.
+    chmodSync(os, 0o777);
+    await expect(disable('v2')).rejects.toMatchObject({ code: 'startup-folder-linked' });
+    chmodSync(os, 0o755);
+    // A link someone else owns: refused.
+    rmSync(join(os, 'var'));
+    symlinkSync('private/var', join(os, 'var'));
+    spawnSync('chown', ['-h', '65534', join(os, 'var')]);
+    await expect(disable('v3')).rejects.toMatchObject({ code: 'startup-folder-linked' });
+    expect(existsSync(join(units, 'miner.service'))).toBe(true);
   });
 
   it('refuses files outside startup folders and the wrong kind of file', async () => {
@@ -315,15 +431,28 @@ describe('Linux startup items', () => {
 });
 
 describe('moving across disks', () => {
-  it.skipIf(!existsSync('/dev/shm'))('copies and deletes when rename would fail', () => {
+  it.skipIf(!existsSync('/dev/shm'))('quarantines and restores from another disk', async () => {
     const a = mkdtempSync(join('/dev/shm', 'vigil-'));
     const b = mkdtempSync(join(tmpdir(), 'vigil-'));
     try {
       mkdirSync(join(a, 'app'));
       writeFileSync(join(a, 'app', 'run'), 'x', { mode: 0o755 });
-      moveAcrossDisks(join(a, 'app'), join(b, 'app'));
+      const appMode = statSync(join(a, 'app')).mode & 0o7777;
+      const opts = {
+        quarantineDir: join(b, 'q'),
+        platform: 'linux' as const,
+        protectedPrefixes: [],
+      };
+      const sys = new FakeLinuxSystem();
+      const rec = await quarantine(sys, join(a, 'app'), 'x1', opts);
       expect(existsSync(join(a, 'app'))).toBe(false);
-      expect(statSync(join(b, 'app', 'run')).mode & 0o777).toBe(0o755);
+      // The stored copy is locked (root reads it anyway); its mode is in the record.
+      expect(statSync(rec.storedPath).mode & 0o777).toBe(0);
+      expect(rec.mode).toBe(appMode);
+      await restore(sys, rec, opts);
+      expect(statSync(join(a, 'app')).mode & 0o7777).toBe(appMode);
+      expect(statSync(join(a, 'app', 'run')).mode & 0o777).toBe(0o755);
+      expect(existsSync(join(b, 'q', 'x1'))).toBe(false);
     } finally {
       rmSync(a, { recursive: true, force: true });
       rmSync(b, { recursive: true, force: true });
