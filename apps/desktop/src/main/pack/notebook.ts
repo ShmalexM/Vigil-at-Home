@@ -207,10 +207,8 @@ function scrub(n: DogNote): DogNote {
   };
 }
 
-/** Read by the redactor: twice the longest field kept, so a cut never shows. */
-const READ = 8000;
-const redactText = (text: string) => redactTextForPack(text, READ);
-const redactData = (value: unknown) => redactDataForPack(value, READ);
+const redactText = redactTextForPack;
+const redactData = redactDataForPack;
 
 function usage(u: NoteUsage): NoteUsage {
   const whole = (n: number) => (Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0);

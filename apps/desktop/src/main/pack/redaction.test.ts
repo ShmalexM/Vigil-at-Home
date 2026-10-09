@@ -1,42 +1,40 @@
+import { MAX_REDACT_CHARS, REDACTED, WITHHELD } from '@vigil/ai/redact';
 import { describe, expect, it } from 'vitest';
-import { cutBefore, redactDataForPack, redactForPack, redactTextForPack } from './redaction.js';
+import { redactDataForPack, redactForPack, redactTextForPack } from './redaction.js';
 
-/** Joined at run time so code scanning doesn't take the sample for a real key. */
+/** Joined at run time so code scanning doesn't take the samples for real keys. */
 const KEY = ['sk', 'ant', 'Abc123Def456Ghi789Jkl012Mno'].join('-');
+const PASSWORD = ['hunter2', 'Plain', 'Word'].join('');
 
 describe('the pack’s redaction', () => {
   it('redacts data as data, and keeps its shape', () => {
-    const out = redactForPack({ q: `find ${KEY}`, n: 3, list: [`a ${KEY}`] }) as {
+    const out = redactForPack({ q: `find ${KEY}`, n: 3, password: PASSWORD }) as {
       q: string;
       n: number;
-      list: string[];
+      password: string;
     };
     expect(JSON.stringify(out)).not.toContain(KEY);
     expect(out.n).toBe(3);
-    expect(redactDataForPack({ rows: [{ key: KEY }] })).toMatch(/^\{"rows":\[\{"key":/);
-    expect(redactDataForPack({ rows: [{ key: KEY }] })).not.toContain(KEY);
+    expect(out.password).toBe(REDACTED);
+    const text = redactDataForPack({ rows: [{ token: PASSWORD }] });
+    expect(text).toMatch(/^\{"rows":\[\{"token":/);
+    expect(text).not.toContain(PASSWORD);
   });
 
-  it('cuts an over-long field back to a word break before redacting, so no half key is left', () => {
-    // The limit falls inside the key: cut there, "sk-ant-Abc123" would be left, too short to spot.
-    const text = `${'word '.repeat(20)}${KEY} tail`;
-    const limit = text.indexOf(KEY) + 13;
-    const out = redactTextForPack(text, limit);
-    expect(out).not.toContain('sk-ant');
-    expect(out.endsWith('word…')).toBe(true);
-    // Nested strings are kept within the limit too.
-    expect(JSON.stringify(redactForPack({ a: [text] }, limit))).not.toContain('sk-ant');
-  });
-
-  it('drops a private key block the cut leaves open', () => {
-    const text = `before\n-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nmore`;
-    expect(cutBefore(text, text.length - 3)).toBe('before\n…');
-    expect(cutBefore('oneverylongword', 5)).toBe('…');
+  it('withholds a field too long to read whole, rather than cutting it', () => {
+    const long = `${'word '.repeat(MAX_REDACT_CHARS / 5)}${KEY}`;
+    expect(redactTextForPack(long)).toBe(WITHHELD);
   });
 
   it('withholds what it can’t read rather than passing it on', () => {
     const loop: Record<string, unknown> = { a: 1 };
     loop.self = loop;
-    expect(JSON.stringify(redactForPack(loop))).toContain('withheld');
+    expect(JSON.stringify(redactForPack(loop))).toContain(WITHHELD);
+    const throws = {
+      get secret(): string {
+        throw new Error('no');
+      },
+    };
+    expect(JSON.stringify(redactForPack(throws))).toContain(WITHHELD);
   });
 });

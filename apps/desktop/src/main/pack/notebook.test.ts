@@ -1,5 +1,4 @@
 import { DatabaseSync } from 'node:sqlite';
-import { redactValue } from '@vigil/ai/redact';
 import { describe, expect, it } from 'vitest';
 import { NOTE_DAYS, Notebook } from './notebook.js';
 
@@ -173,14 +172,6 @@ describe('Notebook', () => {
 const KEY = ['sk', 'ant', 'Abc123Def456Ghi789Jkl012Mno'].join('-');
 const PASSWORD = ['hunter2', 'Plain', 'Word'].join('');
 const TOKEN = ['tok', 'Plain', 'Value9'].join('');
-/**
- * Whether the redactor in this tree withholds a value for its key's name
- * alone ({"password": ...}). main's doesn't yet; PR #133's does. Tests that
- * need it run only where it's there, and are named so.
- */
-const KEY_AWARE =
-  JSON.stringify(redactValue({ password: PASSWORD }, {})) !==
-  JSON.stringify({ password: PASSWORD });
 
 describe('Notebook redaction', () => {
   const rows = (db: DatabaseSync) =>
@@ -258,50 +249,47 @@ describe('Notebook redaction', () => {
     expect(JSON.stringify(read)).not.toContain(KEY);
   });
 
-  it.skipIf(!KEY_AWARE)(
-    '[needs #133’s redactor] withholds values under credential-named keys, on write and on read',
-    () => {
-      const db = new DatabaseSync(':memory:');
-      const book = new Notebook(db);
-      book.write({
+  it('withholds values under credential-named keys, on write and on read', () => {
+    const db = new DatabaseSync(':memory:');
+    const book = new Notebook(db);
+    book.write({
+      ...NOTE,
+      calls: [
+        {
+          tool: 'vigil.search_events',
+          title: 'Vigil › Search events',
+          args: { password: PASSWORD, limit: 5 },
+          outcome: 'ran',
+          result: { token: TOKEN, rows: [] },
+        },
+      ],
+    });
+    db.prepare('INSERT INTO pack_notes (id, ts, dog, subject, body) VALUES (?, ?, ?, ?, ?)').run(
+      'old-2',
+      Date.now(),
+      'lead',
+      null,
+      JSON.stringify({
         ...NOTE,
+        id: 'old-2',
+        at: Date.now(),
+        lookedAt: [],
+        reasons: [],
         calls: [
           {
-            tool: 'vigil.search_events',
-            title: 'Vigil › Search events',
-            args: { password: PASSWORD, limit: 5 },
+            tool: 't',
+            title: 't',
+            args: JSON.stringify({ password: PASSWORD }),
             outcome: 'ran',
-            result: { token: TOKEN, rows: [] },
+            result: JSON.stringify({ token: TOKEN }),
           },
         ],
-      });
-      db.prepare('INSERT INTO pack_notes (id, ts, dog, subject, body) VALUES (?, ?, ?, ?, ?)').run(
-        'old-2',
-        Date.now(),
-        'lead',
-        null,
-        JSON.stringify({
-          ...NOTE,
-          id: 'old-2',
-          at: Date.now(),
-          lookedAt: [],
-          reasons: [],
-          calls: [
-            {
-              tool: 't',
-              title: 't',
-              args: JSON.stringify({ password: PASSWORD }),
-              outcome: 'ran',
-              result: JSON.stringify({ token: TOKEN }),
-            },
-          ],
-        }),
-      );
-      expect(rows(db).includes(PASSWORD) && rows(db).includes('old-2')).toBe(true);
-      const text = JSON.stringify(book.list());
-      expect(book.list()).toHaveLength(2);
-      expect(text).not.toContain(PASSWORD);
-      expect(text).not.toContain(TOKEN);
-    },
-  );
+      }),
+    );
+    expect(rows(db).includes(PASSWORD) && rows(db).includes('old-2')).toBe(true);
+    const text = JSON.stringify(book.list());
+    expect(book.list()).toHaveLength(2);
+    expect(text).not.toContain(PASSWORD);
+    expect(text).not.toContain(TOKEN);
+  });
 });
