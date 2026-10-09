@@ -37,4 +37,18 @@ describe('Activity strip numbers', () => {
     now += EVENT_PROGRAMS_TTL_MS;
     expect(core.eventStats().programsLastHour).toBe(2);
   });
+
+  it('stop saying there are no events once some are stored', () => {
+    const now = 10_000_000;
+    const store = new Store(new DatabaseSync(':memory:'));
+    const core = new VigilCore(store, new DryRunExecutor(), true, () => now);
+    expect(core.eventStats()).toMatchObject({ newest: null, programsLastHour: 0 });
+    core.ingest({ ...makeExec(), ts: now });
+    // Not written yet: still nothing to count.
+    expect(core.eventStats().newest).toBeNull();
+    core.events.flush();
+    // Same instant, well inside both TTLs, yet counted again.
+    expect(core.eventStats()).toMatchObject({ newest: now, lastHour: 1, programsLastHour: 1 });
+    core.stop();
+  });
 });

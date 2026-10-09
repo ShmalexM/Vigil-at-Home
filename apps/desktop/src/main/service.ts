@@ -86,6 +86,8 @@ export class VigilCore {
   helperInstallable = false;
   /** Set when the installed helper isn't the one this build ships. */
   helperOutdated = false;
+  /** Why the AI can't work because of its switches (set by the app from AiBridge). */
+  aiNotice: (() => string | undefined) | undefined;
   /** Emits `events` (count) at most once per FEED_BATCH_MS while events arrive. */
   readonly feed = new EventEmitter<{ events: [number] }>();
   /** Vigil's AI runs and plan limits, for the Usage page. */
@@ -111,6 +113,12 @@ export class VigilCore {
     this.usage = new UsageService(store, now);
     this.events = new EventLog(store, {
       onError: (err) => console.error('[events] write failed:', err),
+      // Numbers that say there are no events must not outlive the first
+      // ones: the page would show "Nothing to show yet" over a full feed.
+      onStored: () => {
+        if (this.statsCache?.stats.newest === null) this.statsCache = undefined;
+        if (this.programsCache?.n === 0) this.programsCache = undefined;
+      },
     });
     this.scheduler = new Scheduler({
       onError: (name, err) => console.error(`[scheduler] ${name} failed:`, err),
@@ -378,6 +386,7 @@ export class VigilCore {
     const s = { ...computeStatus([], this.sensors.list()), ...this.store.openAlertCounts() };
     const today = startOfDay(this.now());
     const alertView = this.alertView();
+    const aiOff = this.aiNotice?.();
     return {
       ...s,
       alertView,
@@ -391,6 +400,7 @@ export class VigilCore {
       dryRun: this.executor.simulated ?? this.dryRun,
       helperInstallable: this.helperInstallable,
       helperOutdated: this.helperOutdated,
+      ...(aiOff ? { aiOff } : {}),
     };
   }
 

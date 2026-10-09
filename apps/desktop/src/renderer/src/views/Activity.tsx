@@ -27,6 +27,7 @@ import { realProcess } from '../evidence';
 import { actorLabel, clock, describeAction, describeEvent, timeAgo, timeOfDay } from '../format';
 import { matchText } from '../rule-modes';
 import { parseActivityParam, VIGIL_CONNECTOR, VIGIL_SELF } from './agents-format';
+import { appendOlder } from './activity-rows';
 import { PageHead } from './AppShell';
 import { onRovingKeyDown } from '../components/roving';
 import { computer, onLinux } from '../platform';
@@ -128,6 +129,9 @@ const PAGE = 100;
 
 /** Matches TEXT_SEARCH_WINDOW_MS in shared/ipc.ts (not imported, to keep zod out of the renderer). */
 const SEARCH_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Match EVENT_STATS_TTL_MS and EVENT_PROGRAMS_TTL_MS in main/service.ts. */
+const STATS_TTL_MS = 5_000;
+const PROGRAMS_TTL_MS = 60_000;
 
 function EventFeed({
   filter,
@@ -141,6 +145,8 @@ function EventFeed({
   const [text, setText] = useState('');
   const [paused, setPaused] = useState(false);
   const [rows, setRows] = useState<EventView[]>();
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
   const [more, setMore] = useState(false);
   /** With a search: how far back it has looked so far. */
   const [searchedTo, setSearchedTo] = useState<number>();
@@ -161,6 +167,8 @@ function EventFeed({
   queryRef.current = query;
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
+  /** The filters the rows on screen were loaded for. */
+  const rowsKey = useRef<string>(undefined);
 
   // One load in flight at a time: a busy Mac sends a batch every second, and
   // a text search over a day of its events can take longer than that.
@@ -169,9 +177,10 @@ function EventFeed({
       async () => {
         const from = Date.now();
         const q = queryRef.current;
-        return { r: await vigil.listEvents(q), from, text: !!q.text };
+        return { r: await vigil.listEvents(q), from, text: !!q.text, key: JSON.stringify(q) };
       },
-      ({ r, from, text }) => {
+      ({ r, from, text, key }) => {
+        rowsKey.current = key;
         setRows(r);
         setMore(r.length === PAGE);
         setSearchedTo(text ? from - SEARCH_WINDOW_MS : undefined);
@@ -184,21 +193,31 @@ function EventFeed({
   // Reload when the filters change (search waits for typing to settle).
   const key = JSON.stringify(query);
   useEffect(() => {
-    // New filters: an answer still on its way for the old ones never lands.
-    const t = setTimeout(feed.reset, text ? 250 : 0);
+    // New filters: an answer still on its way for the old ones never lands,
+    // even one that arrives while the new search waits for typing to settle.
+    feed.invalidate();
+    const t = setTimeout(feed.reload, text ? 250 : 0);
     return () => clearTimeout(t);
   }, [key, feed, text]);
 
-  // New events arrive in batches at most once a second.
-  useEffect(
-    () =>
-      vigil.on('events', (n) => {
-        reloadStats();
-        if (pausedRef.current) setWaiting((w) => w + n);
-        else load();
-      }),
-    [load, reloadStats],
-  );
+  // New events arrive in batches at most once a second. Main reuses the
+  // counts for a few seconds and the programs number for a minute, so they
+  // are asked for again once each has expired after the last batch:
+  // otherwise a quiet Mac would keep showing numbers from before it.
+  useEffect(() => {
+    let again: ReturnType<typeof setTimeout>[] = [];
+    const off = vigil.on('events', (n) => {
+      reloadStats();
+      again.forEach(clearTimeout);
+      again = [STATS_TTL_MS, PROGRAMS_TTL_MS].map((ms) => setTimeout(reloadStats, ms + 250));
+      if (pausedRef.current) setWaiting((w) => w + n);
+      else load();
+    });
+    return () => {
+      off();
+      again.forEach(clearTimeout);
+    };
+  }, [load, reloadStats]);
 
   // A search looks back one day at a time, so it never scans the whole history at once.
   const searching = searchedTo !== undefined;
@@ -206,16 +225,33 @@ function EventFeed({
   const canSearchBack = searching && !more && searchedTo > oldestKept;
 
   const older = async () => {
-    const last = rows?.at(-1);
-    const before = more && last ? last.event.ts : searchedTo;
+    const q = queryRef.current;
+    // The rows on screen are still the previous filters' until the new ones load.
+    if (rowsKey.current !== JSON.stringify(q)) return;
+    const last = more ? rows?.at(-1) : undefined;
+    const before = last ? last.event.ts : searchedTo;
     if (before === undefined) return;
-    const r = await vigil.listEvents({ ...queryRef.current, before });
-    setRows([...(rows ?? []), ...r]);
+    const current = feed.guard();
+    const r = await vigil.listEvents({
+      ...q,
+      before,
+      ...(last ? { beforeId: last.event.id } : {}),
+    });
+    // Filters changed while it loaded: these rows belong to the old ones.
+    if (!current()) return;
+    // A live refresh may have replaced the rows meanwhile: add the older page
+    // after the row it was asked from, in whatever rows are current. If that
+    // row has scrolled off the newest page, the page no longer joins on.
+    const joined = appendOlder(rowsRef.current ?? [], r, last?.event.id);
+    if (!joined) return;
+    setRows(joined);
     setMore(r.length === PAGE);
     if (searching) setSearchedTo(before - SEARCH_WINDOW_MS);
   };
 
-  const empty = stats && stats.newest === null;
+  // Rows on screen win over numbers that may be a few seconds old.
+  const newest = Math.max(stats?.newest ?? 0, rows?.[0]?.event.ts ?? 0) || null;
+  const empty = stats && newest === null;
 
   return (
     <div className="col" style={{ gap: 16 }}>
@@ -226,8 +262,8 @@ function EventFeed({
         <Stat label="Matched a rule" value={count(stats?.matchedLastHour)} />
         <Stat
           label="Latest event"
-          value={!stats ? '…' : stats.newest ? timeAgo(stats.newest) : 'None yet'}
-          live={!paused && !!stats?.newest}
+          value={!stats ? '…' : newest ? timeAgo(newest) : 'None yet'}
+          live={!paused && !!newest}
         />
       </div>
 

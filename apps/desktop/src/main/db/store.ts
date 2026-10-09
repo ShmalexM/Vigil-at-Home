@@ -115,7 +115,12 @@ export function eventViewsQuery(
     where.push('agent_id = ?');
     args.push(q.agent);
   }
-  if (q.before !== undefined) {
+  if (q.before !== undefined && q.beforeId !== undefined) {
+    // Keyset on (ts, id), the feed's order, so events sharing the last ts of
+    // a page aren't skipped. `ts <= ?` keeps the walk on the ts index.
+    where.push('ts <= ? AND (ts < ? OR id < ?)');
+    args.push(q.before, q.before, q.beforeId);
+  } else if (q.before !== undefined) {
     where.push('ts < ?');
     args.push(q.before);
   }
@@ -854,6 +859,13 @@ export class Store {
     );
   }
 
+  /** The AI providers Vigil's runs have used, oldest record kept or not. */
+  aiRunProviders(): string[] {
+    return (this.stmt('SELECT DISTINCT provider FROM ai_runs').all() as { provider: string }[]).map(
+      (r) => r.provider,
+    );
+  }
+
   pruneAiRuns(before: number): number {
     return Number(this.stmt('DELETE FROM ai_runs WHERE ts < ?').run(before).changes);
   }
@@ -1143,7 +1155,7 @@ export class Store {
     const rows = this.stmt(
       `SELECT json_extract(body, '$.purpose') AS purpose,
          SUM(CASE WHEN ts >= ? THEN 1 ELSE 0 END) AS runs, MAX(ts) AS lastAt
-       FROM ai_runs GROUP BY purpose`,
+       FROM ai_runs WHERE provider IS NOT NULL GROUP BY purpose`,
     ).all(since) as { purpose: string | null; runs: number; lastAt: number }[];
     return new Map(
       rows.flatMap((r) =>

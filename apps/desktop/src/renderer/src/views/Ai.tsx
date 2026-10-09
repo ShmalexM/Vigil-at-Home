@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { LogIn, RefreshCw, Unlink } from 'lucide-react';
 import type { AiPrefsPatch, AiProviderView, AiView } from '../../../shared/ai';
 import { vigil } from '../api';
@@ -66,6 +66,11 @@ export function AiSection() {
     }
   }, []);
   useEffect(() => void load(), [load]);
+  // Home’s "Open AI settings" opens Settings at this card.
+  const card = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (location.hash === '#settings/ai') card.current?.scrollIntoView({ block: 'start' });
+  }, []);
 
   const setPref = async (patch: AiPrefsPatch) => {
     await vigil.setAiPrefs(patch);
@@ -172,6 +177,7 @@ export function AiSection() {
 
   return (
     <>
+      <div ref={card} aria-hidden="true" />
       <SectionHead
         title="AI"
         sub={`Explains alerts and labels unusual events${view?.mode ? `, ${MODE_TEXT[view.mode]}` : ''}. None of it blocks or allows anything: rules do the blocking, and you decide. Change where it runs in Setup.`}
@@ -185,6 +191,22 @@ export function AiSection() {
         <p className="ai-sub ai-empty">Checking your AI apps…</p>
       ) : (
         <>
+          {view.off && (
+            <div className="row" style={{ flexWrap: 'wrap', gap: 8 }} role="status">
+              <span className="ai-sub grow">{view.off}.</span>
+              {view.offAction && (
+                <Button
+                  size="sm"
+                  onClick={async () => {
+                    await vigil.turnAiBackOn();
+                    await load();
+                  }}
+                >
+                  {view.offAction}
+                </Button>
+              )}
+            </div>
+          )}
           <h4 className="ai-group">Explains alerts</h4>
           <p className="ai-sub ai-group-sub">
             When an alert comes in, Vigil asks the first app here that’s ready, top to bottom, to
