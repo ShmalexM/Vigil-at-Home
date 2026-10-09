@@ -18,6 +18,7 @@ import { API_KEYS, localModelFor, stepsFor, type PlanInputs } from './plan.js';
 const KEY_MODE = 'onboarding.mode';
 const KEY_FINISHED = 'onboarding.finishedAt';
 const KEY_SKIPPED = 'onboarding.skipped';
+const KEY_BANNERS = 'onboarding.bannersDismissed';
 
 /** Checks are cheap but spawn processes; the wizard polls, so reuse fresh results. */
 const CACHE_MS = 2000;
@@ -57,6 +58,8 @@ export class OnboardingService extends EventEmitter<{ changed: [] }> {
   private codex: { at: number; status: CodexStatus } | undefined;
   private inflight: Promise<Map<CheckId, CheckResult>> | undefined;
   private readonly now: () => number;
+  /** Each step's banner in the last view, for dismissBanner. */
+  private lastBanners = new Map<string, string>();
 
   constructor(private readonly o: OnboardingOptions) {
     super();
@@ -88,6 +91,23 @@ export class OnboardingService extends EventEmitter<{ changed: [] }> {
   finish(): void {
     this.o.store.setSetting(KEY_FINISHED, this.now());
     this.emit('changed');
+  }
+
+  /**
+   * "Later" on a step's banner. Remembered per step and wording, so the same
+   * banner never comes back; the step stays in Settings › Setup.
+   */
+  dismissBanner(stepId: string): void {
+    const banner = this.lastBanners.get(stepId);
+    if (!banner) return;
+    const set = new Set(this.dismissedBanners());
+    set.add(`${stepId}:${banner}`);
+    this.o.store.setSetting(KEY_BANNERS, [...set]);
+    this.emit('changed');
+  }
+
+  private dismissedBanners(): string[] {
+    return this.o.store.getSetting(KEY_BANNERS, z.array(z.string()), []);
   }
 
   /** "Run setup again" in Settings. Keeps the mode and saved keys. */
@@ -143,11 +163,13 @@ export class OnboardingService extends EventEmitter<{ changed: [] }> {
         )
       : new Map<CheckId, CheckResult>();
     const skipped = new Set(this.skipped());
+    const dismissed = new Set(this.dismissedBanners());
+    this.lastBanners.clear();
 
     const steps: SetupStepView[] = [];
     const doneIds = new Set<string>();
     for (const d of defs) {
-      const r = d.result ?? (d.check ? results.get(d.check) : undefined);
+      const r: CheckResult | undefined = d.result ?? (d.check ? results.get(d.check) : undefined);
       const base = {
         id: d.id,
         group: d.group,
@@ -187,6 +209,9 @@ export class OnboardingService extends EventEmitter<{ changed: [] }> {
         };
       } else if (r?.ok) {
         view = { ...base, state: 'done', ...(r.detail ? { detail: r.detail } : {}) };
+      } else if (r?.waiting) {
+        // Nothing to do but wait; calm, and no banner.
+        view = { ...base, state: 'waiting', ...(r.detail ? { detail: r.detail } : {}) };
       } else if ((d.after ?? []).some((id) => defs.some((x) => x.id === id) && !doneIds.has(id))) {
         view = { ...base, state: 'waiting' };
       } else if (!d.commands.length && !d.manual?.length) {
@@ -195,6 +220,16 @@ export class OnboardingService extends EventEmitter<{ changed: [] }> {
           state: 'unavailable',
           detail: d.unavailable ?? 'Not available in this build',
         };
+      } else if (r?.again) {
+        // Done once, but has to be done again: the same commands, its own title.
+        view = {
+          ...base,
+          title: r.again,
+          state: 'todo',
+          ...(r.detail ? { detail: r.detail } : {}),
+        };
+        this.lastBanners.set(d.id, r.again);
+        if (!base.skipped && !dismissed.has(`${d.id}:${r.again}`)) view.banner = r.again;
       } else {
         view = { ...base, state: 'todo', ...(r?.detail ? { detail: r.detail } : {}) };
       }

@@ -370,7 +370,7 @@ function StepAction({
 const MARK: Record<SetupStepView['state'], [MarkState, string]> = {
   done: ['done', 'Done'],
   todo: ['pending', 'To do'],
-  waiting: ['pending', 'Waiting on an earlier step'],
+  waiting: ['pending', 'Waiting'],
   unavailable: ['warn', 'Not available yet'],
 };
 
@@ -393,7 +393,7 @@ export function StepCard({
               <h2 className="t-h3">{step.title}</h2>
               {step.optional && <Chip>Optional</Chip>}
               {step.skipped && <Chip tone="fair">Skipped</Chip>}
-              {step.state === 'waiting' && <Chip>Do the steps above first</Chip>}
+              {step.state === 'waiting' && !step.detail && <Chip>Do the steps above first</Chip>}
             </div>
             <span className="t-small">{step.why}</span>
             {step.detail && (

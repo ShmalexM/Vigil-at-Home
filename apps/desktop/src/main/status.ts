@@ -13,6 +13,21 @@ export interface SensorHealth {
   detail?: string;
   /** Why it is in this state, when that isn't obvious, e.g. "No events for 12 minutes". */
   note?: string;
+  /** A fix Vigil can offer on the spot: santa-sync issues Santa a new sync certificate. */
+  repair?: 'santa-sync';
+  /**
+   * Santa: the last connection the sync port turned away. A detail only,
+   * never a reason for the level: any local program can open the port.
+   */
+  lastRefusal?: {
+    at: number;
+    reason: 'no_certificate' | 'wrong_certificate' | 'handshake_failed';
+  };
+  /**
+   * Santa: while it is still served without its certificate (a profile from
+   * before it), until when at the latest. A detail only.
+   */
+  compatUntil?: number;
 }
 
 export interface Status {

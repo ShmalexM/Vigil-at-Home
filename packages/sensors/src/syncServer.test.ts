@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer, request, type Server } from 'node:https';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
@@ -16,7 +16,7 @@ import {
   SantaSyncServer,
   SYNC_SESSION_TTL_MS,
 } from './santa/syncServer.js';
-import { ensureSyncTls, serverCertNeedsRenewal, syncTlsPaths } from './santa/tls.js';
+import { SyncIdentityStore } from './santa/tls.js';
 import { SensorEvent } from '@vigil/core';
 
 const SHA_A = 'a'.repeat(64);
@@ -94,23 +94,10 @@ async function fullSync(preflightBody: Record<string, unknown> = {}) {
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'vigil-sync-'));
-  const tls = syncTlsPaths(join(dir, 'tls'));
-  expect(await ensureSyncTls(tls, 'openssl')).toBe(true);
-  expect(await ensureSyncTls(tls, 'openssl')).toBe(false); // idempotent
-  expect(serverCertNeedsRenewal(tls)).toBe(false);
-  expect(statSync(tls.caKey).mode & 0o777).toBe(0o600);
-  expect(statSync(tls.serverKey).mode & 0o777).toBe(0o600);
-  // santasyncservice runs as nobody and must reach ca.pem.
-  expect(statSync(tls.dir).mode & 0o777).toBe(0o755);
-  expect(statSync(tls.caCert).mode & 0o777).toBe(0o644);
-  expect(statSync(tls.serverCert).mode & 0o777).toBe(0o644);
-  // A folder left at 0700 by an earlier version is repaired.
-  chmodSync(tls.dir, 0o700);
-  chmodSync(tls.caCert, 0o600);
-  expect(await ensureSyncTls(tls, 'openssl')).toBe(false);
-  expect(statSync(tls.dir).mode & 0o777).toBe(0o755);
-  expect(statSync(tls.caCert).mode & 0o777).toBe(0o644);
-  expect(statSync(tls.caKey).mode & 0o777).toBe(0o600);
+  // The identity store itself is covered in identityStore.test.ts.
+  const identity = new SyncIdentityStore(join(dir, 'tls'), { opensslBin: 'openssl' });
+  await identity.start();
+  const tls = identity.paths;
   ca = readFileSync(tls.caCert);
   store = new RuleStore(join(dir, 'rules.json'));
   sync = new SantaSyncServer({

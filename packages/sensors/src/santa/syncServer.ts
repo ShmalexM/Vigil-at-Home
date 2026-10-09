@@ -11,7 +11,9 @@
 // Santa only accepts plain http for localhost, but anything running as the
 // user could bind the port first and serve allow rules. So in production this
 // server runs inside the root helper over HTTPS, with the CA pinned in
-// Santa's ServerAuthRootsData and the private key readable only by root.
+// Santa's ServerAuthRootsFile and the private key readable only by root. The
+// helper also requires Santa's pinned client certificate (tls.ts), once
+// Santa's profile carries it.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { gunzipSync, inflateSync } from 'node:zlib';
@@ -61,6 +63,11 @@ export interface SyncServerOptions {
   /** Requests handled at once; more get 503 until one finishes. */
   maxInFlight?: number;
   log?: (msg: string) => void;
+  /**
+   * Called when Santa finishes a sync that applied every rule it was sent,
+   * with the request that ended it (absent when dispatch() is called directly).
+   */
+  onRuleSync?: (o: { at: number; req?: IncomingMessage }) => void;
   /** For tests. */
   now?: () => number;
 }
@@ -103,7 +110,7 @@ export class SantaSyncServer {
   private readonly sessions = new Map<string, SyncSession>();
   private inFlight = 0;
   private readonly opts: Required<
-    Omit<SyncServerOptions, 'onEvent' | 'eventDetailUrl' | 'eventDetailText' | 'log'>
+    Omit<SyncServerOptions, 'onEvent' | 'eventDetailUrl' | 'eventDetailText' | 'log' | 'onRuleSync'>
   > &
     SyncServerOptions;
 
@@ -164,10 +171,10 @@ export class SantaSyncServer {
       throw new HttpError(415, 'binary proto transfer is not supported');
     }
     const body = await this.readJson(req);
-    return this.dispatch(stage, machineId, body);
+    return this.dispatch(stage, machineId, body, req);
   }
 
-  dispatch(stage: string, machineId: string, body: unknown): unknown {
+  dispatch(stage: string, machineId: string, body: unknown, req?: IncomingMessage): unknown {
     switch (stage) {
       case 'preflight':
         return this.preflight(machineId, body);
@@ -176,7 +183,7 @@ export class SantaSyncServer {
       case 'ruledownload':
         return this.ruleDownload(machineId, body);
       case 'postflight':
-        return this.postflight(machineId, body);
+        return this.postflight(machineId, body, req);
       default:
         throw new HttpError(404, 'not found');
     }
@@ -281,8 +288,19 @@ export class SantaSyncServer {
 
   /** When Santa last finished a sync with this server (ms since epoch), or null. */
   lastSyncAt: number | null = null;
+  /** When Santa last finished a sync that applied every rule it was sent, or null. */
+  lastRuleSyncAt: number | null = null;
 
-  private postflight(machineId: string, body: unknown): Record<string, never> {
+  /** How often Santa is told to sync (full_sync_interval). */
+  get fullSyncIntervalSeconds(): number {
+    return this.opts.fullSyncIntervalSeconds;
+  }
+
+  private postflight(
+    machineId: string,
+    body: unknown,
+    req?: IncomingMessage,
+  ): Record<string, never> {
     const session = this.session(machineId);
     // A postflight with no sync behind it says nothing about Santa.
     if (!session) return {};
@@ -294,6 +312,8 @@ export class SantaSyncServer {
     // the same changes go out again next time.
     if (received === session.rules.length && processed === session.rules.length) {
       this.opts.store.markSynced(session.snapshotRev, session.clean, machineId);
+      this.lastRuleSyncAt = this.lastSyncAt;
+      this.opts.onRuleSync?.({ at: this.lastSyncAt, ...(req ? { req } : {}) });
     } else {
       this.opts.log?.(
         `santa postflight mismatch: sent ${session.rules.length}, received ${received}, processed ${processed}`,

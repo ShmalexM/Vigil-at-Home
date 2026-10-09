@@ -236,6 +236,10 @@ export const calls = {
   openSettingsPane: z.tuple([SettingsPane]),
   installHelper: z.tuple([]),
   uninstallHelper: z.tuple([]),
+  /** Home's repair for a Santa that can't sync (asks for the admin password). */
+  repairSantaSync: z.tuple([]),
+  /** "Later" on a setup step's banner: the step stays in Settings › Setup. */
+  dismissSetupBanner: z.tuple([z.string().max(64)]),
   // The Usage page (main/usage.ts).
   getUsage: z.tuple([z.union([z.literal(1), z.literal(7), z.literal(30), z.literal(90)])]),
   /** True to read the vendors' limits again now. */
@@ -315,6 +319,21 @@ export interface SensorView {
   state: 'ok' | 'degraded' | 'down' | 'not_installed';
   detail?: string;
   note?: string;
+  /** A fix offered on the layer's row (main/sensor-health.ts). */
+  repair?: 'santa-sync';
+  /**
+   * Santa: the last connection the sync port turned away. A detail only,
+   * never a reason for the level: any local program can open the port.
+   */
+  lastRefusal?: {
+    at: number;
+    reason: 'no_certificate' | 'wrong_certificate' | 'handshake_failed';
+  };
+  /**
+   * Santa: while it is still served without its certificate (a profile from
+   * before it), until when at the latest. A detail only.
+   */
+  compatUntil?: number;
 }
 
 /** Proof that Vigil is running, for the "it's working" line. Today is since local midnight. */
@@ -603,6 +622,8 @@ export interface CallResults {
   openSettingsPane: void;
   installHelper: HelperInstallResult;
   uninstallHelper: HelperInstallResult;
+  repairSantaSync: HelperInstallResult;
+  dismissSetupBanner: SetupView;
   getUsage: UsageReport;
   getUsageLimits: UsageLimitsView;
   getAi: AiView;

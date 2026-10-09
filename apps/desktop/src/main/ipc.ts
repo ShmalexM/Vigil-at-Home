@@ -25,11 +25,14 @@ export type Handlers = {
 export interface HelperControl {
   install(): Promise<HelperInstallResult>;
   uninstall(): Promise<HelperInstallResult>;
+  /** Issue Santa a new sync certificate (asks for the admin password). */
+  repairSantaSync(): Promise<HelperInstallResult>;
 }
 
 const noHelper: HelperControl = {
   install: async () => ({ ok: false, error: 'The helper only runs on macOS' }),
   uninstall: async () => ({ ok: false, error: 'The helper only runs on macOS' }),
+  repairSantaSync: async () => ({ ok: false, error: 'Santa runs only on macOS' }),
 };
 
 /** Register one validated handler per call. Arguments are parsed with zod before use. */
@@ -122,6 +125,11 @@ export function registerIpc(
     ...onboardingHandlers(setup, () => windows.openMain('home')),
     installHelper: () => helper.install(),
     uninstallHelper: () => helper.uninstall(),
+    repairSantaSync: async () => {
+      const r = await helper.repairSantaSync();
+      windows.broadcast('changed');
+      return r;
+    },
     getUsage: (days) => core.usage.report(days),
     getUsageLimits: (refresh) => core.usage.limits(refresh ?? false),
     getUpdates: () => updates.view(),

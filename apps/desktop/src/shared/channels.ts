@@ -49,6 +49,8 @@ export const CALL_NAMES = [
   'openSettingsPane',
   'installHelper',
   'uninstallHelper',
+  'repairSantaSync',
+  'dismissSetupBanner',
   'getUsage',
   'getUsageLimits',
   'getAi',
