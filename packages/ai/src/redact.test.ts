@@ -153,45 +153,129 @@ describe('redaction', () => {
 
 /** A ceiling no linear pass reaches, even on a slow shared CI runner. */
 const MAX_PASS_MS = 2000;
-/** What n and 4n may take apart: 4 when linear, 16 when quadratic. */
-const MAX_GROWTH = 8;
+/** How much smaller the small input is than the large one. */
+const STEP = 16;
 /**
- * Shorter passes are timer and GC noise: below this, the smaller one counts as
- * this long. A pass this quick at n/4 can't be quadratic at these sizes (that
- * would take seconds), and the MAX_PASS_MS ceiling still applies.
+ * What the large input may cost over the small one. Linear is 16 in theory;
+ * measured, it's about 15 typically and up to about 50, as the large input no
+ * longer fits the CPU's caches and lives long enough to be collected.
+ * Quadratic is 256 in theory and about 180 measured with the small input at
+ * MIN_TIMED_MS. The limit sits about 2x from both.
  */
-const MIN_TIMED_MS = 10;
+const MAX_GROWTH = 100;
+/**
+ * Below this, the small input counts as costing this much: its fixed overhead
+ * and the clock's grain. This hides only a quadratic redaction costing under
+ * MAX_GROWTH * MIN_TIMED_MS (100 ms) at full size.
+ */
+const MIN_TIMED_MS = 1;
+/**
+ * Rounds of (small, large, small), interleaved so a slow stretch hits both
+ * sizes. It stops early only on growth under MAX_GROWTH / 2, which a
+ * quadratic redaction shows only if both its small passes ran 5x slow.
+ * Otherwise it runs every round, so the cheapest pass at each size is judged
+ * and not the first reading that happens to pass.
+ */
+const ROUNDS = 5;
 
-function timeOf(run: () => void): number {
-  const started = performance.now();
+/**
+ * The CPU time run takes in this process, in ms. Time the runner gives to
+ * other processes (other test files, other jobs on the host) doesn't count, as
+ * it would on a wall clock.
+ */
+function costOf(run: () => void): number {
+  const started = process.cpuUsage();
   run();
-  return performance.now() - started;
+  const { user, system } = process.cpuUsage(started);
+  return (user + system) / 1000;
+}
+
+interface Growth {
+  small: number;
+  large: number;
+  /** large over small, the small one counted as at least MIN_TIMED_MS. */
+  growth: number;
+  /** The slowest single pass. */
+  slowest: number;
 }
 
 /**
- * Checks that run(size) takes linear time: four times the input may take
- * at most MAX_GROWTH times as long, where quadratic time would take 16. Each
- * size is timed more than once and the fastest pass kept, so a pause of the
- * runner's own can't fail it, and no pass may reach MAX_PASS_MS.
+ * Costs measure(size / STEP) and measure(size) in interleaved rounds after a
+ * warm-up, and keeps the cheapest pass at each size.
  */
-function expectLinear(label: string, size: number, run: (size: number) => void): void {
+function growthOf(size: number, measure: (size: number) => number): Growth {
+  const smallSize = Math.floor(size / STEP);
+  // Compiling the code costs CPU time too, on other threads, and may still be
+  // under way after the warm-up: hence a small pass on each side of the large.
+  measure(smallSize);
+  measure(smallSize);
   let small = Infinity;
-  for (let i = 0; i < 3; i++)
-    small = Math.min(
-      small,
-      timeOf(() => run(size / 4)),
-    );
-  const limit = MAX_GROWTH * Math.max(small, MIN_TIMED_MS);
   let large = Infinity;
-  for (let i = 0; i < 3 && large >= limit; i++)
-    large = Math.min(
-      large,
-      timeOf(() => run(size)),
-    );
-  const report = `${label}: ${small.toFixed(1)} ms at ${size / 4}, ${large.toFixed(1)} ms at ${size}`;
-  expect(large, report).toBeLessThan(limit);
-  expect(large, report).toBeLessThan(MAX_PASS_MS);
+  let growth = Infinity;
+  let slowest = 0;
+  for (let round = 0; round < ROUNDS && growth >= MAX_GROWTH / 2; round++) {
+    const before = measure(smallSize);
+    const l = measure(size);
+    const after = measure(smallSize);
+    small = Math.min(small, before, after);
+    large = Math.min(large, l);
+    growth = large / Math.max(small, MIN_TIMED_MS);
+    slowest = Math.max(slowest, before, l, after);
+  }
+  return { small, large, growth, slowest };
 }
+
+/**
+ * Checks that measure costs linear time: 16 times the input may cost at most
+ * MAX_GROWTH times as much, and no pass may reach MAX_PASS_MS.
+ */
+function expectLinearGrowth(label: string, size: number, measure: (size: number) => number): void {
+  const { small, large, growth, slowest } = growthOf(size, measure);
+  const report = `${label}: ${small.toFixed(2)} ms at ${Math.floor(size / STEP)}, ${large.toFixed(2)} ms at ${size}`;
+  expect(growth, `${report}, more than linear`).toBeLessThan(MAX_GROWTH);
+  expect(slowest, `${report}, a pass over ${MAX_PASS_MS} ms`).toBeLessThan(MAX_PASS_MS);
+}
+
+/** Checks that run(size) takes linear CPU time; see expectLinearGrowth. */
+function expectLinear(label: string, size: number, run: (size: number) => void): void {
+  expectLinearGrowth(label, size, (n) => costOf(() => run(n)));
+}
+
+describe('the linear-time check', () => {
+  /** A seeded noise factor in [1, spread). */
+  const noise = (seed: number, spread: number) => () => {
+    seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+    return 1 + ((spread - 1) * seed) / 2 ** 32;
+  };
+
+  it('passes linear cost and fails quadratic cost under any noise below 2.5x', () => {
+    for (let seed = 1; seed <= 500; seed++) {
+      const factor = noise(seed, 2.5);
+      // 16 ms per MiB, or per MiB squared: the small size is over
+      // MIN_TIMED_MS and the large one under MAX_PASS_MS either way.
+      const mib = (n: number) => n / (1 << 20);
+      expect(() =>
+        expectLinearGrowth('linear', 4 << 20, (n) => 16 * mib(n) * factor()),
+      ).not.toThrow();
+      expect(() =>
+        expectLinearGrowth('quadratic', 4 << 20, (n) => 16 * mib(n) ** 2 * factor()),
+      ).toThrow(/more than linear/);
+    }
+  });
+
+  it('fails a quadratic function, timed for real', () => {
+    // Searches the text read so far from the start, once per 8 characters,
+    // for a character it doesn't hold: n * n / 16 characters read. About 0.2 s
+    // at the full size.
+    const quadratic = (n: number) => {
+      const text = 'a'.repeat(n);
+      let found = 0;
+      for (let end = 8; end <= n; end += 8) found += text.slice(0, end).indexOf('b');
+      return found;
+    };
+    expect(() => expectLinear('quadratic', 512 * 1024, quadratic)).toThrow(/more than linear/);
+  });
+});
 
 describe('redaction, hardened', () => {
   const redact = (text: string) => redactString(text, {});
@@ -313,7 +397,7 @@ describe('redaction, hardened', () => {
       expectLinear(JSON.stringify(unit), MAX_REDACT_CHARS, (n) => redact(fill(unit, n)));
       // Past it, the field is withheld whole.
       const past = fill(unit, MAX_REDACT_CHARS + 88 * 1024);
-      const took = timeOf(() => redact(past));
+      const took = costOf(() => redact(past));
       expect(took, `${JSON.stringify(unit)} past the cap took ${took.toFixed(1)} ms`).toBeLessThan(
         MAX_PASS_MS,
       );
