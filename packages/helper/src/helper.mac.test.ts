@@ -6,6 +6,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import {
+  chmodSync,
   chownSync,
   copyFileSync,
   existsSync,
@@ -177,14 +178,37 @@ describe.skipIf(!enabled)('helper on a real Mac', () => {
   });
 
   describe('quarantine', () => {
-    it('quarantines a file and restores it', async () => {
-      const file = join(root, 'dropper.sh');
+    // The user who runs the tests under sudo: the owner of the temporary folder.
+    const userUid = () => Number(process.env.SUDO_UID ?? statSync(tmpdir()).uid);
+
+    it('quarantines a user’s file as that user and restores it', async () => {
+      // A folder of the user's, as in their Downloads: the move runs as them.
+      chmodSync(root, 0o755);
+      const folder = join(root, 'Downloads');
+      mkdirSync(folder);
+      chownSync(folder, userUid(), 20);
+      const file = join(folder, 'dropper.sh');
       writeFileSync(file, '#!/bin/sh\necho hi\n', { mode: 0o755 });
+      chownSync(file, userUid(), 20);
       const out = await act({ kind: 'file.quarantine', path: file });
       expect(existsSync(file)).toBe(false);
       await act({ kind: 'file.restore', quarantineId: out.quarantineId! });
       expect(existsSync(file)).toBe(true);
       expect(statSync(file).mode & 0o777).toBe(0o755);
+      expect(statSync(file).uid).toBe(userUid());
+    });
+
+    it('refuses a root-owned file in a folder others can change', async () => {
+      chmodSync(root, 0o755);
+      const shared = join(root, 'Shared');
+      mkdirSync(shared);
+      chmodSync(shared, 0o1777);
+      const file = join(shared, 'installed.sh');
+      writeFileSync(file, '#!/bin/sh\n', { mode: 0o755 });
+      await expect(act({ kind: 'file.quarantine', path: file })).rejects.toMatchObject({
+        code: 'installer-owned',
+      });
+      expect(existsSync(file)).toBe(true);
     });
   });
 
