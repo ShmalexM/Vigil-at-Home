@@ -149,7 +149,9 @@ describe('HelperLink', () => {
       selfPaths: ['/x'],
       lists: { big, small: ['a'] },
     });
-    expect(out?.needLists).toEqual(['big']);
+    expect(out).toMatchObject({ needLists: ['big'] });
+    // Vigil's own programs go in a self grant of their own.
+    expect(fake.sent[0]).not.toHaveProperty('selfPaths');
     const parts = fake.sent.filter((c) => c.kind === 'detection.list.set') as unknown as {
       part: number;
       parts: number;

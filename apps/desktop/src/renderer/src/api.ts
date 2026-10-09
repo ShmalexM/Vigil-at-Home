@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { liveLoader } from './live';
 
 export const vigil = window.vigil;
 
@@ -16,29 +17,25 @@ export function useLive<T>(
   const [data, setData] = useState<T>();
   const loader = useRef(load);
   loader.current = load;
-  // Each load gets a number and only the newest may land, so a slow answer
-  // to an older load (or for the previous key) never replaces a newer one.
-  const latest = useRef(0);
-  const reload = useRef(() => {
-    const n = ++latest.current;
-    loader.current().then(
-      (value) => {
-        if (n === latest.current) setData(() => value);
-      },
-      (err: unknown) => console.error(err),
-    );
-  }).current;
+  // At most one load in flight, so a slow answer always lands even while
+  // reloads keep coming; an answer for the previous key never does.
+  const live = useRef<ReturnType<typeof liveLoader<T>>>(undefined);
+  live.current ??= liveLoader(
+    () => loader.current(),
+    (value) => setData(() => value),
+  );
+  const { reload, reset } = live.current;
   useEffect(() => {
     // Don't show the previous key's data while this key's loads.
     setData(undefined);
-    reload();
+    reset();
     const off = vigil.on('changed', reload);
     const offAlso = also ? vigil.on(also, reload) : undefined;
     return () => {
       off();
       offAlso?.();
     };
-  }, [key, reload, also]);
+  }, [key, reload, reset, also]);
   return [data, reload];
 }
 

@@ -58,11 +58,16 @@ describe('the pack tool gate', () => {
   });
 
   it('gates the Lead dog’s changes to the pack by mode', () => {
-    expect(gateAction('ask', 'run', false)).toBe('ask');
-    expect(gateAction('full', 'retire', true)).toBe('apply');
-    expect(gateAction('auto', 'create', false)).toBe('apply');
-    expect(gateAction('auto', 'create', true)).toBe('ask');
-    expect(gateAction('auto', 'update', true)).toBe('ask');
-    expect(gateAction('auto', 'retire', false)).toBe('ask');
+    expect(gateAction('ask', 'run', false, false)).toBe('ask');
+    expect(gateAction('full', 'retire', false, false)).toBe('apply');
+    expect(gateAction('full', 'create', true, false)).toBe('apply');
+    expect(gateAction('full', 'create', true, true)).toBe('ask');
+    expect(gateAction('ask', 'create', true, false)).toBe('ask');
+    expect(gateAction('full', 'run', false, true)).toBe('ask');
+    expect(gateAction('auto', 'create', false, false)).toBe('apply');
+    expect(gateAction('auto', 'update', false, true)).toBe('ask');
+    expect(gateAction('auto', 'create', true, false)).toBe('ask');
+    expect(gateAction('auto', 'update', true, false)).toBe('ask');
+    expect(gateAction('auto', 'retire', false, false)).toBe('ask');
   });
 });

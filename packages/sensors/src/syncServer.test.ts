@@ -5,8 +5,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import type { AddressInfo } from 'node:net';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { Readable } from 'node:stream';
 import { RuleStore } from './santa/ruleStore.js';
-import { SantaSyncServer } from './santa/syncServer.js';
+import {
+  HttpError,
+  logSafe,
+  MAX_LOGGED_URL,
+  MAX_SYNC_SESSIONS,
+  SantaSyncServer,
+  SYNC_SESSION_TTL_MS,
+} from './santa/syncServer.js';
 import { ensureSyncTls, serverCertNeedsRenewal, syncTlsPaths } from './santa/tls.js';
 import { SensorEvent } from '@vigil/core';
 
@@ -285,5 +294,178 @@ describe('Santa sync server over pinned TLS', () => {
         policy: 'BLOCKLIST',
       }),
     ).toThrow();
+  });
+});
+
+describe('unfinished syncs', () => {
+  const statusOf = (fn: () => unknown): number | undefined => {
+    try {
+      fn();
+      return undefined;
+    } catch (err) {
+      return err instanceof HttpError ? err.status : -1;
+    }
+  };
+
+  it('keeps only a few, and only for a while', () => {
+    let clock = 1_000_000;
+    const s = new SantaSyncServer({
+      store: new RuleStore(join(dir, 'sessions-rules.json')),
+      now: () => clock,
+    });
+    const download = (m: string) => () => s.dispatch('ruledownload', m, { cursor: '' });
+    for (let i = 0; i <= MAX_SYNC_SESSIONS; i++) s.dispatch('preflight', `m${i}`, {});
+    // The oldest made room for the newest.
+    expect(statusOf(download('m0'))).toBe(409);
+    for (let i = 1; i <= MAX_SYNC_SESSIONS; i++)
+      expect(statusOf(download(`m${i}`))).toBeUndefined();
+
+    clock += SYNC_SESSION_TTL_MS + 1;
+    expect(statusOf(download('m1'))).toBe(409);
+    s.dispatch('preflight', 'm1', {});
+    expect(statusOf(download('m1'))).toBeUndefined();
+  });
+
+  it("never lets other machine ids push out the last confirmed Santa's sync", () => {
+    const rules = new RuleStore(join(dir, 'known-rules.json'));
+    rules.upsert({ ruleType: 'BINARY', identifier: SHA_A, policy: 'BLOCKLIST' });
+    const s = new SantaSyncServer({ store: rules });
+    const download = (m: string) => () => s.dispatch('ruledownload', m, { cursor: '' });
+    const finish = (m: string) => {
+      s.dispatch('preflight', m, {});
+      s.dispatch('ruledownload', m, { cursor: '' });
+      s.dispatch('postflight', m, { rules_received: 1, rules_processed: 1 });
+    };
+    finish('santa');
+    expect(rules.syncedMachineId).toBe('santa');
+    // It is kept with the store, so a restarted helper still knows it.
+    expect(new RuleStore(join(dir, 'known-rules.json')).syncedMachineId).toBe('santa');
+
+    s.dispatch('preflight', 'santa', {});
+    for (let i = 0; i < MAX_SYNC_SESSIONS * 3; i++) s.dispatch('preflight', `x${i}`, {});
+    expect(statusOf(download('santa'))).toBeUndefined();
+    // The others share the remaining slots, oldest out first.
+    const last = MAX_SYNC_SESSIONS * 3 - 1;
+    for (let i = 0; i < MAX_SYNC_SESSIONS - 1; i++)
+      expect(statusOf(download(`x${last - i}`))).toBeUndefined();
+    expect(statusOf(download(`x${last - (MAX_SYNC_SESSIONS - 1)}`))).toBe(409);
+
+    // With every slot taken by others, Santa's preflight still gets one.
+    const t = new SantaSyncServer({ store: rules });
+    for (let i = 0; i < MAX_SYNC_SESSIONS; i++) t.dispatch('preflight', `y${i}`, {});
+    t.dispatch('preflight', 'santa', {});
+    expect(statusOf(() => t.dispatch('ruledownload', 'santa', { cursor: '' }))).toBeUndefined();
+    expect(statusOf(() => t.dispatch('ruledownload', 'y0', { cursor: '' }))).toBe(409);
+  });
+
+  it('does not remember a machine id whose postflight did not confirm everything', () => {
+    const rules = new RuleStore(join(dir, 'unconfirmed-rules.json'));
+    rules.upsert({ ruleType: 'BINARY', identifier: SHA_A, policy: 'BLOCKLIST' });
+    const s = new SantaSyncServer({ store: rules });
+    s.dispatch('preflight', 'm', {});
+    s.dispatch('postflight', 'm', { rules_received: 0, rules_processed: 0 });
+    expect(rules.syncedMachineId).toBeUndefined();
+  });
+
+  it('counts only a postflight that ends a live sync as Santa syncing', () => {
+    let clock = 5_000;
+    const s = new SantaSyncServer({
+      store: new RuleStore(join(dir, 'postflight-rules.json')),
+      now: () => clock,
+    });
+    s.dispatch('postflight', 'stray', { rules_received: 0, rules_processed: 0 });
+    expect(s.lastSyncAt).toBeNull();
+    s.dispatch('preflight', 'm', {});
+    clock = 6_000;
+    s.dispatch('postflight', 'm', { rules_received: 1, rules_processed: 1 });
+    expect(s.lastSyncAt).toBe(6_000);
+    // The session is gone, so repeating the postflight changes nothing.
+    clock = 7_000;
+    s.dispatch('postflight', 'm', {});
+    expect(s.lastSyncAt).toBe(6_000);
+  });
+});
+
+describe('request logging', () => {
+  it('logs the request path on one line, bounded', async () => {
+    const lines: string[] = [];
+    const s = new SantaSyncServer({ store: new RuleStore(), log: (m) => lines.push(m) });
+    const req = Object.assign(Readable.from([]), {
+      method: 'POST',
+      url: `/nowhere\r\n[vigil-helper] forged line\u001b[2J${'x'.repeat(5000)}`,
+      headers: {},
+    }) as unknown as IncomingMessage;
+    await new Promise<void>((resolve) => {
+      const res = { writeHead: () => res, end: () => resolve() } as unknown as ServerResponse;
+      s.handler(req, res);
+    });
+    expect(lines).toHaveLength(1);
+    for (const c of ['\r', '\n', '\u001b']) expect(lines[0]).not.toContain(c);
+    expect(lines[0]).toContain('/nowhere[vigil-helper] forged line[2J');
+    expect(lines[0]!.length).toBeLessThan(MAX_LOGGED_URL + 100);
+  });
+
+  it('strips control characters and truncates', () => {
+    expect(logSafe('/a\u0000b\u007fc\u0085d e')).toBe('/abcde');
+    expect(logSafe('y'.repeat(MAX_LOGGED_URL + 1))).toBe(`${'y'.repeat(MAX_LOGGED_URL)}...`);
+    expect(logSafe('/preflight/M1')).toBe('/preflight/M1');
+  });
+});
+
+describe('request limits', () => {
+  // A request whose body arrives only when the test says so.
+  function fakeRequest(path: string, headers: Record<string, string> = {}) {
+    const body = new Readable({ read() {} });
+    const req = Object.assign(body, { method: 'POST', url: path, headers });
+    return { req: req as unknown as IncomingMessage, body };
+  }
+  function respond(s: SantaSyncServer, req: IncomingMessage): Promise<number> {
+    return new Promise((resolve) => {
+      let status = 0;
+      const res = {
+        writeHead: (code: number) => ((status = code), res),
+        end: () => resolve(status),
+      } as unknown as ServerResponse;
+      s.handler(req, res);
+    });
+  }
+
+  it('refuses a body declared too large without reading it', async () => {
+    const s = new SantaSyncServer({ store: new RuleStore() });
+    const { req, body } = fakeRequest('/eventupload/M', {
+      'content-length': String(4 * 1024 * 1024 + 1),
+    });
+    expect(await respond(s, req)).toBe(413);
+    expect(body.readableEnded).toBe(false);
+  });
+
+  it('refuses a body over 4 MiB that did not declare its size', async () => {
+    const s = new SantaSyncServer({ store: new RuleStore() });
+    const { req, body } = fakeRequest('/eventupload/M');
+    const status = respond(s, req);
+    for (let i = 0; i < 5; i++) body.push(Buffer.alloc(1024 * 1024, 0x20));
+    body.push(null);
+    expect(await status).toBe(413);
+  });
+
+  it('handles only a few requests at once', async () => {
+    const s = new SantaSyncServer({ store: new RuleStore() });
+    const held = Array.from({ length: 4 }, () => fakeRequest('/preflight/M'));
+    const pending = held.map(({ req }) => respond(s, req));
+    expect(await respond(s, fakeRequest('/preflight/M').req)).toBe(503);
+    held[0]!.body.push(null);
+    expect(await pending[0]).toBe(200);
+    const next = fakeRequest('/preflight/M');
+    next.body.push(null);
+    expect(await respond(s, next.req)).toBe(200);
+    // A request that fails also gives its place back.
+    held[1]!.body.push('not json');
+    held[1]!.body.push(null);
+    expect(await pending[1]).toBe(400);
+    const after = fakeRequest('/preflight/M');
+    after.body.push(null);
+    expect(await respond(s, after.req)).toBe(200);
+    for (const { body } of held.slice(2)) body.push(null);
+    expect(await Promise.all(pending.slice(2))).toEqual([200, 200]);
   });
 });
