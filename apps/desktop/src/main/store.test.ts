@@ -1,6 +1,7 @@
-import { copyFileSync, mkdtempSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import type { AgentToolRequestEvent, EventOfKind, SensorEvent } from '@vigil/core';
 import { TEXT_SEARCH_WINDOW_MS, type EventOutcome } from '../shared/ipc.js';
@@ -93,6 +94,65 @@ describe('Store', () => {
     expect(s.getEvent(drop.id)).toBeUndefined();
   });
 
+  it('answers event counts and last-event times as the database would, through writes, rollbacks and prunes', () => {
+    const db = new DatabaseSync(':memory:');
+    const s = new Store(db);
+    const direct = (since: number, source: string) => ({
+      count: (
+        db.prepare('SELECT COUNT(*) AS n FROM events WHERE ts >= ?').get(since) as { n: number }
+      ).n,
+      last: (
+        db.prepare('SELECT MAX(ts) AS ts FROM events WHERE source = ?').get(source) as {
+          ts: number | null;
+        }
+      ).ts,
+    });
+    const check = () => {
+      for (const source of ['santa', 'osquery', 'test'])
+        for (const since of [0, 1_050, 5_000]) {
+          const want = direct(since, source);
+          // Twice: the second answer may come from memory.
+          for (let i = 0; i < 2; i++) {
+            expect(s.countEventsSince(since)).toBe(want.count);
+            expect(s.lastEventAt(source)).toBe(want.last);
+          }
+        }
+    };
+    let seed = 7;
+    const rand = (n: number) => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n;
+    const event = (): SensorEvent => ({
+      ...makeExec(),
+      ts: 1_000 + rand(8_000),
+      source: (['santa', 'osquery', 'test'] as const)[rand(3)]!,
+    });
+    check();
+    for (let step = 0; step < 300; step++) {
+      switch (rand(6)) {
+        case 0:
+          s.insertEvent(event());
+          break;
+        case 1:
+          s.insertEvents([{ event: event() }, { event: event() }]);
+          break;
+        case 2:
+          expect(() =>
+            s.tx(() => {
+              s.insertEvent(event());
+              check();
+              throw new Error('roll back');
+            }),
+          ).toThrow('roll back');
+          break;
+        case 3:
+          s.pruneEvents(1_000 + rand(8_000));
+          break;
+        default:
+          break;
+      }
+      check();
+    }
+  });
+
   it('counts rule matches since a time', () => {
     const s = memoryStore();
     for (const ts of [10, 20, 30]) {
@@ -183,6 +243,25 @@ describe('Store', () => {
       newest: 3000,
     });
     expect(stats.byGroup).toMatchObject({ programs: 1, network: 1, files: 0 });
+  });
+
+  it('pages the feed by (ts, id), so events sharing a ts are not skipped', () => {
+    const s = memoryStore();
+    const ids = ['e1', 'e2', 'e3', 'e4', 'e5'];
+    s.insertEvents(ids.map((id, i) => ({ event: { ...makeExec(), id, ts: i < 4 ? 2000 : 1000 } })));
+    const all: string[] = [];
+    let last: { ts: number; id: string } | undefined;
+    for (;;) {
+      const page = s.listEventViews({
+        limit: 2,
+        ...(last ? { before: last.ts, beforeId: last.id } : {}),
+      });
+      if (page.length === 0) break;
+      all.push(...page.map((v) => v.event.id));
+      const e = page.at(-1)!.event;
+      last = { ts: e.ts, id: e.id };
+    }
+    expect(all).toEqual(['e4', 'e3', 'e2', 'e1', 'e5']);
   });
 
   it('searches events since a time by kind and text, within a scan budget', () => {
@@ -451,10 +530,17 @@ describe('Store: agents', () => {
       { agent: 'claude-code' },
       { agent: 'claude-code', group: 'programs' as const },
       { agent: 'claude-code', before: 5000 },
+      { agent: 'claude-code', before: 5000, beforeId: 'x' },
     ]) {
       const steps = plan(q);
       expect(steps.join('\n'), JSON.stringify(q)).toContain('events_agent_ts');
       // Ordering rows of equal ts by id is fine; sorting every row is not.
+      expect(steps, JSON.stringify(q)).not.toContain('USE TEMP B-TREE FOR ORDER BY');
+    }
+    // The whole feed pages through the ts index too, sorting only ties by id.
+    for (const q of [{ before: 5000 }, { before: 5000, beforeId: 'x' }]) {
+      const steps = plan(q).join('\n');
+      expect(steps, JSON.stringify(q)).toMatch(/USING INDEX \w*ts\w*/);
       expect(steps, JSON.stringify(q)).not.toContain('USE TEMP B-TREE FOR ORDER BY');
     }
     // The agent comes from the event's own tag, and a tool request's agent.
@@ -600,5 +686,31 @@ describe('Store: agents', () => {
     expect(stats.get('explain')).toEqual({ runs: 1, lastAt: 900 });
     expect(stats.get('classify')).toEqual({ runs: 0, lastAt: 50 });
     expect(stats.has('analyze')).toBe(false);
+  });
+});
+
+describe('Store: who writes events', () => {
+  it('is the only code that changes the events table, so its memos stay right', () => {
+    const root = fileURLToPath(new URL('../../../../', import.meta.url));
+    const writes =
+      /\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE|DELETE\s+FROM|REPLACE\s+INTO)\s+events\b/i;
+    const found: string[] = [];
+    const walk = (dir: string): void => {
+      for (const d of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, d.name);
+        if (d.isDirectory()) walk(path);
+        else if (/\.(?:ts|tsx|mjs|js)$/.test(d.name) && !/\.test\.tsx?$/.test(d.name)) {
+          if (writes.test(readFileSync(path, 'utf8'))) found.push(relative(root, path));
+        }
+      }
+    };
+    // App and package code; measurement scripts (perf/) build their own tables.
+    for (const top of ['apps', 'packages'])
+      for (const d of readdirSync(join(root, top))) walk(join(root, top, d, 'src'));
+    // Migrations run before a Store exists.
+    expect(found.sort()).toEqual([
+      'apps/desktop/src/main/db/schema.ts',
+      'apps/desktop/src/main/db/store.ts',
+    ]);
   });
 });

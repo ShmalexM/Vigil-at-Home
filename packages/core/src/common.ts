@@ -50,6 +50,15 @@ export const AgentTag = z.object({
   /** One run of the agent: 16 hex chars derived from the root process. */
   session: z.string().regex(/^[0-9a-f]{16}$/),
   depth: z.number().int().min(0).max(64),
+  /**
+   * The agent root's code signature (team ID and signing ID, as its launch
+   * reported them). A process carries them only while its parent has that
+   * same signature, i.e. it was started by the signed agent program itself
+   * (or a copy of it the agent started), not by a shell or any other program
+   * in between. Absent when the root reported no signature.
+   */
+  teamId: z.string().max(64).optional(),
+  signingId: z.string().max(256).optional(),
 });
 export type AgentTag = z.infer<typeof AgentTag>;
 

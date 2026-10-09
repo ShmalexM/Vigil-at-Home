@@ -41,6 +41,9 @@ export {
 } from './engine.js';
 export {
   SafetyFloor,
+  selfKey,
+  selfRoots,
+  underSelfRoot,
   DEFAULT_PROTECTED_PATH_GLOBS,
   DEFAULT_NEVER_BLOCK_NETWORKS,
   type SafetyConfig,

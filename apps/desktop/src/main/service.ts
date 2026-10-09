@@ -35,6 +35,10 @@ import { WORTH_A_LOOK_RULE } from './worth-a-look.js';
 import { SLOW_RULE } from './slow-rule.js';
 import { UsageService } from './usage.js';
 
+/** How long the Activity strip's counts are reused (see eventStats). */
+export const EVENT_STATS_TTL_MS = 5_000;
+/** How long its distinct-programs number is reused: it reads every launch of the hour. */
+export const EVENT_PROGRAMS_TTL_MS = 60_000;
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 /** The feed hears about new events at most this often, however fast they arrive. */
@@ -46,6 +50,14 @@ export const EVENT_RETENTION_DAYS = 30;
  * rule replay needs.
  */
 export const DEFAULT_MAX_DB_BYTES = 1024 * 1024 * 1024;
+/**
+ * Also check the cap after this many stored events, not only hourly: a busy
+ * Mac (900,000 events a day) passes the cap in hours, and the hourly job
+ * waits on the scheduler, which holds routine work while the Mac is hot and
+ * starts its hour again at every launch. A check is two PRAGMAs; only a
+ * database over the cap pays for a prune.
+ */
+const CAP_CHECK_EVENTS = 10_000;
 /** Same window the detection engine replays AI-drafted rules over before approval. */
 export const RULE_REVIEW_DAYS = 14;
 
@@ -73,6 +85,8 @@ export class VigilCore {
   onIngest: ((event: SensorEvent, outcome: EventOutcome | undefined) => void) | undefined;
   private editing: RuleEditing | undefined;
   private feedPending = 0;
+  private sinceCapCheck = 0;
+  private stopped = false;
   private feedTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
@@ -86,6 +100,12 @@ export class VigilCore {
     this.usage = new UsageService(store, now);
     this.events = new EventLog(store, {
       onError: (err) => console.error('[events] write failed:', err),
+      // Numbers that say there are no events must not outlive the first
+      // ones: the page would show "Nothing to show yet" over a full feed.
+      onStored: () => {
+        if (this.statsCache?.stats.newest === null) this.statsCache = undefined;
+        if (this.programsCache?.n === 0) this.programsCache = undefined;
+      },
     });
     this.scheduler = new Scheduler({
       onError: (name, err) => console.error(`[scheduler] ${name} failed:`, err),
@@ -126,14 +146,20 @@ export class VigilCore {
       true,
     );
     this.scheduler.every('cap-disk', HOUR, () => {
-      this.store.pruneEventsToSize(this.maxDbBytes);
+      this.capDisk();
     });
   }
 
   stop(): void {
+    this.stopped = true;
     this.scheduler.stop();
     clearTimeout(this.feedTimer);
     this.events.flush();
+  }
+
+  /** Drop the oldest events no alert needs until the database is under its cap. */
+  capDisk(): number {
+    return this.store.pruneEventsToSize(this.maxDbBytes);
   }
 
   /** Slow or hold routine work to match the Mac's power state. */
@@ -150,6 +176,18 @@ export class VigilCore {
    */
   ingest(event: SensorEvent, outcome?: EventOutcome): void {
     this.events.add(event, outcome);
+    if (++this.sinceCapCheck >= CAP_CHECK_EVENTS) {
+      this.sinceCapCheck = 0;
+      // After this event's turn, so it never waits on a prune.
+      setImmediate(() => {
+        if (this.stopped) return; // the store may be closed by now
+        try {
+          this.capDisk();
+        } catch (err) {
+          console.error('[events] could not keep the database under its cap:', err);
+        }
+      });
+    }
     this.onIngest?.(event, outcome);
     this.feedPending++;
     this.feedTimer ??= setTimeout(() => {
@@ -234,11 +272,31 @@ export class VigilCore {
     return cleared;
   }
 
+  private statsCache: { at: number; stats: EventStats } | undefined;
+  private programsCache: { at: number; n: number } | undefined;
+
+  /**
+   * The Activity strip's numbers. A busy Mac stores 200,000 events an hour
+   * while the page asks again with every batch of events, about once a
+   * second, so the counts are at most {@link EVENT_STATS_TTL_MS} old and the
+   * costly distinct-programs number at most {@link EVENT_PROGRAMS_TTL_MS}.
+   */
   eventStats(): EventStats {
-    return {
-      ...this.store.eventStats(this.now() - HOUR),
+    const now = this.now();
+    if (this.statsCache && now - this.statsCache.at < EVENT_STATS_TTL_MS) {
+      return this.statsCache.stats;
+    }
+    const since = now - HOUR;
+    if (!this.programsCache || now - this.programsCache.at >= EVENT_PROGRAMS_TTL_MS) {
+      this.programsCache = { at: now, n: this.store.programsSince(since) };
+    }
+    const stats = {
+      ...this.store.eventCounts(since),
+      programsLastHour: this.programsCache.n,
       retentionDays: EVENT_RETENTION_DAYS,
     };
+    this.statsCache = { at: now, stats };
+    return stats;
   }
 
   status(): StatusView {

@@ -1,4 +1,5 @@
 import { authorizeAction, type Action, type ProcessRef } from '@vigil/core';
+import { selfKey, selfRoots, underSelfRoot } from '@vigil/core/self';
 import { BlockList, isIP } from 'node:net';
 import { globMatcher } from './rules/compile.js';
 import type { DetectionEvent } from './types.js';
@@ -12,11 +13,19 @@ import type { DetectionEvent } from './types.js';
 export interface SafetyConfig {
   /** Paths of Vigil's own binaries or bundle. Vigil never pauses, kills or blocks itself. */
   selfPaths: string[];
+  /**
+   * sha256 of the programs inside Vigil's AppImage. A program is blocked by
+   * hash everywhere at once, so blocking one of these would stop Vigil too.
+   */
+  selfHashes: string[];
   /** Extra process path globs the user never wants touched. */
   protectedPathGlobs: string[];
   /** Networks never firewalled (the user's LAN, a VPN...). Loopback and link-local are always included. */
   neverBlockNetworks: string[];
 }
+
+// Shared with the helper, so both floors agree on what Vigil is.
+export { selfKey, selfRoots, underSelfRoot };
 
 export const DEFAULT_PROTECTED_PATH_GLOBS = [
   '/System/**',
@@ -71,6 +80,7 @@ export class SafetyFloor {
   private readonly appleTools = APPLE_TOOL_GLOBS.map((g) => globMatcher(g));
   private readonly systemPersistence = SYSTEM_PERSISTENCE_GLOBS.map((g) => globMatcher(g));
   private readonly selfPaths: string[];
+  private selfHashes: Set<string>;
   private readonly neverBlock: BlockList;
 
   constructor(cfg: Partial<SafetyConfig> = {}) {
@@ -85,16 +95,22 @@ export class SafetyFloor {
     };
     this.protectedPaths = [...DEFAULT_PROTECTED_PATH_GLOBS, ...extra].map(match);
     this.protectedFiles = [...PROTECTED_FILE_GLOBS, ...extra].map(match);
-    this.selfPaths = (cfg.selfPaths ?? []).map((p) => p.toLowerCase().replace(/\/+$/, ''));
+    this.selfPaths = selfRoots(cfg.selfPaths ?? []);
+    this.selfHashes = new Set();
+    this.setSelfHashes(cfg.selfHashes ?? []);
     this.neverBlock = toBlockList(
       [...DEFAULT_NEVER_BLOCK_NETWORKS, ...(cfg.neverBlockNetworks ?? [])],
       'neverBlockNetworks',
     );
   }
 
+  /** The app hashes its own programs after start-up, so they arrive late. */
+  setSelfHashes(hashes: readonly string[]): void {
+    this.selfHashes = new Set(hashes.map((h) => h.toLowerCase()));
+  }
+
   private isSelf(path: string): boolean {
-    const p = path.toLowerCase();
-    return this.selfPaths.some((s) => p === s || p.startsWith(`${s}/`));
+    return underSelfRoot(this.selfPaths, path);
   }
 
   /** Why this process must never be paused, killed or blocklisted, or undefined if it may be. */
@@ -153,6 +169,8 @@ export class SafetyFloor {
       }
       case 'santa.rule.set': {
         if (action.identifier.startsWith('platform:')) return 'it would block part of macOS';
+        if (this.selfHashes.has(action.identifier.toLowerCase()))
+          return 'it would block Vigil itself';
         const names = proc && [proc.sha256, proc.cdhash, proc.teamId, proc.signingId];
         if (proc && names?.includes(action.identifier)) {
           const why = this.processProtection(proc);

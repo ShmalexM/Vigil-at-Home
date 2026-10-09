@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { Hold, type HoldState } from './hold';
 
 /**
  * Press and hold to confirm something risky, such as releasing a block.
  * A fill sweeps across while held; letting go early cancels. Enter or Space
- * held down works the same way from the keyboard.
+ * held down works the same way from the keyboard. Only the pointer or key
+ * that started the hold can finish it: tabbing away, the pointer leaving or
+ * the system cancelling it all cancel the hold.
  */
 export function HoldButton({
   label,
@@ -24,24 +27,17 @@ export function HoldButton({
   full?: boolean;
   disabled?: boolean;
 }) {
-  const [state, setState] = useState<'idle' | 'holding' | 'done'>('idle');
-  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const [state, setState] = useState<HoldState>('idle');
+  const confirm = useRef(onConfirm);
+  confirm.current = onConfirm;
+  const hold = useRef<Hold>(undefined);
+  hold.current ??= new Hold(ms, setState, () => confirm.current());
+  hold.current.ms = ms;
 
-  useEffect(() => () => clearTimeout(timer.current), []);
-
-  const start = () => {
-    if (disabled || state !== 'idle') return;
-    setState('holding');
-    timer.current = setTimeout(() => {
-      setState('done');
-      onConfirm();
-    }, ms);
-  };
-  const cancel = () => {
-    if (state !== 'holding') return;
-    clearTimeout(timer.current);
-    setState('idle');
-  };
+  useEffect(() => () => hold.current?.abort(), []);
+  useEffect(() => {
+    if (disabled) hold.current?.abort();
+  }, [disabled]);
 
   const fill =
     state === 'idle'
@@ -54,16 +50,20 @@ export function HoldButton({
       className={`btn hold ${state} ${size ?? ''} ${full ? 'full' : ''}`}
       aria-label={`${label}. Press and hold to confirm.`}
       disabled={disabled}
-      onPointerDown={start}
-      onPointerUp={cancel}
-      onPointerLeave={cancel}
+      onPointerDown={(e) => {
+        if (!disabled && e.button === 0) hold.current?.press({ pointer: e.pointerId });
+      }}
+      onPointerUp={(e) => hold.current?.release({ pointer: e.pointerId })}
+      onPointerLeave={(e) => hold.current?.pointerLeft(e.pointerId)}
+      onPointerCancel={() => hold.current?.abort()}
+      onBlur={() => hold.current?.abort()}
       onKeyDown={(e) => {
         if ((e.key === 'Enter' || e.key === ' ') && !e.repeat) {
           e.preventDefault();
-          start();
+          if (!disabled) hold.current?.press({ key: e.key });
         }
       }}
-      onKeyUp={cancel}
+      onKeyUp={(e) => hold.current?.release({ key: e.key })}
     >
       <span className="hold-fill" style={fill} aria-hidden />
       <span className="hold-label">
