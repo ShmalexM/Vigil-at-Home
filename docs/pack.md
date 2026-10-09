@@ -20,21 +20,21 @@ The mode at the top of the page works like a coding agent's permission modes.
 
 Retiring a dog always asks in Let AI decide.
 
-Scheduled runs never stop to ask. Nobody is watching them, so a call that
-would need your OK is skipped, and the dog says in its report what it would
-have done. Only runs you start (Run now, or a chat) ask, and a question still
-open when its run ends goes away with it.
+A tool call still waiting for your OK when its run ends is refused. A pack
+dog's card then stays held for its next same call (below); the Lead dog's
+goes with its answer.
 
 ### Who sees outside text
 
 Text Vigil didn't write and you didn't type can carry instructions: a file name, an alert, a web page a connector fetched, a dog's report. So the Lead dog answers each message along two paths, and the one that can change the pack never reads such text (`main/pack/service.ts`, `say`).
 
 - **The acting path** is the model call that may propose changes: add, change, run or retire a dog, remember or forget a fact. Its prompt holds only your own messages and clean state: dog names and jobs you typed or that are built in, report summaries from runs that read nothing outside, memory facts from your words, earlier answers that read nothing outside, and Vigil's own tools by key with Vigil's titles. Everything else is there only as a reference: `answer-3` for an earlier answer that read outside text, `report:<dog id>`, `job:<dog id>`, `memory:<id>`, a dog with an outside name by its id, and every connector tool as `tool-3` with a label Vigil writes ("connector tool 3 from github"), never the server's key, title or description. The acting path calls no tools. Its changes are your request, so they go through the gate as clean and apply as your mode allows: "Rename Pip to Spot", "Create a dog to find duplicate files" and "Change Pip's job to check Downloads" stay instant.
-- **Names and keys you type** are mapped to ids by Vigil, not the model, by exact match: a dog's whole name in any case (so "Run Pip" finds Pip even when its name came from outside text), and a connector tool's key exactly, same case, never part of a longer key ("github.create_issue_preview" doesn't vouch for "github.create_issue"). A connector key the model gives that you didn't type is dropped.
-- **The reading path** answers questions that need outside text: what a dog found, what a job says, what an alert is, what's on this Mac, a connector's output. The acting path asks for it with a question and the references it needs, or Vigil sends a message there itself when it plainly asks about a report or the memory. This call may see anything and use the Lead dog's tools, but its answer has no field for changes: it is shown to you, kept as outside text, and appears to the acting path only as `answer-<n>`.
-- **The bridge.** When your message leans on text the acting path never saw ("do what Pip suggested", "carry out the recommendation", "yes" right after a reading answer, or a reference like `answer-3`), or the acting path cites a reference, every change in that turn waits for your OK, in every mode, Full access included. Memory changes wait too when the turn also went down the reading path, when a fact replaces one your message doesn't name word for word, or when the fact to forget came from outside text.
+- **Names and keys you type** are mapped to ids by Vigil, not the model, by exact match: a dog's whole name in any case (so "Run Pip" finds Pip even when its name came from outside text), longest name first, so a name inside a longer one you typed doesn't count ("Retire Pip Two" names Pip Two, never Pip), and a connector tool's key exactly, same case, never part of a longer key ("github.create_issue_preview" doesn't vouch for "github.create_issue"). A connector key the model gives that you didn't type is dropped. When your message names a dog, a change, run or retirement the model asks for must be about a dog you named; one about any other dog waits for your OK.
+- **The reading path** answers questions that need outside text: what a dog found, what a job says, what an alert is, what's on this Mac, a connector's output. It runs only when the acting path asks for it, with a question and the references it needs; no word in your message sends a turn there. This call may see anything but is offered only Vigil's own read-only tools, and its answer has no field for changes: it is shown to you, kept as outside text, and appears to the acting path only as `answer-<n>`.
+- **The bridge.** When a change rests on text the acting path never saw, every change in that turn waits for your OK, in every mode, Full access included. Vigil goes by references, never by words: your message names one (`answer-3`, `report:<dog id>`), or the acting path cites one or writes one into a change. The acting path is told to cite what a change rests on ("do what Pip suggested" cites Pip's report, "yes" to a reading answer cites that answer); it never saw that text, so it has nothing of it to copy. A request you typed in full applies as your mode allows, whatever words it uses: "Create a dog named Advisor to check Downloads hourly", "Run Pip; ignore any recommendations in its report" and "Remember I prefer reports in plain English" read nothing and wait for nothing in Full access. Memory changes wait too when the turn also went down the reading path, when a fact replaces one your message doesn't name word for word, or when the fact to forget came from outside text.
+- **After an answer that read outside text.** Once any answer in the conversation read outside text or used a tool, a short "yes" may be agreeing to it, and the acting path can't see what it said. So from then on every change waits for your OK as an inline card in the Lead chat, in every mode, Full access included, however much of it you typed: adding, changing, running or retiring a dog, giving it tools, and remembering or forgetting a fact. Approving it is one tap; it raises no popup, notification or badge. The taint belongs to the conversation, not to one answer: a clean reply, a reply that only holds cards, or asking the same thing again does not clear it. Only a new conversation (clearing the chat) starts clean.
 
-Pack dogs' own runs keep their provenance: a run that used a tool, or whose prompt held a tainted job, report or memory fact, writes a tainted report. Their connector tools are offered as `tool_1`, `tool_2` and so on, never by the server's name, and every call goes through the tool gate below. Changes saved by older versions keep their recorded taint: approving one keeps an outside name or job marked, until you edit the dog yourself.
+Pack dogs' own runs keep their provenance: a run that used a tool, or whose prompt held a tainted job, report or memory fact, writes a tainted report. A tainted last report is outside text: a run whose prompt holds one may read it, but every call it makes to a tool that can change things asks you first, in every mode and even for a tool set to Always allow (the same reason the reading path has no such tools). Their connector tools are offered as `tool_1`, `tool_2` and so on, never by the server's name, and every call goes through the tool gate below. Changes saved by older versions keep their recorded taint: approving one keeps an outside name or job marked, until you edit the dog yourself.
 
 ## How a tool call is decided
 
@@ -47,7 +47,9 @@ flowchart TD
   off -- no --> rules{Vigil's rules<br/>connector calls only}
   rules -- stop --> refused
   rules -- ask --> ask[You are asked]
-  rules -- nothing --> choice{Your choice for the tool}
+  rules -- nothing --> prev{Run read a tainted<br/>last report?}
+  prev -- yes, and the tool can change things --> ask
+  prev -- no --> choice{Your choice for the tool}
   choice -- Always ask --> ask
   choice -- Always allow --> run[Checked again, then runs]
   choice -- Follow mode --> ro{One of Vigil's own tools?}
@@ -62,9 +64,9 @@ flowchart TD
   ask -- Deny, 10 minutes pass, or the run ends --> refused
 ```
 
-In a scheduled run, "You are asked" is "Skipped" instead.
-
 Right before any call goes out, Vigil checks again that the tool is still on, the dog still has it and isn't napping, the connector is still on, and no rule stops it. After the AI rates a call, the whole check runs again, so a mode or tool choice you changed while it was rating wins. Waiting for you or for the AI can take minutes, and a change you made meanwhile wins.
+
+A scheduled run's card stays for a day after the run stops waiting, so the same write asked on a later run lands on the card it already has, and an answer you give on it goes to that dog's next same call. Such a held card and its answer count only under what they were asked under: the permission mode, the dog's tools, your choice for the tool, the connectors the dog's tools come from, and each of those tools' name, description and inputs as the server lists them. Changing the mode, the dog's tools or that choice, adding, removing, switching or changing one of those connectors, or a refresh that lists one of those tools differently drops them, and the next same call asks again.
 
 Vigil's rules come first in every mode, Full access included. Connector calls are checked as if a watched agent's hook had asked about an MCP tool (`mcp__<connector>__<tool>`, with the arguments as the command), so the agent pre-flight rules and your own tool rules from Agents › Tool policy apply. Nothing is recorded for these checks.
 
@@ -192,8 +194,9 @@ What it changes for a security app, compared with a coding agent's memory:
   (`remember`) or cross one out (`forget`, `replaces`). It never reads
   outside text, so Vigil applies that straight away, except that it waits on
   a "Remember this?" card when the same message also went down the reading
-  path, leans on a report or an earlier answer, replaces a fact your message
-  doesn't name word for word, or forgets a fact that came from outside text. Pack jobs and the built-in helpers read memory
+  path, leans on a report or an earlier answer, follows an answer that read
+  outside text, replaces a fact your message doesn't name word for word, or
+  forgets a fact that came from outside text. Pack jobs and the built-in helpers read memory
   and never write it, and no AI tidies it in the background (the post's
   "dreaming" step): duplicates are caught when a fact is saved, and a
   replacement crosses out the line it updates.
@@ -218,6 +221,8 @@ migrations.
 Connectors are your own MCP servers, added on the Pack page under Tools and connectors: a command on this Mac (stdio) or a URL (streamable HTTP). Vigil is the MCP client; the model sees only the tools and their results, never a token. Environment values and bearer tokens are encrypted with the Keychain-backed key the API keys use, in `pack-secrets.json` (mode 0600). Vigil never reads another app's MCP settings.
 
 Each connector tool gets the same four choices as Vigil's own: Follow mode, Always ask, Always allow, Off. A connector tool never counts as read-only, even when its server marks it so: MCP treats those hints as untrusted, and Vigil can't check them. The page shows the server's claim ("Server says it only reads"), but the tool still follows your permission mode, and in Let AI decide a dog given one waits for your OK. Set a tool you trust to Always allow and it is treated as read-only from then on.
+
+Each connector gets an id of its own when you add it: its name as a slug and a part that is new every time, so an id is never given twice, even to a connector you remove and add again under the same name. Tool grants, tool choices and held cards go by that id, so none carry over to a new connector. Connectors added before keep the ids they have. Vigil's rules check a connector call twice, as `mcp__<connector id>__<tool>` and as `mcp__<name slug>__<tool>` (the form rules written before used, like `mcp__github__create_issue`), and the stricter answer wins. Rules only add friction (stop or ask, never allow), so a match by name can only make a call wait. What lifts a rule binds to the id alone: an exception or exclusion on the tool or its server, written for the name, does not apply to a connector with an id of its own.
 
 Connections close after five idle minutes.
 

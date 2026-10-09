@@ -2051,6 +2051,232 @@ describe('redaction, the four findings of the fourth review', () => {
   });
 });
 
+describe('redaction of more credential names, signatures, sessions and escaped JSON', () => {
+  const redact = (text: string) => redactField(text);
+  /** A signature blob: base64 with digits and both cases, 48 characters. */
+  const BLOB = 'MEUCIQDx7Kq9vY3lZ2Rt8aBcWnP4sXe1Jh6uLm0oIfTg5yVr';
+  /** A CDHash: 40 hex. */
+  const CDHASH = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
+  const TOKEN = 'abcDEF1234567890xyzQ';
+
+  it('reads passWord, PassWord and PASSWORD as one word', () => {
+    for (const name of ['password', 'passWord', 'PassWord', 'PASSWORD', 'PassWd', 'passPhrase']) {
+      expect(redact(`${name}=hunter2`)).toBe(`${name}=<redacted>`);
+      expect(redact(`{"${name}":"hunter2"}`)).toBe(`{"${name}":"<redacted>"}`);
+      expect(redactValue({ [name]: 'hunter2' }, {})).toEqual({ [name]: '<redacted>' });
+    }
+    // A PIN under any spelling is a password: a short number is still the secret.
+    expect(redactValue({ passWord: 1234 }, {})).toEqual({ passWord: '<redacted>' });
+  });
+
+  it('redacts the new credential names in every spelling', () => {
+    const names = [
+      'jwt',
+      'JWT',
+      'otp',
+      'totp',
+      'TOTP_CODE',
+      'mfa_code',
+      'mfaCode',
+      'MFA_CODE',
+      '2fa_code',
+      'privkey',
+      'privKey',
+      'ssh_key',
+      'sshKey',
+      'SSH_KEY',
+      'bearer',
+      'dsn',
+      'SENTRY_DSN',
+      'connection_string',
+      'connectionString',
+      'DB_CONNECTION_STRING',
+      'license_key',
+      'licenseKey',
+      'hmac',
+      'HMAC_KEY',
+    ];
+    for (const name of names) {
+      // A name that starts with a digit is read only as a key.
+      if (!/^\d/.test(name)) expect(redact(`${name}=abc123`), name).toBe(`${name}=<redacted>`);
+      expect(redact(`{"${name}":"abc123"}`), name).toBe(`{"${name}":"<redacted>"}`);
+      expect(redactValue({ [name]: 'abc123' }, {}), name).toEqual({ [name]: '<redacted>' });
+    }
+    // .NET's ConnectionStrings section: every string in it.
+    expect(redactValue({ ConnectionStrings: { Main: 'Server=db;Password=x' } }, {})).toEqual({
+      ConnectionStrings: { Main: '[withheld: may contain a secret]' },
+    });
+    // A one-time code is short and numeric, and still the secret.
+    expect(redactValue({ otp: 1234, mfa_code: '123456' }, {})).toEqual({
+      otp: '<redacted>',
+      mfa_code: '<redacted>',
+    });
+  });
+
+  it('leaves pwd and settings about the new names alone', () => {
+    expect(redact('PWD=/tmp/x')).toBe('PWD=/tmp/x');
+    expect(redactValue({ pwd: '/tmp/x' }, {})).toEqual({ pwd: '/tmp/x' });
+    expect(redact('otp_enabled=true')).toBe('otp_enabled=true');
+    expect(redact('hmac_algorithm=sha256')).toBe('hmac_algorithm=sha256');
+    expect(redact('ssh_key_path=/tmp/id')).toBe('ssh_key_path=/tmp/id');
+    expect(redact('jwt_expires_at=1700000000')).toBe('jwt_expires_at=1700000000');
+  });
+
+  it('redacts a signature blob, and leaves hex, signing IDs and team IDs', () => {
+    expect(redact(`signature=${BLOB}`)).toBe('signature=<redacted>');
+    expect(redact(`sig=${BLOB}`)).toBe('sig=<redacted>');
+    expect(redact(`{"signature":"${BLOB}"}`)).toBe('{"signature":"<redacted>"}');
+    expect(redact(`{"x_sig":"${BLOB}=="}`)).toBe('{"x_sig":"<redacted>"}');
+    expect(redactValue({ signature: BLOB, requestSig: BLOB }, {})).toEqual({
+      signature: '<redacted>',
+      requestSig: '<redacted>',
+    });
+    // In free text, a blob is a secret like any other: the field is withheld.
+    expect(redact(`curl -H sig:${BLOB} x`)).toBe(WITHHELD);
+    // Hex of any length is a hash, not a secret. (64 hex after Signature= is an AWS SigV4
+    // signature, which its own rule redacts.)
+    for (const hex of [CDHASH, 'ab'.repeat(24), CDHASH.toUpperCase()]) {
+      expect(redact(`{"signature":"${hex}"}`)).toBe(`{"signature":"${hex}"}`);
+      expect(redact(`signature=${hex}`)).toBe(`signature=${hex}`);
+    }
+    // Too short, one case only, no digit, or not base64.
+    for (const value of [
+      'MEUCIQDx7Kq9vY3lZ2Rt8aBc',
+      'abcdefghijklmnopqrstuvwxyz0123456789',
+      'abcdefghijklmnopqrstuvwxyzABCDEFGHIJ',
+      'Developer ID Application: Example Corp (ABCDE12345)',
+      `${BLOB}:extra`,
+    ]) {
+      expect(redactValue({ signature: value }, {})).toEqual({ signature: value });
+    }
+  });
+
+  it("keeps a Santa or codesign event's signing ID, team ID and CDHash", () => {
+    const event = {
+      kind: 'exec',
+      process: { path: '/usr/bin/ls', pid: 4242 },
+      signing: {
+        signingId: 'platform:com.apple.ls',
+        teamId: 'EQHXZ8M8AV',
+        cdhash: CDHASH,
+        signature: CDHASH,
+        sig: 'TEAMID:com.example.app',
+      },
+      santa: {
+        decision: 'ALLOW',
+        signing_id: 'TEAMID:com.example.app',
+        team_id: 'EQHXZ8M8AV',
+        cdhash: CDHASH,
+        signature: 'Developer ID Application: Example Corp (EQHXZ8M8AV)',
+        signatureVersion: 2,
+      },
+      session: '100012',
+      audit_session_id: 100012,
+      sessionId: 100012,
+    };
+    expect(redactValue(event, {})).toEqual(event);
+    expect(JSON.parse(redactAndSerialize(event, { maxBytes: 100_000 }).text)).toEqual(event);
+    expect(redact(JSON.stringify(event))).toBe(JSON.stringify(event));
+    const line = `exec ls signature=${CDHASH} sig=platform:com.apple.ls session=100012`;
+    expect(redact(line)).toBe(line);
+    expect(redact(`<signature>${CDHASH}</signature>`)).toBe(`<signature>${CDHASH}</signature>`);
+  });
+
+  it('redacts a session token, and leaves numeric, short and UUID session IDs', () => {
+    for (const name of [
+      'session',
+      'sessionid',
+      'sessionId',
+      'session_id',
+      'SESSIONID',
+      'JSESSIONID',
+      'PHPSESSID',
+      'connect.sid',
+      '_app_session',
+    ]) {
+      // connect.sid=x is a cookie, not an assignment: as free text it is withheld.
+      const assigned = /^[A-Za-z_]\w*$/.test(name) ? `${name}=<redacted>` : WITHHELD;
+      expect(redact(`${name}=${TOKEN}`), name).toBe(assigned);
+      expect(redact(`{"${name}":"${TOKEN}"}`), name).toBe(`{"${name}":"<redacted>"}`);
+      expect(redactValue({ [name]: TOKEN }, {}), name).toEqual({ [name]: '<redacted>' });
+      expect(redactValue({ [name]: '100012' }, {}), name).toEqual({ [name]: '100012' });
+      expect(redactValue({ [name]: 100012 }, {}), name).toEqual({ [name]: 100012 });
+      expect(redact(`${name}=100012`), name).toBe(`${name}=100012`);
+    }
+    const kept = {
+      // Vigil's own agent session: 16 hex.
+      session: '0123456789abcdef',
+      // A host's session ID, such as Claude Code's: a UUID.
+      hookSession: '6f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f',
+      // An object under a session name is walked, not replaced.
+      agentSession: { id: 'claude-code', session: '0123456789abcdef', depth: 0 },
+      sessions: ['100012', '100013'],
+    };
+    expect(redactValue(kept, {})).toEqual(kept);
+  });
+
+  it('reads names and values in backslash-escaped quotes', () => {
+    // Escaped JSON in free text: the field is withheld, never passed on.
+    expect(redact('{\\"password\\":\\"hunter2\\"}')).toBe(WITHHELD);
+    expect(redact('echo "{\\"apiKey\\": \\"abc123\\"}"')).toBe(WITHHELD);
+    expect(redact('log {\\\\\\"token\\\\\\":\\\\\\"abc123\\\\\\"}')).toBe(WITHHELD);
+    // Escaped JSON inside a JSON string: cut out, the escapes kept.
+    expect(redact('{"body":"{\\"password\\":\\"hunter2\\"}"}')).toBe(
+      '{"body":"{\\"password\\":\\"<redacted>\\"}"}',
+    );
+  });
+
+  it('decodes a field that is one JSON string, and JSON encoded twice', () => {
+    expect(redact('"{\\"password\\":\\"hunter2\\"}"')).toBe('"{\\"password\\":\\"<redacted>\\"}"');
+    expect(redact('  "{\\"passWord\\":\\"hunter2\\",\\"user\\":\\"bob\\"}"  ')).toBe(
+      '  "{\\"passWord\\":\\"<redacted>\\",\\"user\\":\\"bob\\"}"  ',
+    );
+    // Encoded twice, then held in an object.
+    const twice = JSON.stringify(JSON.stringify({ password: 'hunter2', note: 'x' }));
+    expect(redact(twice)).toBe(twice.replace('hunter2', '<redacted>'));
+    expect(redact(JSON.stringify({ payload: twice }))).toBe(
+      JSON.stringify({ payload: twice }).replace('hunter2', '<redacted>'),
+    );
+    expect(redactValue({ payload: twice }, {})).toEqual({
+      payload: twice.replace('hunter2', '<redacted>'),
+    });
+    // A string holding a command line with a secret is withheld.
+    expect(redact('"curl -u bob:hunter2 https://example.invalid"')).toBe(WITHHELD);
+    // A secret written with an escape can't be cut out as written.
+    expect(redact('"{\\"password\\":\\"a\\\\/b\\"}"')).toBe(WITHHELD);
+    // A string with nothing in it, and text that only starts with a string, are as before.
+    expect(redact('"hello"')).toBe('"hello"');
+    expect(redact('"a" password=hunter2')).toBe(WITHHELD);
+  });
+
+  it('runs in linear time on hostile input for the new rules', () => {
+    const units = [
+      '\\"password\\":\\"',
+      '\\\\\\"token\\\\\\":',
+      'Signature=',
+      'sig:',
+      'session=',
+      'session=a/',
+      'session=a+b',
+      `sig=${BLOB.slice(0, 20)}/`,
+      '<signature>',
+      '<session>a',
+      '"\\"',
+      '\\',
+    ];
+    const size = 512 * 1024;
+    for (const unit of units) {
+      const input = unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+      for (const text of [input, `"${input}"`]) {
+        const started = performance.now();
+        redact(text);
+        const took = performance.now() - started;
+        expect(took, `${JSON.stringify(unit)} took ${took.toFixed(1)} ms`).toBeLessThan(250);
+      }
+    }
+  }, 30_000);
+});
+
 describe('child environment', () => {
   it('passes only allowlisted variables plus explicit extras', () => {
     const env = buildChildEnv(

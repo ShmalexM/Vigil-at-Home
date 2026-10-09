@@ -78,7 +78,7 @@ async function checkTarget(
   pid: number,
   expect: ProcessTarget,
 ): Promise<ProcessIdentity> {
-  if (pid <= 1 || pid === process.pid)
+  if (pid <= 1 || pid === sys.selfPid())
     throw new ActionError('refused', 'that process cannot be touched');
   const id = await identifyProcess(sys, pid);
   if (!id) throw new ActionError('not_found', `process ${pid} is not running`);

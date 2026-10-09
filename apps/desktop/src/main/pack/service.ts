@@ -14,6 +14,7 @@
 // dogs too; the user can name them and pick their breed, and they move when
 // those jobs run.
 
+import { createHash } from 'node:crypto';
 import { newId, type PreflightReply, type PreflightRequest, type ToolsReply } from '@vigil/core';
 import type { ReadTool, RunRequest, RunResult } from '@vigil/ai';
 import { z } from 'zod';
@@ -50,7 +51,7 @@ import {
   type ToolView,
 } from '../../shared/pack.js';
 import type { ToolListing } from '../agents/tools.js';
-import type { ConnectorHub, RemoteTool } from './connectors.js';
+import { connectorSlug, type ConnectorHub, type RemoteTool } from './connectors.js';
 import type { Notebook } from './notebook.js';
 import { memoryTainted, type PackMemory, type PromptMemory } from './memory.js';
 import { afterJudge, gateAction, gateTool } from './gate.js';
@@ -61,15 +62,7 @@ import {
   redactSerialized,
   redactTextForPack,
 } from './redaction.js';
-import {
-  asksToRead,
-  citesReference,
-  leansOn,
-  namesFact,
-  sharesWords,
-  typedKeys,
-  typedNames,
-} from './provenance.js';
+import { citesReference, namesFact, sharesWords, typedKeys, typedNames } from './provenance.js';
 import { shapeFromJsonSchema } from './schema.js';
 
 const KEY_MODE = 'pack.mode';
@@ -88,6 +81,8 @@ const FIRST_VIGIL_TOOLS = [
   'list_agents',
   'get_agent_session',
 ].map((n) => `vigil.${n}`);
+/** The conversation with the Lead dog has held an answer that could hold outside text. */
+const KEY_CHAT_TAINTED = 'pack.chatTainted';
 
 const MAX_PACK = 12;
 const MAX_CHAT = 200;
@@ -102,6 +97,12 @@ const MAX_CALLS_NOTED = 24;
 const APPROVAL_WAIT_MS = 10 * 60_000;
 /** How long a dog shows it finished before it settles. */
 const DONE_MS = 8_000;
+const HOUR = 60 * 60_000;
+/**
+ * A scheduled run's card outlives the run's wait for this long, so the same
+ * write asked again on a later run lands on the card it already has.
+ */
+const HELD_MS = 24 * HOUR;
 /** Pack jobs need a model that can use tools: never Jev, which only picks labels. */
 const JOB_PROVIDERS = ['claude', 'codex', 'api', 'ollama'] as const;
 
@@ -129,7 +130,11 @@ export interface PackDeps {
     call(name: string, args: Record<string, unknown>): ToolsReply;
   };
   /** Vigil's rules on a connector call, as a watched agent's hook would get them. */
-  preflight(req: PreflightRequest): PreflightReply;
+  /**
+   * `opts.noSkipsOn` turns off exclusions and exceptions on those fields
+   * (engine.check), for the check by a connector's name (rulesFor).
+   */
+  preflight(req: PreflightRequest, opts?: { noSkipsOn?: readonly string[] }): PreflightReply;
   connectors: ConnectorHub;
   scheduler?: { every(name: string, ms: number, fn: () => Promise<void> | void): void };
   isBusy?: () => boolean;
@@ -313,15 +318,15 @@ const LEAD_INSTRUCTIONS = [
   '',
   'You see only the person’s own words and the pack’s settings. Anything that could hold someone else’s text (a dog’s report, a job or name the person did not type, an earlier answer that read outside text, a fact remembered from one, Vigil’s data about this Mac, a connector’s output) is shown to you only as a reference: `report:<dogId>`, `job:<dogId>`, `answer-<n>`, `memory:<id>`, or a dog listed by its id with `nameNotShown`. Connector tools are listed by a `tool-<n>` id with a label Vigil wrote.',
   '',
-  'To answer a question that needs any of that (what a dog found, what a job says, what is on this Mac, what an alert or event is, what an earlier answer said, anything about data.lookingAt), put it in `read`: the `question` in your own words and the `refs` it needs. Another helper reads them and answers the person directly; you never see that answer, so do not guess it. When you ask for a read, leave `reply` empty unless you also changed something.',
+  'To answer a question that needs any of that (what a dog found, what a job says, what is on this Mac, what an alert or event is, what an earlier answer said, anything about data.lookingAt, a remembered fact you see only as `memory:<id>`), put it in `read`: the `question` in your own words and the `refs` it needs. Nothing else looks anything up: no read happens unless you ask for one. Another helper reads them and answers the person directly; you never see that answer, so do not guess it. When you ask for a read, leave `reply` empty unless you also changed something. Do not ask for a read just because the message mentions a report, a finding or a recommendation: when the person typed everything a change needs, make it.',
   '',
   'You can ask for changes to the pack in `actions`:',
   '- create: a new pack dog for a standing job. Give `name` (short, fun, fits the breed), `breed`, `job` (clear instructions it follows each run), `schedule` (manual, hourly, daily or nightly) and `tools` (ids from data.tools; give only what the job needs, prefer read-only ones).',
   '- update: change a dog by `dogId` (any of name, breed, job, schedule, tools).',
   '- run: send a dog off on its job now, by `dogId`.',
   '- retire: remove a pack dog by `dogId`.',
-  'Name dogs by `dogId` only. data.youNamed maps names the person typed in this message to dog ids, and data.youNamedTools maps tool keys they typed to tool ids. A connector tool goes in `tools` only by its `tool-<n>` id.',
-  'If a change rests on a reference (the person asks you to do what a report, an answer or a fact says), list those references in `cites`. Such a change always waits for the person.',
+  'Name dogs by `dogId` only. data.youNamed maps names the person typed in this message to dog ids, and data.youNamedTools maps tool keys they typed to tool ids. When the person named a dog, change or run that dog: a change to a dog they did not name waits for them. A connector tool goes in `tools` only by its `tool-<n>` id.',
+  'If a change rests on a reference (the person asks you to do what a report, an answer or a fact says, or says yes to something only an `answer-<n>` holds), list those references in `cites`. Such a change always waits for the person.',
   'Vigil applies changes as the person’s permission mode allows (data.mode): in "ask" they wait for the person, so say you have asked, not that it is done.',
   '',
   'What you cannot do, and must not offer: block, allow, release or quarantine anything; approve, edit or turn off a rule; change Vigil’s settings; touch a built-in helper’s job. If asked, say the person does that themselves in Vigil.',
@@ -386,12 +391,24 @@ interface Turn {
   /** The person's own message. */
   words: string;
   /**
-   * The message leans on text the acting path never saw, or the answer cites
-   * a reference: every change is a card, in every mode.
+   * The changes rest on reading output: the person's message or the acting
+   * path's answer names a reference to text it never saw (an earlier
+   * reading answer, a report, a job, a fact). Every change is a card, in
+   * every mode.
    */
   bridge: boolean;
-  /** The turn also went down the reading path: every memory change is a card. */
+  /** The acting path asked for a read, so the turn went down the reading path: every memory change is a card. */
   read: boolean;
+  /** Dogs the person named in this message, by id. A change to any other dog is a card. */
+  named: ReadonlySet<string>;
+  /**
+   * An answer earlier in this conversation could hold outside text (it read
+   * some, or used a tool): the conversation is tainted (chatTainted) until
+   * the person starts a new one. A short "yes" may be agreeing to it, so
+   * every change in this turn is a card, in every mode, however much of it
+   * the person typed.
+   */
+  afterOutside: boolean;
 }
 
 /**
@@ -435,6 +452,17 @@ class Intake {
   }
 }
 
+/** What a dog's tool calls in one run go by. */
+interface ToolCtx {
+  requestedByUser: boolean;
+  used: string[];
+  /**
+   * The run's prompt holds the dog's last report, which could hold outside
+   * text: every call that can change things asks (gate.ts).
+   */
+  outsideText?: boolean;
+}
+
 interface Runtime {
   mood: DogMood;
   activity?: string;
@@ -442,22 +470,25 @@ interface Runtime {
 }
 
 /** One chat answer or one job run, as its tool calls see it. */
-interface RunCtx {
-  requestedByUser: boolean;
-  /** A scheduled run nobody is watching: it never waits on the person. */
-  background: boolean;
-  used: string[];
+interface RunCtx extends ToolCtx {
   /** Every call it made or tried, for the notebook's Details. The notebook redacts them. */
   calls: NoteToolCallInput[];
   /** Set when the run has ended, so a late tool call or answer goes nowhere. */
   over: boolean;
-  approvals: Set<string>;
+  /** Refuses each call of this run still waiting on the person. */
+  stops: Set<() => void>;
 }
 
 interface PendingApproval {
   view: ToolApproval;
-  resolve: (d: ToolDecision) => void;
-  timer: NodeJS.Timeout;
+  /** The same dog, tool and arguments: one card, however often it is asked. */
+  key: string;
+  /** What the card was asked under (heldContext): a held card counts only while it holds. */
+  context: string;
+  /** The calls waiting on this card. None once a scheduled run's wait ran out. */
+  waiters: Set<(d: ToolDecision) => void>;
+  /** A card with no waiters stays until then, for the next run's same ask. */
+  heldUntil?: number;
 }
 
 interface ToolEntry {
@@ -478,6 +509,14 @@ export class PackService {
   private readonly now: () => number;
   private readonly runtime = new Map<string, Runtime>();
   private readonly approvals = new Map<string, PendingApproval>();
+  /**
+   * Answers given on a held card, by its key, for the next run's same call,
+   * and only under the context the card was asked under (heldContext).
+   */
+  private readonly answered = new Map<
+    string,
+    { decision: ToolDecision; until: number; dogId: string; context: string }
+  >();
   private readonly running = new Set<string>();
   private aiStatus: { at: number; value: PackAiStatus } | undefined;
   private chatting = false;
@@ -500,7 +539,9 @@ export class PackService {
   }
 
   setMode(mode: PermissionMode): void {
-    this.o.save(KEY_MODE, PermissionMode.parse(mode));
+    const next = PermissionMode.parse(mode);
+    if (next !== this.mode()) this.dropHeld(() => true);
+    this.o.save(KEY_MODE, next);
     this.changed();
   }
 
@@ -583,8 +624,24 @@ export class PackService {
   }
 
   private saveChat(chat: ChatMessage[]): void {
+    // Taint belongs to the conversation: set once any answer in it could
+    // hold outside text, and never cleared here, whatever is saved later.
+    if (chat.some((m) => m.from === 'lead' && messageTainted(m)))
+      this.o.save(KEY_CHAT_TAINTED, true);
     this.o.save(KEY_CHAT, chat.slice(-MAX_CHAT));
     this.changed();
+  }
+
+  /**
+   * Whether this conversation has held an answer that could hold outside
+   * text. Only a new conversation (clearChat) makes it clean again. A chat
+   * saved before this was recorded counts by its answers.
+   */
+  chatTainted(): boolean {
+    return (
+      this.o.load(KEY_CHAT_TAINTED, z.boolean().optional(), undefined) ??
+      this.chat().some((m) => m.from === 'lead' && messageTainted(m))
+    );
   }
 
   private choices(): Record<string, z.infer<typeof ToolChoice>> {
@@ -593,6 +650,14 @@ export class PackService {
 
   setToolChoice(key: string, choice: z.infer<typeof ToolChoice>): void {
     const c = { ...this.choices(), [key]: ToolChoice.parse(choice) };
+    if (c[key] !== this.choiceOf(key))
+      this.dropHeld(
+        (dogId, tool) =>
+          tool === key ||
+          !!this.dogs()
+            .find((d) => d.id === dogId)
+            ?.tools.includes(key),
+      );
     if (c[key] === 'auto') delete c[key];
     this.o.save(KEY_CHOICES, c);
     this.changed();
@@ -609,7 +674,7 @@ export class PackService {
         return { ...d, mood: r.mood, ...(r.activity ? { activity: r.activity } : {}) };
       }),
       chat,
-      approvals: [...this.approvals.values()].map((a) => a.view),
+      approvals: this.liveApprovals().map((a) => a.view),
       leadMayUsePlan: ai.leadMayUsePlan,
       judge: ai.judge,
       noAi: !ai.anyReady,
@@ -776,6 +841,7 @@ export class PackService {
     }
     if (d.role !== 'helper' && patch.tools !== undefined)
       next.tools = this.knownToolKeys(patch.tools);
+    if (!sameKeys(d.tools, next.tools)) this.dropHeld((dogId) => dogId === id);
     this.saveDogs(dogs.map((x) => (x.id === id ? next : x)));
   }
 
@@ -784,12 +850,15 @@ export class PackService {
     const d = dogs.find((x) => x.id === id);
     if (!d || d.role !== 'pack') throw new Error('Only pack dogs can be retired');
     this.runtime.delete(id);
+    this.dropHeld((dogId) => dogId === id);
     this.saveDogs(dogs.filter((x) => x.id !== id));
     // Its notebook goes with it; the Lead dog's and the helpers' stay.
     this.o.notebook?.clear(id);
   }
 
+  /** A new conversation: the old one and its taint are gone. */
   clearChat(): void {
+    this.o.save(KEY_CHAT_TAINTED, false);
     this.saveChat([]);
   }
 
@@ -801,12 +870,14 @@ export class PackService {
    * - The acting path proposes changes. Its prompt holds only the person's
    *   messages and clean state, with references for everything else
    *   (actingPrompt), so what it proposes is the person's request and goes
-   *   through gateAction as clean, unless the message leans on a reference
-   *   or the answer cites one (the bridge): then every change is a card.
+   *   through gateAction as clean, unless the message names a reference
+   *   or the answer cites one (the bridge), or it changes or runs a dog
+   *   other than one the person named, or it follows an answer that read
+   *   outside text: then it is a card.
    * - The reading path answers questions that need outside text: what a dog
-   *   found, a job, Vigil's data, a connector's output. It runs when the
-   *   acting path asks for a read (or the message plainly asks about a
-   *   report or the memory), may see anything, and has no way to change
+   *   found, a job, Vigil's data, a connector's output. It runs only when
+   *   the acting path asks for a read of named references (no word in the
+   *   message routes there), may see anything, and has no way to change
    *   anything: its answer is shown to the person and kept as tainted.
    */
   async say(text: string, context?: ChatContext): Promise<void> {
@@ -825,8 +896,9 @@ export class PackService {
     this.saveChat([...before, mine]);
     const lead = this.dogs().find((d) => d.role === 'lead')!;
     this.setMood(lead.id, 'thinking', 'Thinking');
-    const ctx = this.newRun({ requestedByUser: true, background: false });
     const refs = new Refs();
+    const ctx = this.newRun(true);
+    const used = ctx.used;
     try {
       const prompt = this.actingPrompt(words, lookingAt, refs);
       const result = await this.o.ai.run({
@@ -852,18 +924,19 @@ export class PackService {
         return;
       }
       const v = result.value;
-      const lastAnswer = [...before].reverse().find((m) => m.from === 'lead');
-      const read = v.read ?? (asksToRead(words) ? this.defaultRead(words) : undefined);
+      // Only the acting path's own request sends the turn down the reading path.
+      const read = v.read;
       const turn: Turn = {
         words,
         read: !!read,
-        bridge:
-          leansOn(words, !!lastAnswer && messageTainted(lastAnswer)) ||
-          citesReference([
-            ...(v.cites ?? []),
-            ...v.actions.flatMap((a) => [a.name ?? '', a.job ?? '', ...(a.tools ?? [])]),
-            ...(v.remember ?? []).map((r) => r.fact),
-          ]),
+        afterOutside: this.chatTainted(),
+        named: new Set(typedNames(words, this.dogs()).map((n) => n.dogId)),
+        bridge: citesReference([
+          words,
+          ...(v.cites ?? []),
+          ...v.actions.flatMap((a) => [a.name ?? '', a.job ?? '', ...(a.tools ?? [])]),
+          ...(v.remember ?? []).map((r) => r.fact),
+        ]),
       };
       const actions = v.actions.map((a) => this.consider(a, turn, refs));
       const memoryChanges = this.considerMemory(v, turn, mine.id);
@@ -878,7 +951,6 @@ export class PackService {
       let answer = said;
       const reasons = [...(v.why ?? [])];
       const readReasons: string[] = [];
-      const used = ctx.used;
       let provider = result.provider;
       let logId = result.logId;
       if (read) {
@@ -927,7 +999,7 @@ export class PackService {
         this.setMood(lead.id, 'waiting', 'Waiting on you');
     } catch (err) {
       // Never leave the Lead dog thinking with the message unanswered.
-      this.reply({ text: failText('error'), failed: true, used: ctx.used, tainted: false });
+      this.reply({ text: failText('error'), failed: true, tainted: false, used });
       this.setMood(lead.id, 'error', 'Couldn’t answer', DONE_MS);
       console.warn('[pack] the Lead dog failed to answer:', err);
     } finally {
@@ -936,14 +1008,18 @@ export class PackService {
     }
   }
 
-  private newRun(o: { requestedByUser: boolean; background: boolean }): RunCtx {
-    return { ...o, used: [], calls: [], over: false, approvals: new Set() };
+  private newRun(requestedByUser: boolean): RunCtx {
+    return { requestedByUser, used: [], calls: [], over: false, stops: new Set() };
   }
 
-  /** A run is over: tool calls still waiting on the person are refused, and their cards go. */
+  /**
+   * A run is over: tool calls still waiting on the person are refused. A
+   * pack job's card is held for its next same ask, as when its wait runs
+   * out; the Lead dog's goes.
+   */
   private endRun(ctx: RunCtx): void {
     ctx.over = true;
-    for (const id of ctx.approvals) this.approvals.get(id)?.resolve('deny');
+    for (const stop of [...ctx.stops]) stop();
   }
 
   /**
@@ -1055,17 +1131,6 @@ export class PackService {
     return typedKeys(words, keys);
   }
 
-  /** When the acting path asked for no read but the message plainly asks about a report or memory. */
-  private defaultRead(words: string): z.infer<typeof LeadAnswer>['read'] {
-    const pack = this.dogs().filter((d) => d.role === 'pack');
-    const named = new Set(typedNames(words, pack).map((n) => n.dogId));
-    const about = named.size ? pack.filter((d) => named.has(d.id)) : pack;
-    return {
-      question: words,
-      refs: about.flatMap((d) => [`report:${d.id}`, `job:${d.id}`]).slice(0, 10),
-    };
-  }
-
   /**
    * The reading path's prompt: anything the question needs, outside text
    * included, and the Lead dog's tools. Its answer is words for the person
@@ -1163,7 +1228,9 @@ export class PackService {
    * Checks one change the acting path asked for, then applies it or leaves it
    * for the person. Its fields are the person's request (the acting path saw
    * no outside text), so gateAction takes it as clean, unless the turn is a
-   * bridge: then it is a card in every mode.
+   * bridge, or the person named a dog in this message and the change is
+   * about another one, or an answer since the person's last message read
+   * outside text: then it is a card in every mode.
    */
   private consider(
     a: z.infer<typeof LeadAnswer>['actions'][number],
@@ -1182,11 +1249,15 @@ export class PackService {
         return { ...action, status: 'failed', note: 'Only pack dogs run jobs on request' };
     }
     const dog: Partial<DogInput> = {};
-    if (a.name) dog.name = a.name.trim().slice(0, 32);
-    if (a.breed) dog.breed = a.breed;
-    if (a.job) dog.job = a.job.trim();
-    if (a.schedule) dog.schedule = a.schedule;
-    if (a.tools) dog.tools = this.resolveTools(a.tools, turn.words, refs);
+    // Only adding or changing a dog takes fields; a run or a retirement
+    // ignores any the answer sent along.
+    if (a.kind === 'create' || a.kind === 'update') {
+      if (a.name) dog.name = a.name.trim().slice(0, 32);
+      if (a.breed) dog.breed = a.breed;
+      if (a.job) dog.job = a.job.trim();
+      if (a.schedule) dog.schedule = a.schedule;
+      if (a.tools) dog.tools = this.resolveTools(a.tools, turn.words, refs);
+    }
     if (a.kind === 'create') {
       const parsed = DogInput.safeParse({ schedule: 'manual', tools: [], ...dog });
       if (!parsed.success)
@@ -1197,16 +1268,33 @@ export class PackService {
     const before = target?.tools ?? [];
     const added = (dog.tools ?? []).filter((k) => !before.includes(k));
     const grantsWrite = added.some((k) => !this.treatedAsReadOnly(k));
-    if (gateAction(this.mode(), a.kind, grantsWrite, turn.bridge) === 'ask') {
+    // The person named a dog and this is about another one: the model picked it.
+    const otherDog = !!target && turn.named.size > 0 && !turn.named.has(target.id);
+    const tainted = turn.bridge || turn.afterOutside || otherDog;
+    // In Let AI decide, a new job or a run for a dog that can already change
+    // things counts the same as handing it the tool.
+    // A run uses the tools the dog has, whatever the answer listed with it.
+    const holds = a.kind === 'update' ? (dog.tools ?? before) : before;
+    const holdsWrite = a.kind !== 'retire' && holds.some((k) => !this.treatedAsReadOnly(k));
+    if (
+      gateAction(this.mode(), a.kind, grantsWrite, tainted) === 'ask' ||
+      (this.mode() === 'auto' && holdsWrite)
+    ) {
       return {
         ...action,
         note: turn.bridge
           ? 'This builds on text from outside your messages, so it waits for your OK'
-          : this.mode() === 'ask'
-            ? 'Waiting for your OK'
-            : a.kind === 'retire'
-              ? 'Retiring a dog always waits for your OK'
-              : 'It would get a tool that can change things, so it waits for your OK',
+          : turn.afterOutside
+            ? 'My last answer read text from outside your messages, so this waits for your OK'
+            : otherDog
+              ? 'You named a different dog, so this waits for your OK'
+              : this.mode() === 'ask'
+                ? 'Waiting for your OK'
+                : a.kind === 'retire'
+                  ? 'Retiring a dog always waits for your OK'
+                  : grantsWrite
+                    ? 'It would get a tool that can change things, so it waits for your OK'
+                    : 'The dog has a tool that can change things, so it waits for your OK',
       };
     }
     return this.apply(action);
@@ -1284,8 +1372,7 @@ export class PackService {
           job: action.jobTainted ?? fallback,
         })
       : { ...action, status: 'declined' as const };
-    delete next.note;
-    if (next.status === 'failed' && !approve) next.note = 'Failed';
+    if (next.status !== 'failed') delete next.note;
     msg.actions = msg.actions!.map((a) => (a.id === actionId ? next : a));
     this.saveChat(chat);
     this.settleLead();
@@ -1402,9 +1489,10 @@ export class PackService {
   /**
    * The memory changes the acting path asked for. Its facts are the
    * person's words (it saw no outside text), so they apply straight away and
-   * stay clean, except that each waits on a card when: the turn also went
-   * down the reading path, or is a bridge (leans on or cites a reference);
-   * a `remember` replaces a fact the person's message doesn't name word for
+   * stay clean, except that each waits on a card when: the acting path also
+   * asked for a read, or the turn is a bridge (names or cites a reference);
+   * an answer since the person's last message read outside text; a
+   * `remember` replaces a fact the person's message doesn't name word for
    * word; or a `forget` is for a fact that could hold outside text.
    */
   private considerMemory(
@@ -1418,9 +1506,11 @@ export class PackService {
     const changes: { change: MemoryChange; wait?: string }[] = [];
     const turnWait = turn.bridge
       ? 'This builds on text from outside your messages'
-      : turn.read
-        ? 'This answer also looked things up'
-        : undefined;
+      : turn.afterOutside
+        ? 'My last answer read text from outside your messages'
+        : turn.read
+          ? 'This answer also looked things up'
+          : undefined;
     for (const r of answer.remember ?? []) {
       const parsed = MemoryInput.safeParse(r);
       if (!parsed.success) continue;
@@ -1512,7 +1602,7 @@ export class PackService {
     if (this.running.has(id)) return undefined;
     this.running.add(id);
     this.setMood(id, 'thinking', 'Getting started');
-    const ctx = this.newRun({ requestedByUser: false, background: urgency === 'background' });
+    const ctx = this.newRun(false);
     const used = ctx.used;
     try {
       const { prompt, tainted } = this.jobPrompt(dog, ctx);
@@ -1591,10 +1681,16 @@ export class PackService {
    * A pack dog's prompt for one run, and whether it is tainted: the same
    * item-by-item count as the Lead dog's (leadPrompt). Its job, its last
    * report, the memory that rides along and its connector tools' own text.
-   * Its name only when clean; otherwise its id.
+   * Its name only when clean; otherwise its id. A tainted last report also
+   * makes every call that can change things ask (gate.ts).
    */
   private jobPrompt(dog: Dog, ctx: RunCtx): { prompt: Prompt; tainted: boolean } {
     const intake = new Intake();
+    // Its last report is outside text when tainted: the run may read it, but
+    // a call that can change things then waits for the person, as a change
+    // the reading path's answer leads to does.
+    const outsideText = reportTainted(dog);
+    if (outsideText) ctx.outsideText = true;
     const tools = this.toolsFor(dog, ctx, intake);
     const memory = this.memoryFor(tools, ctx.used, dog.job);
     const name = nameTainted(dog) ? `the dog with id ${dog.id}` : dog.name;
@@ -1611,7 +1707,7 @@ export class PackService {
                     at: new Date(dog.lastReport.at).toISOString(),
                     summary: dog.lastReport.summary,
                   },
-                  reportTainted(dog),
+                  outsideText,
                 ),
               }
             : {}),
@@ -1699,11 +1795,28 @@ export class PackService {
     }));
   }
 
+  /**
+   * A connector was added, removed, switched on or off, or changed: the held
+   * cards and answers of every dog that uses it, or was asked about one of
+   * its tools, no longer count.
+   */
+  connectorChanged(id: string): void {
+    const uses = (dogId: string) =>
+      !!this.dogs()
+        .find((d) => d.id === dogId)
+        ?.tools.some((k) => k.startsWith(`${id}.`));
+    this.dropHeld((dogId, tool) => tool.startsWith(`${id}.`) || uses(dogId));
+    this.changed();
+  }
+
   /** Lists a connector's tools now, so they can be chosen for dogs. */
   async refreshConnector(id: string): Promise<void> {
+    const before = toolsDigest(this.o.connectors.knownTools(id));
     try {
       await this.o.connectors.tools(id);
     } finally {
+      // A tool's name, description or input changed: what was held for it no longer counts.
+      if (toolsDigest(this.o.connectors.knownTools(id)) !== before) this.connectorChanged(id);
       this.changed();
     }
   }
@@ -1772,6 +1885,7 @@ export class PackService {
         choice: this.choiceOf(t.key),
         readOnly: t.readOnly,
         rules: this.rulesFor(t, args),
+        ...(ctx.outsideText ? { outsideText: true } : {}),
       });
     let decision = gate();
     if (decision.kind === 'judge') {
@@ -1786,14 +1900,7 @@ export class PackService {
     // The run may have ended while the AI was rating the call.
     if (ctx.over) return notRun('this run has ended.');
     if (decision.kind === 'ask') {
-      // Nobody is watching a scheduled run: it never stops to ask, so the
-      // pack adds nothing to what needs the person.
-      if (ctx.background)
-        return notRun(
-          'it needed your OK, and this was a scheduled run, so it was skipped.',
-          'Not run: this call needs the person’s OK, and this is a scheduled run, so it was skipped. Carry on without it and say in a finding what you would have done.',
-        );
-      const answer = await this.askUser(dog, t, argText, decision.why, decision.reason, ctx);
+      const answer = await this.askUser(dog, t, args, argText, decision, ctx);
       if (answer === 'deny' || ctx.over) {
         if (!ctx.over) this.setMood(dog.id, 'thinking', 'Carrying on without it');
         return notRun(
@@ -1833,20 +1940,44 @@ export class PackService {
     }
   }
 
-  /** What Vigil's rules say about a connector call. Vigil's own tools have none. */
+  /**
+   * What Vigil's rules say about a connector call. Vigil's own tools have none.
+   *
+   * A connector's id is its own (a name slug plus a unique part), but rules
+   * written before that name it by the bare slug, `mcp__github__…`. So the
+   * call is checked twice, by `mcp__<id>__<tool>` and by
+   * `mcp__<name slug>__<tool>`, and the stricter answer wins. Rules only add
+   * friction here: the pre-flight answer is deny, ask or none, never allow
+   * (preflight.ts `decide`), so a match by name, even a lookalike's, can
+   * only make the call wait or stop. What skips a rule (a rule's exclusion,
+   * the person's "Stop alerting on this" exception) binds to the id alone:
+   * the check by name runs with exclusions and exceptions on the tool and
+   * its server turned off. Everything that grants (tool choices, a dog's
+   * tools, held answers) goes by the tool key, which holds the id.
+   */
   private rulesFor(
     t: ToolEntry,
     args: Record<string, unknown>,
   ): { decision: 'deny' | 'ask' | 'none'; reason?: string } {
     if (t.source === 'vigil') return { decision: 'none' };
-    const r = this.o.preflight({
-      v: 1,
-      method: 'preflight.check',
-      host: 'claude-code',
-      tool: `mcp__${t.source}__${t.name}`.slice(0, 128),
-      // Rules see the arguments as sent; the user sees them redacted.
-      command: clip(JSON.stringify(args), 4000),
-    });
+    const ask = (server: string, opts?: { noSkipsOn: readonly string[] }) =>
+      this.o.preflight(
+        {
+          v: 1,
+          method: 'preflight.check',
+          host: 'claude-code',
+          tool: `mcp__${server}__${t.name}`.slice(0, 128),
+          // Rules see the arguments as sent; the user sees them redacted.
+          command: clip(JSON.stringify(args), 4000),
+        },
+        opts,
+      );
+    const byId = ask(t.source);
+    const slug = connectorSlug(t.sourceName);
+    const answers =
+      slug === t.source ? [byId] : [byId, ask(slug, { noSkipsOn: ['tool', 'mcpServer'] })];
+    const rank = { none: 0, ask: 1, deny: 2 } as const;
+    const r = answers.reduce((a, b) => (rank[b.decision] > rank[a.decision] ? b : a));
     return { decision: r.decision, ...(r.reason ? { reason: r.reason } : {}) };
   }
 
@@ -1914,56 +2045,159 @@ export class PackService {
     return r.ok ? r.value : undefined;
   }
 
+  /**
+   * One quiet card in the Pack per pending call: the same dog asking for the
+   * same tool with the same arguments again (on a later scheduled run, or
+   * twice in one run) brings the card it already has up to date and adds
+   * none. A scheduled run's card stays after the run's wait runs out, and an
+   * answer given on it then goes to that dog's next same call.
+   */
   private askUser(
     dog: Dog,
     t: ToolEntry,
-    args: string,
-    why: ToolApproval['why'],
-    reason: string | undefined,
+    args: Record<string, unknown>,
+    argText: string,
+    ask: { why: ToolApproval['why']; reason?: string },
     ctx: RunCtx,
   ): Promise<ToolDecision> {
-    const id = newId(this.now());
+    const key = approvalKey(dog.id, t.key, args);
+    const context = this.heldContext(dog.id, t);
+    const given = this.answered.get(key);
+    this.answered.delete(key);
+    if (given && given.until > this.now() && given.context === context)
+      return Promise.resolve(given.decision);
     this.setMood(dog.id, 'waiting', `Wants to use ${t.title}`);
+    let card = this.liveApprovals().find((a) => a.key === key);
+    // A held card asked under another mode, grant or connector is gone.
+    if (card && !card.waiters.size && card.context !== context) {
+      this.approvals.delete(card.view.id);
+      card = undefined;
+    }
+    const id = card?.view.id ?? newId(this.now());
+    const view: ToolApproval = {
+      id,
+      at: this.now(),
+      dogId: dog.id,
+      tool: t.key,
+      toolTitle: `${t.sourceName} › ${t.title}`,
+      args: clip(argText, 600),
+      why: ask.why,
+      ...(ask.reason ? { reason: ask.reason } : {}),
+    };
+    if (card) {
+      card.view = view;
+      card.context = context;
+      delete card.heldUntil;
+    } else {
+      card = { view, key, context, waiters: new Set() };
+      this.approvals.set(id, card);
+    }
+    const c = card;
+    // A pack job's card stays after its wait (held for the next same ask);
+    // the Lead dog's goes with its run.
+    const hold = !ctx.requestedByUser;
     return new Promise<ToolDecision>((resolve) => {
-      const done = (d: ToolDecision) => {
-        const p = this.approvals.get(id);
-        if (!p) return;
-        clearTimeout(p.timer);
-        this.approvals.delete(id);
-        ctx.approvals.delete(id);
-        this.changed();
+      const waiter = (d: ToolDecision) => {
+        clearTimeout(timer);
+        ctx.stops.delete(stop);
         resolve(d);
       };
-      const timer = setTimeout(() => done('deny'), APPROVAL_WAIT_MS);
+      // The wait ran out, or the run ended: this call is refused.
+      const stop = () => {
+        clearTimeout(timer);
+        ctx.stops.delete(stop);
+        c.waiters.delete(waiter);
+        if (!c.waiters.size) {
+          if (hold) c.heldUntil = this.now() + HELD_MS;
+          else this.approvals.delete(id);
+          this.changed();
+        }
+        resolve('deny');
+      };
+      const timer = setTimeout(stop, APPROVAL_WAIT_MS);
       timer.unref?.();
-      this.approvals.set(id, {
-        view: {
-          id,
-          at: this.now(),
-          dogId: dog.id,
-          tool: t.key,
-          toolTitle: `${t.sourceName} › ${t.title}`,
-          args: clip(args, 600),
-          why,
-          ...(reason ? { reason } : {}),
-        },
-        resolve: done,
-        timer,
-      });
-      ctx.approvals.add(id);
+      c.waiters.add(waiter);
+      ctx.stops.add(stop);
       this.changed();
     });
   }
 
+  /**
+   * What a held card and its answer are bound to: the mode, the dog's tool
+   * grant, the person's choice for the tool, and the identity and settings
+   * of every connector the dog's tools or this tool come from, and a digest
+   * of each such tool's name, description and input schema as its server
+   * gave them. A backstop for dropHeld: anything that changes one of these
+   * drops them anyway.
+   */
+  private heldContext(dogId: string, t: ToolEntry): string {
+    const tools = [...(this.dogs().find((d) => d.id === dogId)?.tools ?? [])].sort();
+    const sources = new Set([t.source, ...tools.map((k) => k.slice(0, k.indexOf('.')))]);
+    sources.delete('vigil');
+    const records = this.o.connectors.list();
+    const connectors = [...sources].sort().map((id) => {
+      const c = records.find((r) => r.id === id);
+      return c
+        ? [c.id, c.kind, c.command ?? null, c.args ?? [], c.url ?? null, c.secrets, c.enabled]
+        : [id, null];
+    });
+    const defs = toolsDigest(
+      [...new Set([t.key, ...tools])].sort().map((k) => {
+        const e = k === t.key ? t : this.entry(k);
+        return e ? [k, e.name, e.description, e.inputSchema] : [k, null];
+      }),
+    );
+    return JSON.stringify([this.mode(), tools, this.choiceOf(t.key), connectors, defs]);
+  }
+
+  /**
+   * Drops held cards (no call waits on them) and held answers for the dogs
+   * and tools `which` picks. A card a call is waiting on stays: that call is
+   * checked again before it runs (recheck).
+   */
+  private dropHeld(which: (dogId: string, tool: string) => boolean): void {
+    for (const [key, a] of this.answered) {
+      const tool = (JSON.parse(key) as [string, string])[1];
+      if (which(a.dogId, tool)) this.answered.delete(key);
+    }
+    for (const [id, a] of this.approvals)
+      if (!a.waiters.size && which(a.view.dogId, a.view.tool)) this.approvals.delete(id);
+  }
+
+  /** Cards still waiting on the person, without held ones that ran out. */
+  private liveApprovals(): PendingApproval[] {
+    const at = this.now();
+    for (const [id, a] of this.approvals)
+      if (!a.waiters.size && a.heldUntil !== undefined && a.heldUntil <= at)
+        this.approvals.delete(id);
+    return [...this.approvals.values()];
+  }
+
   decideTool(id: string, decision: ToolDecision): void {
-    const p = this.approvals.get(id);
+    const p = this.liveApprovals().find((a) => a.view.id === id);
     if (!p) throw new Error('That request is gone');
-    p.resolve(ToolDecision.parse(decision));
+    const d = ToolDecision.parse(decision);
+    this.approvals.delete(id);
+    // A held card's answer goes to that dog's next same call.
+    if (!p.waiters.size && p.heldUntil !== undefined)
+      this.answered.set(p.key, {
+        decision: d,
+        until: this.now() + HELD_MS,
+        dogId: p.view.dogId,
+        context: p.context,
+      });
+    // Allowed once means one call: a second same call waiting on it is refused.
+    let first = true;
+    for (const w of p.waiters) {
+      w(first ? d : 'deny');
+      first = false;
+    }
+    this.changed();
   }
 
   // ---------------------------------------------------------------- demo (development builds)
 
-  demoChat(now: number, ids: { bolt: string; pip: string; noodle: string }): void {
+  demoChat(now: number, ids: { bolt: string; pip: string; noodle: string; github?: string }): void {
     const m = (
       min: number,
       from: 'you' | 'lead',
@@ -2031,7 +2265,7 @@ export class PackService {
               id: 'demo-a3',
               kind: 'update',
               dogId: ids.noodle,
-              dog: { tools: ['vigil.search_events', 'github.create_issue'] },
+              dog: { tools: ['vigil.search_events', `${ids.github ?? 'github'}.create_issue`] },
               status: 'pending',
               note: 'It would get a tool that can change things, so it waits for your OK',
             },
@@ -2135,8 +2369,9 @@ export class PackService {
           args: '{"repo":"alex/notes","title":"invoice-viewer connected to 3 hosts","body":"Seen 09-30 14:02…"}',
           why: 'mode',
         },
-        resolve: () => this.approvals.delete(id),
-        timer: setTimeout(() => undefined, 0),
+        key: id,
+        context: '',
+        waiters: new Set(),
       });
     }
     this.changed();
@@ -2217,6 +2452,36 @@ function failText(reason: string): string {
     default:
       return 'Something went wrong while answering.';
   }
+}
+
+/** Which card a call belongs on: its dog, its tool and its arguments in a stable order. */
+function approvalKey(dogId: string, tool: string, args: unknown): string {
+  return JSON.stringify([dogId, tool, stable(args)]);
+}
+
+/** A value with its object keys sorted, for comparing as JSON. */
+function stable(v: unknown): unknown {
+  return Array.isArray(v)
+    ? v.map(stable)
+    : v && typeof v === 'object'
+      ? Object.fromEntries(
+          Object.keys(v)
+            .sort()
+            .map((k) => [k, stable((v as Record<string, unknown>)[k])]),
+        )
+      : v;
+}
+
+/** A digest of tool definitions, keys in a stable order. */
+function toolsDigest(v: unknown): string {
+  return createHash('sha256')
+    .update(JSON.stringify(stable(v)))
+    .digest('hex');
+}
+
+function sameKeys(a: readonly string[], b: readonly string[]): boolean {
+  const x = new Set(a);
+  return x.size === new Set(b).size && b.every((k) => x.has(k));
 }
 
 function clip(s: string, n: number): string {

@@ -5,11 +5,50 @@ import { describe, expect, it, vi } from 'vitest';
 import type { z } from 'zod';
 import type { ToolListing } from '../agents/tools.js';
 import type { ConnectorHub, ConnectorRecord, RemoteTool } from './connectors.js';
+import { DetectionEngine, decide, memoryStores, toolRequestEvent } from '@vigil/detection';
 import { PackMemory } from './memory.js';
 import { Notebook } from './notebook.js';
 import { PackService, type PackAiStatus } from './service.js';
+import type { ToolApproval, ToolDecision } from '../../shared/pack.js';
 
 type Handler = (req: RunRequest<unknown>) => Promise<unknown> | unknown;
+type PackDepsPreflight = ConstructorParameters<typeof PackService>[0]['preflight'];
+
+/**
+ * Vigil's real rule engine on pre-flight requests, as the agent service runs
+ * it for the pack: `rules` are user rules on tool requests, `exceptions` the
+ * person's "Stop alerting on this" entries.
+ */
+function realRules(
+  rules: { id: string; mode: 'block' | 'alert'; condition: unknown; exclusions?: unknown[] }[],
+  exceptions: { ruleId: string; match: Record<string, string> }[] = [],
+): PackDepsPreflight {
+  const stores = memoryStores();
+  exceptions.forEach((x, i) => stores.exceptions.add({ id: `x${i}`, createdAt: 0, ...x }));
+  const engine = new DetectionEngine(
+    rules.map((r) => ({
+      version: 1,
+      name: r.id,
+      description: '',
+      origin: 'user',
+      severity: 'high',
+      fidelity: 'high',
+      eventKinds: ['agent.tool_request'],
+      createdAt: 0,
+      updatedAt: 0,
+      reasons: ['{{tool}} matched'],
+      ...r,
+    })) as never,
+    stores,
+    { recordHistory: false },
+  );
+  let n = 0;
+  return (req, opts) =>
+    decide(
+      engine.check(toolRequestEvent(req, { id: `r${n++}`, ts: 1 }), opts),
+      (id) => engine.getRule(id)?.name ?? id,
+    );
+}
 
 const LISTING = (name: string): ToolListing => ({
   name: name as ToolListing['name'],
@@ -59,6 +98,9 @@ function setup(
     remote?: RemoteTool[];
     /** What Vigil's own tools answer. */
     vigilResult?: unknown;
+    /** Vigil's rules, in place of a fixed answer. */
+    rules?: PackDepsPreflight;
+    now?: () => number;
   } = {},
 ) {
   const vigil = opts.vigil ?? ['list_alerts', 'search_events'];
@@ -70,11 +112,19 @@ function setup(
   const vigilCalls: string[] = [];
   const notebook = new Notebook(new DatabaseSync(':memory:'));
   const memory = new PackMemory(new DatabaseSync(':memory:'));
+  /** The saved connectors; a test may change them. */
+  const records: ConnectorRecord[] = [GITHUB];
+  let listed = remote;
+  /** What the server lists on the next refresh. */
+  let next: RemoteTool[] | undefined;
   const connectors: ConnectorHub = {
-    list: () => [GITHUB],
+    list: () => records,
     view: () => [],
-    tools: async () => remote,
-    knownTools: () => remote,
+    tools: async () => {
+      if (next) listed = next;
+      return listed;
+    },
+    knownTools: () => listed,
     call: async (id, tool, args) => {
       connectorCalls.push([id, tool, args]);
       if (opts.connectorError) throw new Error(opts.connectorError);
@@ -114,14 +164,28 @@ function setup(
         return { v: 1, ok: true, result: opts.vigilResult ?? { rows: [] } };
       },
     },
-    preflight: () => ({ v: 1, decision: opts.preflight ?? 'none', reason: 'A rule says so' }),
+    preflight:
+      opts.rules ??
+      (() => ({ v: 1, decision: opts.preflight ?? 'none', reason: 'A rule says so' })),
     connectors,
     notebook,
     memory,
     onChange: () => undefined,
     ...(opts.hour !== undefined ? { hour: () => opts.hour! } : {}),
+    ...(opts.now ? { now: opts.now } : {}),
   });
-  return { pack, handlers, runs, connectorCalls, vigilCalls, notebook, memory, settings };
+  return {
+    pack,
+    handlers,
+    runs,
+    connectorCalls,
+    vigilCalls,
+    notebook,
+    memory,
+    settings,
+    records,
+    serverLists: (tools: RemoteTool[]) => (next = tools),
+  };
 }
 
 const tool = (req: RunRequest<unknown>, name: string) => {
@@ -250,10 +314,11 @@ describe('the pack', () => {
     expect(pack.chat().at(-1)!.used).toEqual(['vigil.list_alerts']);
     expect(pack.dogs().some((d) => d.id === dog.id)).toBe(true);
 
-    // The acting path sees that answer only as a reference, and a short yes to it is a card.
+    // The acting path sees that answer only as a reference, and a change resting on it cites it: a card.
     handlers.push(() => ({
       reply: 'Changing Pip.',
       actions: [{ kind: 'update', dogId: dog.id, job: 'Something else.' }],
+      cites: ['answer-1'],
     }));
     await pack.say('ok');
     expect((runs[2]!.data as { earlier: unknown[] }).earlier).toEqual([
@@ -287,11 +352,15 @@ describe('the pack', () => {
     });
     await pack.runDog(dog.id);
     expect(pack.dogs().find((d) => d.id === dog.id)!.lastReport!.tainted).toBe(true);
-    handlers.push(() => ({ reply: '', actions: [] }));
+    handlers.push(() => ({
+      reply: '',
+      actions: [],
+      read: { question: 'What did Pip find?', refs: [`report:${dog.id}`] },
+    }));
     handlers.push(() => ({ answer: 'Pip found two new files.' }));
     await pack.say('what did Pip find?');
     expect(JSON.stringify(runs[3]!.data)).not.toContain('Two new files');
-    // Asked plainly about a report, the reading path runs even when the acting path asked for nothing.
+    // The acting path asked for the report by reference; only the reading path sees it.
     expect(runs[4]!.data).toMatchObject({
       looked: { [`report:${dog.id}`]: { summary: 'Two new files' } },
     });
@@ -434,13 +503,15 @@ describe('the pack', () => {
     await pack.runDog(dog.id);
     expect(connectorCalls).toEqual([]);
 
-    // Marked by the user, it runs without asking.
+    // Marked by the user, it runs without asking, for a dog whose last
+    // report holds no outside text.
     pack.setToolChoice('github.list_issues', 'allow');
+    const fresh = pack.adopt({ ...CREATE, name: 'Fresh', tools: ['github.list_issues'] } as never);
     handlers.push(async (req) => {
       await tool(req, 'tool_1').run({});
       return { summary: 'x', findings: [] };
     });
-    await pack.runDog(dog.id);
+    await pack.runDog(fresh.id);
     expect(connectorCalls).toEqual([['github', 'list_issues', {}]]);
   });
 
@@ -516,23 +587,7 @@ describe('the pack', () => {
     expect(pack.dogs().find((d) => d.id === dog.id)?.lastReport?.ok).toBe(true);
   });
 
-  it('never stops a scheduled run to ask: the call is skipped and nothing waits on the person', async () => {
-    const { pack, handlers, connectorCalls } = setup();
-    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
-    let answer: unknown;
-    let waiting = -1;
-    handlers.push(async (req) => {
-      answer = await tool(req, 'tool_1').run({ title: 'x' });
-      waiting = (await pack.view()).approvals.length;
-      return { summary: 'x', findings: [] };
-    });
-    await pack.runDog(dog.id, 'background');
-    expect(String(answer)).toContain('scheduled run');
-    expect(waiting).toBe(0);
-    expect(connectorCalls).toEqual([]);
-  });
-
-  it('drops a waiting approval when its run ends, so a late Allow runs nothing', async () => {
+  it('refuses a call still waiting when its run ends, so a late Allow runs nothing', async () => {
     const { pack, handlers, connectorCalls } = setup();
     const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
     let late: Promise<unknown> | undefined;
@@ -543,10 +598,72 @@ describe('the pack', () => {
       return { summary: 'gave up', findings: [] };
     });
     await pack.runDog(dog.id);
-    expect((await pack.view()).approvals).toHaveLength(0);
     expect(String(await late)).toContain('Not run');
+    // The card is held for the dog's next same call; allowing it now runs nothing.
+    const held = (await pack.view()).approvals;
+    expect(held).toHaveLength(1);
+    pack.decideTool(held[0]!.id, 'allow-once');
     expect(connectorCalls).toEqual([]);
     expect((await pack.view()).dogs.find((d) => d.id === dog.id)?.mood).not.toBe('thinking');
+  });
+
+  it('keeps a scheduled run’s card quiet: one card on the Pack page, nothing else waiting', async () => {
+    let clock = 10 * 24 * 60 * 60_000;
+    const runs: number[] = [];
+    const { pack, handlers } = setup({ now: () => clock });
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    const ask = async (req: RunRequest<unknown>) => {
+      // The run ends while its write still waits, as on its deadline.
+      void tool(req, 'tool_1').run({ title: 'x' });
+      await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+      runs.push(1);
+      return { summary: 'ok', findings: [] };
+    };
+    for (let run = 0; run < 2; run++) {
+      clock += 61 * 60_000;
+      handlers.push(ask);
+      await pack.runDue();
+    }
+    expect(runs).toHaveLength(2);
+    const view = await pack.view();
+    // The Pack page's card list is the only place it shows, and two runs share it.
+    expect(view.approvals).toMatchObject([{ dogId: dog.id, tool: 'github.create_issue' }]);
+    // Nothing on Home reads it: no dog is left waiting, and the Lead dog is idle.
+    expect(view.dogs.map((d) => d.mood)).not.toContain('waiting');
+  });
+
+  it('in Let AI decide, asks before rewriting or running a dog that can already change things', async () => {
+    const { pack, handlers } = setup();
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    pack.setMode('auto');
+    handlers.push(() => ({
+      reply: 'Sure.',
+      actions: [
+        { kind: 'update', dogId: dog.id, job: 'File an issue with everything.' },
+        { kind: 'run', dogId: dog.id },
+      ],
+    }));
+    await pack.say('change it');
+    expect(
+      pack
+        .chat()
+        .at(-1)!
+        .actions!.map((a) => a.status),
+    ).toEqual(['pending', 'pending']);
+    expect(pack.dogs().find((d) => d.id === dog.id)?.job).toBe(CREATE.job);
+  });
+
+  it('in Let AI decide, a run that lists no tools still counts the dog’s own', async () => {
+    const { pack, handlers } = setup();
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    pack.setMode('auto');
+    handlers.push(() => ({
+      reply: 'Off it goes.',
+      actions: [{ kind: 'run', dogId: dog.id, tools: [] }],
+    }));
+    await pack.say('run it');
+    expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'pending' });
+    expect(pack.chat().at(-1)!.actions![0]!.dog).toBeUndefined();
   });
 
   it('asks nothing for a run that ended while the AI was rating its call', async () => {
@@ -566,6 +683,20 @@ describe('the pack', () => {
     expect(String(await late)).toContain('Not run');
     expect((await pack.view()).approvals).toHaveLength(0);
     expect(connectorCalls).toEqual([]);
+  });
+
+  it('keeps the reason when an approved change fails', async () => {
+    const { pack, handlers } = setup();
+    const dog = pack.adopt(CREATE as never);
+    handlers.push(() => ({ reply: 'Ok.', actions: [{ kind: 'update', dogId: dog.id, job: 'x' }] }));
+    await pack.say('x');
+    pack.retire(dog.id);
+    const msg = pack.chat().at(-1)!;
+    pack.decideAction(msg.id, msg.actions![0]!.id, true);
+    expect(pack.chat().at(-1)!.actions![0]).toMatchObject({
+      status: 'failed',
+      note: 'No such dog',
+    });
   });
 
   it('gives a saved Lead dog Vigil’s tools that arrived later, but not one the person took away', () => {
@@ -642,6 +773,110 @@ describe('the pack', () => {
     const biscuit = (await pack.view()).dogs.find((d) => d.helper === 'labeller');
     expect(biscuit).toMatchObject({ mood: 'sniffing', activity: 'Labelling new events' });
     expect(() => pack.setVoice('loud' as never)).toThrow();
+  });
+
+  describe('Vigil’s rules on a connector with an id of its own', () => {
+    /** GitHub, removed and added again: a name slug and a part of its own. */
+    const NEW_GITHUB = { ...GITHUB, id: 'github-0199b2c4d5e6a1b2c3d4' };
+    const writer = {
+      id: 'dog-pip',
+      role: 'pack',
+      name: 'Pip',
+      breed: 'chihuahua',
+      job: 'File issues.',
+      schedule: 'manual',
+      tools: [`${NEW_GITHUB.id}.create_issue`],
+      enabled: true,
+      createdBy: 'you',
+      createdAt: 1,
+      jobTainted: false,
+      nameTainted: false,
+    };
+    /** Pip's run calls create_issue in Full access; what the gate makes of it. */
+    const callOnce = async (rules: PackDepsPreflight, choice?: 'allow') => {
+      const t = setup({ rules });
+      t.records.splice(0, 1, NEW_GITHUB);
+      t.pack.setMode('full');
+      t.settings.set('pack.dogs', [writer]);
+      if (choice) t.pack.setToolChoice(`${NEW_GITHUB.id}.create_issue`, choice);
+      let answer: unknown;
+      let approvals: unknown[] = [];
+      t.handlers.push(async (req) => {
+        const call = tool(req, 'tool_1').run({ title: 'x' });
+        await new Promise((r) => setTimeout(r, 20));
+        approvals = (await t.pack.view()).approvals;
+        for (const a of approvals as { id: string }[]) t.pack.decideTool(a.id, 'deny');
+        answer = await call;
+        return { summary: 'ok', findings: [] };
+      });
+      await t.pack.runDog('dog-pip');
+      return { answer, approvals, calls: t.connectorCalls };
+    };
+    const STOP = {
+      id: 'stop-github',
+      mode: 'block' as const,
+      condition: { field: 'tool', op: 'startsWith', value: 'mcp__github__' },
+    };
+    const ASK = {
+      id: 'ask-github',
+      mode: 'alert' as const,
+      condition: { field: 'mcpServer', op: 'eq', value: 'github' },
+    };
+
+    it('still stops a call that a stop rule written as mcp__github__ names', async () => {
+      const r = await callOnce(realRules([STOP]));
+      expect(r.answer).toContain('Not run');
+      expect(r.calls).toEqual([]);
+    });
+
+    it('still asks before a call that an ask rule on the github server names', async () => {
+      const r = await callOnce(realRules([ASK]));
+      expect(r.approvals).toMatchObject([{ why: 'rule' }]);
+      expect(r.answer).toContain('said no');
+      expect(r.calls).toEqual([]);
+    });
+
+    it('lets the call through when no rule names it', async () => {
+      const r = await callOnce(realRules([]));
+      expect(r.calls).toEqual([[NEW_GITHUB.id, 'create_issue', { title: 'x' }]]);
+    });
+
+    it('never lets a stop rule match by name, even with Always allow on the tool', async () => {
+      const r = await callOnce(realRules([STOP]), 'allow');
+      expect(r.answer).toContain('Not run');
+      expect(r.calls).toEqual([]);
+    });
+
+    it('does not apply an exception written for mcp__github__ to the new connector', async () => {
+      const r = await callOnce(
+        realRules([STOP], [{ ruleId: STOP.id, match: { tool: 'mcp__github__create_issue' } }]),
+      );
+      expect(r.answer).toContain('Not run');
+      expect(r.calls).toEqual([]);
+    });
+
+    it('does not apply a rule exclusion on the github server to the new connector', async () => {
+      const r = await callOnce(
+        realRules([{ ...ASK, exclusions: [{ field: 'mcpServer', op: 'eq', value: 'github' }] }]),
+      );
+      expect(r.approvals).toMatchObject([{ why: 'rule' }]);
+      expect(r.calls).toEqual([]);
+    });
+
+    it('applies an exception written for the connector’s own id', async () => {
+      const byId = {
+        ...STOP,
+        condition: { field: 'tool', op: 'startsWith', value: `mcp__${NEW_GITHUB.id}__` },
+      };
+      expect((await callOnce(realRules([byId]))).calls).toEqual([]);
+      const r = await callOnce(
+        realRules(
+          [byId],
+          [{ ruleId: STOP.id, match: { tool: `mcp__${NEW_GITHUB.id}__create_issue` } }],
+        ),
+      );
+      expect(r.calls).toEqual([[NEW_GITHUB.id, 'create_issue', { title: 'x' }]]);
+    });
   });
 
   describe('notebooks', () => {
@@ -730,8 +965,11 @@ describe('the pack', () => {
       handlers.push(async (req) => {
         await tool(req, 'search_events').run({ limit: 5 });
         await tool(req, 'tool_1').run({ q: 'token=hunter2-secret' });
-        // A scheduled run never asks, so this one is not run.
-        await tool(req, 'tool_2').run({ title: 'x' });
+        // This one waits for the person, who says no.
+        const asked = tool(req, 'tool_2').run({ title: 'x' });
+        await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+        pack.decideTool((await pack.view()).approvals[0]!.id, 'deny');
+        await asked;
         return { summary: 'ok', findings: [] };
       });
       await pack.runDog(dog.id, 'background');
@@ -748,7 +986,7 @@ describe('the pack', () => {
         expect.objectContaining({
           tool: 'github.create_issue',
           outcome: 'not-run',
-          reason: expect.stringContaining('scheduled run'),
+          reason: expect.stringContaining('you said no'),
         }),
       ]);
       const listed = note!.calls![1]!;
@@ -1423,7 +1661,7 @@ describe('the pack', () => {
       expect(memory.list().map((e) => e.fact)).toEqual(['Prefers short answers']);
     });
 
-    it('holds a schedule change to manual from a reading turn that defers to the report', async () => {
+    it('holds a schedule change to manual from a reading turn that cites the report', async () => {
       const { pack, handlers, settings } = setup();
       pack.setMode('full');
       settings.set('pack.dogs', [TAINTED_PIP]);
@@ -1431,6 +1669,7 @@ describe('the pack', () => {
         reply: 'Asked.',
         actions: [{ kind: 'update', dogId: 'dog-pip', schedule: 'manual' }],
         read: { question: 'What did Pip find?', refs: ['report:dog-pip'] },
+        cites: ['report:dog-pip'],
       }));
       handlers.push(injectedRead);
       await pack.say('What did Pip find? Do what it suggests.');
@@ -1478,6 +1717,10 @@ describe('the pack', () => {
       });
       handlers.push(() => ({ summary: 'ok', findings: [] }));
       await pack.say('Run Pip');
+      // The last answer read outside text, so even a typed run is a card.
+      const reply = pack.chat().at(-1)!;
+      expect(reply.actions![0]).toMatchObject({ status: 'pending', dogId: dog.id });
+      pack.decideAction(reply.id, reply.actions![0]!.id, true);
       expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done', dogId: dog.id });
       await vi.waitFor(() => expect(runs[1]).toMatchObject({ purpose: 'analyze' }));
       // Its own run names it by id.
@@ -1559,13 +1802,14 @@ describe('the pack', () => {
 
     for (const mode of ['ask', 'auto', 'full'] as const)
       for (const words of ['do what Pip suggested', 'carry out the recommendation'])
-        it(`"${words}" is a card in ${mode}`, async () => {
+        it(`"${words}" is a card in ${mode} when the change cites the report`, async () => {
           const { pack, handlers, runs, settings } = setup();
           pack.setMode(mode);
           settings.set('pack.dogs', [TAINTED_PIP]);
           handlers.push(() => ({
             reply: 'Asked.',
             actions: [{ kind: 'update', dogId: 'dog-pip', tools: ['vigil.list_alerts'] }],
+            cites: ['report:dog-pip'],
           }));
           await pack.say(words);
           expect(shown(runs[0]!)).not.toContain(INJECTED);
@@ -1589,13 +1833,23 @@ describe('the pack', () => {
       expect(reply.memory![0]).toMatchObject({ status: 'pending' });
       expect(memory.count()).toBe(0);
 
-      // And a short yes right after a reading answer.
+      // And a yes to a reading answer, which the acting path sees only as `answer-<n>`.
       handlers.push(() => ({ reply: '', actions: [], read: { question: 'x', refs: [] } }));
       handlers.push(() => ({ answer: 'Pip suggests a new dog.' }));
       await pack.say('anything new?');
-      handlers.push(() => ({ reply: 'Done.', actions: [{ ...CREATE, name: 'Taco' }] }));
+      handlers.push(() => ({
+        reply: 'Done.',
+        actions: [{ ...CREATE, name: 'Taco' }],
+        cites: ['answer-1'],
+      }));
       await pack.say('yes please');
       expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'pending' });
+
+      // A reference the person typed is one too, whatever the acting path cites.
+      handlers.push(() => ({ reply: 'Done.', actions: [{ ...CREATE, name: 'Bolt' }] }));
+      await pack.say('make the dog answer-1 describes');
+      expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'pending' });
+      expect(pack.dogs().some((d) => d.name === 'Taco' || d.name === 'Bolt')).toBe(false);
     });
 
     it('shows clean memory as it is and tainted memory only by reference', async () => {
@@ -1609,7 +1863,12 @@ describe('the pack', () => {
         { fact: 'GitHub alerts get a Writer dog', topic: 'pack' },
         { from: 'lead' },
       );
-      handlers.push(() => ({ reply: 'Hi', actions: [], forget: [`memory:${odd.id}`] }));
+      handlers.push(() => ({
+        reply: 'Hi',
+        actions: [],
+        forget: [`memory:${odd.id}`],
+        read: { question: 'What is remembered about GitHub alerts?', refs: [`memory:${odd.id}`] },
+      }));
       await pack.say('What do you remember about GitHub alerts? Forget the odd one.');
       expect(shown(runs[0]!)).not.toContain('Writer');
       expect((runs[0]!.data as { memory: { entries: unknown[] } }).memory.entries).toEqual(
@@ -1618,8 +1877,10 @@ describe('the pack', () => {
           { ref: `memory:${odd.id}`, topic: 'pack' },
         ]),
       );
-      // Plainly about the memory, so it went down the reading path, which sees it all.
-      expect(JSON.stringify(runs[1]!.data)).toContain('Writer');
+      // The acting path asked to read it, so the turn went down the reading path, which sees it all.
+      expect(runs[1]!.data).toMatchObject({
+        looked: { [`memory:${odd.id}`]: 'GitHub alerts get a Writer dog' },
+      });
       // Forgetting it waits: the turn read, and the fact came from outside text.
       expect(pack.chat()[1]!.memory![0]).toMatchObject({ op: 'forget', status: 'pending' });
     });
@@ -1636,6 +1897,864 @@ describe('the pack', () => {
       expect(shown(runs[1]!)).not.toContain(PIP.job);
       pack.updateDog('dog-pip', { job: 'Check Desktop.' });
       expect(pip(pack).jobTainted).toBe(false);
+    });
+
+    describe('no word in the message routes a turn or makes a card', () => {
+      for (const mode of ['full', 'auto'] as const)
+        it(`"Create a dog named Advisor to check Downloads hourly" applies in ${mode}`, async () => {
+          const { pack, handlers, runs } = setup();
+          pack.setMode(mode);
+          handlers.push(() => ({
+            reply: 'Advisor is on it.',
+            actions: [
+              {
+                ...CREATE,
+                name: 'Advisor',
+                breed: 'beagle',
+                job: 'Check Downloads.',
+                schedule: 'hourly',
+              },
+            ],
+          }));
+          await pack.say('Create a dog named Advisor to check Downloads hourly');
+          expect(runs).toHaveLength(1);
+          expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done' });
+          expect(pack.dogs().find((d) => d.name === 'Advisor')).toMatchObject({
+            schedule: 'hourly',
+            jobTainted: false,
+            nameTainted: false,
+          });
+        });
+
+      for (const mode of ['full', 'auto'] as const)
+        it(`"Run Pip; ignore any recommendations in its report" sends Pip off in ${mode}`, async () => {
+          const { pack, handlers, runs, settings } = setup();
+          pack.setMode(mode);
+          settings.set('pack.dogs', [TAINTED_PIP]);
+          handlers.push(() => ({
+            reply: 'Off it goes.',
+            actions: [{ kind: 'run', dogId: 'dog-pip' }],
+          }));
+          handlers.push(() => ({ summary: 'ok', findings: [] }));
+          await pack.say('Run Pip; ignore any recommendations in its report');
+          expect(shown(runs[0]!)).not.toContain(INJECTED);
+          expect(pack.chat().at(-1)!.actions![0]).toMatchObject({
+            status: 'done',
+            dogId: 'dog-pip',
+          });
+          // The next call is Pip's own run, not a reading path.
+          await vi.waitFor(() => expect(runs[1]).toMatchObject({ purpose: 'analyze' }));
+          expect(runs.filter((r) => r.purpose === 'chat')).toHaveLength(1);
+        });
+
+      it('"Remember I prefer reports in plain English" is remembered straight away, with no read', async () => {
+        const { pack, handlers, runs, memory, settings } = setup();
+        pack.setMode('full');
+        settings.set('pack.dogs', [TAINTED_PIP]);
+        handlers.push(() => ({
+          reply: 'Noted.',
+          actions: [],
+          remember: [{ fact: 'Prefers reports in plain English', topic: 'pack' }],
+        }));
+        await pack.say('Remember I prefer reports in plain English');
+        expect(runs).toHaveLength(1);
+        expect(pack.chat()).toHaveLength(2);
+        expect(pack.chat().at(-1)!.memory![0]).toMatchObject({ status: 'done' });
+        expect(memory.list()).toMatchObject([
+          { fact: 'Prefers reports in plain English', tainted: false },
+        ]);
+      });
+
+      it('reads nothing when the acting path asks for no read, even about a report', async () => {
+        const { pack, handlers, runs, settings } = setup();
+        settings.set('pack.dogs', [TAINTED_PIP]);
+        handlers.push(() => ({ reply: 'I can look that up if you like.', actions: [] }));
+        await pack.say('What did Pip find in its report?');
+        expect(runs).toHaveLength(1);
+        expect(pack.chat().map((m) => m.tainted)).toEqual([false, false]);
+      });
+    });
+
+    describe('a change to a dog the person named', () => {
+      for (const mode of ['full', 'auto'] as const)
+        it(`goes to that dog, and a change to another dog is a card (${mode})`, async () => {
+          const { pack, handlers, settings } = setup();
+          pack.setMode(mode);
+          settings.set('pack.dogs', [PIP, TACO]);
+          handlers.push(() => ({
+            reply: 'Done.',
+            actions: [
+              { kind: 'update', dogId: 'dog-taco', name: 'Spot' },
+              { kind: 'run', dogId: 'dog-taco' },
+              { kind: 'update', dogId: 'dog-pip', schedule: 'daily' },
+            ],
+          }));
+          handlers.push(() => ({ summary: 'ok', findings: [] }));
+          await pack.say('Rename Pip to Spot and make it daily');
+          expect(pack.chat().at(-1)!.actions).toMatchObject([
+            {
+              status: 'pending',
+              dogId: 'dog-taco',
+              note: expect.stringContaining('different dog'),
+            },
+            {
+              status: 'pending',
+              dogId: 'dog-taco',
+              note: expect.stringContaining('different dog'),
+            },
+            { status: 'done', dogId: 'dog-pip' },
+          ]);
+          expect(pack.dogs().find((d) => d.id === 'dog-taco')!.name).toBe('Taco');
+          expect(pip(pack).schedule).toBe('daily');
+          expect((await pack.view()).dogs[0]!.mood).toBe('waiting');
+
+          // Approving the card applies it.
+          const msg = pack.chat().at(-1)!;
+          pack.decideAction(msg.id, msg.actions![0]!.id, true);
+          expect(pack.dogs().find((d) => d.id === 'dog-taco')).toMatchObject({
+            name: 'Spot',
+            nameTainted: false,
+          });
+        });
+
+      it('binds a run to the dog named, even one whose name came from outside text', async () => {
+        const { pack, handlers, settings } = setup();
+        pack.setMode('full');
+        settings.set('pack.dogs', [{ ...TAINTED_PIP, nameTainted: true }, TACO]);
+        handlers.push(() => ({
+          reply: 'Off it goes.',
+          actions: [{ kind: 'run', dogId: 'dog-taco' }],
+        }));
+        await pack.say('Run Pip');
+        expect(pack.chat().at(-1)!.actions![0]).toMatchObject({
+          status: 'pending',
+          dogId: 'dog-taco',
+        });
+
+        // Retiring one is bound the same way.
+        handlers.push(() => ({ reply: 'Bye.', actions: [{ kind: 'retire', dogId: 'dog-taco' }] }));
+        await pack.say('Retire Pip');
+        expect(pack.chat().at(-1)!.actions![0]).toMatchObject({
+          status: 'pending',
+          note: expect.stringContaining('different dog'),
+        });
+        expect(pack.dogs().some((d) => d.id === 'dog-taco')).toBe(true);
+      });
+
+      it('takes any dog when the message names none, and each dog the message names', async () => {
+        const { pack, handlers, settings } = setup();
+        pack.setMode('full');
+        settings.set('pack.dogs', [PIP, TACO]);
+        handlers.push(() => ({
+          reply: 'Done.',
+          actions: [{ kind: 'update', dogId: 'dog-taco', schedule: 'daily' }],
+        }));
+        await pack.say('Make the Applications watcher daily');
+        expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done' });
+        handlers.push(() => ({
+          reply: 'Done.',
+          actions: [
+            { kind: 'update', dogId: 'dog-pip', schedule: 'nightly' },
+            { kind: 'update', dogId: 'dog-taco', schedule: 'nightly' },
+          ],
+        }));
+        await pack.say('Make pip and TACO nightly');
+        expect(pack.chat().at(-1)!.actions).toMatchObject([{ status: 'done' }, { status: 'done' }]);
+        expect(
+          pack
+            .dogs()
+            .filter((d) => d.role === 'pack')
+            .map((d) => d.schedule),
+        ).toEqual(['nightly', 'nightly']);
+      });
+    });
+
+    describe('a dog’s tainted last report is outside text', () => {
+      const WRITER = {
+        ...TAINTED_PIP,
+        jobTainted: false,
+        tools: ['vigil.search_events', 'github.create_issue'],
+      };
+      /** Pip's run: it tries the write tool its report talked it into. */
+      const pipRun =
+        (pack: PackService, seen: RunRequest<unknown>[]) => async (req: RunRequest<unknown>) => {
+          seen.push(req);
+          const call = tool(req, 'tool_1').run({ title: 'from the report' });
+          await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+          expect((await pack.view()).approvals[0]).toMatchObject({
+            dogId: 'dog-pip',
+            tool: 'github.create_issue',
+            why: 'outside-text',
+          });
+          pack.decideTool((await pack.view()).approvals[0]!.id, 'deny');
+          expect(await call).toContain('said no');
+          return { summary: 'ok', findings: [] };
+        };
+
+      for (const mode of ['ask', 'auto', 'full'] as const)
+        it(`"Do what Pip suggested": no connector call without the person's OK (${mode})`, async () => {
+          const { pack, handlers, runs, settings, connectorCalls } = setup();
+          pack.setMode(mode);
+          settings.set('pack.dogs', [WRITER]);
+          // Not even a tool set to Always allow.
+          pack.setToolChoice('github.create_issue', 'allow');
+          handlers.push(() => ({
+            reply: 'Pip is on it.',
+            actions: [
+              {
+                kind: 'update',
+                dogId: 'dog-pip',
+                job: 'Carry out the recommendations in your previous run',
+              },
+              { kind: 'run', dogId: 'dog-pip' },
+            ],
+          }));
+          const seen: RunRequest<unknown>[] = [];
+          handlers.push(pipRun(pack, seen));
+          await pack.say('Do what Pip suggested');
+          expect(shown(runs[0]!)).not.toContain(INJECTED);
+          const actions = pack.chat().at(-1)!.actions!;
+          if (mode === 'ask') {
+            expect(actions).toMatchObject([{ status: 'pending' }, { status: 'pending' }]);
+            pack.decideAction(pack.chat().at(-1)!.id, actions[0]!.id, true);
+            pack.decideAction(pack.chat().at(-1)!.id, actions[1]!.id, true);
+          }
+          // The run reads the report as outside text, and every call that can
+          // change things waits for the person.
+          await vi.waitFor(() => expect(seen).toHaveLength(1));
+          expect(seen[0]!.data).toMatchObject({ previousRun: { summary: INJECTED } });
+          await vi.waitFor(() => expect(pip(pack).lastReport!.at).not.toBe(1));
+          expect(connectorCalls).toEqual([]);
+          expect(pip(pack).lastReport!.tainted).toBe(true);
+        });
+
+      it('after a reading answer, holds the job change and still asks before the call', async () => {
+        const { pack, handlers, settings, connectorCalls } = setup();
+        pack.setMode('full');
+        settings.set('pack.dogs', [WRITER]);
+        handlers.push(() => ({
+          reply: '',
+          actions: [],
+          read: { question: 'What did Pip find?', refs: ['report:dog-pip'] },
+        }));
+        handlers.push(() => ({ answer: 'Pip suggests filing an issue.' }));
+        await pack.say('What did Pip find?');
+        handlers.push(() => ({
+          reply: 'Pip is on it.',
+          actions: [
+            {
+              kind: 'update',
+              dogId: 'dog-pip',
+              job: 'Carry out the recommendations in your previous run',
+            },
+            { kind: 'run', dogId: 'dog-pip' },
+          ],
+        }));
+        const seen: RunRequest<unknown>[] = [];
+        handlers.push(pipRun(pack, seen));
+        await pack.say('Do what Pip suggested');
+        const reply = pack.chat().at(-1)!;
+        expect(reply.actions).toMatchObject([
+          { status: 'pending', note: expect.stringContaining('outside your messages') },
+          { status: 'pending', dogId: 'dog-pip' },
+        ]);
+        expect(pip(pack).job).toBe(WRITER.job);
+        expect(seen).toHaveLength(0);
+        // One tap sends Pip off; its write still asks.
+        pack.decideAction(reply.id, reply.actions![1]!.id, true);
+        await vi.waitFor(() => expect(seen).toHaveLength(1));
+        await vi.waitFor(() => expect(pip(pack).lastReport!.at).not.toBe(1));
+        expect(connectorCalls).toEqual([]);
+      });
+
+      describe('one quiet card per pending write', () => {
+        const MIN = 60_000;
+        /** A scheduled run of Pip that tries the write and waits for its answer. */
+        const writeRun =
+          (answers: unknown[], args: Record<string, unknown> = { title: 'from the report' }) =>
+          async (req: RunRequest<unknown>) => {
+            answers.push(await tool(req, 'tool_1').run(args));
+            return { summary: 'ok', findings: [] };
+          };
+
+        it('updates the card a scheduled run left when the next run asks the same', async () => {
+          let clock = 10 * 24 * 60 * MIN;
+          const { pack, handlers, settings, connectorCalls } = setup({ now: () => clock });
+          pack.setMode('full');
+          settings.set('pack.dogs', [WRITER]);
+          vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+          try {
+            const answers: unknown[] = [];
+            handlers.push(writeRun(answers));
+            const first = pack.runDue();
+            await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+            const card = (await pack.view()).approvals[0]!;
+            expect(card).toMatchObject({ dogId: 'dog-pip', why: 'outside-text' });
+            // Nobody answers: the run carries on without it, the card stays.
+            vi.advanceTimersByTime(10 * MIN);
+            await first;
+            expect(answers).toEqual([expect.stringContaining('said no')]);
+            expect((await pack.view()).approvals).toEqual([card]);
+
+            // The next scheduled run asks for the same write: the same card, brought up to date.
+            clock += 61 * MIN;
+            handlers.push(writeRun(answers));
+            const second = pack.runDue();
+            await vi.waitFor(async () => expect((await pack.view()).approvals[0]!.at).toBe(clock));
+            expect((await pack.view()).approvals).toEqual([{ ...card, at: clock }]);
+            pack.decideTool(card.id, 'allow-once');
+            await second;
+            expect(connectorCalls).toEqual([
+              ['github', 'create_issue', { title: 'from the report' }],
+            ]);
+            expect((await pack.view()).approvals).toEqual([]);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it('gives an answer on a held card to the next run’s same call, and only that', async () => {
+          let clock = 10 * 24 * 60 * MIN;
+          const { pack, handlers, settings, connectorCalls } = setup({ now: () => clock });
+          pack.setMode('full');
+          settings.set('pack.dogs', [WRITER]);
+          vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+          try {
+            const answers: unknown[] = [];
+            handlers.push(writeRun(answers));
+            const first = pack.runDue();
+            await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+            vi.advanceTimersByTime(10 * MIN);
+            await first;
+            pack.decideTool((await pack.view()).approvals[0]!.id, 'deny');
+            expect((await pack.view()).approvals).toEqual([]);
+            clock += 61 * MIN;
+            // Different arguments are a different write: a card of their own.
+            handlers.push(async (req) => {
+              const t = tool(req, 'tool_1');
+              answers.push(await t.run({ title: 'from the report' }));
+              answers.push(await t.run({ title: 'something else' }));
+              return { summary: 'ok', findings: [] };
+            });
+            const second = pack.runDue();
+            await vi.waitFor(async () =>
+              expect((await pack.view()).approvals).toMatchObject([
+                { args: expect.stringContaining('something else') },
+              ]),
+            );
+            pack.decideTool((await pack.view()).approvals[0]!.id, 'allow-once');
+            await second;
+            expect(answers.slice(1)).toEqual([expect.stringContaining('said no'), 'ok']);
+            expect(connectorCalls).toEqual([
+              ['github', 'create_issue', { title: 'something else' }],
+            ]);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        describe('a held card and its answer hold only for the context they were given in', () => {
+          type Setup = ReturnType<typeof setup>;
+          const JIRA = { ...GITHUB, id: 'jira', name: 'Jira' };
+          const changes: [string, (t: Setup) => void][] = [
+            ['the mode changes', (t) => t.pack.setMode('auto')],
+            [
+              'its tools change',
+              (t) =>
+                t.pack.updateDog('dog-pip', { tools: [...WRITER.tools, 'github.list_issues'] }),
+            ],
+            [
+              'the person’s choice for the tool changes',
+              (t) => t.pack.setToolChoice('github.create_issue', 'ask'),
+            ],
+            [
+              'a connector it uses is removed and added again with the same name and another endpoint',
+              (t) => {
+                t.records.splice(0);
+                t.pack.connectorChanged('github');
+                t.records.push({ ...GITHUB, command: 'another-server' });
+                t.pack.connectorChanged('github');
+              },
+            ],
+            [
+              'a connector it uses is switched off and on again',
+              (t) => {
+                t.records[0] = { ...GITHUB, enabled: false };
+                t.pack.connectorChanged('github');
+                t.records[0] = GITHUB;
+                t.pack.connectorChanged('github');
+              },
+            ],
+            [
+              'a connector it uses is added',
+              (t) => {
+                t.records.push(JIRA);
+                t.pack.connectorChanged('jira');
+              },
+            ],
+            [
+              'a connector’s endpoint changes without notice (the context check)',
+              (t) => {
+                t.records[0] = { ...GITHUB, command: 'another-server' };
+              },
+            ],
+          ];
+          /** Pip, with a tool from a connector that is not there yet. */
+          const PIP_JIRA = { ...WRITER, tools: [...WRITER.tools, 'jira.list_issues'] };
+
+          /** A scheduled run leaves a held card; `answer` answers it, then `change` happens. */
+          const heldThen = async (
+            answer: ToolDecision | undefined,
+            change: (t: Setup) => void,
+            next: (t: Setup, card: ToolApproval, answers: unknown[]) => Promise<void>,
+          ) => {
+            let clock = 10 * 24 * 60 * MIN;
+            const t = setup({ now: () => clock });
+            t.pack.setMode('full');
+            t.settings.set('pack.dogs', [PIP_JIRA]);
+            vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+            try {
+              const answers: unknown[] = [];
+              t.handlers.push(writeRun(answers));
+              const first = t.pack.runDue();
+              await vi.waitFor(async () => expect((await t.pack.view()).approvals).toHaveLength(1));
+              vi.advanceTimersByTime(10 * MIN);
+              await first;
+              const card = (await t.pack.view()).approvals[0]!;
+              if (answer) t.pack.decideTool(card.id, answer);
+              change(t);
+              clock += 61 * MIN;
+              await next(t, card, answers);
+            } finally {
+              vi.useRealTimers();
+            }
+          };
+
+          for (const [what, change] of changes) {
+            it(`drops an allow given on a held card when ${what}`, async () =>
+              heldThen('allow-once', change, async (t, card, answers) => {
+                t.handlers.push(writeRun(answers));
+                const second = t.pack.runDue();
+                // The same write asks again, on a new card, and nothing runs meanwhile.
+                await vi.waitFor(async () =>
+                  expect((await t.pack.view()).approvals).toHaveLength(1),
+                );
+                expect((await t.pack.view()).approvals[0]!.id).not.toBe(card.id);
+                vi.advanceTimersByTime(10 * MIN);
+                await second;
+                expect(answers).toEqual([
+                  expect.stringContaining('said no'),
+                  expect.stringContaining('said no'),
+                ]);
+                expect(t.connectorCalls).toEqual([]);
+              }));
+
+            if (!what.includes('without notice'))
+              it(`drops a held card nobody answered when ${what}`, async () =>
+                heldThen(undefined, change, async (t) => {
+                  expect((await t.pack.view()).approvals).toEqual([]);
+                }));
+          }
+
+          it('drops an allow and a held card when a refresh changes the tool’s description', async () => {
+            const changed = REMOTE.map((r) =>
+              r.name === 'create_issue'
+                ? { ...r, description: 'Files an issue, now also emails it' }
+                : r,
+            );
+            // An allow on the held card, then the refresh: the next same call asks again.
+            await heldThen(
+              'allow-once',
+              (t) => t.serverLists(changed),
+              async (t, card, answers) => {
+                await t.pack.refreshConnector('github');
+                t.handlers.push(writeRun(answers));
+                const second = t.pack.runDue();
+                await vi.waitFor(async () =>
+                  expect((await t.pack.view()).approvals).toHaveLength(1),
+                );
+                expect((await t.pack.view()).approvals[0]!.id).not.toBe(card.id);
+                vi.advanceTimersByTime(10 * MIN);
+                await second;
+                expect(t.connectorCalls).toEqual([]);
+              },
+            );
+            // A held card nobody answered goes at the refresh itself.
+            await heldThen(
+              undefined,
+              (t) => t.serverLists(changed),
+              async (t) => {
+                await t.pack.refreshConnector('github');
+                expect((await t.pack.view()).approvals).toEqual([]);
+              },
+            );
+          });
+
+          it('keeps a held card when a refresh lists the same tools', async () =>
+            heldThen(
+              undefined,
+              (t) => t.serverLists(REMOTE.map((r) => ({ ...r }))),
+              async (t, card) => {
+                await t.pack.refreshConnector('github');
+                expect((await t.pack.view()).approvals.map((a) => a.id)).toEqual([card.id]);
+              },
+            ));
+
+          it('keeps an answer when nothing it was given under changed', async () =>
+            heldThen(
+              'allow-once',
+              (t) => t.pack.updateDog('dog-pip', { schedule: 'hourly', name: 'Pip' }),
+              async (t, _card, answers) => {
+                t.handlers.push(writeRun(answers));
+                await t.pack.runDue();
+                expect(answers.at(-1)).toBe('ok');
+                expect(t.connectorCalls).toEqual([
+                  ['github', 'create_issue', { title: 'from the report' }],
+                ]);
+              },
+            ));
+
+          it('keeps another dog’s held card when one dog’s tools change', async () =>
+            heldThen(
+              undefined,
+              (t) => {
+                t.settings.set('pack.dogs', [PIP_JIRA, { ...TACO, id: 'dog-other' }]);
+                t.pack.updateDog('dog-other', { tools: ['vigil.list_alerts'] });
+              },
+              async (t, card) => {
+                expect((await t.pack.view()).approvals.map((a) => a.id)).toEqual([card.id]);
+              },
+            ));
+        });
+
+        it('shows the same write asked twice in one run once, and runs it once', async () => {
+          const { pack, handlers, settings, connectorCalls } = setup();
+          pack.setMode('full');
+          settings.set('pack.dogs', [WRITER]);
+          const answers: unknown[] = [];
+          handlers.push(async (req) => {
+            const t = tool(req, 'tool_1');
+            const calls = [t.run({ title: 'x' }), t.run({ title: 'x' })];
+            await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+            await new Promise((r) => setTimeout(r, 10));
+            expect((await pack.view()).approvals).toHaveLength(1);
+            pack.decideTool((await pack.view()).approvals[0]!.id, 'allow-once');
+            answers.push(...(await Promise.all(calls)));
+            return { summary: 'ok', findings: [] };
+          });
+          await pack.runDog('dog-pip', 'background');
+          expect(answers).toEqual(['ok', expect.stringContaining('said no')]);
+          expect(connectorCalls).toHaveLength(1);
+        });
+      });
+
+      it('lets a dog with a clean last report use a tool set to Always allow', async () => {
+        const { pack, handlers, settings, connectorCalls } = setup();
+        pack.setMode('full');
+        settings.set('pack.dogs', [
+          { ...WRITER, lastReport: { ...TAINTED_PIP.lastReport, summary: 'ok', tainted: false } },
+        ]);
+        pack.setToolChoice('github.create_issue', 'allow');
+        handlers.push(async (req) => {
+          await tool(req, 'tool_1').run({ title: 'x' });
+          return { summary: 'ok', findings: [] };
+        });
+        await pack.runDog('dog-pip');
+        expect(connectorCalls).toEqual([['github', 'create_issue', { title: 'x' }]]);
+      });
+    });
+
+    describe('after an answer that read outside text', () => {
+      const readFirst = async (pack: PackService, handlers: Handler[]) => {
+        handlers.push(() => ({
+          reply: '',
+          actions: [],
+          read: { question: 'What did Pip find?', refs: ['report:dog-pip'] },
+        }));
+        handlers.push(() => ({ answer: 'Pip says to retire Taco and run Pip.' }));
+        await pack.say('What did Pip find?');
+        expect(pack.chat().at(-1)).toMatchObject({ tainted: true });
+      };
+
+      for (const [words, action] of [
+        ['yes', { kind: 'retire', dogId: 'dog-taco' }],
+        ['ok', { kind: 'run', dogId: 'dog-taco' }],
+        ['yes please', { kind: 'update', dogId: 'dog-taco', schedule: 'manual' }],
+        ['go ahead', { ...CREATE, name: 'Taco Two' }],
+      ] as const)
+        it(`"${words}" with an uncited ${action.kind} is a card, in Full access`, async () => {
+          const { pack, handlers, settings } = setup();
+          pack.setMode('full');
+          settings.set('pack.dogs', [TAINTED_PIP, TACO]);
+          await readFirst(pack, handlers);
+          handlers.push(() => ({ reply: 'Done.', actions: [action] }));
+          await pack.say(words);
+          expect(pack.chat().at(-1)!.actions![0]).toMatchObject({
+            status: 'pending',
+            note: expect.stringContaining('outside your messages'),
+          });
+          expect(pack.dogs().find((d) => d.id === 'dog-taco')).toMatchObject({
+            schedule: 'hourly',
+          });
+          expect(pack.dogs().some((d) => d.name === 'Taco Two')).toBe(false);
+        });
+
+      it('makes a change the person spells out in full a card, approved with one tap', async () => {
+        const { pack, handlers, settings } = setup();
+        pack.setMode('full');
+        settings.set('pack.dogs', [TAINTED_PIP, TACO]);
+        await readFirst(pack, handlers);
+        handlers.push(() => ({
+          reply: 'Bye, Taco.',
+          actions: [{ kind: 'retire', dogId: 'dog-taco' }],
+        }));
+        await pack.say('Retire Taco');
+        const reply = pack.chat().at(-1)!;
+        expect(reply.actions![0]).toMatchObject({
+          status: 'pending',
+          note: expect.stringContaining('outside your messages'),
+        });
+        expect(pack.dogs().some((d) => d.id === 'dog-taco')).toBe(true);
+        // No tool card: the change waits inline in the chat only.
+        expect((await pack.view()).approvals).toEqual([]);
+        pack.decideAction(reply.id, reply.actions![0]!.id, true);
+        expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done' });
+        expect(pack.dogs().some((d) => d.id === 'dog-taco')).toBe(false);
+
+        // The answer before this one read nothing, but the conversation did:
+        // still a card. A new conversation starts clean.
+        const advisor = () =>
+          handlers.push(() => ({
+            reply: 'Advisor is on it.',
+            actions: [{ ...CREATE, name: 'Advisor', job: 'Check Downloads.' }],
+          }));
+        advisor();
+        await pack.say('Create a dog named Advisor to check Downloads hourly');
+        expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'pending' });
+        pack.clearChat();
+        expect(pack.chatTainted()).toBe(false);
+        advisor();
+        await pack.say('Create a dog named Advisor to check Downloads hourly');
+        expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done' });
+      });
+
+      describe('taint belongs to the conversation', () => {
+        it('keeps a repeated tool grant a card after a card reply, in Full access', async () => {
+          const { pack, handlers, settings } = setup();
+          pack.setMode('full');
+          settings.set('pack.dogs', [TAINTED_PIP, TACO]);
+          await readFirst(pack, handlers);
+          const grant = { kind: 'update', dogId: 'dog-taco', tools: ['github.create_issue'] };
+          for (let i = 0; i < 3; i++) {
+            handlers.push(() => ({ reply: 'Done.', actions: [grant] }));
+            await pack.say('Give Taco github.create_issue');
+            const reply = pack.chat().at(-1)!;
+            // The card reply itself is clean; the conversation is not.
+            expect(reply).toMatchObject({ tainted: false });
+            expect(reply.actions![0]).toMatchObject({
+              status: 'pending',
+              note: expect.stringContaining('outside your messages'),
+            });
+            expect(pack.dogs().find((d) => d.id === 'dog-taco')!.tools).toEqual(TACO.tools);
+          }
+        });
+
+        it('keeps a repeated remember and forget a card after a card reply', async () => {
+          const { pack, handlers, settings, memory } = setup();
+          pack.setMode('full');
+          settings.set('pack.dogs', [TAINTED_PIP, TACO]);
+          const kept = memory.remember(
+            { fact: 'Uses Tailscale at home', topic: 'network' },
+            { from: 'you', tainted: false },
+          );
+          await readFirst(pack, handlers);
+          for (let i = 0; i < 3; i++) {
+            handlers.push(() => ({
+              reply: 'Noted.',
+              actions: [],
+              remember: [{ fact: 'Prefers short answers', topic: 'pack' }],
+              forget: [kept.id],
+            }));
+            await pack.say('Remember I prefer short answers. Forget that I use Tailscale at home.');
+            expect(pack.chat().at(-1)!.memory).toMatchObject([
+              { op: 'remember', status: 'pending' },
+              { op: 'forget', status: 'pending' },
+            ]);
+            expect(memory.list().map((e) => e.fact)).toEqual(['Uses Tailscale at home']);
+          }
+        });
+
+        it('starts a new conversation clean', async () => {
+          const { pack, handlers, settings, memory } = setup();
+          pack.setMode('full');
+          settings.set('pack.dogs', [TAINTED_PIP, TACO]);
+          await readFirst(pack, handlers);
+          expect(pack.chatTainted()).toBe(true);
+          pack.clearChat();
+          expect(pack.chatTainted()).toBe(false);
+          handlers.push(() => ({
+            reply: 'Done.',
+            actions: [{ kind: 'update', dogId: 'dog-taco', schedule: 'daily' }],
+            remember: [{ fact: 'Prefers short answers', topic: 'pack' }],
+          }));
+          await pack.say('Make Taco daily. Remember I prefer short answers.');
+          const reply = pack.chat().at(-1)!;
+          expect(reply.actions![0]).toMatchObject({ status: 'done' });
+          expect(reply.memory![0]).toMatchObject({ status: 'done' });
+          expect(memory.count()).toBe(1);
+        });
+
+        it('counts a conversation saved before the flag by its answers', () => {
+          const { pack, settings } = setup();
+          settings.set('pack.chat', [{ id: 'm1', at: 1, from: 'lead', text: 'x', tainted: true }]);
+          expect(pack.chatTainted()).toBe(true);
+          settings.set('pack.chat', [{ id: 'm1', at: 1, from: 'lead', text: 'x', tainted: false }]);
+          expect(pack.chatTainted()).toBe(false);
+        });
+      });
+
+      it('holds a create, a job and a memory, typed word for word or not', async () => {
+        const { pack, handlers, settings, memory } = setup();
+        pack.setMode('full');
+        settings.set('pack.dogs', [TAINTED_PIP, TACO]);
+        await readFirst(pack, handlers);
+        handlers.push(() => ({
+          reply: 'Done.',
+          actions: [
+            { ...CREATE, name: 'Advisor', job: 'Check Downloads.' },
+            { kind: 'update', dogId: 'dog-pip', job: 'Check Desktop' },
+          ],
+          remember: [{ fact: 'Prefers reports in plain English', topic: 'pack' }],
+        }));
+        await pack.say(
+          'Create a dog named Advisor and change Pip. Remember I prefer reports in plain English',
+        );
+        const reply = pack.chat().at(-1)!;
+        expect(reply.actions).toMatchObject([{ status: 'pending' }, { status: 'pending' }]);
+        expect(reply.memory).toMatchObject([{ status: 'pending' }]);
+        expect(memory.count()).toBe(0);
+
+        // Typed word for word, they still wait. (The answer before is clean
+        // now, so read again first.)
+        await readFirst(pack, handlers);
+        handlers.push(() => ({
+          reply: 'Done.',
+          actions: [
+            { ...CREATE, name: 'Advisor', job: 'Check Downloads.' },
+            { kind: 'update', dogId: 'dog-pip', job: 'Check Desktop' },
+          ],
+          remember: [{ fact: 'Reports in plain English', topic: 'pack' }],
+        }));
+        await pack.say(
+          'Create a dog named Advisor to Check Downloads. Change Pip’s job to Check Desktop. Remember: reports in plain English.',
+        );
+        const next = pack.chat().at(-1)!;
+        expect(next.actions).toMatchObject([{ status: 'pending' }, { status: 'pending' }]);
+        expect(next.memory).toMatchObject([{ status: 'pending' }]);
+        expect(pip(pack).job).toBe(TAINTED_PIP.job);
+        expect(memory.count()).toBe(0);
+      });
+
+      const PIP_TWO = { ...PIP, id: 'dog-pip-two', name: 'Pip Two', job: 'Watch Desktop.' };
+      const typedAfterOutside: [string, string, unknown[], Record<string, unknown>][] = [
+        [
+          'a name with a letter that case-folds to ASCII',
+          'Retire Kip',
+          // U+212A KELVIN SIGN folds to "k".
+          [TAINTED_PIP, { ...TACO, name: '\u212Aip' }],
+          { kind: 'retire', dogId: 'dog-taco' },
+        ],
+        [
+          'two names that differ only in case',
+          'Retire TACO',
+          [TAINTED_PIP, TACO, { ...TACO, id: 'dog-taco-2', name: 'TACO' }],
+          { kind: 'retire', dogId: 'dog-taco-2' },
+        ],
+        [
+          'a URL typed in another case',
+          'Change Taco’s job to Check https://example.com/report',
+          [TAINTED_PIP, TACO],
+          { kind: 'update', dogId: 'dog-taco', job: 'Check https://EXAMPLE.com/Report' },
+        ],
+        [
+          'a tool key followed by a non-ASCII letter',
+          'Give Taco github.create_issueé',
+          [TAINTED_PIP, TACO],
+          { kind: 'update', dogId: 'dog-taco', tools: ['github.create_issue'] },
+        ],
+        [
+          'a longer name typed twice',
+          'Retire Pip Two. Yes, Pip Two',
+          [TAINTED_PIP, PIP_TWO],
+          { kind: 'retire', dogId: 'dog-pip-two' },
+        ],
+      ];
+      for (const [what, words, dogs, action] of typedAfterOutside)
+        it(`is a card with ${what}, in Full access`, async () => {
+          const { pack, handlers, settings } = setup();
+          pack.setMode('full');
+          settings.set('pack.dogs', dogs);
+          await readFirst(pack, handlers);
+          const packDogs = () => pack.dogs().filter((d) => d.role === 'pack');
+          const before = packDogs();
+          handlers.push(() => ({ reply: 'Done.', actions: [action] }));
+          await pack.say(words);
+          expect(pack.chat().at(-1)!.actions![0]).toMatchObject({
+            status: 'pending',
+            note: expect.stringContaining('outside your messages'),
+          });
+          expect(packDogs()).toEqual(before);
+          expect((await pack.view()).approvals).toEqual([]);
+        });
+    });
+
+    describe('overlapping names', () => {
+      const PIP_TWO = { ...PIP, id: 'dog-pip-two', name: 'Pip Two', job: 'Watch Desktop.' };
+
+      for (const mode of ['full', 'auto'] as const)
+        it(`"Retire Pip Two" never retires Pip (${mode})`, async () => {
+          const { pack, handlers, runs, settings } = setup();
+          pack.setMode(mode);
+          settings.set('pack.dogs', [PIP, PIP_TWO]);
+          handlers.push((req) => {
+            expect((req.data as { youNamed: unknown }).youNamed).toEqual([
+              { typed: 'Pip Two', dogId: 'dog-pip-two' },
+            ]);
+            return { reply: 'Bye.', actions: [{ kind: 'retire', dogId: 'dog-pip' }] };
+          });
+          await pack.say('Retire Pip Two');
+          expect(runs).toHaveLength(1);
+          expect(pack.chat().at(-1)!.actions![0]).toMatchObject({
+            status: 'pending',
+            dogId: 'dog-pip',
+            note: expect.stringContaining('different dog'),
+          });
+          expect(pack.dogs().some((d) => d.id === 'dog-pip')).toBe(true);
+        });
+
+      it('binds to the longest name typed, and a name typed on its own still counts', async () => {
+        const { pack, handlers, settings } = setup();
+        pack.setMode('full');
+        settings.set('pack.dogs', [PIP, PIP_TWO]);
+        handlers.push(() => ({
+          reply: 'Bye.',
+          actions: [{ kind: 'retire', dogId: 'dog-pip-two' }],
+        }));
+        await pack.say('Retire Pip Two');
+        expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'done' });
+        expect(pack.dogs().map((d) => d.id)).toContain('dog-pip');
+
+        settings.set('pack.dogs', [PIP, PIP_TWO]);
+        handlers.push(() => ({
+          reply: 'Done.',
+          actions: [
+            { kind: 'update', dogId: 'dog-pip', schedule: 'daily' },
+            { kind: 'update', dogId: 'dog-pip-two', schedule: 'daily' },
+          ],
+        }));
+        await pack.say('Make Pip Two and Pip daily');
+        expect(pack.chat().at(-1)!.actions).toMatchObject([{ status: 'done' }, { status: 'done' }]);
+      });
     });
 
     it('never lists a tool the person switched off', async () => {

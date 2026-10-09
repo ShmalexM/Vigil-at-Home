@@ -28,6 +28,7 @@ import { FEED_CHECK_MS, type Detector } from './detection.js';
 import { RuleEditing } from './rule-editing.js';
 import type { ActionExecutor } from './executor.js';
 import { Scheduler } from './scheduler.js';
+import { reportFeedHealth } from './sensor-health.js';
 import { SensorRegistry } from './sensors.js';
 import { computeStatus } from './status.js';
 import { TEST_RULE } from './test-alert.js';
@@ -127,6 +128,8 @@ export class VigilCore {
             if (r.status === 'failed')
               console.warn(`[feeds] ${r.sourceId}: ${r.error ?? 'failed'}`);
           }
+          // A feed whose update was refused shows as one quiet line under Protection.
+          reportFeedHealth(this.sensors, feeds.status());
         },
         true,
       );

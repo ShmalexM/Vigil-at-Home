@@ -163,6 +163,36 @@ async function fapolicyd(p: HealthProbe, helperState: HelperState): Promise<Sens
   return { ...base, state: 'ok' };
 }
 
+/**
+ * The threat-feeds line, present only while a feed's last update was refused
+ * for shrinking its list too far. It stays `ok` with a note, so it never lowers
+ * the protection level, badges or pops anything up: the old list is still in use.
+ */
+export function feedHealth(
+  feeds: readonly { name: string; heldBack?: boolean }[],
+): SensorHealth | undefined {
+  const held = feeds.filter((f) => f.heldBack).map((f) => f.name);
+  if (!held.length) return undefined;
+  return {
+    id: 'threat-feeds',
+    name: 'Threat feeds',
+    detail: 'Known-bad lists refreshed in the background',
+    state: 'ok',
+    note: `Stale: ${held.join(', ')} kept ${held.length === 1 ? 'its' : 'their'} last list; the new one looked broken`,
+  };
+}
+
+/** Put the threat-feeds line in the registry, or take it out, only when it changes. */
+export function reportFeedHealth(
+  registry: SensorRegistry,
+  feeds: readonly { name: string; heldBack?: boolean }[],
+): void {
+  const h = feedHealth(feeds);
+  const prev = registry.get('threat-feeds');
+  if (!h) registry.remove('threat-feeds');
+  else if (prev?.state !== h.state || prev?.note !== h.note) registry.report(h);
+}
+
 /** Re-check and report every layer. */
 export async function reportHealth(registry: SensorRegistry, probe: HealthProbe): Promise<void> {
   for (const h of await checkHealth(probe)) {
