@@ -4,7 +4,9 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { memoryStore } from '../testing.js';
 import { CHECKS, HELPER_SOCKET, type Probe } from './checks.js';
-import { KeyStore, type Cipher } from './keys.js';
+import { FeedKeyStore, KeyStore, type Cipher } from './keys.js';
+import { calls } from '../../shared/ipc.js';
+import { feedKeyNote, keyedFeeds } from '../../shared/setup.js';
 import {
   FAPOLICYD_ALLOW_RULES,
   LOCAL_MODEL,
@@ -392,6 +394,72 @@ describe('API keys', () => {
   it('refuses to save when the Keychain is unavailable', () => {
     const { svc } = service(fakeMac({}), testCipher(false));
     expect(() => svc.setKey({ provider: 'openrouter', key: orKey })).toThrow('Keychain');
+  });
+});
+
+describe('feed keys', () => {
+  const abuseKey = '0123456789abcdef0123456789abcdef0123456789abcdef';
+  const store = (cipher = testCipher()) => {
+    const path = join(mkdtempSync(join(tmpdir(), 'vigil-feedkeys-')), 'feed-keys.json');
+    return { keys: new FeedKeyStore(path, cipher), path };
+  };
+
+  it('stores the abuse.ch key encrypted and owner-only, and shows only that one is saved', () => {
+    const { keys, path } = store();
+    expect(keys.view()).toEqual({ saved: { abusech: false }, canSave: true });
+    expect(keys.get('abusech')).toBeUndefined();
+    keys.set('abusech', `  ${abuseKey}\n`);
+    expect(readFileSync(path, 'utf8')).not.toContain(abuseKey);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(keys.get('abusech')).toBe(abuseKey);
+    expect(keys.view()).toEqual({ saved: { abusech: true }, canSave: true });
+    keys.clear('abusech');
+    expect(keys.get('abusech')).toBeUndefined();
+    expect(keys.view().saved.abusech).toBe(false);
+  });
+
+  it('refuses malformed keys and an unavailable Keychain', () => {
+    expect(() => store().keys.set('abusech', 'short')).toThrow('too short');
+    expect(() => store().keys.set('abusech', 'has spaces 0123456789abcdef')).toThrow();
+    expect(() => store(testCipher(false)).keys.set('abusech', abuseKey)).toThrow('Keychain');
+  });
+
+  it('says a feed is off only when that feed was refused without a key', () => {
+    const view = (saved: boolean, off: { urlhaus?: boolean; bazaar?: boolean } = {}) => ({
+      saved: { abusech: saved },
+      canSave: true,
+      feeds: keyedFeeds([
+        { name: 'Feodo Tracker', needsKey: false },
+        { name: 'URLhaus', keyName: 'abusech', ...(off.urlhaus ? { needsKey: true } : {}) },
+        { name: 'MalwareBazaar', keyName: 'abusech', ...(off.bazaar ? { needsKey: true } : {}) },
+      ]),
+    });
+    // Only the keyed feeds are listed, each with its own state.
+    expect(view(false, { urlhaus: true }).feeds).toEqual([
+      { name: 'URLhaus', needsKey: true },
+      { name: 'MalwareBazaar', needsKey: false },
+    ]);
+    expect(feedKeyNote(view(false))).toMatch(/^Optional: abuse.ch may start requiring/);
+    expect(feedKeyNote(view(false))).not.toMatch(/\boff\b/);
+    expect(feedKeyNote(view(false, { urlhaus: true }))).toBe(
+      'URLhaus is off until you add a free abuse.ch Auth-Key.',
+    );
+    expect(feedKeyNote(view(false, { bazaar: true }))).toBe(
+      'MalwareBazaar is off until you add a free abuse.ch Auth-Key.',
+    );
+    expect(feedKeyNote(view(false, { urlhaus: true, bazaar: true }))).toBe(
+      'URLhaus and MalwareBazaar are off until you add a free abuse.ch Auth-Key.',
+    );
+    expect(feedKeyNote(view(true, { urlhaus: true }))).not.toMatch(/\boff\b/);
+    expect(keyedFeeds([])).toEqual([]);
+  });
+
+  it('validates the feed-key IPC arguments', () => {
+    expect(calls.saveFeedKey.parse(['abusech', ` ${abuseKey} `])).toEqual(['abusech', abuseKey]);
+    expect(calls.saveFeedKey.safeParse(['otherfeed', abuseKey]).success).toBe(false);
+    expect(calls.saveFeedKey.safeParse(['abusech', 'key; rm -rf /']).success).toBe(false);
+    expect(calls.clearFeedKey.safeParse(['abusech']).success).toBe(true);
+    expect(calls.getFeedKeys.safeParse([]).success).toBe(true);
   });
 });
 

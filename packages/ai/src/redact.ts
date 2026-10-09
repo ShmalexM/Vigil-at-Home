@@ -193,6 +193,12 @@ const QUOTE_FOLLOWERS = ',;&|)}]<>';
 /** A marker from an earlier redaction. */
 const MARKER = /^<[a-z-]+>$/;
 const MARKER_AT = /<[a-z-]+>/y;
+/**
+ * A quote that opens a value, written as is or escaped (\" in JSON held in a
+ * string, \\\" a level deeper). The value then ends at the same quote,
+ * escaped the same way.
+ */
+const OPEN_QUOTE = /(?:\\{1,7})?["']/y;
 
 function matchAt(pattern: RegExp, text: string, at: number): string {
   pattern.lastIndex = at;
@@ -217,20 +223,20 @@ function readValue(
 ): { start: number; end: number } | undefined {
   let quote = closer;
   let start = at;
-  if (!quote && (text[at] === '"' || text[at] === "'")) {
-    quote = text[at]!;
-    start++;
+  if (!quote) {
+    quote = matchAt(OPEN_QUOTE, text, at);
+    start += quote.length;
   }
   const marker = matchAt(MARKER_AT, text, start).length;
   let end = start + marker;
   if (!marker) while (end < text.length && isSafeCode(text.charCodeAt(end))) end++;
   let after = end;
   if (quote) {
-    if (text[end] !== quote) {
+    if (!text.startsWith(quote, end)) {
       f.withhold(at);
       return undefined;
     }
-    after = end + 1;
+    after = end + quote.length;
     if (after < text.length && !isSpace(text.charCodeAt(after))) {
       if (!QUOTE_FOLLOWERS.includes(text[after]!)) {
         f.withhold(at);
@@ -381,6 +387,8 @@ const NON_SECRET_SUFFIXES = new Set([
   'rate',
   'used',
   'stdin',
+  'algorithm',
+  'algo',
 ]);
 
 const CREDENTIAL_WORDS = new Set([
@@ -390,7 +398,28 @@ const CREDENTIAL_WORDS = new Set([
   'apikey',
   'accesskey',
   'privatekey',
+  'jwt',
+  'otp',
+  'totp',
+  'hotp',
+  'mfacode',
+  'bearer',
+  'dsn',
+  'hmac',
+  'connectionstring',
+  'connstr',
+  'connstring',
+  'connectionstrings',
 ]);
+/** A word that makes a name a secret when the next word is one of its set: mfa_code, connection_string. */
+const CREDENTIAL_PAIRS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ['mfa', new Set(['code'])],
+  ['2fa', new Set(['code'])],
+  ['connection', new Set(['string', 'strings', 'str'])],
+  ['conn', new Set(['string', 'strings', 'str'])],
+]);
+/** Password-like words, where even a short number is the secret (a PIN or a one-time code). */
+const ONE_TIME_WORDS = new Set(['otp', 'totp', 'hotp', 'mfacode']);
 const KEY_QUALIFIER_LIST = [
   'api',
   'access',
@@ -403,10 +432,14 @@ const KEY_QUALIFIER_LIST = [
   'client',
   'secret',
   'shared',
+  'priv',
+  'ssh',
+  'license',
 ];
 const KEY_QUALIFIERS = new Set(KEY_QUALIFIER_LIST);
 const QUALIFIED_KEY = new RegExp(`(?:${KEY_QUALIFIER_LIST.join('|')})key$`);
-const QUICK_CREDENTIAL = /pass|pwd|token|secret|key|auth|credential|cookie/i;
+const QUICK_CREDENTIAL =
+  /pass|pwd|token|secret|key|auth|credential|cookie|jwt|otp|mfa|2fa|bearer|dsn|hmac|conn/i;
 
 // Names repeat, often thousands of times in one result: each is split once.
 const MAX_CACHED_NAMES = 1024;
@@ -415,11 +448,22 @@ const partsCache = new Map<string, readonly string[]>();
 function nameParts(name: string): readonly string[] {
   let parts = partsCache.get(name);
   if (!parts) {
-    parts = name
+    const split = name
       .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
       .toLowerCase()
       .split(/[^a-z0-9]+/)
       .filter(Boolean);
+    // passWord and PassWord split into pass and word: join them again.
+    const joined: string[] = [];
+    for (const part of split) {
+      const last = joined[joined.length - 1];
+      if (last === 'pass' && (part === 'word' || part === 'wd' || part === 'phrase')) {
+        joined[joined.length - 1] = last + part;
+      } else {
+        joined.push(part);
+      }
+    }
+    parts = joined;
     if (partsCache.size >= MAX_CACHED_NAMES) partsCache.clear();
     partsCache.set(name, parts);
   }
@@ -447,19 +491,121 @@ export function isCredentialName(name: string): boolean {
     // GITHUB_TOKEN, accessToken; not max_tokens.
     if (part.endsWith('token')) return true;
     if (CREDENTIAL_WORDS.has(part)) return true;
+    if (CREDENTIAL_PAIRS.get(part)?.has(parts[i + 1] ?? '')) return true;
     if (QUALIFIED_KEY.test(part)) return true;
     return part === 'key' && i > 0 && KEY_QUALIFIERS.has(parts[i - 1]!);
   });
 }
 
-/** A password-like name, where even a short number is the secret (a PIN). */
+/** A password-like name, where even a short number is the secret (a PIN or a one-time code). */
 function isPasswordName(name: string): boolean {
   const parts = nameParts(name);
   return parts.some(
     (part, i) =>
       /password|passwd|passphrase/.test(part) ||
       part === 'pwd' ||
+      ONE_TIME_WORDS.has(part) ||
+      ((part === 'mfa' || part === '2fa') && parts[i + 1] === 'code') ||
       (part === 'pass' && i === parts.length - 1),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Names whose value is a secret only when it looks like one: sig, signature,
+// session, sessionid. Vigil's own data uses these names for what it must
+// show: a binary's code signature (signing ID, team ID, CDHash) and agent,
+// login and audit session IDs. Redaction sees a key's own name, never the
+// path to it, so the value's shape alone decides. A value that doesn't look
+// like a secret is read like any other field, and never withholds one.
+
+type Conditional = 'signature' | 'session';
+
+/** The last words of a name whose value is a signature. */
+const SIGNATURE_WORDS = new Set(['sig', 'signature']);
+/** The last words of a name whose value is a session. */
+/** sid as in connect.sid; a process's session ID (sid in ps) is a small number. */
+const SESSION_WORDS = new Set(['session', 'sessionid', 'sessid', 'phpsessid', 'jsessionid', 'sid']);
+
+function conditionalKind(parts: readonly string[]): Conditional | undefined {
+  const last = parts[parts.length - 1];
+  if (last === undefined) return undefined;
+  if (SIGNATURE_WORDS.has(last)) return 'signature';
+  if (SESSION_WORDS.has(last)) return 'session';
+  // session_id, sessionId, sess_id.
+  const before = parts[parts.length - 2];
+  if (last === 'id' && (before === 'session' || before === 'sess')) return 'session';
+  return undefined;
+}
+
+/**
+ * A signature blob: base64 (standard or URL-safe) of at least 32 characters,
+ * padding aside, so 24 bytes or more, the size of a MAC or a signature and
+ * not of an identifier. It must hold a character that isn't hex, a digit, and
+ * both cases of letter: random base64 that long lacks one of these about once
+ * in 200, while hex never passes. Hex is left alone however long it is:
+ * CDHashes (40 hex), SHA-256 digests (64 hex) and other hashes are hex, and
+ * not secrets. A signing ID (com.apple.ls, platform:com.apple.ls,
+ * TEAMID:com.example.app) holds dots or a colon, and a team ID is 10
+ * characters, so neither is ever a blob.
+ */
+const SIGNATURE_BLOB = /^[A-Za-z0-9+/_-]{32,}={0,2}$/;
+
+/**
+ * A session token: at least 20 characters, with a letter and a digit, of
+ * characters a token is written with. A login or audit session ID is a small
+ * number, Vigil's own agent session is 16 hex, and a host's session ID such
+ * as Claude Code's is a UUID: none of these is redacted.
+ */
+const SESSION_TOKEN = /^[A-Za-z0-9._~+/=%-]{20,}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The characters a conditional value is read over, to its end. */
+function isConditionalCode(code: number): boolean {
+  return (
+    (code >= 0x30 && code <= 0x39) ||
+    (code >= 0x41 && code <= 0x5a) ||
+    (code >= 0x61 && code <= 0x7a) ||
+    code === 0x2b || // +
+    code === 0x2f || // /
+    code === 0x3d || // =
+    code === 0x5f || // _
+    code === 0x2d || // -
+    code === 0x2e || // .
+    code === 0x7e || // ~
+    code === 0x25 // %
+  );
+}
+
+/**
+ * Where a value under a conditional name ends: at the first character a
+ * token isn't written with, or after the = padding that ends base64. A value
+ * with = inside it is cut there, and so is never taken for a secret: every
+ * value is then read once, whatever names repeat in the text.
+ */
+function conditionalEnd(text: string, at: number): number {
+  let end = at;
+  while (
+    end < text.length &&
+    text.charCodeAt(end) !== 0x3d &&
+    isConditionalCode(text.charCodeAt(end))
+  ) {
+    end++;
+  }
+  while (text.charCodeAt(end) === 0x3d) end++;
+  return end;
+}
+
+/** True when a value under a conditional name looks like a secret. */
+function isConditionalSecret(kind: Conditional, value: string): boolean {
+  if (kind === 'signature') {
+    if (!SIGNATURE_BLOB.test(value)) return false;
+    const body = value.replace(/=+$/, '');
+    return (
+      /[^0-9A-Fa-f]/.test(body) && /[0-9]/.test(body) && /[A-Z]/.test(body) && /[a-z]/.test(body)
+    );
+  }
+  return (
+    SESSION_TOKEN.test(value) && /[A-Za-z]/.test(value) && /[0-9]/.test(value) && !UUID.test(value)
   );
 }
 
@@ -467,6 +613,8 @@ interface NameInfo {
   readonly credential: boolean;
   readonly password: boolean;
   readonly authorization: boolean;
+  /** Set for a name that isn't a credential's, whose value may still be one. */
+  readonly conditional: Conditional | undefined;
 }
 const nameCache = new Map<string, NameInfo>();
 
@@ -475,11 +623,12 @@ function describeName(name: string): NameInfo {
   let info = nameCache.get(name);
   if (!info) {
     const credential = isCredentialName(name);
-    const parts = credential ? nameParts(name) : [];
+    const parts = nameParts(name);
     info = {
       credential,
       password: credential && isPasswordName(name),
-      authorization: parts.includes('authorization'),
+      authorization: credential && parts.includes('authorization'),
+      conditional: credential ? undefined : conditionalKind(parts),
     };
     if (nameCache.size >= MAX_CACHED_NAMES) nameCache.clear();
     nameCache.set(name, info);
@@ -504,12 +653,14 @@ function isBenignNumber(value: number, passwordName: boolean): boolean {
 /**
  * A name followed by its separator: NAME=, NAME: , "name": , name => , name := ,
  * --name=, or --name followed by a space and a value that isn't another flag.
+ * The quotes around a name may be escaped, as in \"password\": in JSON
+ * written inside a string.
  * The name must start a word, and backtracking within it fails at once, so
  * each name is read a bounded number of times whatever its length. npm's
  * _authToken starts with an underscore.
  */
 const KEYED =
-  /(?<![A-Za-z0-9_.-])(?:(["']?)-{0,2}(_*[A-Za-z][A-Za-z0-9_.-]*)(["']?)[ \t]*(===|==|=>|:=|[=:])[ \t]*|--([A-Za-z][A-Za-z0-9_-]*)[ \t]+(?=[^\s-]|-(?![-\s]|[A-Za-z](?:\s|$))))/g;
+  /(?<![A-Za-z0-9_.-])(?:((?:\\{1,7})?["']|)-{0,2}(_*[A-Za-z][A-Za-z0-9_.-]*)((?:\\{1,7})?["']|)[ \t]*(===|==|=>|:=|[=:])[ \t]*|--([A-Za-z][A-Za-z0-9_-]*)[ \t]+(?=[^\s-]|-(?![-\s]|[A-Za-z](?:\s|$))))/g;
 const AUTH_SCHEME = /(?:Bearer|Basic|Token|Digest|Negotiate|NTLM|AWS4-HMAC-SHA256)[ \t]+/iy;
 
 const JSON_NUMBER = /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/y;
@@ -562,12 +713,31 @@ function addKeyedValues(text: string, f: Findings): void {
   KEYED.lastIndex = 0;
   for (let m = KEYED.exec(text); m; m = KEYED.exec(text)) {
     const name = describeName(m[2] ?? m[5]!);
-    if (!name.credential) continue;
+    if (!name.credential && !name.conditional) continue;
     const afterKey = m.index + m[0].length;
     const lead = m[1] ?? '';
     // 'x-api-key: abc' — the quote opens the shell argument, so the value runs
     // up to its closing quote and the quote stays.
     const argQuote = lead && !m[3] ? lead : '';
+    if (name.conditional) {
+      // Read only when the value looks like a secret; anything else, such as
+      // a signing ID or a session number, is left as it is.
+      const start = afterKey + (argQuote ? 0 : matchAt(OPEN_QUOTE, text, afterKey).length);
+      const end = conditionalEnd(text, start);
+      const next = text.charCodeAt(end);
+      const ended =
+        Number.isNaN(next) ||
+        isSpace(next) ||
+        next === 0x22 ||
+        next === 0x27 ||
+        next === 0x5c ||
+        QUOTE_FOLLOWERS.includes(text[end]!);
+      if (!ended || !isConditionalSecret(name.conditional, text.slice(start, end))) continue;
+      const valueEnd = addValue(text, afterKey, false, f, argQuote);
+      if (f.withheld) return;
+      KEYED.lastIndex = Math.max(KEYED.lastIndex, valueEnd);
+      continue;
+    }
     const sep = m[4] ?? ' ';
     let at = afterKey;
     if (name.authorization) at += matchAt(AUTH_SCHEME, text, at).length;
@@ -679,9 +849,24 @@ function addXml(text: string, f: Findings): void {
   XML_OPEN.lastIndex = 0;
   for (let m = closed.size ? XML_OPEN.exec(text) : null; m; m = XML_OPEN.exec(text)) {
     const local = m[2]!;
-    if (!closed.has(m[1]!) || !isCredentialName(local) || m[0].endsWith('/>')) continue;
+    if (!closed.has(m[1]!) || m[0].endsWith('/>')) continue;
+    const info = describeName(local);
+    if (!info.credential && !info.conditional) continue;
     const at = m.index + m[0].length;
     const close = `</${m[1]}>`;
+    if (info.conditional) {
+      // <signature>, <session>: replaced when its content looks like a
+      // secret, and else read like any other text.
+      const end = conditionalEnd(text, at);
+      if (
+        text.startsWith(close, end) &&
+        isConditionalSecret(info.conditional, text.slice(at, end))
+      ) {
+        f.token(at, end, REDACTED, RANK_KEYED);
+        XML_OPEN.lastIndex = end + close.length;
+      }
+      continue;
+    }
     const marker = matchAt(MARKER_AT, text, at).length;
     let end = at + marker;
     if (!marker) while (end < text.length && isSafeCode(text.charCodeAt(end))) end++;
@@ -789,6 +974,8 @@ interface JsonString {
   readonly end: number;
   readonly escaped: boolean;
   readonly secret: Secret | undefined;
+  /** Under a name such as signature or session: a secret only if it looks like one. */
+  readonly conditional: Conditional | undefined;
   /** An array's element: it may be an argument of a command list. */
   readonly element: boolean;
 }
@@ -851,6 +1038,7 @@ function readJson(text: string, open: number): JsonRead {
   let i = open;
   // What is known of the value about to be read.
   let secret: Secret | undefined;
+  let conditional: Conditional | undefined;
   const fail = (stop: number): JsonRead => ({ end: -1, stop, clean, strings, numbers });
 
   /** Read an object's key and its colon; false when they don't parse. */
@@ -872,6 +1060,7 @@ function readJson(text: string, open: number): JsonRead {
     i++;
     const name = describeName(key);
     secret = name.credential ? { password: name.password } : undefined;
+    conditional = name.conditional;
     return true;
   };
 
@@ -888,6 +1077,7 @@ function readJson(text: string, open: number): JsonRead {
       frames.push(frame);
       if (frames.length > MAX_DEPTH) clean = false;
       secret = undefined;
+      conditional = undefined;
       i = skipJsonSpace(text, i + 1);
       if (text.charCodeAt(i) === (object ? 0x7d : 0x5d)) {
         frames.pop();
@@ -900,7 +1090,7 @@ function readJson(text: string, open: number): JsonRead {
       const { end, escaped } = jsonStringEnd(text, i);
       if (end < 0) return fail(i);
       const element = frames.length > 0 && !frames[frames.length - 1]!.object;
-      strings.push({ start: i + 1, end: end - 1, escaped, secret, element });
+      strings.push({ start: i + 1, end: end - 1, escaped, secret, conditional, element });
       i = end;
     } else {
       const number = matchAt(JSON_NUMBER, text, i).length;
@@ -926,6 +1116,7 @@ function readJson(text: string, open: number): JsonRead {
           if (!readKey(frame)) return fail(i);
         } else {
           secret = undefined;
+          conditional = undefined;
         }
         break;
       }
@@ -998,6 +1189,18 @@ function addJsonFindings(
       continue;
     }
     if (s.end === s.start) continue;
+    if (s.conditional) {
+      // Its characters need no escape, so as written it is as read, unless
+      // a / was written \/: then it can't be cut out as written.
+      const value = s.escaped
+        ? (JSON.parse(text.slice(s.start - 1, s.end + 1)) as string)
+        : text.slice(s.start, s.end);
+      if (isConditionalSecret(s.conditional, value)) {
+        if (s.escaped) f.withhold(s.start);
+        else f.token(s.start, s.end, REDACTED, RANK_KEYED);
+        continue;
+      }
+    }
     // A string of an object is a field of its own; an array's element is
     // read as a word of a command, where no secret is cut out.
     const shape: Shape = s.element ? 'word' : 'field';
@@ -1037,6 +1240,32 @@ function addJson(
   f: Findings,
   regions: number[],
 ): void {
+  // A field that is, whole, one JSON string, such as JSON encoded again: its
+  // content is read as a field of its own, mapped back to the text as
+  // written. A secret whose text holds an escape withholds the field.
+  const first = skipJsonSpace(text, 0);
+  if (text.charCodeAt(first) === 0x22) {
+    const { end, escaped } = jsonStringEnd(text, first);
+    if (end > 0 && skipJsonSpace(text, end) === text.length) {
+      regions.push(first, end);
+      const literal: JsonString = {
+        start: first + 1,
+        end: end - 1,
+        escaped,
+        secret: undefined,
+        conditional: undefined,
+        element: false,
+      };
+      addJsonFindings(
+        text,
+        { end, stop: end, clean: true, strings: [literal], numbers: [] },
+        options,
+        depth,
+        f,
+      );
+      return;
+    }
+  }
   const budget = 2 * text.length + 64 * 1024;
   let work = 0;
   let i = 0;
@@ -1151,12 +1380,14 @@ function addNames(text: string, options: NameOptions, f: Findings): void {
 
 /**
  * Text that matches none of this holds nothing any rule above looks for: a
- * credential-like name, a token format's prefix, a command that takes a
+ * credential-like name, a signature or session name, a token format's prefix, a command that takes a
  * password, an email, a home folder, a base64 run or a JSON escape.
  */
 const SECRET_HINT = new RegExp(
   [
     QUICK_CREDENTIAL.source,
+    // Names whose value may be a secret: sig, signature, session, sid.
+    'sig|sess|sid',
     FORMAT_HINT.source,
     COMMAND_HINT.source,
     '@',
@@ -1376,7 +1607,10 @@ function analyze(text: string, options: NameOptions, depth: number, shape: Shape
   addNames(text, options, rules);
   const json = new Findings(text);
   const regions: number[] = [];
-  if (depth < MAX_TEXT_DEPTH && (text.includes('{') || text.includes('['))) {
+  if (
+    depth < MAX_TEXT_DEPTH &&
+    (text.includes('{') || text.includes('[') || text.trimStart().startsWith('"'))
+  ) {
     addJson(text, options, depth, json, regions);
     if (json.withheld) return [WITHHOLD];
   }
@@ -1589,7 +1823,13 @@ function redactWithin(
           secret || name.credential
             ? { password: !!secret?.password || (secret ? isPasswordName(key) : name.password) }
             : undefined;
-        redacted = redactWithin(item, options, keyed, depth + 1, ancestors, oversized);
+        redacted =
+          !keyed &&
+          name.conditional &&
+          typeof item === 'string' &&
+          isConditionalSecret(name.conditional, item)
+            ? REDACTED
+            : redactWithin(item, options, keyed, depth + 1, ancestors, oversized);
       }
       if (key === '__proto__') {
         // Kept as a key, not taken for the prototype.

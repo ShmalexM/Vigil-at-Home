@@ -166,7 +166,20 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     journal,
     approvals,
     rules,
-    quarantine: { quarantineDir: paths.quarantineDir },
+    quarantine: {
+      quarantineDir: paths.quarantineDir,
+      // The helper's own files where this install put them, on top of the
+      // built-in lists: its state, socket, launcher, runtime and code.
+      selfPaths: [
+        paths.supportDir,
+        paths.socket,
+        paths.approvalsDir,
+        paths.helperExecutable,
+        `${paths.helperExecutable}.d`,
+        process.execPath,
+        ...(process.argv[1] ? [process.argv[1]] : []),
+      ],
+    },
     syncPort,
     ...(linux
       ? {}

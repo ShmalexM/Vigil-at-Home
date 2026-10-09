@@ -1,3 +1,6 @@
 #!/bin/sh
-# The Vigil helper: Node and the bundled helper, both root-owned.
-exec /usr/libexec/vigil-helper.d/node /usr/libexec/vigil-helper.d/helper.mjs "$@"
+# The Vigil helper: Node and the bundled helper, both root-owned. It starts
+# with an empty environment so nothing from the user's session (NODE_OPTIONS
+# and the like) carries into Node running as root.
+exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+  /usr/libexec/vigil-helper.d/node /usr/libexec/vigil-helper.d/helper.mjs "$@"

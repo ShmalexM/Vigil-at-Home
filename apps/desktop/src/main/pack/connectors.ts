@@ -90,6 +90,8 @@ interface Live {
   idle?: NodeJS.Timeout;
   /** The server process, for a stdio connector. */
   pid?: number;
+  /** Stops a connect still under way, closing the server it started. */
+  abort?: AbortController;
 }
 
 const Secrets = z.record(z.string(), z.string());
@@ -114,6 +116,7 @@ export class Connectors implements ConnectorHub {
         record: ConnectorRecord,
         secrets: Record<string, string>,
         onPid: (pid: number) => void,
+        signal: AbortSignal,
       ) => Promise<Client>;
     },
   ) {}
@@ -217,8 +220,8 @@ export class Connectors implements ConnectorHub {
       }
       cursor = page.nextCursor;
     } while (cursor && out.length < MAX_TOOLS);
-    const l = this.live.get(id)!;
-    l.tools = out;
+    const l = this.live.get(id);
+    if (l) l.tools = out;
     this.o.onChange();
     return out;
   }
@@ -275,26 +278,54 @@ export class Connectors implements ConnectorHub {
         if (record.kind === 'http' && !isSafeConnectorUrl(record.url ?? ''))
           throw new Error('Use https, or http only for a server on this computer');
         const secrets = this.secretsFor(id);
-        const onPid = (pid: number) => {
-          live.pid = pid;
-          this.o.spawned?.(pid, true);
+        let pid: number | undefined;
+        const onPid = (p: number) => {
+          pid = p;
+          live.pid = p;
+          this.o.spawned?.(p, true);
         };
-        const client = await withTimeout(
-          (this.o.connect ?? connectTo)(record, secrets, onPid),
-          CONNECT_MS,
-          `${record.name} didn’t answer`,
-        );
+        const ended = () => {
+          if (pid === undefined) return;
+          this.o.spawned?.(pid, false);
+          if (live.pid === pid) delete live.pid;
+        };
+        const abort = new AbortController();
+        live.abort = abort;
+        const pending = (this.o.connect ?? connectTo)(record, secrets, onPid, abort.signal);
+        let client: Client;
+        try {
+          client = await withTimeout(pending, CONNECT_MS, `${record.name} didn’t answer`);
+        } catch (err) {
+          // Stop the server now rather than whenever its handshake settles.
+          abort.abort();
+          // Giving up doesn't stop the server starting: close it if it still
+          // arrives, and only then stop tagging its process.
+          void pending
+            .then(
+              (c) => c.close(),
+              () => undefined,
+            )
+            .catch(() => undefined)
+            .finally(ended);
+          throw err;
+        }
+        // Switched off or removed while connecting: don't keep a server nobody will close.
+        if (!this.list().find((r) => r.id === id)?.enabled || this.live.get(id) !== live) {
+          await client.close().catch(() => undefined);
+          ended();
+          throw new Error(`${record.name} is switched off`);
+        }
         live.client = client;
         live.state = 'connected';
         delete live.error;
         return client;
       } catch (err) {
-        this.stopped(live);
         live.state = 'error';
         live.error = err instanceof Error ? err.message.slice(0, 300) : String(err);
         throw err;
       } finally {
         delete live.connecting;
+        delete live.abort;
         this.o.onChange();
       }
     })();
@@ -313,7 +344,10 @@ export class Connectors implements ConnectorHub {
     } catch {
       // Already gone.
     }
-    this.stopped(l);
+    // Still starting: stop the connect, which closes its server and stops
+    // tagging it once it has.
+    if (l.connecting) l.abort?.abort();
+    else this.stopped(l);
   }
 
   private stopped(l: Live): void {
@@ -372,6 +406,7 @@ async function connectTo(
   record: ConnectorRecord,
   secrets: Record<string, string>,
   onPid: (pid: number) => void,
+  signal: AbortSignal,
 ): Promise<Client> {
   const client = new Client({ name: 'vigil-at-home-pack', version: '1' });
   if (record.kind === 'stdio') {
@@ -381,6 +416,10 @@ async function connectTo(
       // Only the basics (PATH, HOME…) and the user's own values for this server.
       env: { ...getDefaultEnvironment(), ...secrets },
       stderr: 'ignore',
+    });
+    // Closing the transport ends the server, even mid-handshake.
+    signal.addEventListener('abort', () => void transport.close().catch(() => undefined), {
+      once: true,
     });
     // Report the pid as soon as the process exists, before the MCP handshake,
     // so the tracker tags the server before it can start anything.
@@ -392,6 +431,9 @@ async function connectTo(
     await client.connect(transport);
   } else {
     const token = secrets['token'];
+    signal.addEventListener('abort', () => void client.close().catch(() => undefined), {
+      once: true,
+    });
     await client.connect(
       new StreamableHTTPClientTransport(new URL(record.url!), {
         ...(token ? { requestInit: { headers: { Authorization: `Bearer ${token}` } } } : {}),

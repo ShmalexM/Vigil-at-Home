@@ -89,12 +89,16 @@ function setup(
     preflight?: PreflightReply['decision'];
     /** While set, checking AI status waits for it. */
     statusGate?: { wait?: Promise<void> | undefined; entered?: () => void };
+    /** Vigil's own tools; push to it to add one later. */
+    vigil?: string[];
+    hour?: number;
     /** Vigil's rules, in place of a fixed answer. */
     rules?: PackDepsPreflight;
     remote?: RemoteTool[];
     now?: () => number;
   } = {},
 ) {
+  const vigil = opts.vigil ?? ['list_alerts', 'search_events'];
   const remote = opts.remote ?? REMOTE;
   const settings = new Map<string, unknown>();
   const handlers: Handler[] = [];
@@ -148,7 +152,7 @@ function setup(
       },
     },
     vigilTools: {
-      list: () => [LISTING('list_alerts'), LISTING('search_events')],
+      list: () => vigil.map(LISTING),
       call: (name) => {
         vigilCalls.push(name);
         return { v: 1, ok: true, result: { rows: [] } };
@@ -161,6 +165,7 @@ function setup(
     notebook,
     memory,
     onChange: () => undefined,
+    ...(opts.hour !== undefined ? { hour: () => opts.hour! } : {}),
     ...(opts.now ? { now: opts.now } : {}),
   });
   return {
@@ -436,7 +441,7 @@ describe('the pack', () => {
       return { summary: 'done', findings: [] };
     });
     await pack.runDog(dog.id);
-    expect(String(answer)).toContain('ran out of time');
+    expect(String(answer)).toContain('run has ended');
     expect(connectorCalls).toEqual([]);
   });
 
@@ -460,7 +465,7 @@ describe('the pack', () => {
       return { summary: 'done', findings: [] };
     });
     await pack.runDog(dog.id);
-    expect(String(answer)).toContain('ran out of time');
+    expect(String(answer)).toContain('run has ended');
     expect(runs.filter((r) => r.instructions.includes('Rate how risky'))).toHaveLength(0);
     expect(notebook.list({ dog: dog.id }).filter((n) => n.kind === 'judge')).toHaveLength(0);
     expect((await pack.view()).approvals).toHaveLength(0);
@@ -641,6 +646,177 @@ describe('the pack', () => {
     expect(await pack.runDog(dog.id)).toBeUndefined();
     expect(pack.dogs().find((d) => d.id === dog.id)?.lastReport).toBeUndefined();
     expect(notebook.list({ dog: dog.id })).toEqual([]);
+  });
+
+  it('refuses a call still waiting when its run ends, so a late Allow runs nothing', async () => {
+    const { pack, handlers, connectorCalls } = setup();
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    let late: Promise<unknown> | undefined;
+    handlers.push(async (req) => {
+      // The run gives up (as on its deadline) while the call still waits.
+      late = tool(req, 'tool_1').run({ title: 'x' });
+      await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+      return { summary: 'gave up', findings: [] };
+    });
+    await pack.runDog(dog.id);
+    expect(String(await late)).toContain('Not run');
+    // The card is held for the dog's next same call; allowing it now runs nothing.
+    const held = (await pack.view()).approvals;
+    expect(held).toHaveLength(1);
+    pack.decideTool(held[0]!.id, 'allow-once');
+    expect(connectorCalls).toEqual([]);
+    expect((await pack.view()).dogs.find((d) => d.id === dog.id)?.mood).not.toBe('thinking');
+  });
+
+  it('keeps a scheduled run’s card quiet: one card on the Pack page, nothing else waiting', async () => {
+    let clock = 10 * 24 * 60 * 60_000;
+    const runs: number[] = [];
+    const { pack, handlers } = setup({ now: () => clock });
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    const ask = async (req: RunRequest<unknown>) => {
+      // The run ends while its write still waits, as on its deadline.
+      void tool(req, 'tool_1').run({ title: 'x' });
+      await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+      runs.push(1);
+      return { summary: 'ok', findings: [] };
+    };
+    for (let run = 0; run < 2; run++) {
+      clock += 61 * 60_000;
+      handlers.push(ask);
+      await pack.runDue();
+    }
+    expect(runs).toHaveLength(2);
+    const view = await pack.view();
+    // The Pack page's card list is the only place it shows, and two runs share it.
+    expect(view.approvals).toMatchObject([{ dogId: dog.id, tool: 'github.create_issue' }]);
+    // Nothing on Home reads it: no dog is left waiting, and the Lead dog is idle.
+    expect(view.dogs.map((d) => d.mood)).not.toContain('waiting');
+  });
+
+  it('in Let AI decide, asks before rewriting or running a dog that can already change things', async () => {
+    const { pack, handlers } = setup();
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    pack.setMode('auto');
+    handlers.push(() => ({
+      reply: 'Sure.',
+      actions: [
+        { kind: 'update', dogId: dog.id, job: 'File an issue with everything.' },
+        { kind: 'run', dogId: dog.id },
+      ],
+    }));
+    await pack.say('change it');
+    expect(
+      pack
+        .chat()
+        .at(-1)!
+        .actions!.map((a) => a.status),
+    ).toEqual(['pending', 'pending']);
+    expect(pack.dogs().find((d) => d.id === dog.id)?.job).toBe(CREATE.job);
+  });
+
+  it('in Let AI decide, a run that lists no tools still counts the dog’s own', async () => {
+    const { pack, handlers } = setup();
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    pack.setMode('auto');
+    handlers.push(() => ({
+      reply: 'Off it goes.',
+      actions: [{ kind: 'run', dogId: dog.id, tools: [] }],
+    }));
+    await pack.say('run it');
+    expect(pack.chat().at(-1)!.actions![0]).toMatchObject({ status: 'pending' });
+    expect(pack.chat().at(-1)!.actions![0]!.dog).toBeUndefined();
+  });
+
+  it('asks nothing for a run that ended while the AI was rating its call', async () => {
+    const { pack, handlers, connectorCalls } = setup();
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    pack.setMode('auto');
+    let late: Promise<unknown> | undefined;
+    let judged: (v: unknown) => void = () => undefined;
+    handlers.push(async (req) => {
+      late = tool(req, 'tool_1').run({ title: 'x' });
+      return { summary: 'gave up', findings: [] };
+    });
+    // The judge answers only after the run is over, and says high risk.
+    handlers.push(() => new Promise((r) => (judged = r)));
+    await pack.runDog(dog.id);
+    judged({ risk: 'high', reason: 'posts data' });
+    expect(String(await late)).toContain('Not run');
+    expect((await pack.view()).approvals).toHaveLength(0);
+    expect(connectorCalls).toEqual([]);
+  });
+
+  it('keeps the reason when an approved change fails', async () => {
+    const { pack, handlers } = setup();
+    const dog = pack.adopt(CREATE as never);
+    handlers.push(() => ({ reply: 'Ok.', actions: [{ kind: 'update', dogId: dog.id, job: 'x' }] }));
+    await pack.say('x');
+    pack.retire(dog.id);
+    const msg = pack.chat().at(-1)!;
+    pack.decideAction(msg.id, msg.actions![0]!.id, true);
+    expect(pack.chat().at(-1)!.actions![0]).toMatchObject({
+      status: 'failed',
+      note: 'No such dog',
+    });
+  });
+
+  it('gives a saved Lead dog Vigil’s tools that arrived later, but not one the person took away', () => {
+    const vigil = ['list_alerts', 'search_events'];
+    const { pack } = setup({ vigil });
+    pack.updateDog('lead', { name: 'Rex', tools: ['vigil.search_events'] });
+    vigil.push('list_rules');
+    expect(pack.dogs()[0]!.tools).toEqual(['vigil.search_events', 'vigil.list_rules']);
+  });
+
+  it('keeps a tool the person took from a Lead dog saved before Vigil tracked new tools', () => {
+    const { pack, settings } = setup({ vigil: ['list_alerts', 'search_events'] });
+    pack.updateDog('lead', { tools: ['vigil.list_alerts'] });
+    settings.delete('pack.leadToolsSeen');
+    expect(pack.dogs()[0]!.tools).toEqual(['vigil.list_alerts']);
+  });
+
+  it('tries a failed daily run once more an hour later, then waits a day', async () => {
+    const { pack, runs } = setup();
+    const dog = pack.adopt({ ...CREATE, schedule: 'daily' } as never);
+    const start = Date.now();
+    const at = async (hours: number) => {
+      vi.useFakeTimers({ now: start + hours * 60 * 60_000, toFake: ['Date'] });
+      try {
+        await pack.runDue();
+      } finally {
+        vi.useRealTimers();
+      }
+    };
+    await at(25); // first run, fails (no AI answers)
+    await at(26.1); // one retry
+    await at(27.2); // no more until a day has passed
+    expect(runs).toHaveLength(2);
+    await at(50.2);
+    expect(runs).toHaveLength(3);
+    expect(pack.dogs().find((d) => d.id === dog.id)?.lastReport?.ok).toBe(false);
+  });
+
+  it('Undo on a fact the person already had leaves their line alone', async () => {
+    const { pack, handlers, memory } = setup();
+    pack.remember({ fact: 'Uses Tailscale at home', topic: 'network' });
+    handlers.push(() => ({
+      reply: 'Noted.',
+      actions: [],
+      remember: [{ fact: 'Uses Tailscale at home', topic: 'network' }],
+    }));
+    await pack.say('I use Tailscale at home');
+    const msg = pack.chat().at(-1)!;
+    pack.decideMemory(msg.id, msg.memory![0]!.id, false);
+    expect(memory.list().map((e) => e.fact)).toEqual(['Uses Tailscale at home']);
+  });
+
+  it('sends a new nightly dog out on its first night', async () => {
+    const { pack, handlers, runs } = setup({ hour: 3 });
+    const dog = pack.adopt({ ...CREATE, schedule: 'nightly' } as never);
+    handlers.push(() => ({ summary: 'ok', findings: [] }));
+    await pack.runDue();
+    expect(runs).toHaveLength(1);
+    expect(pack.dogs().find((d) => d.id === dog.id)?.lastReport?.ok).toBe(true);
   });
 
   it('talks plainly when the person turns on Plain wording', async () => {
