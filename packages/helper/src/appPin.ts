@@ -33,24 +33,14 @@
 // when the password was asked for (pinCandidate), and on macOS only code
 // signed with Vigil's bundle id is pinned at all.
 
-import {
-  chmodSync,
-  closeSync,
-  constants,
-  fstatSync,
-  openSync,
-  readFileSync,
-  readSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { chmodSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
-import { FileHasher } from '@vigil/sensors';
 import { insideInstalledRoot, looksLikeAppImage, type SelfImage } from '@vigil/core/self';
+import { readCodeIdentity } from './codeDirectory.js';
 import { VIGIL_BUNDLE_ID } from './config.js';
-import type { FileStat, System } from './system.js';
+import { sameStat } from './openedFile.js';
+import type { System } from './system.js';
 import type { ProcessIdentity } from './commands/process.js';
 import { selfImageOf } from './commands/selfImage.js';
 
@@ -140,11 +130,6 @@ async function codesign(sys: System, target: string): Promise<CodeIdentity | und
   return r.code === 0 ? parseCodesignIdentity(`${r.stderr}\n${r.stdout}`) : undefined;
 }
 
-const sha256Of = (p: string) => new FileHasher({ maxBytes: 4 * 1024 ** 3 }).sha256(p);
-
-const sameStat = (a: FileStat, b: FileStat | undefined) =>
-  !!b && a.id === b.id && a.ctime === b.ctime && a.size === b.size;
-
 /**
  * Whether `path` is inside the installer's own folder, which the helper
  * already protects by path: an app there is never pinned. An AppImage never
@@ -159,37 +144,46 @@ function inInstalled(
   return insideInstalledRoot(path, sys.platform ?? 'darwin', { roots: installed, appImage });
 }
 
-/** Linux: whether the file at `path` is an AppImage, by its name or its first bytes. */
-function isAppImage(sys: System, path: string): boolean {
-  if (sys.platform !== 'linux') return false;
-  if (looksLikeAppImage(path)) return true;
-  let fd: number | undefined;
-  try {
-    // Non-blocking, and only a regular file is read, so a FIFO never stalls the helper.
-    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
-    if (!fstatSync(fd).isFile()) return false;
-    const head = Buffer.alloc(16);
-    const n = readSync(fd, head, 0, head.length, 0);
-    return looksLikeAppImage(path, head.subarray(0, n));
-  } catch {
-    return false;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
-
 export interface PinOptions {
   /** The installer's own folders (config installedSelf); an app there needs no pin. */
   installed: readonly string[];
-  sha256?: (path: string) => string | undefined;
-  /** Linux: whether the path is an AppImage. Read from the file when not given. */
+  /** Linux: the path is known to be an AppImage. Otherwise its first bytes tell. */
   appImage?: boolean;
+  /** Linux: the device and inode the file must have (a grant's image), checked on the open file. */
+  expectId?: string;
+}
+
+/**
+ * macOS: the main executable of the bundle at `bundle`, from its Info.plist.
+ * Only a name is taken from it; the executable itself is then opened once
+ * and everything pinned is read from that descriptor.
+ */
+async function bundleExecutable(sys: System, bundle: string): Promise<string> {
+  const plist = `${bundle}/Contents/Info.plist`;
+  const r = await sys.run('plutil', ['-extract', 'CFBundleExecutable', 'raw', '-o', '-', plist]);
+  const name = r.stdout.trim();
+  if (r.code !== 0 || !name || name.includes('/') || name === '.' || name === '..')
+    throw new Error(`${bundle} names no main executable`);
+  return `${bundle}/Contents/MacOS/${name}`;
 }
 
 /**
  * Root: the pin for the app at `path` (its bundle or main executable on
  * macOS, its AppImage on Linux). Undefined when the app needs none (inside
  * the installer's folder). Throws when the file can't be pinned.
+ *
+ * The file is opened once (O_NONBLOCK and O_NOFOLLOW: a FIFO, device,
+ * folder or symlink there is refused at once), and its device, inode,
+ * ctime and size come from fstat on that descriptor, its sha256 from
+ * reading it, and on macOS its CDHash and signing identifier from the code
+ * signature in those same bytes (codeDirectory.ts). The path is never looked
+ * up again, so a file swapped in meanwhile can't lend its metadata or hash
+ * to another. The file must be unchanged (fstat again) once it is hashed.
+ *
+ * On macOS codesign is also asked about the path afterwards, and must
+ * report the same CDHash: a cross-check of the reading above (codesign is
+ * what the kernel and Santa agree with), which can only refuse a pin, never
+ * supply one.
  */
 export async function pinFor(
   sys: System,
@@ -197,29 +191,51 @@ export async function pinFor(
   opts: PinOptions,
 ): Promise<AppPin | undefined> {
   if (!isAbsolute(path)) throw new Error(`${path} is not an absolute path`);
-  const hash = opts.sha256 ?? sha256Of;
-  const appImage = opts.appImage ?? isAppImage(sys, path);
-  if (inInstalled(sys, opts.installed, path, appImage)) return undefined;
-  if (sys.platform === 'linux') {
-    // Hashed between two looks at the file, so the hash is of what was stat'ed.
-    const before = sys.fileStat?.(path);
-    const sha256 = before && hash(path);
-    const after = sys.fileStat?.(path);
-    if (!before || !sha256 || !sameStat(before, after))
-      throw new Error(`${path} is not a file Vigil can pin`);
-    const { id: image, ctime, size } = before;
-    return { platform: 'linux', path, image, ctime, size, sha256 };
-  }
-  const id = await codesign(sys, path);
-  const exe = id?.executable ?? path;
-  if (!id || inInstalled(sys, opts.installed, exe, false))
+  if (sys.platform === 'linux') return pinImage(sys, path, opts);
+  if (inInstalled(sys, opts.installed, path, false)) return undefined;
+  const exe = /\.app$/i.test(path) ? await bundleExecutable(sys, path) : path;
+  if (inInstalled(sys, opts.installed, exe, false))
     throw new Error(`${path} has no code signature to pin`);
-  // Only Vigil's own code is ever pinned, by the identifier it is signed with.
-  if (id.identifier !== VIGIL_BUNDLE_ID)
-    throw new Error(`${path} is not signed as ${VIGIL_BUNDLE_ID}`);
-  const sha256 = hash(exe);
-  if (!sha256) throw new Error(`${exe} can't be read`);
-  return { platform: 'darwin', path: exe, cdhash: id.cdhash, sha256 };
+  const f = sys.openFile?.(exe, { nofollow: true });
+  if (!f) throw new Error(`${exe} is not a regular file Vigil can pin`);
+  try {
+    const code = readCodeIdentity((pos, len) => f.read(pos, len));
+    if (!code) throw new Error(`${exe} has no code signature to pin`);
+    // Only Vigil's own code is ever pinned, by the identifier it is signed with.
+    if (code.identifier !== VIGIL_BUNDLE_ID)
+      throw new Error(`${exe} is not signed as ${VIGIL_BUNDLE_ID}`);
+    const sha256 = f.sha256();
+    if (!sha256 || !sameStat(f.stat, f.restat())) throw new Error(`${exe} changed while read`);
+    const checked = await codesign(sys, exe);
+    if (checked?.cdhash !== code.cdhash || !sameStat(f.stat, f.restat()))
+      throw new Error(`${exe} changed while read`);
+    return { platform: 'darwin', path: exe, cdhash: code.cdhash, sha256 };
+  } finally {
+    f.close();
+  }
+}
+
+/** Linux: the pin for the AppImage at `path`, all read from one descriptor (see pinFor). */
+function pinImage(sys: System, path: string, opts: PinOptions): AppPin | undefined {
+  const inside = inInstalled(sys, opts.installed, path, false);
+  const f = sys.openFile?.(path, { nofollow: true });
+  if (!f) {
+    if (inside) return undefined;
+    throw new Error(`${path} is not a regular file Vigil can pin`);
+  }
+  try {
+    // An AppImage is never inside the installer's folder, wherever it sits.
+    const appImage = opts.appImage ?? looksLikeAppImage(path, f.read(0, 16));
+    if (inside && !appImage) return undefined;
+    const { id: image, ctime, size } = f.stat;
+    if (opts.expectId !== undefined && image !== opts.expectId)
+      throw new Error(`${path} is no longer the file that was named`);
+    const sha256 = f.sha256();
+    if (!sha256 || !sameStat(f.stat, f.restat())) throw new Error(`${path} changed while read`);
+    return { platform: 'linux', path, image, ctime, size, sha256 };
+  } finally {
+    f.close();
+  }
 }
 
 export interface RepinOptions extends PinOptions {
@@ -238,26 +254,31 @@ export interface PinCandidate {
  * The approval is bound to it, so what gets pinned is the code that was on
  * disk when the user was asked (repinFromGrant). That is, on macOS the first
  * of the grant's paths outside the installer's folder that is code signed
- * as Vigil (the app bundle; its cdhash and main executable come from
- * codesign on disk, and a path that isn't such code is skipped), on Linux
- * the first of its AppImages that is still the file at its path. Code
- * replaced before the request is out of scope. Undefined when there is none.
+ * as Vigil (the app bundle; its main executable is read through one
+ * descriptor, see pinFor, and a path that isn't such code is skipped), on
+ * Linux the first of its AppImages whose open file is still the device and
+ * inode the grant names. Code replaced before the request is out of scope.
+ * Undefined when there is none.
  */
 export async function pinCandidate(
   sys: System,
   grant: { selfPaths: readonly string[]; selfImages?: readonly SelfImage[] | undefined },
   opts: PinOptions,
 ): Promise<PinCandidate | undefined> {
-  const candidates =
+  const candidates: { source: string; expectId?: string }[] =
     sys.platform === 'linux'
-      ? (grant.selfImages ?? []).filter((i) => sys.fileId?.(i.path) === i.id).map((i) => i.path)
-      : grant.selfPaths;
+      ? (grant.selfImages ?? []).map((i) => ({ source: i.path, expectId: i.id }))
+      : grant.selfPaths.map((source) => ({ source }));
   // A grant's images are AppImages, wherever they sit.
   const appImage = sys.platform === 'linux';
-  for (const source of candidates) {
+  for (const { source, expectId } of candidates) {
     if (inInstalled(sys, opts.installed, source, appImage)) continue;
     try {
-      const pin = await pinFor(sys, source, { ...opts, appImage });
+      const pin = await pinFor(sys, source, {
+        ...opts,
+        appImage,
+        ...(expectId ? { expectId } : {}),
+      });
       if (pin) return { source, pin };
     } catch {
       // Not code Vigil can pin: try the next.
@@ -331,11 +352,10 @@ export async function runsPinnedApp(
   pinFile: string,
   id: ProcessIdentity,
   recheck: () => Promise<ProcessIdentity | undefined>,
-  opts: { sha256?: (path: string) => string | undefined } = {},
 ): Promise<boolean | 'changed'> {
   const pin = readPin(pinFile);
   if (!pin || pin.platform !== (sys.platform ?? 'darwin')) return false;
-  if (pin.platform === 'linux') return runsPinnedImage(sys, pin, id.pid, opts.sha256 ?? sha256Of);
+  if (pin.platform === 'linux') return runsPinnedImage(sys, pin, id.pid);
   const running = await codesign(sys, String(id.pid));
   const after = await recheck();
   if (!after || after.started !== id.started || after.path !== id.path) return 'changed';
@@ -347,23 +367,29 @@ type LinuxPin = Extract<AppPin, { platform: 'linux' }>;
 /** Images whose contents were found to match their pin after a change, by pin and stat. */
 const rehashed = new Set<string>();
 
-function runsPinnedImage(
-  sys: System,
-  pin: LinuxPin,
-  pid: number,
-  hash: (path: string) => string | undefined,
-): boolean {
-  const image = selfImageOf(sys, pid, [pin.image]);
-  if (!image) return false;
-  const now = sys.fileStat?.(image);
-  if (!now || now.id !== pin.image) return false;
-  if (now.ctime === pin.ctime && now.size === pin.size) return true;
-  // Written to since it was pinned (or a pin without a ctime): the contents decide.
-  const key = `${pin.image}|${pin.sha256}|${now.ctime}|${now.size}`;
-  if (rehashed.has(key)) return true;
-  const sha256 = hash(image);
-  if (sha256 !== pin.sha256 || !sameStat(now, sys.fileStat?.(image))) return false;
-  if (rehashed.size >= 16) rehashed.clear();
-  rehashed.add(key);
-  return true;
+/**
+ * Linux: whether `pid` runs the pinned image, unchanged. The image the
+ * process runs is opened once through /proc (selfImageOf names the link:
+ * the process's own exe, or its mount server's), and its device, inode,
+ * ctime, size and, when needed, contents all come from that descriptor.
+ */
+function runsPinnedImage(sys: System, pin: LinuxPin, pid: number): boolean {
+  const via = selfImageOf(sys, pid, [pin.image]);
+  if (!via) return false;
+  const f = sys.openFile?.(via);
+  if (!f) return false;
+  try {
+    const now = f.stat;
+    if (now.id !== pin.image) return false;
+    if (now.ctime === pin.ctime && now.size === pin.size) return true;
+    // Written to since it was pinned (or a pin without a ctime): the contents decide.
+    const key = `${pin.image}|${pin.sha256}|${now.ctime}|${now.size}`;
+    if (rehashed.has(key)) return true;
+    if (f.sha256() !== pin.sha256 || !sameStat(now, f.restat())) return false;
+    if (rehashed.size >= 16) rehashed.clear();
+    rehashed.add(key);
+    return true;
+  } finally {
+    f.close();
+  }
 }

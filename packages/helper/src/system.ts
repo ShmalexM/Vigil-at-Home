@@ -6,6 +6,7 @@ import { execFile } from 'node:child_process';
 import { readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import { fileId } from '@vigil/core/self';
 import { hostPlatform, type Platform } from './platform.js';
+import { openRegularFile, type OpenedFile, type OpenOptions } from './openedFile.js';
 
 export const BINARIES = {
   pfctl: '/sbin/pfctl',
@@ -81,13 +82,18 @@ export interface System {
    */
   fileId?(path: string): string | undefined;
   /**
-   * Linux only: what `fileId` gives, plus the file's ctime (nanoseconds,
-   * as a decimal string) and size, following links. Any write to the file
-   * moves its ctime, and nothing short of root setting the clock moves it back.
+   * Open a regular file once, without blocking (openedFile.ts): everything
+   * about it is then read from that descriptor. Undefined when it is
+   * missing, not a regular file, or (with `nofollow`) a symlink.
    */
-  fileStat?(path: string): FileStat | undefined;
+  openFile?(path: string, opts?: OpenOptions): OpenedFile | undefined;
 }
 
+/**
+ * A file's device and inode (`fileId`), ctime (nanoseconds, as a decimal
+ * string) and size. Any write to the file moves its ctime, and nothing short
+ * of root setting the clock moves it back.
+ */
 export interface FileStat {
   id: string;
   ctime: string;
@@ -203,14 +209,7 @@ export function realSystem(
         return undefined;
       }
     },
-    fileStat(path) {
-      try {
-        const st = statSync(path, { bigint: true });
-        return { id: fileId(st.dev, st.ino), ctime: st.ctimeNs.toString(), size: Number(st.size) };
-      } catch {
-        return undefined;
-      }
-    },
+    openFile: (path, opts) => openRegularFile(path, opts),
   };
 }
 

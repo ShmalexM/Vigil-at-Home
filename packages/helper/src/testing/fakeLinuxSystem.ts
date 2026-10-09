@@ -1,4 +1,6 @@
-import type { BinaryName, FileStat, RunResult, System } from '../system.js';
+import type { OpenedFile, OpenOptions } from '../openedFile.js';
+import type { BinaryName, RunResult, System } from '../system.js';
+import { FakeFs } from './fakeFs.js';
 import type { FakeProcess } from './fakeSystem.js';
 
 interface FakeRule {
@@ -117,8 +119,12 @@ export class FakeLinuxSystem implements System {
 
   /** /proc/self/mountinfo. */
   mounts = '';
+  /** Paths, file contents and links (fakeFs.ts). */
+  readonly fs = new FakeFs();
   /** Files by path, with their `fileId` (device:inode). */
-  readonly files = new Map<string, string>();
+  readonly files = this.fs.paths;
+  /** Contents and metadata by file id; a file not listed has ctime "1" and size 1. */
+  readonly inodes = this.fs.inodes;
   /** Open files by pid, as `[fd, link]`. */
   readonly fds = new Map<number, [number, string][]>();
   /** Start times by pid, in clock ticks. */
@@ -140,23 +146,25 @@ export class FakeLinuxSystem implements System {
     return this.starts.get(pid);
   }
 
-  fileId(path: string): string | undefined {
+  /** What a /proc/<pid>/exe or /proc/<pid>/fd/<n> link points at; other paths as they are. */
+  private procTarget(path: string): string | undefined {
     const m = /^\/proc\/(\d+)\/(exe|fd\/(\d+))$/.exec(path);
-    if (!m) return this.files.get(path);
+    if (!m) return path;
     const pid = Number(m[1]);
-    const target = m[3]
+    return m[3]
       ? this.procFds(pid).find(([n]) => n === Number(m[3]))?.[1]
       : this.processes.get(pid)?.path;
+  }
+
+  fileId(path: string): string | undefined {
+    const target = this.procTarget(path);
     return target === undefined ? undefined : this.files.get(target);
   }
 
-  /** ctime and size by file id; a file not listed has ctime "1" and size 1. */
-  readonly inodes = new Map<string, { ctime: string; size: number }>();
-
-  fileStat(path: string): FileStat | undefined {
-    const id = this.fileId(path);
-    if (id === undefined) return undefined;
-    return { id, ...(this.inodes.get(id) ?? { ctime: '1', size: 1 }) };
+  openFile(path: string, opts?: OpenOptions): OpenedFile | undefined {
+    const target = this.procTarget(path);
+    // /proc links are always followed, as the kernel does.
+    return target === undefined ? undefined : this.fs.open(target, target === path ? opts : {});
   }
 
   signal(pid: number, signal: 'SIGSTOP' | 'SIGCONT' | 'SIGKILL'): void {

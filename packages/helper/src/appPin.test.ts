@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RuleStore } from '@vigil/sensors';
@@ -14,6 +15,8 @@ import {
   type AppPin,
   type PinOptions,
 } from './appPin.js';
+import { readCodeIdentity } from './codeDirectory.js';
+import { BINARIES, LINUX_BINARIES, realSystem } from './system.js';
 import { VIGIL_BUNDLE_ID } from './config.js';
 import { Executor } from './executor.js';
 import { FastPath } from './fastpath.js';
@@ -24,14 +27,17 @@ import { FapolicydBlocks } from './commands/fapolicyd.js';
 import { isProtectedProcess } from './commands/process.js';
 import { FakeSystem } from './testing/fakeSystem.js';
 import { FakeLinuxSystem } from './testing/fakeLinuxSystem.js';
+import { machO, type FakeMachO } from './testing/machO.js';
 
 const STARTED = 'Mon Oct  5 16:20:13 2026';
-const CDHASH = 'c'.repeat(40);
-const APP_SHA = 'a'.repeat(64);
+const VIGIL_ID = 'app.vigilathome.desktop';
+/** The app as built, version 1: what the pin names in most tests. */
+const V1 = machO(VIGIL_ID, 'v1');
+const CDHASH = V1.cdhash;
+const APP_SHA = V1.sha256;
 const BUNDLE = '/Users/a/Downloads/Vigil at Home.app';
 const EXE = `${BUNDLE}/Contents/MacOS/Vigil at Home`;
 const INSTALLED_MAC = ['/Applications/Vigil at Home.app'];
-const VIGIL_ID = 'app.vigilathome.desktop';
 
 /** A self grant's whole re-pin: bound when the password is asked for, pinned once it's given. */
 async function regrant(
@@ -51,29 +57,45 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
+const setPin = (pin: AppPin | undefined) => writePin(pinFile, pin);
+const currentPin = () => readPin(pinFile);
+
 const ok = (stdout = '', stderr = ''): RunResult => ({ code: 0, stdout, stderr });
 
-/** macOS, with what codesign reads for each path or pid. */
+/**
+ * macOS: files on disk (FakeFs), codesign reading whatever file a path names
+ * when it runs, and what the kernel loaded for each pid.
+ */
 class MacCode extends FakeSystem {
-  /** target (path or pid) → [cdhash, main executable]. */
-  code = new Map<string, [string, string]>();
-  /** target → signing identifier, when not Vigil's. */
-  identifiers = new Map<string, string>();
-  /** Runs while codesign looks at a pid, to stand in for the pid being reused meanwhile. */
+  /** pid → cdhash of the code the kernel loaded for it. */
+  code = new Map<string, string>();
+  /** Runs while codesign looks at a pid or path, to stand in for something changing meanwhile. */
   duringCodesign: (() => void) | undefined;
+
+  /** Put a program at `path` as file `id`, and name it the main executable of its bundle. */
+  put(path: string, id: string, m: FakeMachO): void {
+    this.fs.paths.set(path, id);
+    this.fs.inodes.set(id, { data: m.data });
+    const bundle = /^(.*\.app)\/Contents\/MacOS\/([^/]+)$/i.exec(path);
+    if (bundle) this.labels.set(`${bundle[1]}/Contents/Info.plist`, bundle[2]!);
+  }
 
   override async run(bin: BinaryName, args: string[], opts: { input?: string } = {}) {
     if (bin !== 'codesign') return super.run(bin, args, opts);
     this.runs.push({ bin, args, input: opts.input });
     const target = args.at(-1)!;
-    if (/^\d+$/.test(target)) this.duringCodesign?.();
-    const c = this.code.get(target);
-    return c
-      ? ok(
-          '',
-          `Executable=${c[1]}\nIdentifier=${this.identifiers.get(target) ?? VIGIL_ID}\nCDHash=${c[0]}\n`,
-        )
-      : { code: 1, stdout: '', stderr: 'code object is not signed at all' };
+    this.duringCodesign?.();
+    let out: string | undefined;
+    if (/^\d+$/.test(target)) {
+      const c = this.code.get(target);
+      if (c) out = `Identifier=${VIGIL_ID}\nCDHash=${c}\n`;
+    } else {
+      const f = this.fs.open(target);
+      this.fs.opened.pop(); // codesign's own read, not the helper's
+      const c = f && readCodeIdentity((pos, len) => f.read(pos, len));
+      if (c) out = `Executable=${target}\nIdentifier=${c.identifier}\nCDHash=${c.cdhash}\n`;
+    }
+    return out ? ok('', out) : { code: 1, stdout: '', stderr: 'code object is not signed at all' };
   }
 }
 
@@ -109,26 +131,28 @@ describe('codesign -d -vvv as a real Mac prints it', () => {
   const FINDER_APP = '/System/Library/CoreServices/Finder.app';
   const FINDER_EXE = `${FINDER_APP}/Contents/MacOS/Finder`;
   const FINDER_CDHASH = '2ff5' + '0'.repeat(36);
-  const FINDER = [
-    `Executable=${FINDER_EXE}`,
-    'Identifier=com.apple.finder',
-    'Format=app bundle with Mach-O universal (x86_64 arm64e)',
-    'CodeDirectory v=20400 size=12345 flags=0x0(none) hashes=375+7 location=embedded',
-    'Platform identifier=16',
-    'Hash type=sha256 size=32',
-    `CandidateCDHash sha256=${FINDER_CDHASH}`,
-    `CandidateCDHashFull sha256=${FINDER_CDHASH}${'1'.repeat(24)}`,
-    'Hash choices=sha256',
-    `CDHash=${FINDER_CDHASH}`,
-    'Signature size=4442',
-    'Authority=Software Signing',
-    'Signed Time=Sep 1, 2026 at 00:00:00',
-    'Info.plist entries=40',
-    'TeamIdentifier=not set',
-    'Sealed Resources version=2 rules=2 files=0',
-    'Internal requirements count=1 size=68',
-    '',
-  ].join('\n');
+  const output = (cdhash: string, identifier: string) =>
+    [
+      `Executable=${FINDER_EXE}`,
+      `Identifier=${identifier}`,
+      'Format=app bundle with Mach-O universal (x86_64 arm64e)',
+      'CodeDirectory v=20400 size=12345 flags=0x0(none) hashes=375+7 location=embedded',
+      'Platform identifier=16',
+      'Hash type=sha256 size=32',
+      `CandidateCDHash sha256=${cdhash}`,
+      `CandidateCDHashFull sha256=${cdhash}${'1'.repeat(24)}`,
+      'Hash choices=sha256',
+      `CDHash=${cdhash}`,
+      'Signature size=4442',
+      'Authority=Software Signing',
+      'Signed Time=Sep 1, 2026 at 00:00:00',
+      'Info.plist entries=40',
+      'TeamIdentifier=not set',
+      'Sealed Resources version=2 rules=2 files=0',
+      'Internal requirements count=1 size=68',
+      '',
+    ].join('\n');
+  const FINDER = output(FINDER_CDHASH, 'com.apple.finder');
 
   it('reads the inner executable and cdhash, in any line order', () => {
     const want = { cdhash: FINDER_CDHASH, executable: FINDER_EXE, identifier: 'com.apple.finder' };
@@ -144,62 +168,40 @@ describe('codesign -d -vvv as a real Mac prints it', () => {
     ).toEqual(want);
   });
 
-  /** The same output for code signed as Vigil, which is all that is ever pinned. */
-  const AS_VIGIL = FINDER.replace('Identifier=com.apple.finder', `Identifier=${VIGIL_ID}`);
-
-  /** codesign writing `out` to stderr, with nothing on stdout, for the bundle and its pid. */
+  /** codesign writing `out` to stderr, with nothing on stdout, for the program and its pid. */
   class StderrMac extends FakeSystem {
-    constructor(private readonly out = AS_VIGIL) {
+    constructor(private readonly out: string) {
       super();
+      this.fs.paths.set(FINDER_EXE, '1:2');
+      this.fs.inodes.set('1:2', { data: V1.data });
+      this.labels.set(`${FINDER_APP}/Contents/Info.plist`, 'Finder');
     }
     override async run(bin: BinaryName, args: string[], opts: { input?: string } = {}) {
       if (bin !== 'codesign') return super.run(bin, args, opts);
       this.runs.push({ bin, args, input: opts.input });
-      return [FINDER_APP, '700'].includes(args.at(-1)!)
+      return [FINDER_EXE, '700'].includes(args.at(-1)!)
         ? ok('', this.out)
         : { code: 1, stdout: '', stderr: 'code object is not signed at all' };
     }
   }
 
-  it('never pins code signed as anything but Vigil', async () => {
-    const opts = { installed: INSTALLED_MAC, sha256: () => APP_SHA };
-    await expect(pinFor(new StderrMac(FINDER), FINDER_APP, opts)).rejects.toThrow(VIGIL_ID);
-    const noId = AS_VIGIL.replace(`Identifier=${VIGIL_ID}\n`, '');
-    await expect(pinFor(new StderrMac(noId), FINDER_APP, opts)).rejects.toThrow(VIGIL_ID);
-    const sys = new StderrMac(FINDER);
-    expect(await regrant(sys, { selfPaths: [FINDER_APP] }, { ...opts, pinFile })).toBeUndefined();
-    expect(readPin(pinFile)).toBeUndefined();
-  });
-
-  it('pins from a bundle path by the inner Mach-O, read from stderr', async () => {
-    const sys = new StderrMac();
-    const hashed: string[] = [];
-    const sha256 = (p: string) => (hashed.push(p), APP_SHA);
-    const pin = await pinFor(sys, FINDER_APP, { installed: INSTALLED_MAC, sha256 });
-    expect(pin).toEqual({
-      platform: 'darwin',
-      path: FINDER_EXE,
-      cdhash: FINDER_CDHASH,
-      sha256: APP_SHA,
-    });
-    expect(hashed).toEqual([FINDER_EXE]);
-  });
-
-  it('re-pins from a grant naming the bundle, and spares its pid by cdhash', async () => {
-    const sys = new StderrMac();
+  it('pins when codesign, read from stderr, agrees with the program’s own bytes', async () => {
+    const sys = new StderrMac(output(CDHASH, VIGIL_ID));
     sys.processes.set(700, { path: FINDER_EXE, started: STARTED });
-    const pin = await regrant(
-      sys,
-      { selfPaths: [FINDER_APP] },
-      { pinFile, installed: INSTALLED_MAC, sha256: () => APP_SHA },
-    );
-    expect(pin?.path).toBe(FINDER_EXE);
-    expect(readPin(pinFile)).toEqual(pin);
+    const opts = { pinFile, installed: INSTALLED_MAC };
+    const pin = await regrant(sys, { selfPaths: [FINDER_APP] }, opts);
+    expect(pin).toEqual({ platform: 'darwin', path: FINDER_EXE, cdhash: CDHASH, sha256: APP_SHA });
+    expect(currentPin()).toEqual(pin);
     const ex = new Executor(executorDeps(sys));
     await expect(
       ex.execute({ kind: 'process.kill', pid: 700, path: FINDER_EXE }),
     ).rejects.toMatchObject({ code: 'refused' });
     expect(sys.signals).toEqual([]);
+  });
+
+  it('pins nothing when codesign disagrees with the bytes read', async () => {
+    const sys = new StderrMac(FINDER);
+    await expect(pinFor(sys, FINDER_APP, { installed: INSTALLED_MAC })).rejects.toThrow();
   });
 });
 
@@ -210,33 +212,66 @@ describe('the app pinned at install (macOS)', () => {
 
   beforeEach(() => {
     sys = new MacCode();
-    sys.code.set(BUNDLE, [CDHASH, EXE]);
-    sys.code.set(EXE, [CDHASH, EXE]);
-    sys.code.set(String(APP), [CDHASH, EXE]);
+    sys.put(EXE, '16777220:100', V1);
+    sys.code.set(String(APP), CDHASH);
     sys.processes.set(APP, { path: EXE, started: STARTED });
   });
 
-  it('pins the cdhash and sha256 of the main executable', async () => {
-    const pin = await pinFor(sys, BUNDLE, { installed: INSTALLED_MAC, sha256: () => APP_SHA });
+  it('pins the cdhash and sha256 of the main executable, read from one open file', async () => {
+    const pin = await pinFor(sys, BUNDLE, { installed: INSTALLED_MAC });
     expect(pin).toEqual({ platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
-    writePin(pinFile, pin);
-    expect(readPin(pinFile)).toEqual(pin);
+    expect(sys.fs.opened).toEqual([EXE]);
+    setPin(pin);
+    expect(currentPin()).toEqual(pin);
     expect(statSync(pinFile).mode & 0o777).toBe(0o644);
-    const opts = { installed: INSTALLED_MAC, sha256: () => APP_SHA };
+    const opts = { installed: INSTALLED_MAC };
     await expect(pinFor(sys, '/Users/a/unsigned', opts)).rejects.toThrow();
     await expect(pinFor(sys, 'relative', opts)).rejects.toThrow();
   });
 
+  it('never pins code signed as anything but Vigil', async () => {
+    const other = '/Users/a/Downloads/Other.app/Contents/MacOS/Other';
+    sys.put(other, '16777220:300', machO('com.example.other', 'x'));
+    await expect(pinFor(sys, other, { installed: INSTALLED_MAC })).rejects.toThrow(VIGIL_ID);
+  });
+
+  it('refuses a FIFO, folder or symlink at once, without codesign', async () => {
+    const opts = { installed: INSTALLED_MAC };
+    sys.fs.paths.set('/Users/a/fifo', '16777220:400');
+    sys.fs.inodes.set('16777220:400', { kind: 'fifo' });
+    sys.fs.paths.set('/Users/a/dir', '16777220:401');
+    sys.fs.inodes.set('16777220:401', { kind: 'dir' });
+    sys.fs.links.set('/Users/a/link', EXE);
+    for (const path of ['/Users/a/fifo', '/Users/a/dir', '/Users/a/link'])
+      await expect(pinFor(sys, path, opts), path).rejects.toThrow(/not a regular file/);
+    expect(codesigns()).toEqual([]);
+  });
+
+  it('never mixes the identity and the hash of two files swapped in meanwhile', async () => {
+    const opts = { installed: INSTALLED_MAC };
+    // While the open file is hashed, another program takes its path...
+    sys.fs.duringHash = () => sys.put(EXE, '16777220:200', machO(VIGIL_ID, 'other'));
+    // ...so codesign, reading the path, no longer agrees with the bytes read: no pin.
+    await expect(pinFor(sys, BUNDLE, opts)).rejects.toThrow(/changed/);
+    // Swapped while codesign reads it, then put back: the open file never changed, and
+    // codesign saw the other program, so still no pin.
+    sys.fs.duringHash = undefined;
+    sys.put(EXE, '16777220:100', V1);
+    sys.duringCodesign = () => sys.put(EXE, '16777220:200', machO(VIGIL_ID, 'other'));
+    await expect(pinFor(sys, BUNDLE, opts)).rejects.toThrow(/changed/);
+  });
+
   it('pins nothing in /Applications, so nothing extra ever runs', async () => {
     const app = '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home';
-    sys.code.set(app, [CDHASH, app]);
+    sys.put(app, '16777220:101', V1);
     expect(await pinFor(sys, app, { installed: INSTALLED_MAC })).toBeUndefined();
     expect(codesigns()).toEqual([]);
+    expect(sys.fs.opened).toEqual([]);
   });
 
   describe('with a pin', () => {
     beforeEach(() => {
-      writePin(pinFile, { platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
+      setPin({ platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
     });
 
     it('never pauses or stops a process running the pinned code', async () => {
@@ -250,7 +285,7 @@ describe('the app pinned at install (macOS)', () => {
       expect(codesigns()).toEqual([String(APP), String(APP)]);
       // A copy elsewhere runs the same code, so it is the app too.
       sys.processes.set(600, { path: '/tmp/copy/Vigil at Home', started: STARTED });
-      sys.code.set('600', [CDHASH, '/tmp/copy/Vigil at Home']);
+      sys.code.set('600', CDHASH);
       await expect(
         ex.execute({ kind: 'process.kill', pid: 600, path: '/tmp/copy/Vigil at Home' }),
       ).rejects.toMatchObject({ code: 'refused' });
@@ -261,11 +296,11 @@ describe('the app pinned at install (macOS)', () => {
       // start time, now running the pinned code. It is spared from then on;
       // the real app (pid 501) is a separate process either way.
       sys.processes.set(900, { path: '/tmp/evil', started: STARTED });
-      sys.code.set('900', ['d'.repeat(40), '/tmp/evil']);
+      sys.code.set('900', 'd'.repeat(40));
       const ex = new Executor(executorDeps(sys));
       await ex.execute({ kind: 'process.suspend', pid: 900, path: '/tmp/evil' });
       sys.processes.set(900, { path: EXE, started: STARTED });
-      sys.code.set('900', [CDHASH, EXE]);
+      sys.code.set('900', CDHASH);
       await expect(ex.execute({ kind: 'process.kill', pid: 900, path: EXE })).rejects.toMatchObject(
         { code: 'refused' },
       );
@@ -274,7 +309,7 @@ describe('the app pinned at install (macOS)', () => {
 
     it('stops a different program as before', async () => {
       sys.processes.set(777, { path: '/tmp/evil', started: STARTED });
-      sys.code.set('777', ['d'.repeat(40), '/tmp/evil']);
+      sys.code.set('777', 'd'.repeat(40));
       sys.processes.set(778, { path: '/tmp/unsigned', started: STARTED });
       const ex = new Executor(executorDeps(sys));
       await ex.execute({ kind: 'process.kill', pid: 777, path: '/tmp/evil' });
@@ -292,7 +327,7 @@ describe('the app pinned at install (macOS)', () => {
       );
       // And a pid already reused by another program fails the path check first.
       sys.duringCodesign = undefined;
-      sys.code.set(String(APP), ['d'.repeat(40), '/tmp/evil']);
+      sys.code.set(String(APP), 'd'.repeat(40));
       await ex.execute({ kind: 'process.kill', pid: APP, path: '/tmp/evil' });
       expect(sys.signals).toEqual([{ pid: APP, signal: 'SIGKILL' }]);
     });
@@ -331,7 +366,7 @@ describe('the app pinned at install (macOS)', () => {
   });
 
   it('runs no codesign for a program protected by path', async () => {
-    writePin(pinFile, { platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
+    setPin({ platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
     const app = '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home';
     sys.processes.set(700, { path: app, started: STARTED });
     const ex = new Executor(executorDeps(sys));
@@ -342,14 +377,14 @@ describe('the app pinned at install (macOS)', () => {
   });
 
   it('treats the installer’s folder alike for the pin and for stopping, in any case', async () => {
-    writePin(pinFile, { platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
+    setPin({ platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
     const ex = new Executor(executorDeps(sys));
     let pid = 800;
     for (const app of [
       '/applications/vigil at home.app/Contents/MacOS/Vigil at Home',
       '/APPLICATIONS/Vigil At Home.app/Contents/MacOS/Vigil at Home',
     ]) {
-      sys.code.set(app, [CDHASH, app]);
+      sys.put(app, `16777220:${pid}`, V1);
       expect(await pinFor(sys, app, { installed: INSTALLED_MAC }), app).toBeUndefined();
       expect(isProtectedProcess(app, 'darwin'), app).toBe(true);
       sys.processes.set(++pid, { path: app, started: STARTED });
@@ -365,37 +400,33 @@ describe('the app pinned at install (macOS)', () => {
   });
 
   describe('re-pinned by an approved self grant', () => {
-    const NEW = 'e'.repeat(40);
+    const V2 = machO(VIGIL_ID, 'v2');
     const repin = (selfPaths: string[]) =>
-      regrant(
-        sys,
-        { selfPaths },
-        { pinFile, installed: INSTALLED_MAC, sha256: () => 'b'.repeat(64) },
-      );
+      regrant(sys, { selfPaths }, { pinFile, installed: INSTALLED_MAC });
     beforeEach(() => {
-      writePin(pinFile, { platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
+      setPin({ platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
       // The app in Downloads was updated: its code has a new cdhash.
-      sys.code.set(BUNDLE, [NEW, EXE]);
+      sys.put(EXE, '16777220:102', V2);
     });
 
     it('pins the executable the grant covers, by its cdhash on disk', async () => {
       const pin = await repin(['/Users/a/Library/not-code', BUNDLE]);
-      expect(pin).toEqual({ platform: 'darwin', path: EXE, cdhash: NEW, sha256: 'b'.repeat(64) });
-      expect(readPin(pinFile)).toEqual(pin);
+      expect(pin).toEqual({ platform: 'darwin', path: EXE, cdhash: V2.cdhash, sha256: V2.sha256 });
+      expect(currentPin()).toEqual(pin);
     });
 
     it('leaves the pin alone for a grant inside /Applications or naming no code', async () => {
-      const before = readPin(pinFile);
+      const before = currentPin();
       const app = '/Applications/Vigil at Home.app';
-      sys.code.set(app, [NEW, `${app}/Contents/MacOS/Vigil at Home`]);
+      sys.put(`${app}/Contents/MacOS/Vigil at Home`, '16777220:103', V2);
       expect(await repin([app, '/Users/a/Library/not-code'])).toBeUndefined();
-      expect(readPin(pinFile)).toEqual(before);
-      expect(sys.runs.filter((r) => r.args.at(-1) === app)).toEqual([]);
+      expect(currentPin()).toEqual(before);
+      expect(sys.runs.filter((r) => r.args.some((a) => a.startsWith(app)))).toEqual([]);
     });
 
-    /** An executor wired as the daemon wires it, with the code on disk hashing to `sha()`. */
-    const grantExecutor = (sha: () => string) => {
-      const opts = { installed: INSTALLED_MAC, sha256: sha };
+    /** An executor wired as the daemon wires it. */
+    const grantExecutor = () => {
+      const opts = { installed: INSTALLED_MAC };
       const committed: AppPin[] = [];
       const ex = new Executor({
         ...executorDeps(sys),
@@ -424,52 +455,43 @@ describe('the app pinned at install (macOS)', () => {
     };
 
     it('happens only when the password approved a grant', async () => {
-      const { ex, committed } = grantExecutor(() => 'b'.repeat(64));
+      const { ex, committed } = grantExecutor();
       const grant: HelperCommand = { kind: 'self.grant', selfPaths: [BUNDLE] };
       const nonce = await approve(ex, grant);
       expect(committed).toEqual([]);
       // The code was read before the dialog, from the bundle the grant names.
-      expect(codesigns()).toEqual([BUNDLE]);
+      expect(sys.fs.opened).toEqual([EXE]);
       await ex.execute(grant, nonce);
       expect(committed).toEqual([
-        { platform: 'darwin', path: EXE, cdhash: NEW, sha256: 'b'.repeat(64) },
+        { platform: 'darwin', path: EXE, cdhash: V2.cdhash, sha256: V2.sha256 },
       ]);
-      expect(readPin(pinFile)).toEqual(committed[0]);
+      expect(currentPin()).toEqual(committed[0]);
       // The same grant again names nothing new, needs no password, and re-pins nothing.
       await ex.execute(grant);
       expect(committed).toHaveLength(1);
     });
 
     it('pins only the code that was on disk when the password was asked for', async () => {
-      const before = readPin(pinFile);
-      let sha = 'b'.repeat(64);
-      const { ex, committed } = grantExecutor(() => sha);
+      const before = currentPin();
+      const { ex, committed } = grantExecutor();
       const grant: HelperCommand = { kind: 'self.grant', selfPaths: [BUNDLE] };
-      // Other code is put in place while the dialog is up: a new cdhash...
-      let nonce = await approve(ex, grant);
-      sys.code.set(BUNDLE, ['f'.repeat(40), EXE]);
+      // Other code is put in place while the dialog is up.
+      const nonce = await approve(ex, grant);
+      sys.put(EXE, '16777220:104', machO(VIGIL_ID, 'v3'));
       expect((await ex.execute(grant, nonce)).kind).toBe('done');
       expect(committed).toEqual([]);
-      expect(readPin(pinFile)).toEqual(before);
-      // ...or the same cdhash with other bytes in the executable.
-      const ex2 = grantExecutor(() => sha);
-      nonce = await approve(ex2.ex, { kind: 'self.grant', selfPaths: [BUNDLE, '/Users/a/x'] });
-      sha = 'd'.repeat(64);
-      await ex2.ex.execute({ kind: 'self.grant', selfPaths: [BUNDLE, '/Users/a/x'] }, nonce);
-      expect(ex2.committed).toEqual([]);
-      expect(readPin(pinFile)).toEqual(before);
+      expect(currentPin()).toEqual(before);
     });
 
     it('pins nothing for a grant naming code not signed as Vigil', async () => {
-      const before = readPin(pinFile);
+      const before = currentPin();
       const other = '/Users/a/Downloads/Other.app';
-      sys.code.set(other, [NEW, `${other}/Contents/MacOS/Other`]);
-      sys.identifiers.set(other, 'com.example.other');
-      const { ex, committed } = grantExecutor(() => 'b'.repeat(64));
+      sys.put(`${other}/Contents/MacOS/Other`, '16777220:105', machO('com.example.other', 'o'));
+      const { ex, committed } = grantExecutor();
       const grant: HelperCommand = { kind: 'self.grant', selfPaths: [other] };
       await ex.execute(grant, await approve(ex, grant));
       expect(committed).toEqual([]);
-      expect(readPin(pinFile)).toEqual(before);
+      expect(currentPin()).toEqual(before);
     });
   });
 });
@@ -478,7 +500,7 @@ describe('the app pinned at install (Linux AppImage)', () => {
   const image = '/home/alex/Apps/Vigil.AppImage';
   const mount = '/tmp/.mount_VigilaB1c2D';
   let sys: FakeLinuxSystem;
-  // FakeLinuxSystem gives a file it has no inode entry for ctime "1" and size 1.
+  // FakeFs gives a file without its own ctime and size ctime "1" and size 1.
   const pin: AppPin = {
     platform: 'linux',
     path: image,
@@ -487,10 +509,12 @@ describe('the app pinned at install (Linux AppImage)', () => {
     size: 1,
     sha256: APP_SHA,
   };
+  const opts = { installed: ['/opt/Vigil at Home'] };
 
   beforeEach(() => {
     sys = new FakeLinuxSystem();
     sys.files.set(image, '2049:5501');
+    sys.inodes.set('2049:5501', { sha256: APP_SHA });
     sys.mounts = [
       '22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw',
       '40 22 0:35 / /tmp rw,nosuid,nodev shared:20 - tmpfs tmpfs rw',
@@ -512,14 +536,47 @@ describe('the app pinned at install (Linux AppImage)', () => {
   });
 
   it('pins the AppImage by device and inode, and nothing in the installer’s folder', async () => {
-    const opts = { installed: ['/opt/Vigil at Home'], sha256: () => APP_SHA };
     expect(await pinFor(sys, image, opts)).toEqual(pin);
     expect(await pinFor(sys, '/opt/Vigil at Home/vigil-at-home', opts)).toBeUndefined();
     await expect(pinFor(sys, '/home/alex/missing', opts)).rejects.toThrow();
   });
 
+  it('refuses a FIFO, folder or symlink at once', async () => {
+    sys.files.set('/home/alex/fifo.AppImage', '2049:8001');
+    sys.inodes.set('2049:8001', { kind: 'fifo' });
+    sys.files.set('/home/alex/dir.AppImage', '2049:8002');
+    sys.inodes.set('2049:8002', { kind: 'dir' });
+    sys.fs.links.set('/home/alex/link.AppImage', image);
+    for (const path of ['/home/alex/fifo.AppImage', '/home/alex/dir.AppImage'])
+      await expect(pinFor(sys, path, opts), path).rejects.toThrow(/not a regular file/);
+    await expect(pinFor(sys, '/home/alex/link.AppImage', opts)).rejects.toThrow(
+      /not a regular file/,
+    );
+    // Through a grant naming them, nothing is pinned either.
+    const grant = {
+      selfPaths: [],
+      selfImages: [
+        { path: '/home/alex/fifo.AppImage', id: '2049:8001' },
+        { path: '/home/alex/link.AppImage', id: '2049:5501' },
+      ],
+    };
+    expect(await regrant(sys, grant, { ...opts, pinFile })).toBeUndefined();
+  });
+
+  it('never mixes the identity and the hash of two files swapped in meanwhile', async () => {
+    // While the open image is hashed, another file takes its path.
+    sys.inodes.set('2049:5502', { sha256: 'e'.repeat(64), ctime: '77', size: 9 });
+    sys.fs.duringHash = () => sys.files.set(image, '2049:5502');
+    // Device, inode, ctime, size and hash are all the first file's.
+    expect(await pinFor(sys, image, opts)).toEqual(pin);
+    // A grant naming the first file's id, after the swap, pins nothing.
+    sys.fs.duringHash = undefined;
+    const grant = { selfPaths: [], selfImages: [{ path: image, id: '2049:5501' }] };
+    expect(await regrant(sys, grant, { ...opts, pinFile })).toBeUndefined();
+  });
+
   it('never stops Vigil running from the pinned image, or blocks the image by hash', async () => {
-    writePin(pinFile, pin);
+    setPin(pin);
     const blocks = new FapolicydBlocks(sys, {
       store: join(root, 'blocked.json'),
       rulesDir: join(root, 'rules.d'),
@@ -542,69 +599,70 @@ describe('the app pinned at install (Linux AppImage)', () => {
   });
 
   it('spares nothing when the pin names another image, or there is none', async () => {
-    writePin(pinFile, { ...pin, image: '2049:9999', sha256: 'b'.repeat(64) });
+    setPin({ ...pin, image: '2049:9999', sha256: 'b'.repeat(64) });
     const ex = new Executor(executorDeps(sys));
     await ex.execute({ kind: 'process.suspend', pid: 2000, path: `${mount}/vigil-at-home` });
-    writePin(pinFile, undefined);
+    setPin(undefined);
     await ex.execute({ kind: 'process.suspend', pid: 2000, path: `${mount}/vigil-at-home` });
     expect(sys.signals.map((s) => s.pid)).toEqual([2000, 2000]);
   });
 
   it('pins the image’s ctime and size, and checks its contents once they change', async () => {
-    sys.inodes.set('2049:5501', { ctime: '1700000000123456789', size: 150_000_000 });
-    const opts = { installed: ['/opt/Vigil at Home'], sha256: () => APP_SHA };
+    sys.inodes.set('2049:5501', {
+      ctime: '1700000000123456789',
+      size: 150_000_000,
+      sha256: APP_SHA,
+    });
     const pinned = await pinFor(sys, image, opts);
     expect(pinned).toEqual({ ...pin, ctime: '1700000000123456789', size: 150_000_000 });
-    writePin(pinFile, pinned);
-    // What the image file now holds, by the /proc path the check hashes.
-    let contents = APP_SHA;
-    const hashed: string[] = [];
-    const ex = new Executor({
-      ...executorDeps(sys),
-      appPinSha256: (p) => (hashed.push(p), contents),
-    });
+    setPin(pinned);
+    let hashes = 0;
+    sys.fs.duringHash = () => void hashes++;
+    const ex = new Executor(executorDeps(sys));
     const kill = (pid: number) =>
       ex.execute({ kind: 'process.kill', pid, path: sys.processes.get(pid)!.path });
     // Unchanged: spared, and nothing hashed.
     await expect(kill(2000)).rejects.toMatchObject({ code: 'refused' });
-    expect(hashed).toEqual([]);
+    expect(hashes).toBe(0);
     // Rewritten in place, same inode, other contents: no exemption, for the
     // app on the mount or the runtime running the image itself.
-    sys.inodes.set('2049:5501', { ctime: '1700000999000000000', size: 150_000_000 });
-    contents = 'd'.repeat(64);
+    sys.inodes.set('2049:5501', {
+      ctime: '1700000999000000000',
+      size: 150_000_000,
+      sha256: 'd'.repeat(64),
+    });
     await kill(2000);
     await kill(2003);
     expect(sys.signals.map((s) => s.pid)).toEqual([2000, 2003]);
+    expect(hashes).toBe(2);
+    // Read through /proc, never through the image's path.
+    expect(sys.fs.opened.filter((p) => p !== image)).toEqual([]);
     // Nor is an image pinned that was written to while it was being hashed.
-    const racing = () => (sys.inodes.set('2049:5501', { ctime: '9', size: 1 }), APP_SHA);
-    await expect(pinFor(sys, image, { ...opts, sha256: racing })).rejects.toThrow();
-    expect(hashed).toEqual(['/proc/2003/exe', '/proc/2003/exe']);
+    sys.fs.duringHash = () => sys.inodes.set('2049:5501', { ctime: '9', size: 1, sha256: APP_SHA });
+    await expect(pinFor(sys, image, opts)).rejects.toThrow(/changed/);
   });
 
   it('spares a changed image whose contents still match the pin', async () => {
-    writePin(pinFile, { ...pin, ctime: '5', size: 1 });
-    sys.inodes.set('2049:5501', { ctime: '6', size: 1 }); // touched (chmod, say)
-    const hashed: string[] = [];
-    const ex = new Executor({
-      ...executorDeps(sys),
-      appPinSha256: (p) => (hashed.push(p), APP_SHA),
-    });
+    setPin({ ...pin, ctime: '5', size: 1 });
+    sys.inodes.set('2049:5501', { ctime: '6', size: 1, sha256: APP_SHA }); // touched (chmod, say)
+    let hashes = 0;
+    sys.fs.duringHash = () => void hashes++;
+    const ex = new Executor(executorDeps(sys));
     await expect(
       ex.execute({ kind: 'process.kill', pid: 2000, path: `${mount}/vigil-at-home` }),
     ).rejects.toMatchObject({ code: 'refused' });
-    expect(hashed).toEqual(['/proc/2003/exe']);
+    expect(hashes).toBe(1);
     // A pin from before ctimes were kept is checked by contents too.
-    writePin(pinFile, { platform: 'linux', path: image, image: '2049:5501', sha256: APP_SHA });
-    sys.inodes.set('2049:5501', { ctime: '7', size: 1 }); // and rewritten since
-    const bare = new Executor({ ...executorDeps(sys), appPinSha256: () => 'e'.repeat(64) });
-    await bare.execute({ kind: 'process.kill', pid: 2000, path: `${mount}/vigil-at-home` });
+    setPin({ platform: 'linux', path: image, image: '2049:5501', sha256: APP_SHA });
+    sys.inodes.set('2049:5501', { ctime: '7', size: 1, sha256: 'e'.repeat(64) });
+    await ex.execute({ kind: 'process.kill', pid: 2000, path: `${mount}/vigil-at-home` });
     expect(sys.signals.map((s) => s.pid)).toEqual([2000]);
   });
 
   it('pins an AppImage inside the installer’s folder like one anywhere else', async () => {
-    const opts = { installed: ['/opt/Vigil at Home'], sha256: () => APP_SHA };
     const inOpt = '/opt/Vigil at Home/Vigil.AppImage';
     sys.files.set(inOpt, '2049:6601');
+    sys.inodes.set('2049:6601', { sha256: APP_SHA });
     expect(await pinFor(sys, inOpt, opts)).toEqual({ ...pin, path: inOpt, image: '2049:6601' });
     // Through an approved grant too.
     const grant = { selfPaths: [], selfImages: [{ path: inOpt, id: '2049:6601' }] };
@@ -612,32 +670,56 @@ describe('the app pinned at install (Linux AppImage)', () => {
       path: inOpt,
       image: '2049:6601',
     });
-    expect(readPin(pinFile)?.path).toBe(inOpt);
+    expect(currentPin()?.path).toBe(inOpt);
     // Told by its first bytes, whatever it is called.
-    const dir = join(root, 'installed');
-    mkdirSync(dir);
-    const renamed = join(dir, 'vigil');
-    const head = [0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, 0x41, 0x49, 2, 0, 0, 0, 0, 0];
-    writeFileSync(renamed, Buffer.from(head));
+    const renamed = '/opt/Vigil at Home/vigil';
     sys.files.set(renamed, '2049:6602');
-    const here = { installed: [dir], sha256: () => APP_SHA };
-    expect(await pinFor(sys, renamed, here)).toMatchObject({ path: renamed, image: '2049:6602' });
+    sys.inodes.set('2049:6602', {
+      data: Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, 0x41, 0x49, 2, 0, 0, 0, 0, 0]),
+    });
+    expect(await pinFor(sys, renamed, opts)).toMatchObject({ path: renamed, image: '2049:6602' });
     // An unpacked install there still needs no pin.
-    const unpacked = join(dir, 'vigil-at-home');
-    writeFileSync(unpacked, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0, 0, 0, 0, 0]));
+    const unpacked = '/opt/Vigil at Home/vigil-at-home';
     sys.files.set(unpacked, '2049:6603');
-    expect(await pinFor(sys, unpacked, here)).toBeUndefined();
-    expect(await pinFor(sys, '/opt/Vigil at Home/vigil-at-home', opts)).toBeUndefined();
+    sys.inodes.set('2049:6603', { data: Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]) });
+    expect(await pinFor(sys, unpacked, opts)).toBeUndefined();
   });
 
   it('is re-pinned by an approved grant naming the image', async () => {
-    const opts = { pinFile, installed: ['/opt/Vigil at Home'], sha256: () => APP_SHA };
+    const o = { ...opts, pinFile };
     // An image that is no longer the file at its path is skipped.
     const moved = { path: '/home/alex/Old.AppImage', id: '2049:7777' };
-    expect(await regrant(sys, { selfPaths: [], selfImages: [moved] }, opts)).toBeUndefined();
-    expect(readPin(pinFile)).toBeUndefined();
+    expect(await regrant(sys, { selfPaths: [], selfImages: [moved] }, o)).toBeUndefined();
+    const elsewhere = { path: image, id: '2049:7777' };
+    expect(await regrant(sys, { selfPaths: [], selfImages: [elsewhere] }, o)).toBeUndefined();
+    expect(currentPin()).toBeUndefined();
     const grant = { selfPaths: [], selfImages: [{ path: image, id: '2049:5501' }] };
-    expect(await regrant(sys, grant, opts)).toEqual(pin);
-    expect(readPin(pinFile)).toEqual(pin);
+    expect(await regrant(sys, grant, o)).toEqual(pin);
+    expect(currentPin()).toEqual(pin);
   });
+});
+
+describe('a FIFO on a real disk', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'vigil-fifo-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it.skipIf(process.platform === 'win32')(
+    'is refused promptly as a pin candidate, on either system',
+    { timeout: 5000 },
+    async () => {
+      const fifo = join(dir, 'Vigil.AppImage');
+      execFileSync('mkfifo', [fifo]);
+      const started = Date.now();
+      const linux = realSystem(LINUX_BINARIES, 'linux');
+      await expect(pinFor(linux, fifo, { installed: [] })).rejects.toThrow(/not a regular file/);
+      const grant = { selfPaths: [], selfImages: [{ path: fifo, id: '1:1' }] };
+      expect(await pinCandidate(linux, grant, { installed: [] })).toBeUndefined();
+      const mac = realSystem(BINARIES, 'darwin');
+      await expect(pinFor(mac, fifo, { installed: [] })).rejects.toThrow(/not a regular file/);
+      expect(Date.now() - started).toBeLessThan(2000);
+    },
+  );
 });

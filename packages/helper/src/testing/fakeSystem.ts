@@ -1,4 +1,6 @@
+import type { OpenedFile, OpenOptions } from '../openedFile.js';
 import type { BinaryName, RunResult, System } from '../system.js';
+import { FakeFs } from './fakeFs.js';
 
 export interface FakeProcess {
   path: string;
@@ -73,5 +75,12 @@ export class FakeSystem implements System {
 
   now(): number {
     return Date.now();
+  }
+
+  /** Paths, file contents and links (fakeFs.ts). */
+  readonly fs = new FakeFs();
+
+  openFile(path: string, opts?: OpenOptions): OpenedFile | undefined {
+    return this.fs.open(path, opts);
   }
 }
