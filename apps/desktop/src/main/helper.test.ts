@@ -101,7 +101,9 @@ describe('HelperLink', () => {
       if (cmd.kind === 'persistence.disable')
         throw new HelperCallError(
           'no',
-          cmd.path.includes('/a/') ? 'startup-folder-linked' : 'not-your-item',
+          (cmd as { path?: string }).path?.includes('/a/')
+            ? 'startup-folder-linked'
+            : 'not-your-item',
         );
       throw new HelperCallError('no', 'refused');
     });
