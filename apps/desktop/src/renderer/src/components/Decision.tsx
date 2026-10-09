@@ -32,6 +32,7 @@ export function DecisionControls({
   const pending = proposals.filter((p) => p.status === 'pending');
   const active = activeContainment(actions);
   const contained = alert.containment === 'active';
+  const serious = alert.severity === 'high' || alert.severity === 'critical';
 
   const decide = async (
     verdict: 'malicious' | 'benign' | 'expected',
@@ -77,7 +78,8 @@ export function DecisionControls({
           <>
             {pending.length > 0 && (
               <Button
-                kind="primary"
+                // A suggestion, not the default: only a serious alert leads with it.
+                kind={serious ? 'primary' : 'outline'}
                 icon={<ShieldAlert size={15} />}
                 onClick={() => void contain()}
               >
@@ -85,17 +87,28 @@ export function DecisionControls({
               </Button>
             )}
             <Button
-              kind={pending.length > 0 ? 'outline' : 'primary'}
+              kind={pending.length > 0 && serious ? 'outline' : 'primary'}
+              title="You did this yourself. Closes the alert; nothing is allowed for next time."
               onClick={() => void decide('expected', false, 'expected')}
             >
               That was me
             </Button>
-            <Button kind="ghost" onClick={() => void decide('benign', false, 'fine')}>
+            <Button
+              kind="ghost"
+              title="It wasn’t you, but it’s harmless. Closes the alert; nothing is allowed for next time."
+              onClick={() => void decide('benign', false, 'fine')}
+            >
               Looks fine
             </Button>
           </>
         )}
       </div>
+      {!contained && !full && (
+        <span className="t-small">
+          Either answer closes it, and Vigil remembers which. When a rule keeps getting these
+          answers, Vigil suggests turning it down on the Rules page.
+        </span>
+      )}
       {contained && active.length > 0 && (
         <div className="col release-scope" style={{ gap: 2 }}>
           <span className="t-small">Holding “{releaseLabel(active)}” will:</span>

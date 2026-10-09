@@ -96,6 +96,8 @@ export interface DogReport {
   }[];
   /** The AI that ran it. */
   provider?: string;
+  /** It failed after a run that failed too, so the next try waits a whole period. */
+  retry?: boolean;
   /** The run used a tool, or read a report that did: the summary could hold anyone's text. */
   tainted?: boolean;
 }

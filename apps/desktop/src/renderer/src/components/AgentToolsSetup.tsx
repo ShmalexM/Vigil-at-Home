@@ -6,6 +6,7 @@ import { timeAgo } from '../format';
 import { plural } from '../views/agents-format';
 import { useToast } from './Toasts';
 import { Button, Segmented, StatusMark, type MarkState } from './ui';
+import { computer } from '../platform';
 
 type Where = keyof McpSnippets;
 
@@ -101,10 +102,10 @@ export function AgentToolsSetup() {
 
       <span className="t-small">
         Add Vigil as an MCP server to Claude Code, Cursor or Codex, and your agent can look up
-        Vigil’s alerts, what it saw in the last 7 days and the agent sessions on this Mac, for
-        example to explain an alert or check its own work. What it gets is redacted the way Vigil’s
-        own AI gets it: names in home folder paths, keys and tokens are replaced. Vigil runs no
-        model for this. No tool changes a rule, a setting or a block, and none shows how a rule
+        Vigil’s alerts, what it saw in the last 7 days and the agent sessions on this {computer},
+        for example to explain an alert or check its own work. What it gets is redacted the way
+        Vigil’s own AI gets it: names in home folder paths, keys and tokens are replaced. Vigil runs
+        no model for this. No tool changes a rule, a setting or a block, and none shows how a rule
         works.
       </span>
 

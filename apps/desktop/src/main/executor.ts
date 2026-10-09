@@ -23,6 +23,8 @@ export class DryRunExecutor implements ActionExecutor {
   async execute(action: Action): Promise<ActionResult> {
     this.log.push(action);
     const at = Date.now();
-    return action.kind === 'file.quarantine' ? { at, quarantineId: `dry-${at}` } : { at };
+    return action.kind === 'file.quarantine'
+      ? { at, quarantineId: `dry-${at}`, simulated: true }
+      : { at, simulated: true };
   }
 }
