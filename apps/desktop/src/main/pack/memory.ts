@@ -20,15 +20,19 @@ const PROMPT_CHARS = 6000;
  * sourced entries, grouped by topic), with three changes for a security app:
  *
  * - Only the person's own words go in. The Lead dog notes a fact straight
- *   away only from an answer that used no tool; anything a tool, an alert or
- *   a connector returned could be written by an attacker, so changes from
- *   such an answer wait on a "Remember this?" card. Pack jobs and Vigil's
+ *   away only when its answer read no outside text, or the person typed the
+ *   fact in their message; anything a tool, an alert or a connector returned
+ *   could be written by an attacker, so other changes from such an answer
+ *   wait on a "Remember this?" card. Pack jobs and Vigil's
  *   helpers read it and never write it, and no AI tidies it in the
  *   background.
  * - It is background for answers, never a decision: nothing here blocks,
  *   allows, approves a tool call or changes a rule. Only PackService reads it.
  * - No secrets: a fact that looks like a key, token, password or email
  *   address is refused rather than stored.
+ * - Each fact keeps its provenance: `tainted` when the answer it came from
+ *   read outside text, even after the person said yes to the card. Facts
+ *   saved before this was recorded count as tainted (see memoryTainted).
  *
  * Kept in its own table, created here like the notebooks', so the pack can
  * come and go without touching the main schema's numbering.
@@ -78,17 +82,26 @@ export class PackMemory {
   /**
    * Saves one fact. The same fact said again is not saved twice; `replaces`
    * crosses out the entry it updates, so the memory keeps one answer per
-   * question rather than two that disagree.
+   * question rather than two that disagree. `tainted` says whether the fact
+   * could hold outside text; left out, it does (fails closed). The same fact
+   * said again cleanly makes a tainted entry clean.
    */
   remember(
     input: { fact: string; topic: string },
-    meta: { from: MemoryEntry['from']; source?: string; replaces?: string },
+    meta: { from: MemoryEntry['from']; source?: string; replaces?: string; tainted?: boolean },
   ): MemoryEntry {
     const { fact, topic } = MemoryInput.parse(input);
     if (looksSecret(fact)) throw new Error('Memory never keeps keys, passwords or email addresses');
-    const same = this.list().find((e) => sameFact(e.fact, fact));
+    const tainted = meta.tainted !== false;
+    let same = this.list().find((e) => sameFact(e.fact, fact));
     if (same) {
       if (meta.replaces && meta.replaces !== same.id) this.drop(meta.replaces);
+      if (!tainted && memoryTainted(same)) {
+        same = { ...same, tainted: false };
+        this.db
+          .prepare('UPDATE pack_memory SET body = ? WHERE id = ?')
+          .run(JSON.stringify(same), same.id);
+      }
       this.onChange();
       return same;
     }
@@ -102,6 +115,7 @@ export class PackMemory {
       from: meta.from,
       ...(meta.source ? { source: meta.source } : {}),
       added: this.now(),
+      tainted,
     };
     this.db
       .prepare('INSERT INTO pack_memory (id, added, topic, body) VALUES (?, ?, ?, ?)')
@@ -119,25 +133,28 @@ export class PackMemory {
 
   /**
    * What rides along with a run: the newest entries that fit, and how many
-   * more there are. Ids let the Lead dog replace or forget one.
+   * more there are. Ids let the Lead dog replace or forget one. `include`
+   * leaves entries out (the caller keeps tainted ones out unless relevant);
+   * those count as not shown.
    */
-  forPrompt(): {
-    entries: { id: string; topic: MemoryTopic; fact: string }[];
+  forPrompt(include: (e: MemoryEntry) => boolean = () => true): {
+    entries: PromptMemory[];
     notShown: number;
   } {
     const all = this.list().sort((a, b) => b.added - a.added);
-    const entries: { id: string; topic: MemoryTopic; fact: string }[] = [];
+    const entries: PromptMemory[] = [];
     let chars = 0;
     for (const e of all) {
+      if (!include(e)) continue;
       chars += e.fact.length + e.id.length + 16;
       if (chars > PROMPT_CHARS) break;
-      entries.push({ id: e.id, topic: e.topic, fact: e.fact });
+      entries.push(promptMemory(e));
     }
     return { entries, notShown: all.length - entries.length };
   }
 
   /** Entries whose words match, for a dog looking past what rode along. */
-  recall(words: string, limit = 20): { id: string; topic: MemoryTopic; fact: string }[] {
+  recall(words: string, limit = 20): PromptMemory[] {
     const terms = [...new Set(wordsOf(words))];
     return this.list()
       .map((e) => {
@@ -147,7 +164,7 @@ export class PackMemory {
       .filter((x) => terms.length === 0 || x.score > 0)
       .sort((a, b) => b.score - a.score || b.e.added - a.e.added)
       .slice(0, limit)
-      .map(({ e }) => ({ id: e.id, topic: e.topic, fact: e.fact }));
+      .map(({ e }) => promptMemory(e));
   }
 
   /**
@@ -173,6 +190,32 @@ export class PackMemory {
   private drop(id: string): void {
     this.db.prepare('DELETE FROM pack_memory WHERE id = ?').run(id);
   }
+}
+
+/** One fact as a run sees it. `tainted` is only there when it could hold outside text. */
+export interface PromptMemory {
+  id: string;
+  topic: MemoryTopic;
+  fact: string;
+  tainted?: true;
+}
+
+function promptMemory(e: MemoryEntry): PromptMemory {
+  return {
+    id: e.id,
+    topic: e.topic,
+    fact: e.fact,
+    ...(memoryTainted(e) ? { tainted: true as const } : {}),
+  };
+}
+
+/**
+ * Whether a fact could hold someone else's text. Facts saved before this was
+ * recorded count: a hand-typed one and one kept from a "Remember this?" card
+ * were saved the same way, so they can't be told apart.
+ */
+export function memoryTainted(e: Pick<MemoryEntry, 'tainted'>): boolean {
+  return e.tainted !== false;
 }
 
 function wordsOf(s: string): string[] {
