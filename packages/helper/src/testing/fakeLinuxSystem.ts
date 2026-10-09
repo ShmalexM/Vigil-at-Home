@@ -22,6 +22,15 @@ export class FakeLinuxSystem implements System {
   fagenrulesFails = false;
   private nextHandle = 2;
   console: number | undefined = 1000;
+  /**
+   * The helper's pid in this fake. Fixed, so the fake pids tests use never
+   * collide with the test runner's real pid.
+   */
+  pid = 999_999;
+
+  selfPid(): number {
+    return this.pid;
+  }
 
   async run(bin: BinaryName, args: string[], opts: { input?: string } = {}): Promise<RunResult> {
     this.runs.push({ bin, args, input: opts.input });

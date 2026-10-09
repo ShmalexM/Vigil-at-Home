@@ -16,6 +16,15 @@ export class FakeSystem implements System {
   /** ProgramArguments[0] of a plist, by path. */
   programs = new Map<string, string>();
   console: number | undefined = 501;
+  /**
+   * The helper's pid in this fake. Fixed, so the fake pids tests use never
+   * collide with the test runner's real pid.
+   */
+  pid = 999_999;
+
+  selfPid(): number {
+    return this.pid;
+  }
 
   async run(bin: BinaryName, args: string[], opts: { input?: string } = {}): Promise<RunResult> {
     this.runs.push({ bin, args, input: opts.input });

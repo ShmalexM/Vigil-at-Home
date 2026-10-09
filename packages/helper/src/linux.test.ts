@@ -125,6 +125,16 @@ describe('processes on Linux', () => {
     expect(await identifyProcess(sys, 4243)).toBeUndefined();
     expect(sys.runs.some((r) => r.bin === 'lsof')).toBe(false);
   });
+
+  it("refuses the helper's own pid as the system reports it, not the test runner's", async () => {
+    const sys = new FakeLinuxSystem();
+    sys.processes.set(sys.pid, { path: '/home/alex/Downloads/evil', started: STARTED });
+    await expect(suspendProcess(sys, sys.pid, {})).rejects.toMatchObject({ code: 'refused' });
+    // The runner's real pid is just another fake process here.
+    sys.processes.set(process.pid, { path: '/home/alex/Downloads/evil', started: STARTED });
+    await suspendProcess(sys, process.pid, {});
+    expect(sys.signals).toEqual([{ pid: process.pid, signal: 'SIGSTOP' }]);
+  });
 });
 
 describe('nftables firewall', () => {
