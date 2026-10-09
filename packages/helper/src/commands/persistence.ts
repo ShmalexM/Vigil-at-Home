@@ -10,7 +10,6 @@ import {
   quarantine,
   resolveTarget,
   restore,
-  type GuardedFile,
   type QuarantineOptions,
   type QuarantineRecord,
 } from './quarantine.js';
@@ -84,16 +83,16 @@ export async function disablePersistence(
         throw new ActionError('failed', `could not unload ${label}: ${out.stderr.trim()}`);
     }
   }
-  const q = quarantine(path, actionId, opts);
+  const q = await quarantine(sys, path, actionId, opts);
   return { quarantine: q, label, domain, wasLoaded };
 }
 
 export async function restorePersistence(
   sys: System,
   rec: PersistenceRecord,
-  guards?: readonly GuardedFile[],
+  opts: QuarantineOptions,
 ): Promise<void> {
-  restore(rec.quarantine, guards);
+  await restore(sys, rec.quarantine, opts);
   if (rec.wasLoaded) {
     const r = await sys.run('launchctl', ['bootstrap', rec.domain, rec.quarantine.originalPath]);
     if (r.code !== 0) {

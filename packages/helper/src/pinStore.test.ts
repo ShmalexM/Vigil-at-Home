@@ -14,17 +14,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHmac } from 'node:crypto';
-import { RuleStore } from '@vigil/sensors';
 import type { AppPin } from './appPin.js';
-import { Approvals } from './approval.js';
-import {
-  GuardTripped,
-  quarantine,
-  restore,
-  type QuarantineOptions,
-} from './commands/quarantine.js';
-import { Executor } from './executor.js';
-import { Journal } from './journal.js';
+import { quarantine, type QuarantineOptions } from './commands/quarantine.js';
 import { AppPinStore } from './pinStore.js';
 import type { BinaryName, RunResult, System } from './system.js';
 import type { Platform } from './platform.js';
@@ -47,7 +38,13 @@ class Flags {
   immutable = new Set<string>();
   constructor(readonly platform: Platform) {}
   now = () => 1_000;
+  /** Milliseconds each run takes, to hold a write in flight. */
+  delay = 0;
+  /** Called during each run, with its arguments. */
+  during: ((args: string[]) => void) | undefined;
   async run(bin: BinaryName, args: string[]): Promise<RunResult> {
+    if (this.delay) await new Promise((r) => setTimeout(r, this.delay));
+    this.during?.(args);
     const path = args.at(-1)!;
     const on = args[0] === '+i' || args[0] === 'uchg';
     if (on) this.immutable.add(path);
@@ -63,15 +60,14 @@ let file: string;
 let keyFile: string;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'vigil-pinstore-'));
-  state = join(root, 'state');
-  mkdirSync(state);
+  state = join(root, 'pin');
   file = join(state, 'app-pin.json');
   keyFile = join(state, 'app-pin.key');
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 const open = async (sys: Flags | System = new Flags('linux')) => {
-  const store = new AppPinStore(sys as System, { file, keyFile, ownerUid: process.getuid!() });
+  const store = new AppPinStore(sys as System, { dir: state, ownerUid: process.getuid!() });
   await store.load();
   return store;
 };
@@ -147,7 +143,6 @@ describe('the signed app pin', () => {
     expect(store.status().problem).toMatch(/not the one/);
     // A fresh install with nothing there yet is not a problem.
     rmSync(state, { recursive: true });
-    mkdirSync(state);
     expect((await open()).status()).toEqual({ pinned: false });
   });
 
@@ -185,89 +180,123 @@ describe('the signed app pin', () => {
       sys.runs = [];
       store.current();
       store.status();
-      store.guarded();
+      await store.intact();
       await open(sys);
       expect(sys.runs).toEqual([]);
     });
   }
 });
 
-describe('a move that takes a file the helper keeps', () => {
-  const opts = (store: AppPinStore): QuarantineOptions => ({
+describe('one queue for the pin', () => {
+  it('ends with the new pin when a repair races a write', async () => {
+    const sys = new Flags('linux');
+    const store = await open(sys);
+    await store.write(OTHER);
+    // The file goes away, so the repair has something to do.
+    rmSync(file);
+    // The write is slowed in its flag step, where the old code let a repair read the old pin.
+    sys.delay = 30;
+    const writing = store.write(PIN);
+    const repairing = store.repair();
+    await Promise.all([writing, repairing]);
+    expect(store.current()).toEqual(PIN);
+    expect((await open()).current()).toEqual(PIN);
+    // And a repair queued after a "no pin" writes no pin, not the one before it.
+    rmSync(file);
+    const none = store.write(undefined);
+    const again = store.repair();
+    await Promise.all([none, again]);
+    expect(store.current()).toBeUndefined();
+    expect((await open()).status()).toEqual({ pinned: false });
+  });
+
+  it('keeps the old pin in memory until a write is in place and flagged', async () => {
+    const sys = new Flags('linux');
+    const store = await open(sys);
+    await store.write(OTHER);
+    let seenDuring: AppPin | undefined;
+    sys.during = (args) => {
+      if (args[0] === '+i' && args[1] === file) seenDuring = store.current();
+    };
+    await store.write(PIN);
+    expect(seenDuring).toEqual(OTHER);
+    expect(store.current()).toEqual(PIN);
+  });
+
+  it('writes a readable copy for the app, never read back', async () => {
+    const publicFile = join(root, 'app-pin.json');
+    const store = new AppPinStore(new Flags('linux') as unknown as System, {
+      dir: state,
+      publicFile,
+      ownerUid: process.getuid!(),
+    });
+    await store.load();
+    await store.write(PIN);
+    expect(JSON.parse(readFileSync(publicFile, 'utf8'))).toEqual(PIN);
+    expect(statSync(publicFile).mode & 0o777).toBe(0o644);
+    expect(statSync(state).mode & 0o777).toBe(0o700);
+    writeFileSync(publicFile, JSON.stringify(OTHER));
+    expect(store.current()).toEqual(PIN);
+  });
+});
+
+describe('the tripwire on moves', () => {
+  const qopts = (
+    store: AppPinStore,
+    extra: Partial<QuarantineOptions> = {},
+  ): QuarantineOptions => ({
     quarantineDir: join(root, 'Quarantine'),
     platform: 'linux',
     protectedPrefixes: [],
     protectedExact: new Set(),
-    // The state folder is deliberately left out, as if reached by another path.
-    guarded: () => store.guarded(),
+    guard: () => store.intact(),
+    log: (m) => logs.push(m),
+    ...extra,
+  });
+  let logs: string[];
+  beforeEach(() => {
+    logs = [];
   });
 
-  it('is undone and refused when it moved the folder holding them', async () => {
-    const store = await open();
-    await store.write(PIN);
-    expect(() => quarantine(state, 'q1', opts(store))).toThrow(GuardTripped);
+  it('waits for a pin write in flight instead of tripping on it', async () => {
+    const sys = new Flags('linux');
+    const store = await open(sys);
+    await store.write(OTHER);
+    const home = join(root, 'home');
+    mkdirSync(home);
+    writeFileSync(join(home, 'evil'), 'x');
+    sys.delay = 30;
+    const writing = store.write(PIN);
+    const rec = await quarantine(new FakeLinuxSystem(), join(home, 'evil'), 'q1', qopts(store));
+    await writing;
+    expect(existsSync(join(home, 'evil'))).toBe(false);
+    expect(existsSync(rec.storedPath)).toBe(true);
     expect(store.current()).toEqual(PIN);
-    expect(store.status().problem).toBeUndefined();
-    expect(existsSync(join(root, 'Quarantine', 'q1'))).toBe(false);
+    expect(logs).toEqual([]);
   });
 
-  it('is undone and refused when what moved is a link to one of them', async () => {
+  it('refuses and logs, and moves nothing back, when a kept file changed', async () => {
     const store = await open();
     await store.write(PIN);
     const home = join(root, 'home');
     mkdirSync(home);
-    linkSync(keyFile, join(home, 'notes.txt'));
-    expect(() => quarantine(join(home, 'notes.txt'), 'q2', opts(store))).toThrow(GuardTripped);
-    expect(existsSync(join(home, 'notes.txt'))).toBe(true);
-    // An ordinary file still goes.
     writeFileSync(join(home, 'evil'), 'x');
-    expect(quarantine(join(home, 'evil'), 'q3', opts(store)).storedPath).toContain('q3');
-  });
-
-  it('is undone and refused on restore', async () => {
-    const store = await open();
-    await store.write(PIN);
-    const slot = join(root, 'Quarantine', 'q4');
-    mkdirSync(slot, { recursive: true });
-    linkSync(file, join(slot, 'x'));
-    const rec = {
-      originalPath: join(root, 'x'),
-      storedPath: join(slot, 'x'),
-      mode: 0o644,
-      uid: process.getuid!(),
-      gid: process.getgid!(),
-      isDirectory: false,
-    };
-    expect(() => restore(rec, store.guarded())).toThrow(GuardTripped);
-    expect(existsSync(rec.originalPath)).toBe(false);
-    expect(existsSync(rec.storedPath)).toBe(true);
-  });
-
-  it('is refused by the executor, which keeps its pin', async () => {
-    const sys = new FakeLinuxSystem();
-    const store = await open(new Flags('linux'));
-    await store.write(PIN);
-    const ex = new Executor({
-      sys,
-      journal: new Journal(join(root, 'journal.json')),
-      approvals: new Approvals({
-        dir: join(root, 'approvals'),
-        requiredOwnerUid: process.getuid!(),
-      }),
-      rules: new RuleStore(join(root, 'rules.json')),
-      quarantine: {
-        quarantineDir: join(root, 'Quarantine'),
-        protectedPrefixes: [],
-        protectedExact: new Set(),
-      },
-      syncPort: 47821,
-      appPin: store,
-    });
-    await expect(ex.execute({ kind: 'file.quarantine', path: state })).rejects.toMatchObject({
-      code: 'refused',
-    });
-    expect(existsSync(file)).toBe(true);
-    expect(store.current()).toEqual(PIN);
-    expect(store.status().problem).toBeUndefined();
+    // Before the move: nothing moves.
+    rmSync(file);
+    await expect(
+      quarantine(new FakeLinuxSystem(), join(home, 'evil'), 'q1', qopts(store)),
+    ).rejects.toMatchObject({ code: 'refused' });
+    expect(readFileSync(join(home, 'evil'), 'utf8')).toBe('x');
+    expect(existsSync(file)).toBe(false);
+    // During the move: the item stays in quarantine, and nothing is put back or rewritten.
+    await store.repair();
+    let calls = 0;
+    const guard = async () => ++calls === 1;
+    await expect(
+      quarantine(new FakeLinuxSystem(), join(home, 'evil'), 'q2', qopts(store, { guard })),
+    ).rejects.toMatchObject({ code: 'failed', message: expect.stringMatching(/in quarantine/) });
+    expect(existsSync(join(home, 'evil'))).toBe(false);
+    expect(existsSync(join(root, 'Quarantine', 'q2', 'evil'))).toBe(true);
+    expect(logs).toHaveLength(2);
   });
 });

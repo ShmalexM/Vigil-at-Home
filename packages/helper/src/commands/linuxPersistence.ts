@@ -15,13 +15,7 @@ import { lstatSync, readFileSync } from 'node:fs';
 import type { System } from '../system.js';
 import { protectionFor } from '../config.js';
 import { ActionError } from './errors.js';
-import {
-  quarantine,
-  resolveTarget,
-  restore,
-  type GuardedFile,
-  type QuarantineOptions,
-} from './quarantine.js';
+import { quarantine, resolveTarget, restore, type QuarantineOptions } from './quarantine.js';
 import type { PersistenceRecord } from './persistence.js';
 
 /** Folders whose items persistence.disable accepts on Linux. */
@@ -125,7 +119,7 @@ export async function disableLinuxPersistence(
         throw new ActionError('failed', `could not stop ${name}: ${stop.stderr.trim()}`);
     }
   }
-  const q = quarantine(path, actionId, startupQuarantine(opts));
+  const q = await quarantine(sys, path, actionId, startupQuarantine(opts));
   if (scope.kind !== 'autostart')
     await sys.run('systemctl', [...scopeArgs(scope), 'daemon-reload']);
   return { quarantine: q, label: name, domain: domainOf(scope), wasLoaded };
@@ -134,9 +128,9 @@ export async function disableLinuxPersistence(
 export async function restoreLinuxPersistence(
   sys: System,
   rec: PersistenceRecord,
-  guards?: readonly GuardedFile[],
+  opts: QuarantineOptions,
 ): Promise<void> {
-  restore(rec.quarantine, guards);
+  await restore(sys, rec.quarantine, startupQuarantine(opts));
   const scope = scopeOf(rec.domain);
   if (scope.kind === 'autostart') return;
   const args = scopeArgs(scope);

@@ -19,7 +19,8 @@ rm -f /usr/share/polkit-1/actions/com.vigilathome.helper.policy
 rm -f /usr/libexec/vigil-helper
 rm -rf /usr/libexec/vigil-helper.d
 # The pin and its key are kept immutable by the helper; clear that before removing them.
-chattr -i "/var/lib/vigil/app-pin.json" "/var/lib/vigil/app-pin.key" 2>/dev/null || true
-rm -f "/var/lib/vigil/app-pin.json" "/var/lib/vigil/app-pin.key" "/var/lib/vigil/app-pin.json.tmp" "/var/lib/vigil/app-pin.key.tmp"
+chattr -i "/var/lib/vigil/pin/app-pin.json" "/var/lib/vigil/pin/app-pin.key" 2>/dev/null || true
+rm -rf "/var/lib/vigil/pin"
+rm -f "/var/lib/vigil/app-pin.json" "/var/lib/vigil/app-pin.json.tmp"
 rm -f /run/vigil-helper.sock
 echo "Vigil helper removed. Quarantined files are still in /var/lib/vigil."

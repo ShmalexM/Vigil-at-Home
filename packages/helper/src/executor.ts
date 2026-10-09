@@ -38,7 +38,6 @@ import {
   realParentPath,
   restore,
   touchesHelperState,
-  GuardTripped,
   type QuarantineOptions,
   type QuarantineRecord,
 } from './commands/quarantine.js';
@@ -149,24 +148,14 @@ export class Executor {
 
   /**
    * Quarantine settings with the protected folders of the OS the helper acts
-   * on, and the files the helper keeps that no move may take (pinStore.ts).
+   * on, and the tripwire over the files the helper keeps (pinStore.ts).
    */
   private get quarantineOpts(): QuarantineOptions {
     const store = this.d.appPin;
     const opts: QuarantineOptions = store
-      ? { guarded: () => store.guarded(), ...this.d.quarantine }
+      ? { guard: () => store.intact(), ...this.d.quarantine }
       : { ...this.d.quarantine };
     return this.d.sys.platform === 'linux' ? { platform: 'linux', ...opts } : opts;
-  }
-
-  /** Run a file command; if a move took a file the helper keeps, put that file back from memory. */
-  private async guardedMove<T>(fn: () => Promise<T> | T): Promise<T> {
-    try {
-      return await fn();
-    } catch (err) {
-      if (err instanceof GuardTripped) await this.d.appPin?.repair().catch(() => undefined);
-      throw err;
-    }
   }
 
   /** The app each pending self-grant approval re-pins (appPin.ts pinCandidate), by nonce. */
@@ -393,22 +382,27 @@ export class Executor {
       }
       case 'file.quarantine': {
         const id = Journal.newId();
-        const rec = await this.guardedMove(() => quarantine(cmd.path, id, this.quarantineOpts));
+        const rec = await quarantine(sys, cmd.path, id, this.quarantineOpts);
         return this.record(cmd, `quarantined ${rec.originalPath}`, { quarantine: rec }, id);
       }
       case 'file.restore': {
         const entry = this.findContainment(cmd)!;
         const rec = entry.undo?.quarantine as QuarantineRecord;
-        await this.guardedMove(() => restore(rec, this.quarantineOpts.guarded?.()));
+        await restore(sys, rec, this.quarantineOpts);
         return this.release(entry, cmd, `restored ${rec.originalPath}`);
       }
       case 'persistence.disable': {
         const id = Journal.newId();
-        const rec = await this.guardedMove(() =>
+        const rec =
           sys.platform === 'linux'
-            ? disableLinuxPersistence(sys, cmd.path, id, this.quarantineOpts, this.d.launchDirs)
-            : disablePersistence(sys, cmd.path, id, this.quarantineOpts, this.d.launchDirs),
-        );
+            ? await disableLinuxPersistence(
+                sys,
+                cmd.path,
+                id,
+                this.quarantineOpts,
+                this.d.launchDirs,
+              )
+            : await disablePersistence(sys, cmd.path, id, this.quarantineOpts, this.d.launchDirs);
         return this.record(
           cmd,
           `disabled startup item ${rec.label ?? rec.quarantine.originalPath}`,
@@ -419,12 +413,8 @@ export class Executor {
       case 'persistence.enable': {
         const entry = this.findContainment(cmd)!;
         const rec = entry.undo?.persistence as PersistenceRecord;
-        const guards = this.quarantineOpts.guarded?.();
-        await this.guardedMove(() =>
-          sys.platform === 'linux'
-            ? restoreLinuxPersistence(sys, rec, guards)
-            : restorePersistence(sys, rec, guards),
-        );
+        if (sys.platform === 'linux') await restoreLinuxPersistence(sys, rec, this.quarantineOpts);
+        else await restorePersistence(sys, rec, this.quarantineOpts);
         return this.release(
           entry,
           cmd,

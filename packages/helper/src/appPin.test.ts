@@ -53,14 +53,10 @@ let pinFile: string;
 let store: AppPinStore;
 beforeEach(async () => {
   root = mkdtempSync(join(tmpdir(), 'vigil-pin-'));
-  pinFile = join(root, 'app-pin.json');
   // The store's own system: the immutable flag is a no-op here (pinStore.test.ts covers it).
   const flags = { platform: 'linux', run: async () => ok(), now: Date.now } as unknown as System;
-  store = new AppPinStore(flags, {
-    file: pinFile,
-    keyFile: join(root, 'app-pin.key'),
-    ownerUid: process.getuid!(),
-  });
+  store = new AppPinStore(flags, { dir: join(root, 'pin'), ownerUid: process.getuid!() });
+  pinFile = store.file;
   await store.load();
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));

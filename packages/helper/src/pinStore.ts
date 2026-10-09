@@ -1,6 +1,10 @@
 // Where the app pin (appPin.ts) is kept, so that nothing but the helper can
 // make a file the pin, and the pin doesn't depend on the file staying put.
 //
+//   Root-only   The pin and its key live in their own folder (config
+//               appPinDir, 0700, root's). File commands act on user paths
+//               only as that user (commands/transfer.ts), so none of them
+//               can reach it.
 //   Signed      The pin file carries an HMAC-SHA256 over its contents, keyed
 //               by a random key only root can read (app-pin.key, 0600, made
 //               on first use). A file without a valid signature is never
@@ -16,15 +20,19 @@
 //               vanishes or stops verifying changes nothing until the helper
 //               itself writes a new one (or a signed one appears).
 //   Immutable   Both files carry the immutable flag (chflags uchg on macOS,
-//               chattr +i on Linux where the filesystem has it), which
-//               stops any rename, unlink or write, even root's. The helper
-//               clears it only around its own writes. The state folder
-//               itself is not flagged: the journal, rules and approvals are
-//               written there all the time.
-//   Watched     The files' device and inode are known (guarded), so a file
-//               command whose move ends up taking one of them is undone
-//               (commands/quarantine.ts); that also covers filesystems
-//               without the flag.
+//               chattr +i on Linux where the filesystem has it). The helper
+//               clears it only around its own writes.
+//   One queue   Writes, repairs and the tripwire run one at a time, in
+//               order. The pin in memory changes only once a write is
+//               complete and flagged, and a repair writes what is in memory
+//               when its turn comes, never something read before.
+//   Tripwire    intact() says whether the files are still the device and
+//               inode the helper left; file commands check it before and
+//               after every move, and refuse and log when it is not. It
+//               never moves or rewrites anything.
+//
+// A readable copy of the pin (config appPin) is written beside the state for
+// the app to see what is pinned. It is never read here.
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
@@ -33,27 +41,28 @@ import {
   fchmodSync,
   fstatSync,
   lstatSync,
+  mkdirSync,
   openSync,
   readSync,
   renameSync,
   rmSync,
   writeSync,
 } from 'node:fs';
+import { join } from 'node:path';
 import { fileId } from '@vigil/core/self';
 import { openNonBlocking } from '@vigil/sensors';
 import { AppPin } from './appPin.js';
 import type { System } from './system.js';
-import type { GuardedFile } from './commands/quarantine.js';
 
 const DOMAIN = 'vigil-app-pin-v1\n';
 const MAX_FILE = 64 * 1024;
 
 export interface PinStoreOptions {
-  /** The pin file (config appPin). */
-  file: string;
-  /** The key file (config appPinKey). */
-  keyFile: string;
-  /** uid that must own the key file. 0 in production; the test's own uid in tests. */
+  /** The root-only folder holding the pin and its key (config appPinDir). */
+  dir: string;
+  /** The readable copy for the app (config appPin). */
+  publicFile?: string;
+  /** uid that must own the folder and key. 0 in production; the test's own uid in tests. */
   ownerUid?: number;
   log?: (msg: string) => void;
 }
@@ -122,24 +131,63 @@ function canonical(body: Record<string, unknown>): string {
 }
 
 export class AppPinStore {
+  readonly file: string;
+  readonly keyFile: string;
   private key: Buffer | undefined;
   private pin: AppPin | undefined;
   private seen: string | undefined;
   private problem: string | undefined;
   /** The generation of the pin in memory; a file signed with a lower one is old. */
   private gen = 0;
+  /** Device and inode of each file as the helper last left it. */
   private readonly ids = new Map<string, string>();
+  private tail: Promise<unknown> = Promise.resolve();
+  private writing = 0;
 
   constructor(
     private readonly sys: System,
     private readonly opts: PinStoreOptions,
-  ) {}
+  ) {
+    this.file = join(opts.dir, 'app-pin.json');
+    this.keyFile = join(opts.dir, 'app-pin.key');
+  }
 
-  /** At start: the key (made if there is none) and the pin, if the file verifies. */
-  async load(): Promise<void> {
-    this.key = this.readKey();
-    if (!this.key && lstatId(this.opts.keyFile) === undefined) await this.writeKey();
-    this.refresh();
+  /** Run `fn` after everything queued before it. */
+  private enqueue<T>(fn: () => Promise<T> | T): Promise<T> {
+    const run = this.tail.then(fn);
+    this.tail = run.catch(() => undefined);
+    return run;
+  }
+
+  /** At start: the folder, the key (made if there is none) and the pin, if the file verifies. */
+  load(): Promise<void> {
+    return this.enqueue(async () => {
+      this.ensureDir();
+      this.key = this.readKey();
+      if (!this.key && lstatId(this.keyFile) === undefined) await this.writeKey();
+      this.refresh();
+    });
+  }
+
+  /** The folder must be a real folder, the owner's alone; made so if it is new. */
+  private ensureDir(): void {
+    const owner = this.opts.ownerUid ?? 0;
+    mkdirSync(this.opts.dir, { recursive: true, mode: 0o700 });
+    const st = lstatSync(this.opts.dir);
+    if (!st.isDirectory() || st.uid !== owner)
+      throw new Error(`${this.opts.dir} is not a folder only the helper owns`);
+    if ((st.mode & 0o077) !== 0) {
+      // Opened without following a link, so the mode lands on this very folder.
+      const fd = openSync(
+        this.opts.dir,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY,
+      );
+      try {
+        fchmodSync(fd, 0o700);
+      } finally {
+        closeSync(fd);
+      }
+    }
   }
 
   /** The pin in force: the signed file on disk if it changed, else the one in memory. */
@@ -156,54 +204,95 @@ export class AppPinStore {
     return s;
   }
 
-  /** The pin and key files with the device and inode the helper last left them with. */
-  guarded(): GuardedFile[] {
-    return [...this.ids].map(([path, id]) => ({ path, id }));
+  /**
+   * The tripwire: whether the pin and key files are still the device and
+   * inode the helper left them as. Waits for writes queued before it.
+   */
+  intact(): Promise<boolean> {
+    return this.enqueue(() => [...this.ids].every(([path, id]) => lstatId(path) === id));
   }
 
   /** Replace the pin (undefined: no pin), signed, and flagged immutable again. */
-  async write(pin: AppPin | undefined): Promise<void> {
+  write(pin: AppPin | undefined): Promise<void> {
+    return this.enqueue(() => this.commit(pin));
+  }
+
+  /**
+   * Put back what the helper keeps, from memory, when a file is no longer
+   * the one it left (replaced, moved away or gone). Writes the pin in force
+   * when its turn in the queue comes.
+   */
+  repair(): Promise<void> {
+    return this.enqueue(async () => {
+      const keyId = this.ids.get(this.keyFile);
+      if (this.key && keyId !== undefined && lstatId(this.keyFile) !== keyId) {
+        const key = this.key;
+        await this.writeFile(this.keyFile, 0o600, () => key.toString('hex') + '\n');
+      }
+      const pinId = this.ids.get(this.file);
+      if (pinId !== undefined && lstatId(this.file) !== pinId) await this.commit(this.pin);
+    });
+  }
+
+  /** Write `pin`, then, once the file is in place and flagged, make it the pin in memory. */
+  private async commit(pin: AppPin | undefined): Promise<void> {
     if (!this.key) await this.writeKey();
+    const key = this.key!;
     const gen = Math.max(this.gen + 1, this.sys.now());
-    await this.writeFile(this.opts.file, 0o644, (file) => {
+    await this.writeFile(this.file, 0o644, (file) => {
       const body: Record<string, unknown> = pin ? { ...pin } : { none: true };
       Object.assign(body, { file, gen });
-      body.mac = this.sign(body);
+      body.mac = this.sign(key, body);
       return JSON.stringify(body) + '\n';
     });
     this.pin = pin;
     this.gen = gen;
     this.problem = undefined;
-    this.seen = stamp(this.opts.file);
+    this.seen = stamp(this.file);
+    this.writePublic(pin);
   }
 
-  /**
-   * Put back what the helper keeps, from memory, when a file is no longer
-   * the one it left (replaced, moved away or gone).
-   */
-  async repair(): Promise<void> {
-    const keyId = this.ids.get(this.opts.keyFile);
-    if (this.key && keyId !== undefined && lstatId(this.opts.keyFile) !== keyId)
-      await this.writeFile(this.opts.keyFile, 0o600, () => this.key!.toString('hex') + '\n');
-    const pinId = this.ids.get(this.opts.file);
-    if (pinId !== undefined && lstatId(this.opts.file) !== pinId) await this.write(this.pin);
+  /** The app's readable copy; a failure only means the app may ask to set the helper up again. */
+  private writePublic(pin: AppPin | undefined): void {
+    const path = this.opts.publicFile;
+    if (!path) return;
+    try {
+      const tmp = `${path}.tmp`;
+      rmSync(tmp, { force: true });
+      const fd = openSync(
+        tmp,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o644,
+      );
+      try {
+        fchmodSync(fd, 0o644);
+        writeSync(fd, JSON.stringify(pin ?? {}) + '\n');
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(tmp, path);
+    } catch (err) {
+      this.opts.log?.(`could not write ${path}: ${(err as Error).message}`);
+    }
   }
 
-  private sign(body: Record<string, unknown>): string {
-    return createHmac('sha256', this.key!)
+  private sign(key: Buffer, body: Record<string, unknown>): string {
+    return createHmac('sha256', key)
       .update(DOMAIN + canonical(body))
       .digest('hex');
   }
 
   /** Re-read the pin file when it changed since last looked at; keep memory unless it verifies. */
   private refresh(): void {
-    const now = stamp(this.opts.file);
+    // A write in progress is not the pin until it is committed.
+    if (this.writing) return;
+    const now = stamp(this.file);
     if (now === this.seen) return;
     this.seen = now;
     const verified = this.verify();
     if (verified === 'invalid') {
       // Never pinned and nothing there: nothing is wrong.
-      if (now === 'missing' && !this.pin && !this.ids.has(this.opts.file)) return;
+      if (now === 'missing' && !this.pin && !this.ids.has(this.file)) return;
       this.problem =
         now === 'missing'
           ? 'the pin file is missing; the helper keeps the pin it loaded'
@@ -214,12 +303,12 @@ export class AppPinStore {
     this.pin = verified.pin;
     this.gen = verified.gen;
     this.problem = undefined;
-    const id = lstatId(this.opts.file);
-    if (id) this.ids.set(this.opts.file, id);
+    const id = lstatId(this.file);
+    if (id) this.ids.set(this.file, id);
   }
 
   private verify(): { pin: AppPin | undefined; gen: number } | 'invalid' {
-    const read = readSmall(this.opts.file);
+    const read = readSmall(this.file);
     if (!read) return 'invalid';
     let body: Record<string, unknown>;
     try {
@@ -248,22 +337,22 @@ export class AppPinStore {
     return 'invalid';
   }
 
-  /** The key, if the key file is a root-owned 0600 file holding one. */
+  /** The key, if the key file is a 0600 file of the owner's holding one. */
   private readKey(): Buffer | undefined {
-    const read = readSmall(this.opts.keyFile);
+    const read = readSmall(this.keyFile);
     if (!read) return undefined;
     const owner = this.opts.ownerUid ?? 0;
     if (read.uid !== owner || (read.mode & 0o077) !== 0) return undefined;
     const m = /^([0-9a-f]{64})\n?$/.exec(read.text);
     if (!m) return undefined;
-    const id = lstatId(this.opts.keyFile);
-    if (id) this.ids.set(this.opts.keyFile, id);
+    const id = lstatId(this.keyFile);
+    if (id) this.ids.set(this.keyFile, id);
     return Buffer.from(m[1]!, 'hex');
   }
 
   private async writeKey(): Promise<void> {
     const key = randomBytes(32);
-    await this.writeFile(this.opts.keyFile, 0o600, () => key.toString('hex') + '\n');
+    await this.writeFile(this.keyFile, 0o600, () => key.toString('hex') + '\n');
     this.key = key;
   }
 
@@ -274,25 +363,30 @@ export class AppPinStore {
    * file's device and inode, which the rename keeps.
    */
   private async writeFile(path: string, mode: number, text: (id: string) => string): Promise<void> {
-    if (lstatId(path) !== undefined) await this.flag(path, false);
-    const tmp = `${path}.tmp`;
-    rmSync(tmp, { force: true });
-    const fd = openSync(
-      tmp,
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-      mode,
-    );
+    this.writing++;
     try {
-      fchmodSync(fd, mode);
-      const st = fstatSync(fd, { bigint: true });
-      writeSync(fd, text(fileId(st.dev, st.ino)));
+      if (lstatId(path) !== undefined) await this.flag(path, false);
+      const tmp = `${path}.tmp`;
+      rmSync(tmp, { force: true });
+      const fd = openSync(
+        tmp,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        mode,
+      );
+      try {
+        fchmodSync(fd, mode);
+        const st = fstatSync(fd, { bigint: true });
+        writeSync(fd, text(fileId(st.dev, st.ino)));
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(tmp, path);
+      await this.flag(path, true);
+      const id = lstatId(path);
+      if (id) this.ids.set(path, id);
     } finally {
-      closeSync(fd);
+      this.writing--;
     }
-    renameSync(tmp, path);
-    await this.flag(path, true);
-    const id = lstatId(path);
-    if (id) this.ids.set(path, id);
   }
 
   /** Set or clear the immutable flag; a filesystem without it is left as it is. */

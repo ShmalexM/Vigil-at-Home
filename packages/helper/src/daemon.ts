@@ -151,7 +151,12 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     : undefined;
 
   // The app pin, signed and kept in memory (pinStore.ts).
-  const pinStore = new AppPinStore(sys, { file: paths.appPin, keyFile: paths.appPinKey, log });
+  const pinStore = new AppPinStore(sys, {
+    dir: paths.appPinDir,
+    publicFile: paths.appPin,
+    ownerUid: process.getuid?.() ?? 0,
+    log,
+  });
   await pinStore.load();
 
   const executor: Executor = new Executor({
@@ -159,7 +164,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     journal,
     approvals,
     rules,
-    quarantine: { quarantineDir: paths.quarantineDir, stateDir: paths.supportDir },
+    quarantine: { quarantineDir: paths.quarantineDir, stateDir: paths.supportDir, log },
     syncPort,
     ...(linux
       ? {}
@@ -313,7 +318,14 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       .catch((err: Error) => log(`could not start osquery: ${err.message}`));
   };
   keepOsquery();
-  const osqueryTimer = setInterval(keepOsquery, 5 * 60 * 1000);
+  const osqueryTimer = setInterval(
+    () => {
+      keepOsquery();
+      // Puts the pin back from memory if its file went away; never a value older than the one in force.
+      pinStore.repair().catch((err: Error) => log(`could not repair the app pin: ${err.message}`));
+    },
+    5 * 60 * 1000,
+  );
   osqueryTimer.unref();
 
   // Renew the sync certificate daily if it is close to expiring.

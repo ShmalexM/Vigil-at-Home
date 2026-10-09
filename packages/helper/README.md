@@ -88,7 +88,9 @@ Santa / osquery ─► SensorHub ─► FastPath (same engine as the app) ─►
   revision (`helperRules.rev`), which goes up with every change.
 - The app pinned at install is spared (`appPin.ts`): `install.sh` runs `vigil-helper
 pin-app` as root, which records the cdhash and sha256 of the app's main executable on
-  macOS, or the AppImage's device, inode and sha256 on Linux, in `app-pin.json`. Before
+  macOS, or the AppImage's device, inode and sha256 on Linux. The pin is signed with a
+  root-only key and kept in a root-only folder (`pin/`, 0700), held in memory and flagged
+  immutable (`pinStore.ts`); `app-pin.json` beside it is a readable copy for the app. Before
   pausing or stopping a process, the helper checks the target against the pin (codesign on
   the pid on macOS, with the process identified again afterwards so a reused pid counts for
   nothing; the AppImage's mount on Linux), and it refuses a hash block naming the pinned
@@ -121,6 +123,14 @@ an event while working fine; Santa logs every program launch.
 - **Protected paths.** macOS system folders, top-level folders, home folders and Vigil's
   own files are never quarantined. Symlinked parent folders are resolved and checked
   again. Restore never overwrites something new.
+- **No root writes through your folders.** Quarantine and restore copy an item between
+  its folder and the helper's own in two small processes (`commands/fsChild.ts`): the
+  side in your folders runs as you (the folder's owner), with your groups, so a folder
+  swapped for a link mid-move leads only where you could already go. Root acts directly
+  only where every folder on the path is root's alone. Files are created with
+  `O_EXCL|O_NOFOLLOW`, the original is removed only after the copy is complete, and a
+  failed copy removes only what it created. A root-owned item in a folder others can
+  write to (like a package-installed app in `/Applications`) is refused.
 - **Network blocks.** Loopback, link-local and multicast addresses are refused, and so
   are ranges wider than /8 (IPv4) or /24 (IPv6). Single ports are not supported yet.
   pf forgets its tables at reboot, so the helper re-applies active blocks from its

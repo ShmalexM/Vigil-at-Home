@@ -18,6 +18,7 @@ export const BINARIES = {
   osascript: '/usr/bin/osascript',
   codesign: '/usr/bin/codesign',
   chflags: '/usr/bin/chflags',
+  id: '/usr/bin/id',
   osqueryd: '/opt/osquery/lib/osquery.app/Contents/MacOS/osqueryd',
 } as const;
 
@@ -34,6 +35,7 @@ export const LINUX_BINARIES = {
   rpm: '/usr/bin/rpm',
   fagenrules: '/usr/sbin/fagenrules',
   chattr: '/usr/bin/chattr',
+  id: '/usr/bin/id',
   osqueryd: '/opt/osquery/bin/osqueryd',
 } as const;
 

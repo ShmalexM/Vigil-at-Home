@@ -10,6 +10,7 @@
 // vigil-helper osquery-remove    (root) stop Vigil's osquery job, restore osquery's old config
 // vigil-helper pin-app <path>    (root) pin the app the helper is installed for (appPin.ts):
 //                                its main executable on macOS, its AppImage on Linux
+// vigil-helper fs-child          one file operation as a user, for the daemon (commands/fsChild.ts)
 
 import {
   osqueryConfig,
@@ -23,6 +24,7 @@ import { dirname } from 'node:path';
 import { Approvals } from './approval.js';
 import { pinFor } from './appPin.js';
 import { AppPinStore } from './pinStore.js';
+import { runFsChild } from './commands/fsChild.js';
 import { defaultPaths, installedSelf, SANTA_SYNC_PORT } from './config.js';
 import { runDaemon } from './daemon.js';
 import { ensureOsquery, removeOsquery } from './osquery.js';
@@ -33,6 +35,9 @@ import { realSystem } from './system.js';
 async function main(argv: string[]): Promise<number> {
   const [cmd, arg, ...more] = argv;
   switch (cmd) {
+    case 'fs-child':
+      // One file operation as a user, started by the daemon (commands/fsChild.ts).
+      return runFsChild();
     case 'daemon': {
       const stop = await runDaemon();
       const shutdown = () => {
@@ -95,8 +100,8 @@ async function main(argv: string[]): Promise<number> {
       }
       const sys = realSystem();
       const paths = defaultPaths();
-      mkdirSync(dirname(paths.appPin), { recursive: true, mode: 0o755 });
-      const store = new AppPinStore(sys, { file: paths.appPin, keyFile: paths.appPinKey });
+      mkdirSync(dirname(paths.appPinDir), { recursive: true, mode: 0o755 });
+      const store = new AppPinStore(sys, { dir: paths.appPinDir, publicFile: paths.appPin });
       await store.load();
       // Whatever happens, an older app's pin doesn't outlive this install.
       await store.write(undefined);

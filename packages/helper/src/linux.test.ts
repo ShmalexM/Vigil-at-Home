@@ -16,7 +16,7 @@ import { defaultPaths, linuxPaths } from './config.js';
 import { Executor, type ActionOutcome } from './executor.js';
 import { Journal } from './journal.js';
 import { identifyProcess, isProtectedProcess, suspendProcess } from './commands/process.js';
-import { moveAcrossDisks, vetPath } from './commands/quarantine.js';
+import { quarantine, restore, vetPath } from './commands/quarantine.js';
 import { NFT_SETUP, NftFirewall, parseNftRules } from './commands/nftables.js';
 import {
   disableLinuxPersistence,
@@ -242,7 +242,7 @@ describe('Linux startup items', () => {
       '--user -M alex@ daemon-reload',
     ]);
 
-    await restoreLinuxPersistence(sys, rec);
+    await restoreLinuxPersistence(sys, rec, qopts());
     expect(readFileSync(path, 'utf8')).toContain('ExecStart');
     expect(sys.active.has('user:alex miner.service')).toBe(true);
   });
@@ -253,7 +253,7 @@ describe('Linux startup items', () => {
     const rec = await disableLinuxPersistence(sys, path, 'act2', qopts(), dirs(), () => PASSWD);
     expect(rec.domain).toBe('autostart');
     expect(sys.runs).toEqual([]);
-    await restoreLinuxPersistence(sys, rec);
+    await restoreLinuxPersistence(sys, rec, qopts());
     expect(existsSync(path)).toBe(true);
   });
 
@@ -275,15 +275,24 @@ describe('Linux startup items', () => {
 });
 
 describe('moving across disks', () => {
-  it.skipIf(!existsSync('/dev/shm'))('copies and deletes when rename would fail', () => {
+  it.skipIf(!existsSync('/dev/shm'))('quarantines and restores from another disk', async () => {
     const a = mkdtempSync(join('/dev/shm', 'vigil-'));
     const b = mkdtempSync(join(tmpdir(), 'vigil-'));
     try {
       mkdirSync(join(a, 'app'));
       writeFileSync(join(a, 'app', 'run'), 'x', { mode: 0o755 });
-      moveAcrossDisks(join(a, 'app'), join(b, 'app'));
+      const opts = {
+        quarantineDir: join(b, 'q'),
+        platform: 'linux' as const,
+        protectedPrefixes: [],
+      };
+      const sys = new FakeLinuxSystem();
+      const rec = await quarantine(sys, join(a, 'app'), 'x1', opts);
       expect(existsSync(join(a, 'app'))).toBe(false);
-      expect(statSync(join(b, 'app', 'run')).mode & 0o777).toBe(0o755);
+      expect(statSync(join(rec.storedPath, 'run')).mode & 0o777).toBe(0o755);
+      await restore(sys, rec, opts);
+      expect(statSync(join(a, 'app', 'run')).mode & 0o777).toBe(0o755);
+      expect(existsSync(join(b, 'q', 'x1'))).toBe(false);
     } finally {
       rmSync(a, { recursive: true, force: true });
       rmSync(b, { recursive: true, force: true });

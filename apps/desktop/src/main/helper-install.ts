@@ -128,7 +128,7 @@ export function appPinTarget(
   }
 }
 
-/** Where the helper keeps its pin; root-owned, readable by everyone. */
+/** The readable copy of the helper's pin (the signed pin itself is root-only); root-owned. */
 export function appPinFile(platform: NodeJS.Platform = process.platform, root = ''): string {
   return join(
     root,
