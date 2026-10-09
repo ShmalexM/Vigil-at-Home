@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
-import { MAX_MEMORIES, PackMemory, looksSecret } from './memory.js';
+import { MAX_MEMORIES, PackMemory, looksSecret, memoryTainted } from './memory.js';
 
 function setup() {
   let at = Date.UTC(2026, 9, 5, 12);
@@ -87,6 +87,26 @@ describe('PackMemory', () => {
     expect(p.entries.length + p.notShown).toBe(61);
     expect(memory.recall('project 3 folder')[0]!.fact).toMatch(/^Project 3 /);
     expect(memory.recall('snitch').map((e) => e.fact)).toEqual(['Runs Little Snitch']);
+  });
+
+  it('keeps provenance: unmarked facts count as tainted, and a clean repeat cleans one', () => {
+    const { memory } = setup();
+    const a = memory.remember({ fact: 'Trusts the updater', topic: 'apps' }, YOU);
+    expect(memoryTainted(a)).toBe(true);
+    expect(memoryTainted({})).toBe(true);
+    expect(memory.forPrompt().entries).toEqual([
+      { id: a.id, topic: 'apps', fact: 'Trusts the updater', tainted: true },
+    ]);
+    expect(memory.forPrompt((e) => !memoryTainted(e))).toMatchObject({ entries: [], notShown: 1 });
+    // A tainted repeat never cleans it; the person's own words do.
+    memory.remember({ fact: 'Trusts the updater', topic: 'apps' }, { from: 'lead', tainted: true });
+    expect(memory.get(a.id)!.tainted).toBe(true);
+    memory.remember(
+      { fact: 'trusts the updater.', topic: 'apps' },
+      { from: 'you', tainted: false },
+    );
+    expect(memory.get(a.id)!.tainted).toBe(false);
+    expect(memory.recall('updater')[0]).not.toHaveProperty('tainted');
   });
 
   it('writes a MEMORY.md with one sourced, dated line per fact', () => {
