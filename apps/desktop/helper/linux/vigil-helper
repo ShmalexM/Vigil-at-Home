@@ -17,4 +17,6 @@ case $V in versions/*) ;; *) N= ;; esac
 case $N in
   '' | .* | *[!A-Za-z0-9._-]*) echo "Unexpected $D/current: $V" >&2; exit 1 ;;
 esac
+# And that name is the folder the link points to, however readlink printed it.
+[ "$D/current" -ef "$D/versions/$N" ] || { echo "Unexpected $D/current: $V" >&2; exit 1; }
 exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "$D/versions/$N/node" "$D/versions/$N/helper.mjs" "$@"
