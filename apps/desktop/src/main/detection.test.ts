@@ -686,13 +686,13 @@ describe('alert detail', () => {
     }
     const alert = await core.alerts.raise({ rule, events: [event], actions: [] });
     expect(core.alertDetail(alert.id)?.events[0]?.raw).toBeDefined();
-    const json = core.alertEvidence(alert.id)!;
+    const json = (await core.alertEvidence(alert.id))!;
     expect(json).not.toContain('kept out');
     expect(json).not.toContain('"raw"');
     expect(json).not.toContain('hunter2');
     expect(json).not.toMatch(/alice/i);
     expect(JSON.parse(json).rule.name).toBe('Downloaded script run directly');
-    expect(core.alertEvidence('nope')).toBeNull();
+    expect(await core.alertEvidence('nope')).toBeNull();
   });
   it("copies only the fields picked for export, never a repeat's match key", async () => {
     const { core, store } = setup();
@@ -703,7 +703,7 @@ describe('alert detail', () => {
     const alert = await core.alerts.raise({ rule, events: [event], actions: [] });
     // The key is the evidence itself, command line included.
     expect(store.getAlert(alert.id)?.repeats?.key).toContain('hunter2');
-    const json = core.alertEvidence(alert.id)!;
+    const json = (await core.alertEvidence(alert.id))!;
     expect(json).not.toContain('hunter2');
     const out = JSON.parse(json);
     expect(out.alert.repeats).toEqual({ count: 1, lastAt: expect.any(Number) });
@@ -727,7 +727,7 @@ describe('alert detail', () => {
         } as never,
       ],
     });
-    const later = core.alertEvidence(alert.id)!;
+    const later = (await core.alertEvidence(alert.id))!;
     expect(later).not.toContain('later-field');
     expect(JSON.parse(later).actions[0]).toMatchObject({
       id: 'a1',
@@ -753,7 +753,7 @@ describe('alert detail', () => {
       details: { service: 'kTCCServiceCamera', authRight: 'allowed', sessionToken: 'hunter2' },
     };
     const alert = await core.alerts.raise({ rule, events: [xprotect, tcc], actions: [] });
-    const json = core.alertEvidence(alert.id)!;
+    const json = (await core.alertEvidence(alert.id))!;
     expect(json).not.toContain('hunter2');
     expect(json).not.toContain('internal');
     const events: Array<{ id: string; details: unknown }> = JSON.parse(json).events;
@@ -778,7 +778,7 @@ describe('alert detail', () => {
     if (plain.kind === 'process.exec') plain.process.args = ['ssh', 'al@pc', '-l', 'al'];
     const alert = await core.alerts.raise({ rule, events: [secret, plain], actions: [] });
     const events: Array<{ id: string; process: { args: string[] } }> = JSON.parse(
-      core.alertEvidence(alert.id)!,
+      (await core.alertEvidence(alert.id))!,
     ).events;
     expect(events.find((e) => e.id === secret.id)?.process.args).toEqual([
       '[withheld: may contain a secret]',

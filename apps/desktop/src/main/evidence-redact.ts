@@ -204,7 +204,47 @@ function carries(text: unknown, withheld: Withheld): boolean {
  */
 export function redactEvidence(value: unknown, names: EvidenceNames): unknown {
   const withheld: Withheld = [];
-  const out = walk(value, names, withheld);
+  return finish(value, walk(value, names, withheld), withheld);
+}
+
+/** How long {@link redactEvidenceInSlices} works before letting other work run. */
+export const SLICE_MS = 50;
+
+const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/**
+ * {@link redactEvidence}, with the same result, for evidence that can be
+ * large: an alert keeps every repeat's events, so it can hold thousands, and
+ * the scan of each string is not cheap. The events are scanned a few at a
+ * time, letting other work (the window) run every {@link SLICE_MS}.
+ */
+export async function redactEvidenceInSlices(
+  value: unknown,
+  names: EvidenceNames,
+  yieldTo: () => Promise<void> = nextTurn,
+  now: () => number = () => performance.now(),
+): Promise<unknown> {
+  if (!isRecord(value) || !Array.isArray(value['events'])) return redactEvidence(value, names);
+  const withheld: Withheld = [];
+  const { events, ...rest } = value;
+  const out = walk(rest, names, withheld) as Record<string, unknown>;
+  const scanned: unknown[] = [];
+  let since = now();
+  for (const event of events) {
+    if (now() - since >= SLICE_MS) {
+      await yieldTo();
+      since = now();
+    }
+    scanned.push(walk(event, names, withheld));
+  }
+  // The same keys in the same order as redactEvidence gives.
+  const whole: Record<string, unknown> = {};
+  for (const k of Object.keys(value)) whole[k] = k === 'events' ? scanned : out[k];
+  return finish(value, whole, withheld);
+}
+
+/** The alert summary and repeated titles and labels, once every string has been scanned. */
+function finish(value: unknown, out: unknown, withheld: Withheld): unknown {
   if (withheld.length === 0) return out;
   const alert = isRecord(value) && isRecord(value['alert']) ? value['alert'] : undefined;
   const copied = isRecord(out) && isRecord(out['alert']) ? out['alert'] : undefined;

@@ -28,7 +28,7 @@ import { untouched } from '../shared/piles.js';
 import { DEFAULT_APPEARANCE, type AppearanceSettings } from '../shared/themes.js';
 import { AlertService, type DecisionInput } from './alerts.js';
 import { evidenceOf } from './evidence-export.js';
-import { redactEvidence } from './evidence-redact.js';
+import { redactEvidenceInSlices } from './evidence-redact.js';
 import { EventLog } from './events.js';
 import { BATTERY_SLOWDOWN, type PowerMode } from './power.js';
 import type { Store } from './db/store.js';
@@ -430,10 +430,11 @@ export class VigilCore {
    * It exports only the fields evidence-export.ts picks, so neither an event's
    * raw sensor record nor an internal key such as a repeat's goes out.
    */
-  alertEvidence(id: string): string | null {
+  async alertEvidence(id: string): Promise<string | null> {
     const d = this.alertDetail(id);
     if (!d) return null;
-    return JSON.stringify(redactEvidence(evidenceOf(d), this.evidenceRedaction()), null, 2);
+    const out = await redactEvidenceInSlices(evidenceOf(d), this.evidenceRedaction());
+    return JSON.stringify(out, null, 2);
   }
 
   /** Whose names the copied evidence hides. Overridable for tests. */

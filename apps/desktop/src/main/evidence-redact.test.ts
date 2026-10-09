@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { redactEvidence, WITHHELD } from './evidence-redact.js';
+import { redactEvidence, redactEvidenceInSlices, SLICE_MS, WITHHELD } from './evidence-redact.js';
 
 const names = { username: 'al', hostname: 'pc.local' };
 const command = (text: string, n = {}) =>
@@ -399,5 +399,48 @@ describe("the shared redaction's secret scan in copied evidence", () => {
       };
       expect(out.alert.decision.note, note).toBe(WITHHELD);
     }
+  });
+});
+
+describe('large evidence', () => {
+  it('gives the same copy in slices, letting other work run between them', async () => {
+    const events = Array.from({ length: 3000 }, (_, i) => ({
+      id: `e${i}`,
+      process: {
+        path: '/usr/bin/curl',
+        args:
+          i === 2500
+            ? ['curl', '-u', 'al:hunter2', 'https://pc.local/x']
+            : ['curl', '-s', `https://example.com/${i}`],
+        user: 'al',
+      },
+    }));
+    const evidence = {
+      alert: { title: 'Download', summary: 'curl ran', subject: { kind: 'file', label: 'x' } },
+      events,
+      actions: [{ title: 'curl -u al:hunter2 https://pc.local/x' }],
+    };
+    // A clock that moves a slice's worth on every reading, so each event yields.
+    let t = 0;
+    let yields = 0;
+    const sliced = await redactEvidenceInSlices(
+      evidence,
+      names,
+      async () => {
+        yields++;
+      },
+      () => (t += SLICE_MS),
+    );
+    expect(sliced).toEqual(redactEvidence(evidence, names));
+    expect(JSON.stringify(sliced)).toBe(JSON.stringify(redactEvidence(evidence, names)));
+    expect(yields).toBeGreaterThan(1000);
+    const out = sliced as typeof evidence;
+    expect(out.alert.summary).toBe(WITHHELD);
+    expect(out.events[2500]!.process.args).toEqual([WITHHELD]);
+    expect(out.actions[0]!.title).toBe(WITHHELD);
+    // Evidence without events is redacted in one go.
+    expect(await redactEvidenceInSlices({ command: 'git status' }, names)).toEqual({
+      command: 'git status',
+    });
   });
 });
