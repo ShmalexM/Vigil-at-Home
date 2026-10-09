@@ -39,6 +39,11 @@ export const CLEAN_SYNC_SENTINEL: StoredRule = {
 
 export interface SyncServerOptions {
   store: RuleStore;
+  /**
+   * Gets the events uploaded to /eventupload. Nothing proves Santa sent them:
+   * any local account can post here, so they must never drive a response.
+   * The helper leaves this unset and reads the same events from santa.log.
+   */
   onEvent?: SensorEventSink;
   /** Default MONITOR: only explicit block rules are enforced; unknown programs still run. */
   clientMode?: ClientMode;
@@ -48,8 +53,16 @@ export interface SyncServerOptions {
   eventDetailText?: string;
   /** Rules per RuleDownload page. */
   pageSize?: number;
+  /**
+   * Largest request body, before and after decompression. Uploads are
+   * ignored and the other requests are small, so a big body is refused.
+   */
   maxBodyBytes?: number;
+  /** Requests handled at once; more get 503 until one finishes. */
+  maxInFlight?: number;
   log?: (msg: string) => void;
+  /** For tests. */
+  now?: () => number;
 }
 
 interface SyncSession {
@@ -58,6 +71,21 @@ interface SyncSession {
   rules: StoredRule[];
   snapshotRev: number;
   startedAt: number;
+}
+
+// Any local account can reach the port, and each machine id holds a copy of
+// the rules until postflight, so only a few unfinished syncs are kept, briefly.
+export const MAX_SYNC_SESSIONS = 4;
+export const SYNC_SESSION_TTL_MS = 10 * 60 * 1000;
+
+/** Longest request line part written to the log; anyone local can send one. */
+export const MAX_LOGGED_URL = 200;
+
+/** A client-sent string as it may appear in the log: one line, bounded. */
+export function logSafe(text: string): string {
+  // eslint-disable-next-line no-control-regex -- stripping them is the point
+  const clean = text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '');
+  return clean.length > MAX_LOGGED_URL ? `${clean.slice(0, MAX_LOGGED_URL)}...` : clean;
 }
 
 const ROUTE_RE = /^\/(preflight|eventupload|ruledownload|postflight)\/([^/?#]{1,128})\/?$/;
@@ -73,6 +101,7 @@ export class HttpError extends Error {
 
 export class SantaSyncServer {
   private readonly sessions = new Map<string, SyncSession>();
+  private inFlight = 0;
   private readonly opts: Required<
     Omit<SyncServerOptions, 'onEvent' | 'eventDetailUrl' | 'eventDetailText' | 'log'>
   > &
@@ -83,14 +112,24 @@ export class SantaSyncServer {
       clientMode: 'MONITOR',
       fullSyncIntervalSeconds: 600,
       pageSize: 500,
-      maxBodyBytes: 16 * 1024 * 1024,
+      maxBodyBytes: 4 * 1024 * 1024,
+      maxInFlight: 4,
+      now: Date.now,
       ...options,
     };
   }
 
   /** Node http(s) request handler. */
   readonly handler = (req: IncomingMessage, res: ServerResponse): void => {
+    if (this.inFlight >= this.opts.maxInFlight) {
+      res.writeHead(503, { 'content-type': 'text/plain', connection: 'close' });
+      res.end('busy');
+      return;
+    }
+    this.inFlight++;
     this.handle(req)
+      // Give the place back before answering, so a client's next request fits.
+      .finally(() => this.inFlight--)
       .then((body) => {
         const json = JSON.stringify(body);
         res.writeHead(200, {
@@ -101,8 +140,14 @@ export class SantaSyncServer {
       })
       .catch((err: unknown) => {
         const status = err instanceof HttpError ? err.status : 500;
-        this.opts.log?.(`santa sync ${req.method} ${req.url} failed: ${(err as Error).message}`);
-        res.writeHead(status, { 'content-type': 'text/plain' });
+        this.opts.log?.(
+          `santa sync ${logSafe(req.method ?? '')} ${logSafe(req.url ?? '')} failed: ${(err as Error).message}`,
+        );
+        // Don't read the rest of a body that was refused for its size.
+        res.writeHead(status, {
+          'content-type': 'text/plain',
+          ...(status === 413 ? { connection: 'close' } : {}),
+        });
         res.end(status === 500 ? 'internal error' : (err as Error).message);
       });
   };
@@ -158,7 +203,7 @@ export class SantaSyncServer {
     // an empty clean sync would leave whatever Santa already had. A REMOVE for
     // a hash no program has makes the wipe happen and changes nothing else.
     if (clean && rules.length === 0) rules = [CLEAN_SYNC_SENTINEL];
-    this.sessions.set(machineId, { clean, rules, snapshotRev, startedAt: Date.now() });
+    this.startSession(machineId, { clean, rules, snapshotRev, startedAt: this.opts.now() });
 
     const resp: PreflightResponse = {
       client_mode: this.opts.clientMode,
@@ -176,6 +221,36 @@ export class SantaSyncServer {
     return resp;
   }
 
+  private startSession(machineId: string, session: SyncSession): void {
+    this.dropExpired();
+    this.sessions.delete(machineId);
+    // Any local account can start syncs under made-up machine ids. Once Santa
+    // has finished a sync, its id always gets a session and the others share
+    // what is left, so they can only push each other out.
+    const known = this.opts.store.syncedMachineId;
+    const isKnown = known !== undefined && machineId === known;
+    const others = () => [...this.sessions.keys()].filter((id) => id !== known);
+    const limit = known === undefined || isKnown ? MAX_SYNC_SESSIONS : MAX_SYNC_SESSIONS - 1;
+    const used = () => (isKnown ? this.sessions.size : others().length);
+    while (used() >= limit) {
+      // The map is in start order, so this is the oldest evictable session.
+      const oldest = others()[0];
+      if (oldest === undefined) break;
+      this.sessions.delete(oldest);
+    }
+    this.sessions.set(machineId, session);
+  }
+
+  private session(machineId: string): SyncSession | undefined {
+    this.dropExpired();
+    return this.sessions.get(machineId);
+  }
+
+  private dropExpired(): void {
+    const cutoff = this.opts.now() - SYNC_SESSION_TTL_MS;
+    for (const [id, s] of this.sessions) if (s.startedAt < cutoff) this.sessions.delete(id);
+  }
+
   private eventUpload(machineId: string, body: unknown): Record<string, never> {
     const events = pick<unknown[]>(body, 'events') ?? [];
     const faa = pick<unknown[]>(body, 'file_access_events') ?? [];
@@ -190,7 +265,7 @@ export class SantaSyncServer {
   }
 
   private ruleDownload(machineId: string, body: unknown): RuleDownloadResponse {
-    const session = this.sessions.get(machineId);
+    const session = this.session(machineId);
     if (!session) throw new HttpError(409, 'ruledownload without preflight');
     const cursor = pick<string>(body, 'cursor') ?? '';
     const offset = cursor === '' ? 0 : Number.parseInt(cursor, 10);
@@ -208,16 +283,17 @@ export class SantaSyncServer {
   lastSyncAt: number | null = null;
 
   private postflight(machineId: string, body: unknown): Record<string, never> {
-    this.lastSyncAt = Date.now();
-    const session = this.sessions.get(machineId);
-    this.sessions.delete(machineId);
+    const session = this.session(machineId);
+    // A postflight with no sync behind it says nothing about Santa.
     if (!session) return {};
+    this.sessions.delete(machineId);
+    this.lastSyncAt = this.opts.now();
     const received = Number(pick(body, 'rules_received') ?? NaN);
     const processed = Number(pick(body, 'rules_processed') ?? NaN);
     // Only advance when Santa says it applied everything we sent; otherwise
     // the same changes go out again next time.
     if (received === session.rules.length && processed === session.rules.length) {
-      this.opts.store.markSynced(session.snapshotRev, session.clean);
+      this.opts.store.markSynced(session.snapshotRev, session.clean, machineId);
     } else {
       this.opts.log?.(
         `santa postflight mismatch: sent ${session.rules.length}, received ${received}, processed ${processed}`,
@@ -227,6 +303,8 @@ export class SantaSyncServer {
   }
 
   private async readJson(req: IncomingMessage): Promise<unknown> {
+    const declared = Number(req.headers['content-length']);
+    if (declared > this.opts.maxBodyBytes) throw new HttpError(413, 'body too large');
     const chunks: Buffer[] = [];
     let size = 0;
     for await (const chunk of req) {

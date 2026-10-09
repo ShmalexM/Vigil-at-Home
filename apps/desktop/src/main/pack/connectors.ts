@@ -29,6 +29,7 @@ import {
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { newId } from '@vigil/core';
+import { selfRoots, underSelfRoot } from '@vigil/detection';
 import { z } from 'zod';
 import { ConnectorInput, isSafeConnectorUrl, type ConnectorView } from '../../shared/pack.js';
 import type { Cipher } from '../onboarding/keys.js';
@@ -140,7 +141,7 @@ export class Connectors implements ConnectorHub {
     if (input.kind === 'stdio') this.assertNotVigil(input.command);
     const records = this.list();
     if (records.length >= 20) throw new Error('Twenty connectors is the most Vigil keeps');
-    const id = slug(input.name, new Set(records.map((r) => r.id)));
+    const id = newConnectorId(input.name, new Set(records.map((r) => r.id)));
     const secrets =
       input.kind === 'stdio' ? (input.env ?? {}) : input.token ? { token: input.token } : {};
     if (Object.keys(secrets).length > 0) {
@@ -343,12 +344,11 @@ export class Connectors implements ConnectorHub {
 
   /** Refuse a command that is part of Vigil, which the safety floor would never block. */
   private assertNotVigil(command: string): void {
-    const selfPaths = (this.o.selfPaths ?? []).map((p) => p.toLowerCase().replace(/\/+$/, ''));
+    const selfPaths = selfRoots(this.o.selfPaths ?? []);
     if (selfPaths.length === 0) return;
     const path = whereIs(command);
     for (const candidate of path ? [path, realOr(path)] : []) {
-      const p = candidate.toLowerCase();
-      if (selfPaths.some((s) => p === s || p.startsWith(`${s}/`))) {
+      if (underSelfRoot(selfPaths, candidate)) {
         throw new Error('That program is part of Vigil. A connector has to run its own program.');
       }
     }
@@ -452,16 +452,34 @@ function realOr(path: string): string {
   }
 }
 
-function slug(name: string, taken: Set<string>): string {
-  const base =
+/**
+ * A connector's name as a slug: the id connectors were given before ids got
+ * a part of their own, and the name rules written then use
+ * (`mcp__<slug>__<tool>`). Never an identity: names repeat.
+ */
+export function connectorSlug(name: string): string {
+  return (
     name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '')
-      .slice(0, 30) || 'connector';
-  if (base === 'vigil' || taken.has(base))
-    return `${base.slice(0, 24)}-${newId().slice(-6).toLowerCase()}`;
-  return base;
+      .slice(0, 30) || 'connector'
+  );
+}
+
+/**
+ * A new connector's id: its name as a slug, then a part that is new each
+ * time (the time in hex and random hex from newId), so an id is never given
+ * twice, even to a connector removed and added again under the same name.
+ * Connectors saved before keep the ids they have.
+ */
+function newConnectorId(name: string, taken: Set<string>): string {
+  const base = connectorSlug(name).slice(0, 19).replace(/-$/, '');
+  for (;;) {
+    const n = newId().toLowerCase();
+    const id = `${base}-${n.slice(0, 12)}${n.slice(16, 24)}`;
+    if (!taken.has(id)) return id;
+  }
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
