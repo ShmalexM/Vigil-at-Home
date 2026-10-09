@@ -900,6 +900,47 @@ describe('the pack', () => {
       expect(JSON.parse(json).notes).toHaveLength(1);
     });
 
+    it('keeps JSON encoded twice and split secrets out of the approval card and both Copy outputs', async () => {
+      const secrets = [['Tr0ub4', 'dor&3'].join(''), ['hunter2', 'xyzQ'].join('')];
+      const double = JSON.stringify(
+        JSON.stringify({ password: secrets[0], api_token: secrets[1] }),
+      );
+      const { pack, handlers } = setup({ vigilResult: { data: double } });
+      const dog = pack.adopt({
+        ...CREATE,
+        tools: ['vigil.search_events', 'github.create_issue'],
+      } as never);
+      let card = '';
+      handlers.push(async (req) => {
+        await tool(req, 'search_events').run({ data: double });
+        const asked = tool(req, 'tool_1').run({ title: double });
+        await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+        card = JSON.stringify((await pack.view()).approvals);
+        pack.decideTool((await pack.view()).approvals[0]!.id, 'deny');
+        await asked;
+        return { summary: double, findings: [] };
+      });
+      await pack.runDog(dog.id);
+      // A command in the question, its password in the answer.
+      handlers.push(() => ({
+        reply: `Sure, run it with -u admin:${secrets[1]}`,
+        actions: [],
+      }));
+      await pack.say('curl the billing api for me');
+      expect(card).toContain('create');
+      for (const id of [dog.id, 'lead']) {
+        for (const text of [
+          card,
+          JSON.stringify(pack.notes({ dog: id })),
+          pack.exportNotes({ dog: id }, 'md', 'Notebook'),
+          pack.exportNotes({ dog: id }, 'json', 'Notebook'),
+        ])
+          for (const secret of secrets) expect(text).not.toContain(secret);
+      }
+      // The chat note keeps its shape.
+      expect(pack.notes({ dog: 'lead' })[0]).toMatchObject({ kind: 'chat', dog: 'lead' });
+    });
+
     it('writes no risk check for a dog retired while the AI was rating its call', async () => {
       const { pack, handlers, notebook } = setup();
       pack.setMode('auto');

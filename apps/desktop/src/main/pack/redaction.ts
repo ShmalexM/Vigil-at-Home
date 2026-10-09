@@ -72,16 +72,22 @@ function withKeys(value: unknown, depth: number): unknown {
   return out;
 }
 
-/** Text that is a JSON object or array is redacted as data, keys included; other text as one field. */
+/**
+ * Text that is a JSON object or array is redacted as data, keys included;
+ * text that is a JSON string (JSON encoded twice or more) is unwrapped and
+ * read the same way; other text as one field.
+ */
 export function redactJsonText(text: string, depth = 0): string {
   const t = text.trim();
-  if ((t.startsWith('{') || t.startsWith('[')) && depth < MAX_DEPTH) {
+  if (/^[{["]/.test(t)) {
+    if (depth >= MAX_DEPTH) return WITHHELD_TEXT;
     let parsed: unknown;
     try {
       parsed = JSON.parse(t);
     } catch {
       parsed = undefined;
     }
+    if (typeof parsed === 'string') return JSON.stringify(redactJsonText(parsed, depth + 1));
     if (parsed && typeof parsed === 'object') return JSON.stringify(redactDeep(parsed, depth + 1));
   }
   return redactTextForPack(text);
@@ -102,31 +108,111 @@ function settle(value: unknown, depth: number): unknown {
   const text = JSON.stringify(value);
   if (text === undefined) return value;
   const whole = redactTextForPack(text);
-  if (whole === text) return value;
-  try {
-    return JSON.parse(whole) as unknown;
-  } catch {
-    // Not JSON any more: find the part it objects to.
-  }
+  if (whole !== text) {
+    try {
+      return JSON.parse(whole) as unknown;
+    } catch {
+      // Not JSON any more: find the part it objects to.
+    }
+  } else if (!objectsAsText(value)) return value;
   if (!value || typeof value !== 'object' || depth >= MAX_DEPTH) return WITHHELD_TEXT;
-  if (Array.isArray(value)) return value.map((v) => settle(v, depth + 1));
-  return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, settle(v, depth + 1)]));
+  const parts = Array.isArray(value)
+    ? value.map((v) => settle(v, depth + 1))
+    : Object.fromEntries(Object.entries(value).map(([k, v]) => [k, settle(v, depth + 1)]));
+  // Fail closed: when the parts still object together, no one part was the
+  // secret (a command in one field, its password in another), so every
+  // free-text field here goes.
+  const again = JSON.stringify(parts);
+  return redactTextForPack(again) !== again || objectsAsText(parts) ? withholdText(parts) : parts;
+}
+
+/**
+ * The redactor reads JSON field by field, so a secret split across fields
+ * (a command in the question, its password in the answer) passes it. This
+ * reads the free text of a value as one text instead: its strings, one per
+ * line, leaving out those that are JSON, which were read as data.
+ */
+function objectsAsText(value: unknown): boolean {
+  const lines: string[] = [];
+  const walk = (v: unknown, depth: number): void => {
+    if (typeof v === 'string') {
+      if (!/^\s*[{["]/.test(v)) lines.push(v);
+    } else if (v && typeof v === 'object' && depth < MAX_DEPTH) {
+      for (const x of Array.isArray(v) ? v : Object.values(v)) walk(x, depth + 1);
+    }
+  };
+  walk(value, 0);
+  if (lines.length < 2) return false;
+  const joined = lines.join('\n');
+  return redactTextForPack(joined) !== joined;
+}
+
+/**
+ * Fields that are the app's own (ids, times, kinds, outcomes, counts), kept
+ * when the free text around them is withheld so a note keeps its shape.
+ */
+const STRUCTURAL = new Set([
+  'id',
+  'at',
+  'dog',
+  'kind',
+  'ok',
+  'subject',
+  'provider',
+  'model',
+  'tool',
+  'outcome',
+  'fromOutside',
+  'usage',
+  'exportedAt',
+]);
+
+function withholdText(value: unknown, key?: string): unknown {
+  if (key !== undefined && STRUCTURAL.has(key)) return value;
+  if (typeof value === 'string') return WITHHELD_TEXT;
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((v) => withholdText(v));
+  return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, withholdText(v, k)]));
 }
 
 /**
  * Rendered Markdown, redacted as a whole. When the whole would be withheld,
- * each line is redacted on its own instead, so one bad line doesn't blank
- * the export; a line that is JSON is read as data, keys included.
+ * each section (a note, from its `## ` heading) is redacted on its own, and
+ * within a section that objects, each line, so one bad line doesn't blank
+ * the export; a line that is JSON is read as data, keys included. Fails
+ * closed: a section that still objects once its lines pass, because the
+ * secret spans lines, keeps only its heading, and if the sections still
+ * object together, every section does.
  */
 export function redactMarkdown(text: string): string {
   const whole = redactTextForPack(text);
   if (whole !== WITHHELD_TEXT) return whole;
-  return text
-    .split('\n')
-    .map((line) => {
-      // A heading or list marker stays, so a withheld line keeps its place.
-      const [, lead = '', rest = ''] = /^(\s*(?:#{1,6} |[-*] |\d+\. )?)([\s\S]*)$/.exec(line) ?? [];
-      return rest ? lead + redactJsonText(rest) : line;
-    })
-    .join('\n');
+  const sections = text.split(/\n(?=## )/);
+  let out = sections.map(redactSection);
+  if (objects(out.join('\n'))) out = sections.map(headingOnly);
+  const joined = out.join('\n');
+  return objects(joined) ? WITHHELD_TEXT : joined;
+}
+
+function objects(text: string): boolean {
+  return redactTextForPack(text) === WITHHELD_TEXT;
+}
+
+function redactSection(section: string): string {
+  const whole = redactTextForPack(section);
+  if (whole !== WITHHELD_TEXT) return whole;
+  const lines = section.split('\n').map(redactLine).join('\n');
+  return objects(lines) ? headingOnly(section) : lines;
+}
+
+/** A section's first line, its heading, redacted on its own, and the rest withheld. */
+function headingOnly(section: string): string {
+  const [first = ''] = section.split('\n', 1);
+  return `${redactLine(first)}\n\n${WITHHELD_TEXT}\n`;
+}
+
+/** One line, keeping a heading or list marker so a withheld line keeps its place. */
+function redactLine(line: string): string {
+  const [, lead = '', rest = ''] = /^(\s*(?:#{1,6} |[-*] |\d+\. )?)([\s\S]*)$/.exec(line) ?? [];
+  return rest ? lead + redactJsonText(rest) : line;
 }

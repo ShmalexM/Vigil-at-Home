@@ -9,7 +9,12 @@ import type {
   NoteToolCallInput,
   NoteUsage,
 } from '../../shared/pack.js';
-import { redactDataForPack, redactSerialized, redactTextForPack } from './redaction.js';
+import {
+  redactDataForPack,
+  redactJsonText,
+  redactSerialized,
+  redactTextForPack,
+} from './redaction.js';
 
 /** Notes older than this are dropped. */
 export const NOTE_DAYS = 30;
@@ -172,8 +177,9 @@ export class Notebook {
   }
 }
 
+/** The subject column, redacted like the note, the same way on write and lookup. */
 function subjectKey(s: DogNote['subject']): string | null {
-  return s ? `${s.kind}:${s.id}` : null;
+  return s ? redactTextForPack(`${s.kind}:${s.id}`) : null;
 }
 
 /** A call as stored: every field redacted whole, then cut to size. */
@@ -188,7 +194,8 @@ function call(c: NoteToolCallInput): NoteToolCall {
   };
 }
 
-const redactText = redactTextForPack;
+/** JSON text, even encoded twice, is read as data. */
+const redactText = (text: string) => redactJsonText(text);
 const redactData = redactDataForPack;
 
 function usage(u: NoteUsage): NoteUsage {

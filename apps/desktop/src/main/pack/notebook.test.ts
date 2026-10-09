@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { WITHHELD } from '@vigil/ai/redact';
 import { describe, expect, it } from 'vitest';
 import { NOTE_DAYS, Notebook } from './notebook.js';
 
@@ -171,6 +172,10 @@ describe('Notebook', () => {
 /** Joined at run time so code scanning doesn't take the samples for real keys. */
 const KEY = ['sk', 'ant', 'Abc123Def456Ghi789Jkl012Mno'].join('-');
 const PASSWORD = ['hunter2', 'Plain', 'Word'].join('');
+const SPLIT = ['hunter2', 'xyzQ'].join('');
+const SECRETS = [['Tr0ub4', 'dor&3'].join(''), SPLIT];
+/** JSON encoded twice: a string whose text is JSON. */
+const DOUBLE = JSON.stringify(JSON.stringify({ password: SECRETS[0], api_token: SPLIT }));
 const TOKEN = ['tok', 'Plain', 'Value9'].join('');
 
 describe('Notebook redaction', () => {
@@ -342,5 +347,63 @@ describe('Notebook redaction', () => {
     expect(book.list()).toHaveLength(2);
     expect(text).not.toContain(PASSWORD);
     expect(text).not.toContain(TOKEN);
+  });
+
+  it('reads JSON encoded twice as data: a result, a nested value, the answer and an older row', () => {
+    const db = new DatabaseSync(':memory:');
+    const book = new Notebook(db);
+    book.write({
+      ...NOTE,
+      answer: DOUBLE,
+      calls: [
+        { tool: 't', title: 'T', args: { data: DOUBLE }, outcome: 'ran', result: DOUBLE },
+        { tool: 't', title: 'T', args: {}, outcome: 'ran', result: { nested: [{ data: DOUBLE }] } },
+      ],
+    });
+    db.prepare('INSERT INTO pack_notes (id, ts, dog, subject, body) VALUES (?, ?, ?, ?, ?)').run(
+      'old-4',
+      Date.now(),
+      'lead',
+      null,
+      JSON.stringify({
+        ...NOTE,
+        id: 'old-4',
+        at: Date.now(),
+        lookedAt: [],
+        reasons: [],
+        answer: DOUBLE,
+        calls: [{ tool: 't', title: 'T', args: DOUBLE, outcome: 'ran', result: DOUBLE }],
+      }),
+    );
+    const stored = JSON.stringify(
+      db.prepare("SELECT body FROM pack_notes WHERE id != 'old-4'").all(),
+    );
+    const listed = JSON.stringify(book.list());
+    expect(book.list()).toHaveLength(2);
+    for (const text of [stored, listed])
+      for (const secret of SECRETS) expect(text).not.toContain(secret);
+  });
+
+  it('fails closed on a secret split across fields: the free text goes, the shape stays', () => {
+    const db = new DatabaseSync(':memory:');
+    const book = new Notebook(db);
+    const n = book.write({
+      ...NOTE,
+      ask: 'curl the billing api for me',
+      answer: `Sure, run it with -u admin:${SPLIT}`,
+    });
+    const row = JSON.stringify(db.prepare('SELECT body FROM pack_notes').all());
+    expect(row).not.toContain(SPLIT);
+    expect(JSON.stringify(book.list())).not.toContain(SPLIT);
+    expect(n).toMatchObject({ id: expect.any(String), dog: 'lead', kind: 'chat', ok: true });
+    expect(n.answer).toBe(WITHHELD);
+  });
+
+  it('redacts the subject column, and still finds the note by it', () => {
+    const db = new DatabaseSync(':memory:');
+    const book = new Notebook(db);
+    book.write({ ...NOTE, subject: { kind: 'tool', id: `github.${KEY}` } });
+    expect(JSON.stringify(db.prepare('SELECT subject FROM pack_notes').all())).not.toContain(KEY);
+    expect(book.list({ subject: { kind: 'tool', id: `github.${KEY}` } })).toHaveLength(1);
   });
 });

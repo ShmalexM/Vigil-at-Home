@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   redactDataForPack,
   redactForPack,
+  redactJsonText,
   redactMarkdown,
   redactSerialized,
   redactTextForPack,
@@ -59,5 +60,45 @@ describe('the pack’s sinks', () => {
     expect(out).not.toContain(KEY);
     expect(out).toMatch(/^# /);
     expect(out).toContain('**Asked:** what ran?');
+  });
+
+  it('reads JSON encoded twice, at any depth, as data', () => {
+    const secret = ['hunter2', 'xyzQ'].join('');
+    const once = JSON.stringify({ api_token: secret });
+    for (const text of [JSON.stringify(once), JSON.stringify(JSON.stringify(once))]) {
+      expect(redactJsonText(text)).not.toContain(secret);
+      expect(redactSerialized({ a: { b: [text] } })).not.toContain(secret);
+      expect(redactDataForPack({ arg: text })).not.toContain(secret);
+    }
+  });
+
+  it('withholds a note section whose secret spans lines, keeping its heading', () => {
+    const secret = ['hunter2', 'xyzQ'].join('');
+    const md = [
+      '# Pip’s notebook',
+      '',
+      'Exported today.',
+      '',
+      '## 2026-10-09 12:00 UTC · Chat',
+      '',
+      '**Asked:** machine db.internal',
+      '',
+      '**Answered:** login bob',
+      '',
+      '**Thinking summary (from the provider):**',
+      '',
+      `password ${secret}`,
+      '',
+      '## 2026-10-09 11:00 UTC · Chat',
+      '',
+      '**Asked:** what ran?',
+      '',
+    ].join('\n');
+    const out = redactMarkdown(md);
+    expect(out).not.toContain(secret);
+    expect(out).toContain('# Pip’s notebook');
+    expect(out).toContain('## 2026-10-09 12:00 UTC · Chat');
+    expect(out).toContain('**Asked:** what ran?');
+    expect(out).not.toContain('login bob');
   });
 });

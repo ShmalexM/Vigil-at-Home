@@ -147,7 +147,10 @@ arguments and results as data, before they are written out as text) goes
 through Vigil's redactor before it is stored, and is cut to size only after
 that. The whole note is then redacted again as the text that is stored,
 object keys included (the shared redactor keeps keys, so the pack redacts
-each one too, and reads a result that is JSON text as data). Notes are
+each one too, and reads a result that is JSON text as data, even JSON
+encoded twice). A secret split across fields, such as a command in the
+question and its password in the answer, fails closed: that note's free
+text is withheld and its shape is kept. Notes are
 redacted the same way each time they are read for the page, so older notes
 get the same treatment. It also shows the model and, from the Usage page's ledger, the tokens
 and estimated cost of the attempt that answered. Notes from before this was
@@ -157,7 +160,9 @@ added simply have no Details.
 the 200 newest notes in it to the clipboard, for an issue or a file. The app
 renders the export and redacts the finished Markdown or JSON as a whole, so
 the heading, the sheet's title and dog names are covered too; where the whole
-Markdown would be withheld, each line is redacted on its own instead.
+Markdown would be withheld, each note's section, then each line, is redacted
+on its own instead, and a section whose secret spans lines keeps only its
+heading.
 
 ## Memory
 

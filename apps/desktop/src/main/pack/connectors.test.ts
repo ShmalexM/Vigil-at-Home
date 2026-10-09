@@ -179,6 +179,13 @@ describe('connectors', () => {
     expect(structured).not.toContain(token);
   });
 
+  it('reads a text part that is JSON encoded twice as data', async () => {
+    const secrets = [['Tr0ub4', 'dor&3'].join(''), ['hunter2', 'xyzQ'].join('')];
+    const text = JSON.stringify(JSON.stringify({ password: secrets[0], api_token: secrets[1] }));
+    const out = await answering({ content: [{ type: 'text', text }] }).call('leaky', 'read', {});
+    for (const secret of secrets) expect(out).not.toContain(secret);
+  });
+
   it('refuses a command inside Vigil’s own app, even through a link', () => {
     const { c, dir } = hub({ selfPaths: [process.execPath] });
     const input = { kind: 'stdio' as const, name: 'Sneaky', args: [server] };
