@@ -1,4 +1,4 @@
-import { AGENT_CATALOG, type CatalogEntry } from '../agents/catalog.js';
+import { AGENT_CATALOG, VIGIL_SELF, type CatalogEntry } from '../agents/catalog.js';
 import type { Condition, DetectionRuleInput } from '../types.js';
 import {
   CREDENTIAL_STORE_GLOBS,
@@ -192,7 +192,7 @@ export const COPY_OUT_RES = [SCP_FROM, RSYNC_FROM];
  * tool cannot cross `;`, `&` or another `|`, so two separate commands like
  * `env | grep proxy; curl host` do not count as one exfil.
  */
-export const ENV_DUMP_RE = String.raw`(^|[\s;&|('"])(/usr/bin/|/bin/)?(env|printenv)\s*\|(?!\|)([^;&|\n]|\|(?!\|)){0,256}?(?<=[ \t|(/])(curl|wget|nc|ncat|socat)(?=[\s"')]|$)`;
+export const ENV_DUMP_RE = String.raw`(^|[\s;&|('"])(/usr/bin/|/bin/)?(env|printenv)\s*\|(?!\|)((?!\|\|)[^;&\n]){0,256}?(?<=[ \t|(/])(curl|wget|nc|ncat|socat)(?=[\s"')]|$)`;
 /**
  * Paste sites, file drops and request catchers, matched only as the host part
  * of a URL: after `//`, an optional `name.`/`user@` run, then the host, then a
@@ -274,17 +274,65 @@ export const KEYCHAIN_SECRET_RE = String.raw`security\s+(find-(generic|internet)
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
+ * The agent root's signature fits one of the agent's signed matchers: its team
+ * ID, and its signing ID when the root reported one (sensors give it bare or
+ * `TEAM:` prefixed; Santa's EXEC line gives none).
+ */
+function signedRoot(match: CatalogEntry['match']): Condition[] {
+  return match.flatMap((m): Condition[] => {
+    const teams = m.teamIds ?? [];
+    if (!teams.length) return [];
+    const team: Condition = { field: 'process.agent.teamId', op: 'in', value: teams };
+    const ids = m.signingIds ?? [];
+    if (!ids.length) return [team];
+    const signingIds = [...ids, ...teams.flatMap((t) => ids.map((i) => `${t}:${i}`))];
+    return [
+      {
+        all: [
+          team,
+          {
+            any: [
+              { not: { field: 'process.agent.signingId', op: 'exists' } },
+              { field: 'process.agent.signingId', op: 'in', value: signingIds },
+            ],
+          },
+        ],
+      },
+    ];
+  });
+}
+
+/**
  * An agent reading back its own saved sign-in: `security
  * find-generic-password` for one of the agent's own services (catalogue
  * `keychainLogins`, each also with the 8-hex-digit suffix Claude Code adds per
- * config folder), launched by the agent's own program as is or through a bare
- * `sh -c`, wherever that program runs in the tree (Vigil's own helpers start
- * Claude Code too). The caller is the parent: its path or plain name fits the
- * catalogue, or, for a shell that reached Vigil without its parent's path, it
- * sits right under the agent itself.
+ * config folder), launched by the agent's own signed program as is or through
+ * a bare `sh -c`.
  *
- * The whole command must be that one read: only -a, -s, -w and -g, one -s
- * naming its own service, nothing that chains, redirects or substitutes. On a
+ * Who is asking is decided by the signature, never by a name or a path alone:
+ * a program's name, its place under ~/.local/share/claude/versions and the
+ * nearest ancestor's name (process.parentName without a parent path) are all
+ * things any local program can choose. So the read passes only when the agent
+ * root's launch reported one of the catalogue's team IDs (and, when it
+ * reported a signing ID, one of the catalogue's, bare or `TEAM:` prefixed) and
+ * the tracker handed that signature down, which it does only while every
+ * process from the root to the reader's parent has it (process.agent.teamId,
+ * see AgentTag). A root with no signature (a ps seed not yet seen launching, a
+ * sensor that reports none) or another team's does not pass. Within that, the
+ * caller is the parent as before: its path or plain name fits the catalogue,
+ * it sits right under the agent itself, or, with no parent path, its nearest
+ * ancestor is a native install's version-named binary (real Mac, 2026-10-08:
+ * `2.1.283` started by `2.1.283`, so the read sits two levels down).
+ *
+ * Vigil's own tree (its helpers run Claude Code) passes on the caller alone,
+ * as before: it carries no agent root signature.
+ *
+ * The whole command must be that one read, exactly as Claude Code's code
+ * runs it: `security find-generic-password -a <user> -w -s <service>` in that
+ * order (optionally /usr/bin/, words optionally quoted, optionally inside a
+ * bare `sh -c`), <user> one plain word, <service> one of its own with an
+ * optional 8-hex-digit suffix. No other option, nothing that chains,
+ * redirects or substitutes. On a
  * real Mac (2026-10-02, 341 shells under Claude Code) a Bash tool step always
  * arrived wrapped (`zsh -c source …snapshot… && eval '…'`, or `sh -c env
  * SANDBOX_RUNTIME=1 …`), never as a bare `sh -c <command>`, so the same read
@@ -302,28 +350,58 @@ export function ownKeychainLogin(
   const caller: Condition[] = [];
   if (paths.length) caller.push({ field: 'process.parentPath', op: 'glob', value: paths });
   if (names.length) caller.push({ field: 'process.parentName', op: 'in', value: names });
-  // A short-lived shell often reaches Vigil without its parent's path; directly
-  // under the agent itself, the tracker already identified that parent.
-  if (agentId)
+  // A native install names its binary by version (`…/versions/2.1.283`), and
+  // one copy often starts another. With no parent path, the parent's name is
+  // the nearest ancestor's: a version number is the agent itself.
+  if (paths.some((p) => p.endsWith('/versions/*')))
     caller.push({
       all: [
-        { field: 'process.agent.id', op: 'eq', value: agentId },
-        { field: 'process.agent.depth', op: 'eq', value: 1 },
+        { not: { field: 'process.parentPath', op: 'exists' } },
+        { field: 'process.parentName', op: 'regex', value: [String.raw`^\d+\.\d+\.\d+$`] },
       ],
     });
-  const svc = String.raw`["']?(${services.map(escapeRe).join('|')})(-[0-9a-f]{8})?["']?`;
+  // Who may be excused is decided by the agent root's signature, never by a
+  // name or path alone. Vigil's own tree lends the signature of the signed
+  // agent program it runs (see tracker resolve), so it is verified the same
+  // way; an unsigned or other-program copy inside Vigil's tree is not.
+  const signed = agentId ? signedRoot(agent.match) : [];
+  const who: Condition[] = [];
+  if (signed.length) {
+    who.push({
+      all: [
+        { field: 'process.agent.id', op: 'eq', value: VIGIL_SELF },
+        { any: signed },
+        { any: caller },
+      ],
+    });
+    who.push({
+      all: [
+        { field: 'process.agent.id', op: 'eq', value: agentId },
+        { any: signed },
+        {
+          any: [
+            ...caller,
+            // A short-lived shell often reaches Vigil without its parent's path;
+            // directly under the agent itself, the tracker already identified that parent.
+            { field: 'process.agent.depth', op: 'eq', value: 1 },
+          ],
+        },
+      ],
+    });
+  }
+  // Exactly the read Claude Code's own code runs, in its order: `security
+  // find-generic-password -a <user> -w -s <service>`, each word bare or quoted.
+  const user = String.raw`([\w.-]+|"[\w.-]+"|'[\w.-]+')`;
+  const svc = String.raw`(${services.map(escapeRe).join('|')})(-[0-9a-f]{8})?`;
+  const head = String.raw`^((/bin/)?(ba)?sh -c )?(/usr/bin/)?security find-generic-password -a ${user} -w -s `;
   return {
     all: [
       { field: 'process.name', op: 'in', value: ['security', 'sh', 'bash'] },
-      { any: caller },
+      { any: who },
       {
         field: 'process.commandLine',
         op: 'regex',
-        value: [
-          String.raw`^((/bin/)?(ba)?sh -c )?(/usr/bin/)?security find-generic-password ` +
-            String.raw`(?=[-\w .@"']{1,200}$)` +
-            String.raw`(?=(.* )?-s ${svc}( |$))(?!.* -s .* -s )(?!(.* )?-[^asgw\s])`,
-        ],
+        value: [`${head}${svc}$`, `${head}"${svc}"$`, `${head}'${svc}'$`],
       },
     ],
   };

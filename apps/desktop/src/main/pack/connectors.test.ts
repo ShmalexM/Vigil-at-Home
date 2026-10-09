@@ -123,6 +123,37 @@ describe('connectors', () => {
     expect(readFileSync(join(dir, 'pack-secrets.json'), 'utf8')).toBe('{}');
   });
 
+  it('takes https, or plain http only to this computer', () => {
+    const { c } = hub();
+    const http = (url: string) => ({ kind: 'http' as const, name: 'Remote', url });
+    expect(() => c.add(http('http://mcp.example.test/mcp'))).toThrow('http only');
+    expect(() => c.add(http('file:///etc/passwd'))).toThrow();
+    expect(c.add(http('http://localhost:8080/mcp')).target).toBe('http://localhost:8080/mcp');
+    expect(c.add(http('http://127.0.0.1:8080/mcp')).kind).toBe('http');
+    expect(c.add(http('http://[::1]:8080/mcp')).kind).toBe('http');
+  });
+
+  it('still lists a connector saved before the https rule', () => {
+    const saved = { id: 'old', name: 'Old', kind: 'http' as const, url: 'http://lan.test/mcp' };
+    const { c } = hub({ load: () => [{ ...saved, secrets: [], enabled: false }] });
+    expect(c.view()).toMatchObject([{ id: 'old', target: 'http://lan.test/mcp' }]);
+  });
+
+  it('never connects to a saved plain-http connector off this computer', async () => {
+    const saved = { id: 'old', name: 'Old', kind: 'http' as const, url: 'http://lan.test/mcp' };
+    let reached = false;
+    const { c } = hub({
+      load: () => [{ ...saved, secrets: [], enabled: true }],
+      connect: async () => {
+        reached = true;
+        throw new Error('should not connect');
+      },
+    });
+    c.setEnabled('old', true);
+    await expect(c.tools('old')).rejects.toThrow('http only');
+    expect(reached).toBe(false);
+  });
+
   it('never takes the name vigil', () => {
     const { c } = hub();
     expect(c.add({ kind: 'http', name: 'Vigil', url: 'https://x.test/mcp' }).id).toMatch(

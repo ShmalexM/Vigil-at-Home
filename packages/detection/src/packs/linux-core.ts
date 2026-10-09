@@ -158,6 +158,8 @@ export const linuxCoreRules: DetectionRuleInput[] = [
             { field: 'process.commandLine', op: 'contains', value: ['$(curl', '$(wget'] },
           ],
         },
+        // Claude Code's exact local-service reads (see rules/quiet-lines.ts).
+        { not: { field: 'process.quietDownloadLine', op: 'eq', value: true } },
       ],
     },
     response: [SUSPEND],
