@@ -94,6 +94,14 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               waiting on you are counted separately, so they never make protection look broken.
             </p>
           </details>
+          {status.aiOff && (
+            <div className="row" style={{ flexWrap: 'wrap', gap: 8 }} role="status">
+              <span className="t-small grow">{status.aiOff}.</span>
+              <button type="button" className="btn sm ghost" onClick={() => go('settings/ai')}>
+                Open AI settings
+              </button>
+            </div>
+          )}
           {status.dryRun && (
             <div className="attn fair">
               <TriangleAlert size={17} />

@@ -83,11 +83,26 @@ export class JsonRpcStdio {
     }
   }
 
-  request<T = Json>(method: string, params: Json): Promise<T> {
+  /**
+   * With `timeoutMs`, a server that hasn't answered by then is stopped (the
+   * child is killed) and the request fails, so a hung server never lingers.
+   */
+  request<T = Json>(method: string, params: Json, timeoutMs?: number): Promise<T> {
     if (this.closedError) return Promise.reject(this.closedError);
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (v: Json) => void, reject });
+      const timer =
+        timeoutMs === undefined
+          ? undefined
+          : setTimeout(() => {
+              this.fail(new Error(`${method} did not answer in time`));
+              this.close();
+            }, timeoutMs);
+      timer?.unref?.();
+      this.pending.set(id, {
+        resolve: (v: Json) => (clearTimeout(timer), resolve(v as T)),
+        reject: (e: Error) => (clearTimeout(timer), reject(e)),
+      });
       this.send({ id, method, params });
     });
   }

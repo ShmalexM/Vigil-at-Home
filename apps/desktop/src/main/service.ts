@@ -74,6 +74,8 @@ export class VigilCore {
   helperInstallable = false;
   /** Set when the installed helper isn't the one this build ships. */
   helperOutdated = false;
+  /** Why the AI can't work because of its switches (set by the app from AiBridge). */
+  aiNotice: (() => string | undefined) | undefined;
   /** Emits `events` (count) at most once per FEED_BATCH_MS while events arrive. */
   readonly feed = new EventEmitter<{ events: [number] }>();
   /** Vigil's AI runs and plan limits, for the Usage page. */
@@ -299,6 +301,7 @@ export class VigilCore {
     const s = computeStatus(this.store.listAlerts({ status: 'open' }), this.sensors.list());
     const today = startOfDay(this.now());
     const alertView = this.alertView();
+    const aiOff = this.aiNotice?.();
     return {
       ...s,
       alertView,
@@ -312,6 +315,7 @@ export class VigilCore {
       dryRun: this.executor.simulated ?? this.dryRun,
       helperInstallable: this.helperInstallable,
       helperOutdated: this.helperOutdated,
+      ...(aiOff ? { aiOff } : {}),
     };
   }
 

@@ -126,6 +126,8 @@ function start(): void {
     userData: dataDir,
     // For the vigil_status tool (Vigil's read-only tools for the user's own agents).
     status: () => core.status(),
+    // Why the explainer or labeller isn't reaching an AI, for the Agents page.
+    heldBack: (id) => ai.heldBack(id),
     ...(devHelperDir ? { devHelperDir } : {}),
     // The demo shows a fixed set of agents rather than this Mac's.
     ...(demo ? { readPs: async () => [], statInstall: demoInstalled } : {}),
@@ -222,9 +224,11 @@ function start(): void {
     mode: () => setup.mode(),
     dataDir,
     isBusy: () => power.isBusy(),
+    busyReason: () => power.busyReason(),
     openExternal: (url) => shell.openExternal(url),
   });
   if (!demo) core.usage.setLimitsSource(() => ai.limits());
+  core.aiNotice = () => ai.offNotice();
   ai.on('changed', () => windows.broadcast('changed'));
   ai.explainAlertsFrom(core);
   ai.labelEventsFrom(core);

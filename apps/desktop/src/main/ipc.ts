@@ -131,6 +131,7 @@ export function registerIpc(
     downloadUpdate: () => updates.download(),
     getAi: () => ai.view(),
     getAiPrefs: () => ai.prefs(),
+    turnAiBackOn: () => ai.turnBackOn(),
     setAiPrefs: (patch) => ai.setPrefs(patch),
     explainAlert: (id) => ai.explainOnRequest(core, id),
     signInAi: (provider) => ai.signIn(provider),
