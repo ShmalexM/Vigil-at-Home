@@ -169,6 +169,23 @@ and the next run of the same code was back to the numbers above. Before
 events were batched, every event was its own commit: on Linux that wrote
 about 22 MB per 1,000 events for 0.5 MB stored and used twice the CPU.
 
+### The event history once it is big
+
+`perf/measure.mjs` starts from an empty database, where every index fits in
+memory. On a busy Mac (about 220,000 events an hour) the table holds hours of
+events, and the cost of storing one depends on where its id lands in the
+primary-key index. Measured on 2026-10-08 with `node perf/db-writes.mjs`
+(Linux, 1,000,000 events already stored, batches of 60 a second):
+
+| Event ids                                 | Disk written per event | CPU per event |
+| ----------------------------------------- | ---------------------- | ------------- |
+| Hash of the log line (until October 2026) | 12.8 KB                | 43 µs         |
+| Line's time first, then the hash (now)    | 2.4 KB                 | 13 µs         |
+
+A hash puts each event on a random index page, so every event rewrote a
+4 KB page of its own: about 65 GB a day at that rate, against 12 GB now.
+Ids still come only from the line, so a line read twice is stored once.
+
 ### Sensors
 
 | Measure                            | Intel                 | M1            | Budget    |

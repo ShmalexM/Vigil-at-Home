@@ -2,7 +2,7 @@
 
 The Pack page shows Vigil's own AI agents as dogs. The third-party coding agents Vigil watches (Claude Code, Codex and the rest) stay on the Agents page under their own names.
 
-- **The Lead dog** is the one you talk to. It answers from Vigil's read-only tools and any connector tools you gave it, and it looks after the pack: it adds a dog for a job you describe, changes a dog, sends one off on its job, or retires one.
+- **The Lead dog** is the one you talk to. It answers from Vigil's read-only tools and any connector tools you gave it (on its reading path, below), and it looks after the pack: it adds a dog for a job you describe, changes a dog, sends one off on its job, or retires one.
 - **Pack dogs** each have a standing job, a schedule (when asked, hourly, daily or nightly) and the tools you let them use. A run ends in a short report with findings.
 - **Built-in helpers** are Vigil's existing AI jobs: Sunny explains each new alert (the AI opinion on the alert), Biscuit tags events no rule matched as unusual or suspicious (shown in Activity; it never blocks anything), and Duke reviews rules once a day (its ideas wait under Suggested changes on Rules until you accept them). You can rename them and pick their breed; their jobs are fixed. They move on the page while those jobs run.
 
@@ -19,6 +19,17 @@ The mode at the top of the page works like a coding agent's permission modes.
 | Full access      | Go ahead                                                                                | Go ahead                                                             |
 
 Retiring a dog always asks in Let AI decide.
+
+### Who sees outside text
+
+Text Vigil didn't write and you didn't type can carry instructions: a file name, an alert, a web page a connector fetched, a dog's report. So the Lead dog answers each message along two paths, and the one that can change the pack never reads such text (`main/pack/service.ts`, `say`).
+
+- **The acting path** is the model call that may propose changes: add, change, run or retire a dog, remember or forget a fact. Its prompt holds only your own messages and clean state: dog names and jobs you typed or that are built in, report summaries from runs that read nothing outside, memory facts from your words, earlier answers that read nothing outside, and Vigil's own tools by key with Vigil's titles. Everything else is there only as a reference: `answer-3` for an earlier answer that read outside text, `report:<dog id>`, `job:<dog id>`, `memory:<id>`, a dog with an outside name by its id, and every connector tool as `tool-3` with a label Vigil writes ("connector tool 3 from github"), never the server's key, title or description. The acting path calls no tools. Its changes are your request, so they go through the gate as clean and apply as your mode allows: "Rename Pip to Spot", "Create a dog to find duplicate files" and "Change Pip's job to check Downloads" stay instant.
+- **Names and keys you type** are mapped to ids by Vigil, not the model, by exact match: a dog's whole name in any case (so "Run Pip" finds Pip even when its name came from outside text), and a connector tool's key exactly, same case, never part of a longer key ("github.create_issue_preview" doesn't vouch for "github.create_issue"). A connector key the model gives that you didn't type is dropped.
+- **The reading path** answers questions that need outside text: what a dog found, what a job says, what an alert is, what's on this Mac, a connector's output. The acting path asks for it with a question and the references it needs, or Vigil sends a message there itself when it plainly asks about a report or the memory. This call may see anything and use the Lead dog's tools, but its answer has no field for changes: it is shown to you, kept as outside text, and appears to the acting path only as `answer-<n>`.
+- **The bridge.** When your message leans on text the acting path never saw ("do what Pip suggested", "carry out the recommendation", "yes" right after a reading answer, or a reference like `answer-3`), or the acting path cites a reference, every change in that turn waits for your OK, in every mode, Full access included. Memory changes wait too when the turn also went down the reading path, when a fact replaces one your message doesn't name word for word, or when the fact to forget came from outside text.
+
+Pack dogs' own runs keep their provenance: a run that used a tool, or whose prompt held a tainted job, report or memory fact, writes a tainted report. Their connector tools are offered as `tool_1`, `tool_2` and so on, never by the server's name, and every call goes through the tool gate below. Changes saved by older versions keep their recorded taint: approving one keeps an outside name or job marked, until you edit the dog yourself.
 
 ## How a tool call is decided
 
@@ -57,27 +68,27 @@ The Pack page sits under Advanced. Two parts of it reach the rest of the app:
 - **Scout on Home.** The Lead dog sits next to Home's status line and acts it out: relaxed when nothing needs you, ears up (the waiting pose) when something needs your decision (the Needs you count) or a protection layer has stopped, and busy while a dog's AI job runs. The status words don't change; the dog only shows them. Clicking it opens Ask.
 - **Today the pack.** Under the status line, one line per dog that did something since midnight ("Biscuit sniffed through new events 5 times"), counted from the notebooks. The wording is fixed, never written by an AI; runs that didn't finish are counted separately, and background runs that never reached an AI aren't noted. Each line opens that dog's notebook.
 - **Scout on a pile.** When Needs you holds a pile of three or more alerts (the alerts' own grouping: same rule, same agent run or program), the biggest one shows as Scout's card instead of a row: who set it off, how many times, and one button to look at them all, where "That was me, all N" and "Looks fine, all N" decide them together. Scout adds no grouping of its own and the wording is fixed.
-- **Ask.** A bar at the bottom of every page (except Pack and setup) opens a chat drawer with the Lead dog. It is closed until you open it (click the bar or press ⌘K; Esc closes it). It is the same conversation as the Pack page, sent as your own chat, so the same rules apply: a Claude plan only if you turned it on, and no dog blocks, allows or changes a rule. The drawer tells the Lead dog which page you're on and what you have selected there (an alert, a rule, an agent or one of its sessions, or Activity's filter to one agent or session), so "what's this?" works; the Lead dog reads the details with its read-only tools. Its tools are the ones listed in [agents.md](agents.md#the-tools): status, alerts, events (by agent, rule matches or Biscuit's labels), rules, what Vigil did, and agents. When you ask how to stop an alert repeating, it points you to "Stop alerting on this" on the alert or to the rule on Rules; it can't change either itself.
+- **Ask.** A bar at the bottom of every page (except Pack and setup) opens a chat drawer with the Lead dog. It is closed until you open it (click the bar or press ⌘K; Esc closes it). It is the same conversation as the Pack page, sent as your own chat, so the same rules apply: a Claude plan only if you turned it on, and no dog blocks, allows or changes a rule. The drawer tells the Lead dog which page you're on and what you have selected there (an alert, a rule, an agent or one of its sessions, or Activity's filter to one agent or session), so "what's this?" works; the Lead dog's reading path reads the details with its read-only tools. Its tools are the ones listed in [agents.md](agents.md#the-tools): status, alerts, events (by agent, rule matches or Biscuit's labels), rules, what Vigil did, and agents. When you ask how to stop an alert repeating, it points you to "Stop alerting on this" on the alert or to the rule on Rules; it can't change either itself.
 
 ```mermaid
 flowchart LR
   P[Any page] -->|click the bar or ⌘K| D[Ask drawer]
   H[Scout on Home] -->|click| D
   D -->|your message + page + selected id| L[Lead dog: your own chat]
-  L --> T[Vigil's read-only tools]
-  L -->|changes to the pack| G[Permission mode decides]
+  L -->|acting path: changes to the pack| G[Permission mode decides]
+  L -->|reading path: questions| T[Vigil's read-only tools]
 ```
 
 A half-written message stays in the box when you change pages or close the drawer. If a message doesn't reach the Lead dog, the words go back in the box with the reason. With no AI set up, neither Enter nor the starter questions send anything.
 
 ## Which AI runs what
 
-| Work                                    | Purpose | May use a Claude plan                                  |
-| --------------------------------------- | ------- | ------------------------------------------------------ |
-| A message you send the Lead dog         | chat    | Yes, if you turned on the plan in Settings › AI        |
-| Risk check during your chat             | chat    | Same as the chat                                       |
-| A pack dog's job (scheduled or Run now) | analyze | Never                                                  |
-| Risk check during a pack dog's job      | analyze | Never: a Claude API key, Codex, the cloud API or local |
+| Work                                         | Purpose | May use a Claude plan                                  |
+| -------------------------------------------- | ------- | ------------------------------------------------------ |
+| A message you send the Lead dog (both paths) | chat    | Yes, if you turned on the plan in Settings › AI        |
+| Risk check during your chat                  | chat    | Same as the chat                                       |
+| A pack dog's job (scheduled or Run now)      | analyze | Never                                                  |
+| Risk check during a pack dog's job           | analyze | Never: a Claude API key, Codex, the cloud API or local |
 
 If only a Claude plan is set up, pack jobs can't run and Let AI decide asks about every risky call in them.
 
@@ -129,8 +140,8 @@ forget one, or copy the whole thing as a `MEMORY.md`.
 ```mermaid
 flowchart LR
   you[Your message] --> lead[Lead dog answers]
-  lead -->|no tool used| keep[Saved, with Undo]
-  lead -->|a tool was used| card["Remember this? card"]
+  lead -->|acting path, nothing read| keep[Saved, with Undo]
+  lead -->|read, leaned on a reference or replaced a fact| card["Remember this? card"]
   card -->|Keep| keep
   keep --> mem[(pack_memory)]
   mem -->|background only| chat[Next chats and pack jobs]
@@ -139,12 +150,12 @@ flowchart LR
 
 What it changes for a security app, compared with a coding agent's memory:
 
-- **Only your words go in.** The Lead dog may note a fact (`remember`) or
-  cross one out (`forget`, `replaces`). Vigil applies that straight away only
-  when the answer used no tool, so it rested on your message alone. If the
-  answer read an alert, an event or a connector, text in there could have
-  been written by whoever made the file or the web page, so the change waits
-  on a "Remember this?" card. Pack jobs and the built-in helpers read memory
+- **Only your words go in.** The Lead dog's acting path may note a fact
+  (`remember`) or cross one out (`forget`, `replaces`). It never reads
+  outside text, so Vigil applies that straight away, except that it waits on
+  a "Remember this?" card when the same message also went down the reading
+  path, leans on a report or an earlier answer, replaces a fact your message
+  doesn't name word for word, or forgets a fact that came from outside text. Pack jobs and the built-in helpers read memory
   and never write it, and no AI tidies it in the background (the post's
   "dreaming" step): duplicates are caught when a fact is saved, and a
   replacement crosses out the line it updates.
@@ -157,8 +168,8 @@ What it changes for a security app, compared with a coding agent's memory:
   email addresses) is refused, not stored.
 - **Small.** Up to 100 lines, each up to 200 characters. The newest that fit
   ride along with each chat and pack job; when some don't fit, the dog gets a
-  `recall_memory` tool to search the rest. Using it doesn't count as using a
-  tool for the rule above, since it only reads your own words back.
+  `recall_memory` tool to search the rest. On the acting path it hands back
+  a fact from outside text only as `memory:<id>`.
 
 Memory lives in its own `pack_memory` table on this Mac, created by
 `main/pack/memory.ts` like the notebooks' table, outside the numbered
