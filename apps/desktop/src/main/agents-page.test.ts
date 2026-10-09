@@ -239,6 +239,10 @@ describe('agent routes', () => {
     expect(Route.safeParse(a).success && Route.safeParse(s).success).toBe(true);
     expect(parseActivityParam(a.split('/')[1])).toEqual({ agent: 'codex' });
     expect(parseActivityParam(s.split('/')[1])).toEqual({ session });
+    expect(parseActivityParam('rule-persistence.unsigned-launch-agent')).toEqual({
+      rule: 'persistence.unsigned-launch-agent',
+    });
+    expect(parseActivityParam('rule-Bad Id')).toEqual({});
     expect(parseActivityParam('session-xyz')).toEqual({});
     expect(parseActivityParam(undefined)).toEqual({});
   });

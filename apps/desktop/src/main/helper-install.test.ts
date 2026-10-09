@@ -307,7 +307,6 @@ describe('helper install', () => {
       'linux',
     );
     expect(noPkexec.error).toMatch(/no pkexec/);
-    // The fallback is the wizard's command, which still has root check its own copy.
     expect(noPkexec.command).toBe(helperInstallCommand(dir, 'linux'));
     expect(noPkexec.command).toContain(` vigil-helper-setup "$d" 'linux/install.sh' `);
 

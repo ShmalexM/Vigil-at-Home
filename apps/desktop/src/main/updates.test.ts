@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compareVersions, newest, UpdateChecker } from './updates.js';
+import { compareVersions, isLinuxPackage, newest, UpdateChecker } from './updates.js';
 
 const release = (tag: string, o: { draft?: boolean; prerelease?: boolean } = {}) => ({
   tag_name: `v${tag}`,
@@ -118,8 +118,53 @@ describe('UpdateChecker', () => {
     expect(c.view()).toMatchObject({ auto: false, dismissed: true });
   });
 
+  it('opens the release page for What’s new', async () => {
+    const { c, opened } = checker([release('0.1.0-alpha.3')]);
+    await c.openNotes();
+    expect(opened).toEqual([]);
+    await c.check();
+    await c.openNotes();
+    expect(opened[0]).toMatch(/\/releases\/tag\/v0\.1\.0-alpha\.3$/);
+  });
+
   it('reports a failed check in words', async () => {
     const { c } = checker(null, false);
     expect((await c.check()).error).toMatch(/403/);
+  });
+});
+
+describe('newest on Linux', () => {
+  const withLinux = (tag: string) => {
+    const r = release(tag);
+    r.assets.push(
+      ...['amd64.deb', 'x86_64.AppImage'].map((suffix) => ({
+        name: `Vigil-at-Home-${tag}-${suffix}`,
+        browser_download_url: `https://github.com/ShmalexM/Vigil-at-Home/releases/download/v${tag}/Vigil-at-Home-${tag}-${suffix}`,
+      })),
+    );
+    return r;
+  };
+
+  it('only counts a release with a package for this chip', () => {
+    expect(newest([release('0.1.0-alpha.3')], '0.1.0-alpha.2', 'x64', 'linux')).toBeUndefined();
+    expect(newest([withLinux('0.1.0-alpha.3')], '0.1.0-alpha.2', 'arm64', 'linux')).toBeUndefined();
+    // A newer Mac-only release doesn't hide the newest one Linux can install.
+    expect(
+      newest(
+        [release('0.1.0-alpha.4'), withLinux('0.1.0-alpha.3')],
+        '0.1.0-alpha.2',
+        'x64',
+        'linux',
+      )?.version,
+    ).toBe('0.1.0-alpha.3');
+    expect(isLinuxPackage('Vigil-at-Home-1.0.0-arm64.AppImage', 'arm64')).toBe(true);
+    expect(isLinuxPackage('Vigil-at-Home-1.0.0-x64.dmg', 'x64')).toBe(false);
+  });
+
+  it('never offers a Mac DMG to an x64 Linux machine: the release page opens instead', () => {
+    const a = newest([withLinux('0.1.0-alpha.3')], '0.1.0-alpha.2', 'x64', 'linux');
+    expect(a?.version).toBe('0.1.0-alpha.3');
+    expect(a?.downloadUrl).toBeUndefined();
+    expect(a?.notesUrl).toMatch(/^https:\/\/github\.com\//);
   });
 });

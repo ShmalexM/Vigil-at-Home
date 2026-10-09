@@ -79,7 +79,7 @@ export function AiSection() {
 
   const act = async (run: () => Promise<{ ok: boolean; error?: string } | void>, done: string) => {
     const r = await run();
-    if (r && !r.ok) toast({ text: r.error ?? 'That didn’t work' });
+    if (r && !r.ok) toast({ text: r.error ?? 'That didn’t work', tone: 'error' });
     else toast({ text: done });
     await load();
   };

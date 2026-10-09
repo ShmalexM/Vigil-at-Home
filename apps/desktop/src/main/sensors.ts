@@ -52,7 +52,7 @@ export function defaultSensors(platform: NodeJS.Platform = process.platform): Se
           state: 'not_installed',
           detail: 'Blocks programs before they run',
         };
-  return [blocker, ...COMMON_SENSORS];
+  return [blocker, ...COMMON_SENSORS.map((s) => ({ ...s }))];
 }
 
 const COMMON_SENSORS: SensorHealth[] = [

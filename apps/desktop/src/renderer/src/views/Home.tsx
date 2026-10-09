@@ -1,6 +1,13 @@
-import { CircleCheck, Copy, Eye, TriangleAlert } from 'lucide-react';
+import {
+  ChevronRight,
+  CircleCheck,
+  Copy,
+  Eye,
+  History as HistoryIcon,
+  TriangleAlert,
+} from 'lucide-react';
 import { useState } from 'react';
-import { useLive, vigil } from '../api';
+import { useClock, useLive, vigil } from '../api';
 import { homeMood } from '../components/AskScout';
 import { NeedsYouLine, needsRows, NoticedList, pileLine, WatchLine } from '../components/Attention';
 import { Dog } from '../components/Dog';
@@ -22,7 +29,14 @@ const levelSentence = {
   poor: 'Protection has stopped.',
 };
 
+/** "Santa, osquery and the Vigil helper", from the layers this computer has. */
+export function layerNames(names: string[]): string {
+  const n = names.map((x) => (x === 'Vigil helper' ? 'the Vigil helper' : x));
+  return n.length < 2 ? (n[0] ?? 'its layers') : `${n.slice(0, -1).join(', ')} and ${n.at(-1)}`;
+}
+
 export function HomeView({ go }: { go: (r: string) => void }) {
+  useClock();
   const [status] = useLive(() => vigil.getStatus());
   const [alerts] = useLive(() => vigil.listAlerts('open'));
   const allNeeds = needsRows((alerts ?? []).filter(needsDecision));
@@ -39,6 +53,12 @@ export function HomeView({ go }: { go: (r: string) => void }) {
   const lead = pack?.dogs.find((d) => d.role === 'lead');
   // Ears up for a decision, or for protection that has stopped; a layer that
   // was never installed is the status line's to explain, not a reason to fret.
+  const showLayers = () => {
+    const el = document.getElementById('home-layers') as HTMLDetailsElement | null;
+    if (!el) return;
+    el.open = true;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
   const scout = homeMood(pack, !!status && (status.needsYou > 0 || status.level === 'poor'));
 
   return (
@@ -71,16 +91,28 @@ export function HomeView({ go }: { go: (r: string) => void }) {
           {status.needsYou > 0 && <NeedsYouLine count={status.needsYou} />}
           <div className="row spread" style={{ flexWrap: 'wrap' }}>
             <WatchLine watch={status.watch} />
-            <button type="button" className="btn sm ghost" onClick={() => go('history')}>
-              What Vigil handled
+            <button
+              type="button"
+              className="btn sm ghost"
+              title="Everything Vigil blocked, paused or closed in the last 30 days"
+              onClick={() => go('history')}
+            >
+              <HistoryIcon size={14} aria-hidden />
+              See what Vigil handled
+              <ChevronRight size={14} aria-hidden />
             </button>
           </div>
           {status.reasons.length > 0 && (
-            <ul className="reasons">
-              {status.reasons.map((r) => (
-                <li key={r}>{r}</li>
-              ))}
-            </ul>
+            // One line: the Protection card below lists every layer, so the list isn't repeated here.
+            <div className="row wrap home-why" style={{ gap: 8 }}>
+              <span>
+                {status.reasons[0]}
+                {status.reasons.length > 1 && ` and ${status.reasons.length - 1} more`}.
+              </span>
+              <button type="button" className="btn sm ghost" onClick={showLayers}>
+                See the layers
+              </button>
+            </div>
           )}
           <details className="level-rules">
             <summary>How is this worked out?</summary>
@@ -92,7 +124,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               ))}
             </ul>
             <p className="t-small">
-              The level is only about protection: {listWords(status.sensors.map((s) => s.name))}.
+              The level is only about protection: {layerNames(status.sensors.map((s) => s.name))}.
               Alerts waiting on you are counted separately, so they never make protection look
               broken.
             </p>
@@ -180,7 +212,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
 
       <Card>
         <SectionHead title="Protection" sub="The layers that watch and block" />
-        <details className="layers" open={!allRunning}>
+        <details id="home-layers" className="layers" open={!allRunning}>
           <summary className="row t-small">
             {allRunning ? (
               <>
@@ -251,13 +283,20 @@ export function HomeView({ go }: { go: (r: string) => void }) {
 
       {status && noticed.length > 0 && status.alertView === 'more' && (
         <Card>
-          <NoticedList alerts={noticed} view="more" open={(id) => go(`alerts/${id}`)} limit={8} />
+          <NoticedList
+            alerts={noticed}
+            total={status.noticed}
+            clearable={status.noticedClearable}
+            view="more"
+            open={(id) => go(`alerts/${id}`)}
+            limit={8}
+          />
         </Card>
       )}
       {status && noticed.length > 0 && status.alertView === 'less' && (
         <button type="button" className="row t-small noticed-hint" onClick={() => go('history')}>
           <Eye size={14} />
-          Vigil also noticed {noticed.length === 1 ? 'one thing' : `${noticed.length} things`},
+          Vigil also noticed {status.noticed === 1 ? 'one thing' : `${status.noticed} things`},
           probably you. Nothing was blocked. See History.
         </button>
       )}
@@ -369,11 +408,4 @@ function PackDiary({ pack }: { pack: PackView }) {
       )}
     </div>
   );
-}
-
-/** "a, b and c". */
-function listWords(items: string[]): string {
-  return items.length > 1
-    ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`
-    : (items[0] ?? '');
 }

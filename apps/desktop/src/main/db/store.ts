@@ -20,6 +20,8 @@ import {
   type EventStats,
   type EventView,
 } from '../../shared/ipc.js';
+import { isNoticed, needsDecision } from '../../shared/attention.js';
+import { pileKey, untouched } from '../../shared/piles.js';
 import type { AgentCandidate, AgentSessionView } from '../../shared/agents.js';
 import type { UsageRun } from '../../shared/usage.js';
 import { migrations } from './schema.js';
@@ -98,7 +100,14 @@ export function eventViewsQuery(
     where.push(`kind IN (${kinds.map(() => '?').join(',')})`);
     args.push(...kinds);
   }
-  if (q.matchedOnly) where.push('matched = 1');
+  if (q.matchedOnly || q.rule) where.push('matched = 1');
+  if (q.rule) {
+    // Walks the partial index on matched events, so only events some rule matched are read.
+    where.push(
+      `EXISTS (SELECT 1 FROM json_each(outcome, '$.matches') m WHERE json_extract(m.value, '$.ruleId') = ?)`,
+    );
+    args.push(q.rule);
+  }
   if (q.agentSession) {
     where.push('agent_session = ?');
     args.push(q.agentSession);
@@ -166,6 +175,9 @@ export class Store {
     { events: number; matches: number; lastAt: number; asks: number; denies: number }
   >();
   private txDepth = 0;
+  /** Open, undecided alerts: whether each needs a decision, and its pile (openAlertCounts). */
+  private attention:
+    Map<string, { needs: boolean; pile: string | undefined; clearable: boolean }> | undefined;
   private readonly argDict: ArgDictionary;
   /**
    * The text search running now (argsLike), for vigil_args_hit: the text,
@@ -309,6 +321,9 @@ export class Store {
       this.db.exec(`RELEASE ${name}`);
       return out;
     } catch (err) {
+      // Alerts saved inside may be rolled back, by us below or by SQLite itself
+      // (SQLITE_FULL and the like end the whole transaction); count them afresh next time.
+      this.attention = undefined;
       if (this.db.isTransaction) {
         this.db.exec(`ROLLBACK TO ${name}`);
         this.db.exec(`RELEASE ${name}`);
@@ -751,13 +766,64 @@ export class Store {
          ON CONFLICT (id) DO UPDATE SET updated_at = excluded.updated_at, status = excluded.status,
            severity = excluded.severity, body = excluded.body`,
     ).run(a.id, a.createdAt, a.updatedAt, a.status, a.severity, a.ruleId, JSON.stringify(a));
+    this.track(a);
     return a;
+  }
+
+  /**
+   * Needs you and Noticed over every open alert, not just a page of them.
+   * Kept per alert as alerts are saved, so a status read never parses alert
+   * bodies; read in full once, the first time it's asked for (and again after
+   * a rolled-back transaction). Uses shared/attention and shared/piles
+   * themselves, so it can't drift from what the lists show.
+   */
+  openAlertCounts(): { needsYou: number; noticed: number; noticedClearable: number } {
+    if (!this.attention) {
+      this.attention = new Map();
+      const suggested = new Set(
+        (
+          this.stmt(
+            "SELECT DISTINCT alert_id AS id FROM proposals WHERE status = 'pending' AND alert_id IS NOT NULL",
+          ).all() as { id: string }[]
+        ).map((r) => r.id),
+      );
+      for (const a of this.listAlerts({ status: 'open', limit: -1 })) {
+        this.track(a, suggested.has(a.id));
+      }
+    }
+    let needsYou = 0;
+    let noticed = 0;
+    let noticedClearable = 0;
+    const piles = new Set<string>();
+    for (const t of this.attention.values()) {
+      if (!t.needs) {
+        noticed++;
+        if (t.clearable) noticedClearable++;
+      } else if (t.pile === undefined) needsYou++;
+      else piles.add(t.pile);
+    }
+    return { needsYou: needsYou + piles.size, noticed, noticedClearable };
+  }
+
+  /**
+   * `suggested`: a suggestion still waits on this alert in the proposals
+   * table, so "Those were me" leaves it (VigilCore.clearNoticed).
+   */
+  private track(a: Alert, suggested = this.hasPendingProposal(a.id)): void {
+    if (!this.attention) return;
+    if (needsDecision(a)) {
+      this.attention.set(a.id, { needs: true, pile: pileKey(a), clearable: false });
+    } else if (isNoticed(a)) {
+      const clearable = untouched(a) && !suggested;
+      this.attention.set(a.id, { needs: false, pile: undefined, clearable });
+    } else this.attention.delete(a.id);
   }
 
   getAlert(id: string): Alert | undefined {
     return this.one(Alert, 'SELECT body FROM alerts WHERE id = ?', id);
   }
 
+  /** `limit` defaults to the newest 200; -1 means all of them. */
   listAlerts(opts: { status?: Alert['status']; limit?: number } = {}): Alert[] {
     const limit = opts.limit ?? 200;
     return opts.status
@@ -768,6 +834,22 @@ export class Store {
           limit,
         )
       : this.all(Alert, 'SELECT body FROM alerts ORDER BY created_at DESC LIMIT ?', limit);
+  }
+
+  /** How many open alerts there are and when one last changed: a cheap key for caching. */
+  openAlertsMark(): string {
+    const row = this.stmt(
+      "SELECT COUNT(*) AS n, MAX(updated_at) AS at FROM alerts WHERE status = 'open'",
+    ).get() as { n: number; at: number | null };
+    return `${row.n}:${row.at ?? 0}`;
+  }
+
+  /** How many alerts have this status, however many listAlerts returns. */
+  countAlerts(status: Alert['status']): number {
+    const row = this.stmt('SELECT COUNT(*) AS n FROM alerts WHERE status = ?').get(status) as {
+      n: number;
+    };
+    return Number(row.n);
   }
 
   // ---------------------------------------------------------------- actions
@@ -819,7 +901,17 @@ export class Store {
       `INSERT INTO proposals (id, created_at, status, alert_id, body) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET status = excluded.status, body = excluded.body`,
     ).run(p.id, p.createdAt, p.status, p.alertId ?? null, JSON.stringify(p));
+    // A suggestion arriving or settled changes whether its alert can be cleared in bulk.
+    const alert = this.attention && p.alertId ? this.getAlert(p.alertId) : undefined;
+    if (alert) this.track(alert);
     return p;
+  }
+
+  /** Whether a suggestion still waits on this alert. */
+  hasPendingProposal(alertId: string): boolean {
+    return !!this.stmt(
+      "SELECT 1 FROM proposals WHERE alert_id = ? AND status = 'pending' LIMIT 1",
+    ).get(alertId);
   }
 
   listProposals(

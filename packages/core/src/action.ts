@@ -197,6 +197,14 @@ export const ActionRecord = z.object({
       at: Timestamp,
       error: z.string().optional(),
       quarantineId: Id.optional(),
+      /**
+       * True when nothing was changed: the helper wasn't connected when this
+       * ran, so it was only logged; false when the helper did it. Recorded per
+       * action, so what the app says later follows what happened then, not
+       * whether the helper is connected now. Missing on rows from older
+       * builds, which didn't say: those read as unknown, never as real.
+       */
+      simulated: z.boolean().optional(),
     })
     .optional(),
   /** Set when this record undoes an earlier one. */

@@ -4,7 +4,14 @@ import { useLive, vigil } from '../api';
 import { DecisionControls } from '../components/Decision';
 import { Shield } from '../components/Shield';
 import { Button, Chip, IconButton, SeverityMark, StatusMark } from '../components/ui';
-import { describeAction, headline, timeAgo } from '../format';
+import { describeAction, headline, simulatedNote, timeAgo } from '../format';
+import {
+  isSimulated,
+  othersNeedingYou,
+  provenance,
+  provenanceLabel,
+  responseProvenance,
+} from '../decision';
 
 /**
  * The always-on-top detection popup. It appears without taking focus, says
@@ -36,8 +43,14 @@ export function Popup({ initialId }: { initialId: string }) {
   if (!detail) return null;
   const { alert, actions, proposals } = detail;
   const pending = proposals.filter((p) => p.status === 'pending');
-  const others = (open ?? []).filter((a) => a.id !== alert.id && !a.decision).length;
   const contained = alert.containment === 'active';
+  // The same count as Needs you everywhere else: decisions only, a pile once.
+  const others = othersNeedingYou(alert, status?.needsYou ?? 0, open ?? []);
+  // Worded from what every action really did, not whether the helper is connected now.
+  const response = contained ? responseProvenance(actions) : undefined;
+  const note = simulatedNote(response);
+  const shown = actions.filter((r) => !r.undoes);
+  const allSimulated = shown.length > 0 && shown.every(isSimulated);
   const decided = !!alert.decision;
 
   return (
@@ -50,7 +63,7 @@ export function Popup({ initialId }: { initialId: string }) {
       <div className="row spread">
         <div className="row">
           <Shield height={20} />
-          <span className="t-h3">{headline(alert)}</span>
+          <span className="t-h3">{headline(alert, response)}</span>
           <span className="t-small">· {timeAgo(alert.createdAt)}</span>
         </div>
         <IconButton
@@ -65,12 +78,16 @@ export function Popup({ initialId }: { initialId: string }) {
       <div className="col" style={{ gap: 6 }}>
         <div className="row">
           <SeverityMark severity={alert.severity} />
-          {status?.dryRun && contained && (
+          {note && (
             <Chip
               tone="fair"
-              title="The Vigil helper is not installed, so nothing was actually changed"
+              title={
+                response === 'unknown'
+                  ? 'An older Vigil recorded this without noting whether the helper was connected'
+                  : 'The Vigil helper wasn’t connected when some or all of this ran, so that part changed nothing'
+              }
             >
-              Simulated
+              {note[0]!.toUpperCase() + note.slice(1)}
             </Chip>
           )}
         </div>
@@ -86,27 +103,34 @@ export function Popup({ initialId }: { initialId: string }) {
       {(actions.length > 0 || pending.length > 0) && (
         <div className="col" style={{ gap: 6 }}>
           <span className="t-label">
-            {actions.length > 0 ? 'What Vigil did' : 'Vigil suggests'}
+            {actions.length === 0
+              ? 'Vigil suggests'
+              : allSimulated
+                ? 'What Vigil would have done'
+                : 'What Vigil did'}
           </span>
-          {actions
-            .filter((r) => !r.undoes)
-            .map((r) => (
-              <div key={r.id} className="row">
-                <StatusMark
-                  state={
-                    r.status === 'done'
-                      ? 'done'
-                      : r.status === 'pending'
-                        ? 'running'
-                        : r.status === 'undone'
-                          ? 'warn'
-                          : 'failed'
-                  }
-                  label={r.status}
-                />
-                <span className="grow ellipsis">{describeAction(r.action)}</span>
-              </div>
-            ))}
+          {shown.map((r) => (
+            <div key={r.id} className="row">
+              <StatusMark
+                state={
+                  r.status === 'done'
+                    ? provenance(r) !== 'real'
+                      ? 'warn'
+                      : 'done'
+                    : r.status === 'pending'
+                      ? 'running'
+                      : r.status === 'undone'
+                        ? 'warn'
+                        : 'failed'
+                }
+                label={(r.status === 'done' && provenanceLabel(r)) || r.status}
+              />
+              <span className="grow ellipsis">
+                {describeAction(r.action)}
+                {isSimulated(r) && !allSimulated && <span className="muted"> (simulated)</span>}
+              </span>
+            </div>
+          ))}
           {actions.length === 0 &&
             pending.map((p) => (
               <div key={p.id} className="row">

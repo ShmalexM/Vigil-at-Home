@@ -1,9 +1,10 @@
 import { useEffect } from 'react';
-import { BellRing } from 'lucide-react';
+import { BellRing, ClipboardCopy } from 'lucide-react';
 import { useLive, vigil } from '../api';
 import { AlertViewSwitch } from '../components/Attention';
 import { useToast } from '../components/Toasts';
 import { Button, Card, SectionHead } from '../components/ui';
+import { aboutText, systemName } from './about';
 import { AiSection } from './Ai';
 import { AppearanceSection } from './Appearance';
 import { ThreatFeedsSection } from './ThreatFeeds';
@@ -49,7 +50,22 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
       )}
       <SetupPanel />
       <Card>
-        <SectionHead title="About" />
+        <SectionHead
+          title="About"
+          right={
+            <Button
+              size="sm"
+              kind="ghost"
+              icon={<ClipboardCopy size={14} />}
+              onClick={async () => {
+                await navigator.clipboard.writeText(aboutText(settings, status));
+                toast({ text: 'Copied. Paste it into a bug report.' });
+              }}
+            >
+              Copy for a bug report
+            </Button>
+          }
+        />
         <dl className="kv">
           <dt>Version</dt>
           <dd>
@@ -60,6 +76,8 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
           <dd>
             <UpdatesRow />
           </dd>
+          <dt>System</dt>
+          <dd>{systemName(settings.platform, settings.arch)}</dd>
           <dt>Data folder</dt>
           <dd className="mono">{settings.dataDir}</dd>
           <dt>License</dt>

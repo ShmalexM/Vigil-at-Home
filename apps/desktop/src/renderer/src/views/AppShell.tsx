@@ -24,6 +24,7 @@ import { AgentsView } from './Agents';
 import { AlertsView } from './Alerts';
 import { HistoryView } from './History';
 import { HomeView } from './Home';
+import { isTyping, navKey, navKeys, navShortcut } from './nav-keys';
 import { PackPage } from './Pack';
 import { SetupWizard } from './onboarding/SetupWizard';
 import { RulesView } from './Rules';
@@ -52,6 +53,9 @@ export const ADVANCED_NAV: NavItem[] = [
   { id: 'usage', label: 'Usage', icon: <ChartSpline size={16} /> },
 ];
 
+/** ⌘1…⌘9 follow the sidebar's own order. */
+const NAV_KEYS = navKeys([...NAV, ...ADVANCED_NAV].map((n) => n.id));
+
 export function AppShell({ initialRoute }: { initialRoute: string }) {
   const [route, setRoute] = useState(initialRoute);
   // Keep the hash in step with pushed navigation, so the window's URL always names its page.
@@ -72,6 +76,19 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
     location.hash = r;
     setRoute(r);
   };
+  // ⌘1…⌘9 in sidebar order and ⌘, (Ctrl elsewhere) move between pages without the mouse.
+  useEffect(() => {
+    const mac = navigator.platform.toLowerCase().includes('mac');
+    const onKey = (e: KeyboardEvent) => {
+      const r = navKey(e, NAV_KEYS, mac, isTyping(e.target));
+      if (!r) return;
+      e.preventDefault();
+      location.hash = r;
+      setRoute(r);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   const [status] = useLive(() => vigil.getStatus());
   const [setup] = useLive(() => vigil.getSetup());
@@ -89,9 +106,11 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
   useEffect(() => {
     if (savedOpen !== undefined) setAdvancedOpen((open) => open ?? savedOpen);
   }, [savedOpen]);
+  // Every arrival on an Advanced page (a link, a shortcut) opens the group, so
+  // the current page always shows in the sidebar.
   useEffect(() => {
     if (onAdvanced) setAdvancedOpen(true);
-  }, [onAdvanced]);
+  }, [onAdvanced, section]);
   const showAdvanced = advancedOpen ?? onAdvanced;
   const toggleAdvanced = () => {
     const open = !showAdvanced;
@@ -108,7 +127,8 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
         <div className="row brand">
           <Shield height={22} />
           <span className="t-h3">Vigil at Home</span>
-          {updates?.available && (
+          {/* After Later, a quiet reminder here takes over from the banner. */}
+          {updates?.available && updates.dismissed && (
             <IconButton
               size="sm"
               className="btn icon-btn sm update-pill"
@@ -213,8 +233,11 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
             <Button size="sm" kind="ghost" onClick={() => void vigil.dismissUpdate()}>
               Later
             </Button>
+            <Button size="sm" kind="ghost" onClick={() => void vigil.openUpdateNotes()}>
+              What’s new
+            </Button>
             <Button size="sm" kind="primary" onClick={() => void vigil.downloadUpdate()}>
-              Download
+              {updates.available.downloadUrl ? 'Download' : 'Get it on GitHub'}
             </Button>
           </div>
         )}
@@ -249,11 +272,14 @@ function NavButton({
   badgeTitle?: string;
   onClick: () => void;
 }) {
+  const shortcut = navShortcut(item.id, NAV_KEYS);
   return (
     <button
       type="button"
       className="nav-item"
       aria-current={current ? 'page' : undefined}
+      aria-keyshortcuts={shortcut?.aria}
+      title={shortcut ? `${item.label} (${shortcut.label})` : undefined}
       onClick={onClick}
     >
       {item.icon}

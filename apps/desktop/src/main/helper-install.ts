@@ -394,7 +394,10 @@ async function runHelperScriptNow(
   return !r.ok && r.error !== 'cancelled' && command ? { ...r, command } : r;
 }
 
-/** macOS: run the script as root through osascript's administrator dialog. */
+/**
+ * macOS: run the script as root through osascript's administrator dialog.
+ * Root runs only its own checked copy of the scripts (see rootStageScript).
+ */
 async function viaOsascript(
   kind: 'install' | 'update' | 'uninstall',
   dir: string,

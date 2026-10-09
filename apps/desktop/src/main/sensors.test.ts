@@ -13,4 +13,10 @@ describe('defaultSensors', () => {
     for (const s of reg.list()) reg.report({ ...s, state: 'ok' });
     expect(computeStatus([], reg.list()).level).toBe('good');
   });
+
+  it('hands out copies, so one registry never changes another', () => {
+    const a = defaultSensors('linux');
+    a[1]!.state = 'ok';
+    expect(defaultSensors('linux')[1]!.state).toBe('not_installed');
+  });
 });

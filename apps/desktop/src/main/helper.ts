@@ -172,7 +172,11 @@ export class HelperLink
         isRelease(action) ? RELEASE_TIMEOUT_MS : ACTION_TIMEOUT_MS,
       );
       if (!out) throw new Error('No answer from the Vigil helper');
-      return { at: Date.now(), ...(out.quarantineId ? { quarantineId: out.quarantineId } : {}) };
+      return {
+        at: Date.now(),
+        simulated: false,
+        ...(out.quarantineId ? { quarantineId: out.quarantineId } : {}),
+      };
     } catch (err) {
       if (!(err instanceof HelperCallError) || /connection closed/.test(err.message)) {
         this.dropped(client, err);
@@ -383,7 +387,11 @@ export class HelperLink
     for (const r of ran) {
       const at = typeof r.at === 'number' ? r.at : now;
       const result: ActionResult = r.outcome
-        ? { at, ...(r.outcome.quarantineId ? { quarantineId: r.outcome.quarantineId } : {}) }
+        ? {
+            at,
+            simulated: false,
+            ...(r.outcome.quarantineId ? { quarantineId: r.outcome.quarantineId } : {}),
+          }
         : { at, error: r.error ?? 'The Vigil helper could not do this' };
       const key = JSON.stringify(r.action);
       const entry = this.helperRan.get(key);

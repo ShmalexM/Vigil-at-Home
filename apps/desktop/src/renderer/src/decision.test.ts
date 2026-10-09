@@ -1,6 +1,16 @@
-import type { Action, ActionProposal, ActionRecord } from '@vigil/core';
+import type { Action, ActionProposal, ActionRecord, Alert } from '@vigil/core';
 import { describe, expect, it } from 'vitest';
-import { activeContainment, containLabel, keepLabel, releaseLabel, releaseStep } from './decision';
+import {
+  activeContainment,
+  containLabel,
+  isSimulated,
+  keepLabel,
+  othersNeedingYou,
+  provenance,
+  releaseLabel,
+  releaseStep,
+  responseProvenance,
+} from './decision';
 
 let n = 0;
 const rec = (action: Action, over: Partial<ActionRecord> = {}): ActionRecord => ({
@@ -57,5 +67,77 @@ describe('decision wording', () => {
     expect(containLabel([prop(suspend)])).toBe('Pause app');
     expect(containLabel([prop(block)])).toBe('Block connection');
     expect(containLabel([prop(suspend), prop(block)])).toBe('Do all 2');
+  });
+});
+
+describe('simulated containment', () => {
+  const alert = (over: Partial<Alert> = {}): Alert =>
+    ({
+      id: 'x',
+      createdAt: 1,
+      updatedAt: 1,
+      ruleId: 'r',
+      ruleVersion: 1,
+      title: 't',
+      summary: '',
+      severity: 'high',
+      fidelity: 'high',
+      notify: 'popup',
+      status: 'open',
+      containment: 'active',
+      eventIds: ['e'],
+      actionIds: [],
+      ...over,
+    }) as Alert;
+  const suspend: Action = { kind: 'process.suspend', pid: 1 };
+
+  it('follows the records, not whether the helper is connected now', () => {
+    const real = rec(suspend, { result: { at: 1, simulated: false } });
+    const dry = rec(suspend, { result: { at: 1, simulated: true } });
+    expect(isSimulated(dry)).toBe(true);
+    expect(responseProvenance([dry])).toBe('simulated');
+    expect(responseProvenance([real])).toBe('real');
+    expect(responseProvenance([real, dry])).toBe('mixed');
+    expect(responseProvenance([])).toBeUndefined();
+  });
+
+  it('counts actions with no undo, like a kill', () => {
+    const kill: Action = { kind: 'process.kill', pid: 1 };
+    const dryKill = rec(kill, { result: { at: 1, simulated: true } });
+    const realKill = rec(kill, { result: { at: 1, simulated: false } });
+    expect(responseProvenance([dryKill])).toBe('simulated');
+    expect(
+      responseProvenance([realKill, rec(suspend, { result: { at: 1, simulated: true } })]),
+    ).toBe('mixed');
+    // Undoes and actions that didn't go through say nothing about the response.
+    expect(responseProvenance([realKill, rec(suspend, { status: 'failed' })])).toBe('real');
+  });
+
+  it('never reads a row from an older build as real', () => {
+    // Older builds saved simulations without the field; only a dry-run quarantine id tells.
+    const old = rec(suspend, { result: { at: 1 } });
+    const oldDryQuarantine = rec(
+      { kind: 'file.quarantine', path: '/tmp/x' },
+      { result: { at: 1, quarantineId: 'dry-1' } },
+    );
+    expect(provenance(old)).toBe('unknown');
+    expect(provenance(oldDryQuarantine)).toBe('simulated');
+    expect(responseProvenance([old])).toBe('unknown');
+    expect(responseProvenance([old, rec(suspend, { result: { at: 1, simulated: false } })])).toBe(
+      'unknown',
+    );
+  });
+
+  it('counts the other decisions, keeping a pile this alert sits in', () => {
+    const pile = { key: 'k', who: 'claude' };
+    const a = alert({ id: 'a', containment: 'none', pile });
+    const b = alert({ id: 'b', containment: 'none', pile });
+    const c = alert({ id: 'c', containment: 'none' });
+    // Rows: the a+b pile and c.
+    expect(othersNeedingYou(a, 2, [a, b, c])).toBe(2);
+    expect(othersNeedingYou(c, 2, [a, b, c])).toBe(1);
+    expect(
+      othersNeedingYou(alert({ severity: 'low', notify: 'badge', containment: 'none' }), 2, []),
+    ).toBe(2);
   });
 });

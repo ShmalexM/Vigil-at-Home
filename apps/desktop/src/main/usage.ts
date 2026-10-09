@@ -1,6 +1,7 @@
 import type { Store } from './db/store.js';
 import {
   BILLED_PROVIDERS,
+  chargedToKey,
   isKeyBilled,
   USAGE_PROVIDERS,
   type KeyCapView,
@@ -144,15 +145,24 @@ export function toRun(e: PromptLogLike): UsageRun | undefined {
     inputTokens: whole(u?.inputTokens),
     cachedInputTokens: whole(u?.cachedInputTokens),
     outputTokens: whole(u?.outputTokens),
-    // A local model costs nothing; anything else without a price stays unpriced.
+    // A local model costs nothing. An Ollama cloud model (`…-cloud`) runs on
+    // Ollama's servers at a price Vigil doesn't see (the adapter says 0), so
+    // it is unpriced; anything else without a price stays unpriced too.
     costUsd:
       e.provider === 'ollama'
-        ? 0
+        ? isOllamaCloud(e.model)
+          ? null
+          : 0
         : typeof u?.costUsd === 'number' && u.costUsd >= 0
           ? u.costUsd
           : null,
     ...(e.billed !== undefined ? { billed: e.billed } : {}),
   };
+}
+
+/** Ollama's cloud models are named like `gpt-oss:120b-cloud`; they run on Ollama's servers. */
+export function isOllamaCloud(model: string | undefined): boolean {
+  return !!model && /(^|[-:])cloud\b/i.test(model);
 }
 
 /** Local day starts for 7 to 90 days (today included), or the past 24 hour starts. */
@@ -188,6 +198,8 @@ function emptyTotals(): UsageTotals {
     costUsd: 0,
     billedUsd: 0,
     unpricedRuns: 0,
+    billedUnpricedRuns: 0,
+    loginUsd: 0,
   };
 }
 
@@ -198,10 +210,13 @@ function add(t: UsageTotals, r: UsageRun): void {
   t.cachedInputTokens += r.cachedInputTokens;
   t.outputTokens += r.outputTokens;
   t.totalTokens += r.inputTokens + r.cachedInputTokens + r.outputTokens;
-  if (r.costUsd === null) t.unpricedRuns += 1;
-  else {
+  if (r.costUsd === null) {
+    t.unpricedRuns += 1;
+    if (chargedToKey(r)) t.billedUnpricedRuns += 1;
+  } else {
     t.costUsd += r.costUsd;
     if (isKeyBilled(r)) t.billedUsd += r.costUsd;
+    else if (r.provider === 'claude' && r.billed === undefined) t.loginUsd += r.costUsd;
   }
 }
 
