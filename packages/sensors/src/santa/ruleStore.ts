@@ -27,6 +27,8 @@ interface RuleStoreFile {
   syncedRev: number;
   /** Set when Santa must drop everything and take the full rule set. */
   cleanSyncPending: boolean;
+  /** Machine id of the last sync whose postflight confirmed every rule sent. */
+  syncedMachineId?: string;
   rules: Record<string, StoredRule>;
 }
 
@@ -102,6 +104,11 @@ export class RuleStore {
     return this.state.cleanSyncPending;
   }
 
+  /** Machine id of the last sync Santa confirmed in full, if any. */
+  get syncedMachineId(): string | undefined {
+    return this.state.syncedMachineId;
+  }
+
   requestCleanSync(): void {
     this.state.cleanSyncPending = true;
     this.save();
@@ -171,12 +178,18 @@ export class RuleStore {
   }
 
   /** Called at postflight once Santa confirms it applied rules up to `rev`. */
-  markSynced(rev: number, clean: boolean): void {
+  markSynced(rev: number, clean: boolean, machineId?: string): void {
     // Most syncs change nothing; don't rewrite the file for those.
     // A save that failed is retried, though memory already matches.
-    if (!this.unsaved && this.state.syncedRev === rev && !(clean && this.state.cleanSyncPending))
+    if (
+      !this.unsaved &&
+      this.state.syncedRev === rev &&
+      !(clean && this.state.cleanSyncPending) &&
+      (machineId === undefined || this.state.syncedMachineId === machineId)
+    )
       return;
     this.state.syncedRev = rev;
+    if (machineId !== undefined) this.state.syncedMachineId = machineId;
     if (clean) this.state.cleanSyncPending = false;
     this.save();
   }

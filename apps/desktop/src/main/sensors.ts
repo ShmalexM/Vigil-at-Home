@@ -19,6 +19,11 @@ export class SensorRegistry extends EventEmitter<{ changed: [] }> {
     this.emit('changed');
   }
 
+  /** Take a row away, e.g. the threat-feeds line once nothing is held back. */
+  remove(id: string): void {
+    if (this.sensors.delete(id)) this.emit('changed');
+  }
+
   get(id: string): SensorHealth | undefined {
     return this.sensors.get(id);
   }

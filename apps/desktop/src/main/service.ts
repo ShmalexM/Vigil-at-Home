@@ -28,6 +28,7 @@ import { FEED_CHECK_MS, type Detector } from './detection.js';
 import { RuleEditing } from './rule-editing.js';
 import type { ActionExecutor } from './executor.js';
 import { Scheduler } from './scheduler.js';
+import { reportFeedHealth } from './sensor-health.js';
 import { ruleMatcherHealth, SensorRegistry } from './sensors.js';
 import { computeStatus } from './status.js';
 import { TEST_RULE } from './test-alert.js';
@@ -75,6 +76,8 @@ export class VigilCore {
   helperInstallable = false;
   /** Set when the installed helper isn't the one this build ships. */
   helperOutdated = false;
+  /** Why the AI can't work because of its switches (set by the app from AiBridge). */
+  aiNotice: (() => string | undefined) | undefined;
   /** Emits `events` (count) at most once per FEED_BATCH_MS while events arrive. */
   readonly feed = new EventEmitter<{ events: [number] }>();
   /** Vigil's AI runs and plan limits, for the Usage page. */
@@ -129,6 +132,8 @@ export class VigilCore {
             if (r.status === 'failed')
               console.warn(`[feeds] ${r.sourceId}: ${r.error ?? 'failed'}`);
           }
+          // A feed whose update was refused shows as one quiet line under Protection.
+          reportFeedHealth(this.sensors, feeds.status());
         },
         true,
       );
@@ -303,6 +308,7 @@ export class VigilCore {
     const s = computeStatus(this.store.listAlerts({ status: 'open' }), this.sensors.list());
     const today = startOfDay(this.now());
     const alertView = this.alertView();
+    const aiOff = this.aiNotice?.();
     return {
       ...s,
       alertView,
@@ -316,6 +322,7 @@ export class VigilCore {
       dryRun: this.executor.simulated ?? this.dryRun,
       helperInstallable: this.helperInstallable,
       helperOutdated: this.helperOutdated,
+      ...(aiOff ? { aiOff } : {}),
     };
   }
 
