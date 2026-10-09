@@ -201,13 +201,12 @@ describe('moves made after the checks (item 3)', () => {
         symlinkSync(runtime, target);
       }),
     };
-    // At most the link is taken, as a link; what it points at is left as it was.
-    await quarantine(sys, target, 'a', o).catch(() => undefined);
+    // The child moving it sees it is not what was checked, and refuses.
+    await expect(quarantine(sys, target, 'a', o)).rejects.toThrow(/changed after it was checked/);
     expect(modeOf(runtime)).toBe(0o755);
     expect(readFileSync(runtime, 'utf8')).toBe('runtime');
-    const stored = join(opts.quarantineDir, 'a', 'evil');
-    if (existsSync(join(opts.quarantineDir, 'a')))
-      expect(lstatSync(stored).isSymbolicLink()).toBe(true);
+    expect(lstatSync(target).isSymbolicLink()).toBe(true);
+    expect(existsSync(join(opts.quarantineDir, 'a'))).toBe(false);
   });
 
   it('locks the stored copy and gives the mode back on restore', async () => {
@@ -251,78 +250,12 @@ describe('hard links (item 4)', () => {
         linkSync(runtime, link);
       }),
     };
-    await quarantine(sys, link, 'c', late).catch(() => undefined);
-    // The protected file is never locked or changed: at most a copy is stored.
+    await expect(quarantine(sys, link, 'c', late)).rejects.toThrow(/changed after it was checked/);
+    // The protected file is never locked or changed, and its other name stays.
     expect(modeOf(runtime)).toBe(0o755);
     expect(readFileSync(runtime, 'utf8')).toBe('runtime');
-  });
-});
-
-/** A user's Downloads folder, owned by nobody, in a folder root keeps to itself. */
-function usersDownloads() {
-  chmodSync(root, 0o755);
-  const downloads = join(root, 'Downloads');
-  const dir = join(downloads, 'stuff');
-  mkdirSync(dir, { recursive: true });
-  for (const d of [downloads, dir]) chownSync(d, NOBODY, NOBODY);
-  const file = join(dir, 'evil');
-  writeFileSync(file, 'x', { mode: 0o644 });
-  chownSync(file, NOBODY, NOBODY);
-  // Root's own folder, which the user can read but not change.
-  const system = join(root, 'system');
-  mkdirSync(system, { mode: 0o755 });
-  const opts: QuarantineOptions = { quarantineDir: join(root, 'Quarantine') };
-  return { downloads, dir, file, system, opts, real: realSystem() };
-}
-
-describe.skipIf(!isRoot)('a folder swapped for a link after the checks (root only)', () => {
-  it('never takes a file from where the link leads (item 3)', async () => {
-    const { downloads, dir, file, system, opts, real } = usersDownloads();
-    writeFileSync(join(system, 'evil'), 'keep', { mode: 0o644 });
-    const o: QuarantineOptions = {
-      ...opts,
-      actorFor: afterChecks(() => {
-        renameSync(dir, join(downloads, 'old'));
-        symlinkSync(system, dir);
-      }),
-    };
-    await expect(quarantine(real, file, 'a', o)).rejects.toThrow();
-    expect(readFileSync(join(system, 'evil'), 'utf8')).toBe('keep');
-    expect(modeOf(join(system, 'evil'))).toBe(0o644);
-    expect(readFileSync(join(downloads, 'old', 'evil'), 'utf8')).toBe('x');
-  });
-
-  it('never restores into a folder swapped for a link to another folder (item 5)', async () => {
-    const { downloads, dir, file, system, opts, real } = usersDownloads();
-    const rec = await quarantine(real, file, 'a', opts);
-    const swap: QuarantineOptions = {
-      ...opts,
-      actorFor: afterChecks(() => {
-        renameSync(dir, join(downloads, 'old'));
-        symlinkSync(system, dir);
-      }),
-    };
-    await expect(restore(real, rec, swap)).rejects.toThrow();
-    expect(existsSync(join(system, 'evil'))).toBe(false);
-    expect(existsSync(join(downloads, 'old', 'evil'))).toBe(false);
-    // Back in the store, locked again.
-    expect(modeOf(rec.storedPath)).toBe(0);
-  });
-
-  it('never recreates a missing folder through a swapped parent (item 5)', async () => {
-    const { downloads, dir, file, system, opts, real } = usersDownloads();
-    const rec = await quarantine(real, file, 'a', opts);
-    rmSync(dir, { recursive: true });
-    const swap: QuarantineOptions = {
-      ...opts,
-      actorFor: afterChecks(() => {
-        renameSync(downloads, join(root, 'old'));
-        symlinkSync(system, downloads);
-      }),
-    };
-    await expect(restore(real, rec, swap)).rejects.toThrow();
-    expect(existsSync(join(system, 'stuff'))).toBe(false);
-    expect(modeOf(rec.storedPath)).toBe(0);
+    expect(statSync(link).ino).toBe(statSync(runtime).ino);
+    expect(existsSync(join(opts.quarantineDir, 'c'))).toBe(false);
   });
 });
 

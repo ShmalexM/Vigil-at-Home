@@ -337,6 +337,10 @@ export interface TransferOptions {
   parents?: boolean;
   /** place: the mode of the item's own folder when it is made. */
   parentMode?: number;
+  /** pack: the identity (dev:ino) of the item as checked. */
+  expectId?: string;
+  /** place: the real folder the item must land in, as checked. */
+  expectParent?: string;
   /** place: the top entry's mode. */
   topMode?: number;
   /** place, as root: keep the archived owners. */
@@ -378,6 +382,7 @@ async function transferOnce(
     gid: from.actor.gid,
     ...caps,
     ...(from.ownTree ? { ownTree: true } : {}),
+    ...(opts.expectId !== undefined ? { expectId: opts.expectId } : {}),
   });
   const placer = start({
     op: 'place',
@@ -386,6 +391,7 @@ async function transferOnce(
     ...caps,
     ...(opts.parents ? { parents: true } : {}),
     ...(opts.parentMode !== undefined ? { parentMode: opts.parentMode } : {}),
+    ...(opts.expectParent !== undefined ? { expectParent: opts.expectParent } : {}),
     ...(opts.topMode !== undefined ? { topMode: opts.topMode } : {}),
     ...(opts.owners ? { owners: true } : {}),
   });

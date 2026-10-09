@@ -122,11 +122,13 @@ an event while working fine; Santa logs every program launch.
   `/sbin`, plus Santa and Vigil, is never paused or killed.
 - **Protected paths.** macOS system folders, top-level folders, home folders, and the
   files of Vigil, Santa and osquery (helper, launch items, units, socket, data) are never
-  quarantined, nor is a folder that holds one. Paths are checked by name first and then by
+  quarantined, nor is a folder that holds one, nor Vigil's own app as pinned or as the
+  app names it (an AppImage by its identity). Paths are checked by name first and then by
   identity (device and inode), so another spelling of a protected path, or a hard link to a
   protected file, is refused too. Files with more than one hard link are refused.
   Symlinked parent folders are resolved and checked again. Restore never overwrites
-  something new, and makes a missing folder again with the mode it had.
+  something new, and makes a missing folder again with the mode it had (when root makes
+  it, never writable by others).
 - **No root writes through your folders.** Quarantine and restore copy an item between
   its folder and the helper's own in two small processes (`commands/fsChild.ts`): the
   side in your folders runs as you (the folder's owner), with your groups, so a folder
@@ -135,7 +137,10 @@ an event while working fine; Santa logs every program launch.
   group or others, and with no ACL letting anyone else write (read with `ls -le` on
   macOS; on Linux a POSIX ACL's mask shows in the group bits). Files are created with
   `O_EXCL|O_NOFOLLOW`, the original is removed only after the copy is complete, and a
-  failed copy removes only what it created. A root-owned item in a folder others can
+  failed copy removes only what it created. The process that reads the item refuses
+  anything but the file the helper checked (same device and inode, no other hard links)
+  and never crosses into another mounted disk; the one that writes refuses any folder
+  but the one checked. A root-owned item in a folder others can
   write to (like a package-installed app in `/Applications`) is refused. An item goes
   back into a folder that is root's alone as root, with each entry's owner given last;
   anywhere else, anything a user owns is restored as that user, keeping each entry's

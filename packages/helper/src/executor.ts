@@ -152,9 +152,18 @@ export class Executor {
    */
   private get quarantineOpts(): QuarantineOptions {
     const store = this.d.appPin;
-    const opts: QuarantineOptions = store
-      ? { guard: () => store.intact(), ...this.d.quarantine }
-      : { ...this.d.quarantine };
+    // Vigil's own app as pinned and as the app named it (its AppImages by
+    // identity), so no rule moves it or turns off what starts it.
+    const own = this.self();
+    const pinned = store?.current()?.path;
+    const selfPaths = [
+      ...(this.d.quarantine.selfPaths ?? []),
+      ...own.paths,
+      ...(pinned ? [pinned] : []),
+    ];
+    const selfIds = [...(this.d.quarantine.selfIds ?? []), ...own.images];
+    const base: QuarantineOptions = { ...this.d.quarantine, selfPaths, selfIds };
+    const opts: QuarantineOptions = store ? { guard: () => store.intact(), ...base } : base;
     return this.d.sys.platform === 'linux' ? { platform: 'linux', ...opts } : opts;
   }
 

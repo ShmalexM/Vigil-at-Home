@@ -46,6 +46,7 @@ import {
   readdirSync,
   readlinkSync,
   readSync,
+  realpathSync,
   rmdirSync,
   statSync,
   symlinkSync,
@@ -72,6 +73,10 @@ export interface FsRequest {
   owners?: boolean;
   /** pack: the item is in the helper's own root-only folder, where no one else reaches. */
   ownTree?: boolean;
+  /** pack: the identity (dev:ino) the helper checked; anything else at the path is refused. */
+  expectId?: string;
+  /** place: the real folder the helper checked; the item goes nowhere else. */
+  expectParent?: string;
   /** pack and place: at most this many entries, and bytes of file data (never above the built-in caps). */
   maxEntries?: number;
   maxBytes?: number;
@@ -260,12 +265,25 @@ function packFile(top: string, rel: string, st: BigIntStats, out: number): void 
 
 /** Set for a pack of the helper's own store (FsRequest ownTree). */
 let ownTree = false;
+/** pack: the identity the helper checked, and the disk of the top item once it is read. */
+let expectId: string | undefined;
+let topDev: bigint | undefined;
 /** The pack's caps (FsRequest maxEntries, maxBytes). */
 let budget = new Budget({ op: 'pack', path: '', uid: 0, gid: 0 });
 
 function packEntry(top: string, rel: string, out: number, packed: Packed[]): void {
   const path = at(top, rel);
   const st = lstatSync(path, { bigint: true });
+  if (rel === '') {
+    // What is here must be what the helper checked: not something swapped in since.
+    if (expectId !== undefined && idOf(st) !== expectId)
+      throw new Refusal(`${path} changed after it was checked`);
+    if (st.isFile() && st.nlink > 1n) throw new Refusal(`${path} has other hard links`);
+    topDev = st.dev;
+  } else if (st.dev !== topDev) {
+    // Never into another mount (a bind mount of a system folder, say).
+    throw new Refusal(`${path} is on another disk mounted inside the item`);
+  }
   const owner = { uid: Number(st.uid), gid: Number(st.gid) };
   if (!st.isFile()) budget.take(0);
   if (st.isSymbolicLink()) {
@@ -314,6 +332,7 @@ function removePacked(top: string, packed: Packed[]): void {
 export function pack(req: FsRequest, input: FdReader, out = 1): void {
   const packed: Packed[] = [];
   ownTree = req.ownTree === true;
+  expectId = req.expectId;
   budget = new Budget(req);
   packEntry(req.path, '', out, packed);
   writeAll(out, Buffer.from(JSON.stringify({ t: 'end' } satisfies Frame) + '\n'));
@@ -414,6 +433,8 @@ export function place(req: FsRequest, input: FdReader): void {
   };
   try {
     if (req.parents) makeParents(req.path, created, req.parentMode);
+    if (req.expectParent !== undefined && realpathSync(dirname(req.path)) !== req.expectParent)
+      throw new Refusal(`${dirname(req.path)} is not the folder that was checked`);
     const madeDirs = new Set<string>();
     let first = true;
     for (;;) {

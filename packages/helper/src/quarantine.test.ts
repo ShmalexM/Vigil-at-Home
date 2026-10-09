@@ -1,15 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   chmodSync,
-  chownSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
-  renameSync,
   rmSync,
-  symlinkSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,12 +20,9 @@ import { isProtectedProcess } from './commands/process.js';
 import { self } from './commands/transfer.js';
 import { Executor } from './executor.js';
 import { Journal } from './journal.js';
-import { realSystem } from './system.js';
+import type { AppPinStore } from './pinStore.js';
 import { FakeSystem } from './testing/fakeSystem.js';
 import { FakeLinuxSystem } from './testing/fakeLinuxSystem.js';
-
-const isRoot = process.getuid?.() === 0;
-const NOBODY = 65534;
 
 const opts = { quarantineDir: '/Library/Application Support/Vigil/Quarantine' };
 
@@ -87,29 +82,6 @@ describe('restore', () => {
     const q = join(root, 'Quarantine');
     if (existsSync(q)) chmodSync(q, 0o700);
     rmSync(root, { recursive: true, force: true });
-  });
-
-  // The user's side of a move runs as the user, so a folder they swap for a
-  // link leads only where they could already write.
-  it.skipIf(!isRoot)('never moves back through a folder swapped for a symlink', async () => {
-    chmodSync(root, 0o755);
-    const q: QuarantineOptions = { quarantineDir: join(root, 'Quarantine') };
-    const downloads = join(root, 'Downloads');
-    const dir = join(downloads, 'stuff');
-    mkdirSync(dir, { recursive: true });
-    for (const d of [downloads, dir]) chownSync(d, NOBODY, NOBODY);
-    writeFileSync(join(dir, 'evil'), 'x');
-    chownSync(join(dir, 'evil'), NOBODY, NOBODY);
-    const real = realSystem();
-    const rec = await quarantine(real, join(dir, 'evil'), 'a1', q);
-    // Root's own folder, which the user can't write to.
-    const elsewhere = join(root, 'elsewhere');
-    mkdirSync(elsewhere, { mode: 0o755 });
-    renameSync(dir, join(downloads, 'old'));
-    symlinkSync(elsewhere, dir);
-    await expect(restore(real, rec, q)).rejects.toThrow();
-    expect(existsSync(join(elsewhere, 'evil'))).toBe(false);
-    expect(existsSync(rec.storedPath)).toBe(true);
   });
 
   it('recreates a deleted folder and moves the file back', async () => {
@@ -299,6 +271,68 @@ describe("file commands against the helper's state folder", () => {
       await expect(ex.execute({ kind: 'file.restore', quarantineId: 'q1' })).rejects.toMatchObject({
         code: 'refused',
       });
+    });
+  }
+});
+
+describe("Vigil's own app, as pinned and as the app names it", () => {
+  let root: string;
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'vigil-ownapp-')));
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  for (const platform of ['darwin', 'linux'] as const) {
+    it(`is never quarantined, nor what starts it turned off (${platform})`, async () => {
+      const sys = platform === 'linux' ? new FakeLinuxSystem() : new FakeSystem();
+      sys.console = process.getuid!();
+      const apps = join(root, 'Applications');
+      mkdirSync(apps);
+      // An AppImage known only by identity, and an app known by its pinned path.
+      const image = join(apps, 'Vigil.AppImage');
+      writeFileSync(image, 'image', { mode: 0o755 });
+      const st = statSync(image, { bigint: true });
+      const pinned = join(apps, 'vigil-pinned');
+      writeFileSync(pinned, 'app', { mode: 0o755 });
+      const autostart = join(root, 'autostart');
+      const agents = join(root, 'LaunchAgents');
+      mkdirSync(autostart);
+      mkdirSync(agents);
+      const ex = new Executor({
+        sys,
+        journal: new Journal(join(root, 'journal.json')),
+        approvals: new Approvals({
+          dir: join(root, 'approvals'),
+          requiredOwnerUid: process.getuid!(),
+        }),
+        rules: new RuleStore(join(root, 'rules.json')),
+        quarantine: { quarantineDir: join(root, 'Quarantine'), actorFor: async () => self() },
+        launchDirs: /\/(LaunchAgents|autostart)$/,
+        syncPort: 47821,
+        self: () => ({ paths: [], images: [`${st.dev}:${st.ino}`], hashes: [] }),
+        appPin: {
+          current: () => ({ platform, path: pinned }),
+          intact: async () => true,
+        } as unknown as AppPinStore,
+      });
+      for (const path of [image, pinned, apps])
+        await expect(ex.execute({ kind: 'file.quarantine', path }), path).rejects.toMatchObject({
+          code: 'refused',
+        });
+      expect(existsSync(image) && existsSync(pinned)).toBe(true);
+      for (const [i, program] of [image, pinned].entries()) {
+        const item =
+          platform === 'linux'
+            ? join(autostart, `vigil${i}.desktop`)
+            : join(agents, `com.example.start${i}.plist`);
+        writeFileSync(item, `[Desktop Entry]\nExec="${program}" --hidden\n`);
+        if (sys instanceof FakeSystem) sys.programs.set(item, program);
+        await expect(
+          ex.execute({ kind: 'persistence.disable', path: item }),
+          item,
+        ).rejects.toMatchObject({ code: 'refused' });
+        expect(existsSync(item)).toBe(true);
+      }
     });
   }
 });

@@ -58,6 +58,8 @@ export interface QuarantineOptions {
   platform?: Platform;
   /** Vigil's own files on this machine (runtime, socket, data), protected like the built-in lists. */
   selfPaths?: string[];
+  /** Vigil's own files known by identity (`<device>:<inode>`), like an approved AppImage. */
+  selfIds?: readonly string[];
   /**
    * A tripwire over the files the helper keeps (pinStore.ts): whether they
    * are all still where and what the helper left them. Checked before and
@@ -152,9 +154,24 @@ export function vetPath(path: string, opts: QuarantineOptions): string {
   return path;
 }
 
+/** The real location of `dir`, through its nearest folder that exists. */
+function realFolder(dir: string): string {
+  const rest: string[] = [];
+  for (let d = dir; ; d = dirname(d)) {
+    try {
+      return join(realpathSync(d), ...rest);
+    } catch {
+      if (d === '/') return dir;
+      rest.unshift(basename(d));
+    }
+  }
+}
+
 /** Everything protected from file moves, by identity. */
 export function protectedFor(opts: QuarantineOptions): ProtectedIds {
-  return protectedIds(protectedPaths(opts));
+  const ids = protectedIds(protectedPaths(opts));
+  for (const id of opts.selfIds ?? []) ids.inside.set(id, "Vigil's own app");
+  return ids;
 }
 
 /** The path with symlinks in its parent folders resolved, or the path itself when they don't exist. */
@@ -243,7 +260,13 @@ export async function quarantine(
     await transfer(
       { path, actor },
       { path: storedPath, actor: self() },
-      { owners: true, removeSource: true },
+      {
+        owners: true,
+        removeSource: true,
+        // The child refuses anything at the path but what was checked here.
+        expectId: `${st.dev}:${st.ino}`,
+        expectParent: realpathSync(slot),
+      },
     );
   } catch (err) {
     // A complete copy whose original could not be (fully) removed is kept.
@@ -344,6 +367,9 @@ export async function restore(
   vetPath(realParentPath(rec.originalPath), opts);
   // By identity too: no folder it goes back into is one of the protected ones.
   checkFolders(dirname(rec.originalPath), protectedFor(opts));
+  // The folder it goes into, as checked now: the child refuses any other.
+  const parentAtCheck = realFolder(dirname(rec.originalPath));
+  vetPath(join(parentAtCheck, basename(rec.originalPath)), opts);
   const isLink = stored.isSymbolicLink();
   // The store is root's own: readable again only for the copy back, and
   // for listing who owns what is in it.
@@ -359,7 +385,11 @@ export async function restore(
       { path: rec.originalPath, actor },
       {
         parents: true,
-        ...(rec.parent ? { parentMode: rec.parent.mode } : {}),
+        // Root never makes a folder others can change; a user makes their own as it was.
+        ...(rec.parent
+          ? { parentMode: actor.uid === 0 ? rec.parent.mode & 0o755 : rec.parent.mode }
+          : {}),
+        expectParent: parentAtCheck,
         ...(isLink ? {} : { topMode: rec.mode }),
         owners: actor.uid === 0,
       },
