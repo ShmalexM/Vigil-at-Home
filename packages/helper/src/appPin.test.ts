@@ -9,13 +9,12 @@ import {
   parseCodesignIdentity,
   pinCandidate,
   pinFor,
-  readPin,
   repinFromGrant,
-  writePin,
   type AppPin,
   type PinOptions,
 } from './appPin.js';
 import { readCodeIdentity } from './codeDirectory.js';
+import { AppPinStore } from './pinStore.js';
 import { BINARIES, LINUX_BINARIES, realSystem } from './system.js';
 import { VIGIL_BUNDLE_ID } from './config.js';
 import { Executor } from './executor.js';
@@ -43,7 +42,7 @@ const INSTALLED_MAC = ['/Applications/Vigil at Home.app'];
 async function regrant(
   sys: System,
   grant: Parameters<typeof pinCandidate>[1],
-  opts: PinOptions & { pinFile: string },
+  opts: PinOptions & { store: AppPinStore },
 ): Promise<AppPin | undefined> {
   const bound = await pinCandidate(sys, grant, opts);
   return bound && repinFromGrant(sys, bound, opts);
@@ -51,14 +50,23 @@ async function regrant(
 
 let root: string;
 let pinFile: string;
-beforeEach(() => {
+let store: AppPinStore;
+beforeEach(async () => {
   root = mkdtempSync(join(tmpdir(), 'vigil-pin-'));
   pinFile = join(root, 'app-pin.json');
+  // The store's own system: the immutable flag is a no-op here (pinStore.test.ts covers it).
+  const flags = { platform: 'linux', run: async () => ok(), now: Date.now } as unknown as System;
+  store = new AppPinStore(flags, {
+    file: pinFile,
+    keyFile: join(root, 'app-pin.key'),
+    ownerUid: process.getuid!(),
+  });
+  await store.load();
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-const setPin = (pin: AppPin | undefined) => writePin(pinFile, pin);
-const currentPin = () => readPin(pinFile);
+const setPin = (pin: AppPin | undefined) => store.write(pin);
+const currentPin = () => store.current();
 
 const ok = (stdout = '', stderr = ''): RunResult => ({ code: 0, stdout, stderr });
 
@@ -106,7 +114,7 @@ const executorDeps = (sys: FakeSystem | FakeLinuxSystem) => ({
   rules: new RuleStore(join(root, 'rules.json')),
   quarantine: { quarantineDir: join(root, 'Quarantine') },
   syncPort: 47821,
-  appPin: pinFile,
+  appPin: store,
 });
 
 it('pins by the bundle id the app is built with', () => {
@@ -188,7 +196,7 @@ describe('codesign -d -vvv as a real Mac prints it', () => {
   it('pins when codesign, read from stderr, agrees with the program’s own bytes', async () => {
     const sys = new StderrMac(output(CDHASH, VIGIL_ID));
     sys.processes.set(700, { path: FINDER_EXE, started: STARTED });
-    const opts = { pinFile, installed: INSTALLED_MAC };
+    const opts = { store, installed: INSTALLED_MAC };
     const pin = await regrant(sys, { selfPaths: [FINDER_APP] }, opts);
     expect(pin).toEqual({ platform: 'darwin', path: FINDER_EXE, cdhash: CDHASH, sha256: APP_SHA });
     expect(currentPin()).toEqual(pin);
@@ -221,7 +229,7 @@ describe('the app pinned at install (macOS)', () => {
     const pin = await pinFor(sys, BUNDLE, { installed: INSTALLED_MAC });
     expect(pin).toEqual({ platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
     expect(sys.fs.opened).toEqual([EXE]);
-    setPin(pin);
+    await setPin(pin);
     expect(currentPin()).toEqual(pin);
     expect(statSync(pinFile).mode & 0o777).toBe(0o644);
     const opts = { installed: INSTALLED_MAC };
@@ -270,8 +278,8 @@ describe('the app pinned at install (macOS)', () => {
   });
 
   describe('with a pin', () => {
-    beforeEach(() => {
-      setPin({ platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
+    beforeEach(async () => {
+      await setPin({ platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
     });
 
     it('never pauses or stops a process running the pinned code', async () => {
@@ -366,7 +374,7 @@ describe('the app pinned at install (macOS)', () => {
   });
 
   it('runs no codesign for a program protected by path', async () => {
-    setPin({ platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
+    await setPin({ platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
     const app = '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home';
     sys.processes.set(700, { path: app, started: STARTED });
     const ex = new Executor(executorDeps(sys));
@@ -377,7 +385,7 @@ describe('the app pinned at install (macOS)', () => {
   });
 
   it('treats the installer’s folder alike for the pin and for stopping, in any case', async () => {
-    setPin({ platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
+    await setPin({ platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
     const ex = new Executor(executorDeps(sys));
     let pid = 800;
     for (const app of [
@@ -402,9 +410,9 @@ describe('the app pinned at install (macOS)', () => {
   describe('re-pinned by an approved self grant', () => {
     const V2 = machO(VIGIL_ID, 'v2');
     const repin = (selfPaths: string[]) =>
-      regrant(sys, { selfPaths }, { pinFile, installed: INSTALLED_MAC });
-    beforeEach(() => {
-      setPin({ platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
+      regrant(sys, { selfPaths }, { store, installed: INSTALLED_MAC });
+    beforeEach(async () => {
+      await setPin({ platform: 'darwin', path: EXE, cdhash: CDHASH, sha256: APP_SHA });
       // The app in Downloads was updated: its code has a new cdhash.
       sys.put(EXE, '16777220:102', V2);
     });
@@ -439,7 +447,7 @@ describe('the app pinned at install (macOS)', () => {
         repin: {
           candidate: (grant) => pinCandidate(sys, grant, opts),
           commit: async (bound) => {
-            const pin = await repinFromGrant(sys, bound, { ...opts, pinFile });
+            const pin = await repinFromGrant(sys, bound, { ...opts, store });
             if (pin) committed.push(pin);
           },
         },
@@ -560,7 +568,7 @@ describe('the app pinned at install (Linux AppImage)', () => {
         { path: '/home/alex/link.AppImage', id: '2049:5501' },
       ],
     };
-    expect(await regrant(sys, grant, { ...opts, pinFile })).toBeUndefined();
+    expect(await regrant(sys, grant, { ...opts, store })).toBeUndefined();
   });
 
   it('never mixes the identity and the hash of two files swapped in meanwhile', async () => {
@@ -572,11 +580,11 @@ describe('the app pinned at install (Linux AppImage)', () => {
     // A grant naming the first file's id, after the swap, pins nothing.
     sys.fs.duringHash = undefined;
     const grant = { selfPaths: [], selfImages: [{ path: image, id: '2049:5501' }] };
-    expect(await regrant(sys, grant, { ...opts, pinFile })).toBeUndefined();
+    expect(await regrant(sys, grant, { ...opts, store })).toBeUndefined();
   });
 
   it('never stops Vigil running from the pinned image, or blocks the image by hash', async () => {
-    setPin(pin);
+    await setPin(pin);
     const blocks = new FapolicydBlocks(sys, {
       store: join(root, 'blocked.json'),
       rulesDir: join(root, 'rules.d'),
@@ -599,10 +607,10 @@ describe('the app pinned at install (Linux AppImage)', () => {
   });
 
   it('spares nothing when the pin names another image, or there is none', async () => {
-    setPin({ ...pin, image: '2049:9999', sha256: 'b'.repeat(64) });
+    await setPin({ ...pin, image: '2049:9999', sha256: 'b'.repeat(64) });
     const ex = new Executor(executorDeps(sys));
     await ex.execute({ kind: 'process.suspend', pid: 2000, path: `${mount}/vigil-at-home` });
-    setPin(undefined);
+    await setPin(undefined);
     await ex.execute({ kind: 'process.suspend', pid: 2000, path: `${mount}/vigil-at-home` });
     expect(sys.signals.map((s) => s.pid)).toEqual([2000, 2000]);
   });
@@ -615,7 +623,7 @@ describe('the app pinned at install (Linux AppImage)', () => {
     });
     const pinned = await pinFor(sys, image, opts);
     expect(pinned).toEqual({ ...pin, ctime: '1700000000123456789', size: 150_000_000 });
-    setPin(pinned);
+    await setPin(pinned);
     let hashes = 0;
     sys.fs.duringHash = () => void hashes++;
     const ex = new Executor(executorDeps(sys));
@@ -643,7 +651,7 @@ describe('the app pinned at install (Linux AppImage)', () => {
   });
 
   it('spares a changed image whose contents still match the pin', async () => {
-    setPin({ ...pin, ctime: '5', size: 1 });
+    await setPin({ ...pin, ctime: '5', size: 1 });
     sys.inodes.set('2049:5501', { ctime: '6', size: 1, sha256: APP_SHA }); // touched (chmod, say)
     let hashes = 0;
     sys.fs.duringHash = () => void hashes++;
@@ -653,7 +661,7 @@ describe('the app pinned at install (Linux AppImage)', () => {
     ).rejects.toMatchObject({ code: 'refused' });
     expect(hashes).toBe(1);
     // A pin from before ctimes were kept is checked by contents too.
-    setPin({ platform: 'linux', path: image, image: '2049:5501', sha256: APP_SHA });
+    await setPin({ platform: 'linux', path: image, image: '2049:5501', sha256: APP_SHA });
     sys.inodes.set('2049:5501', { ctime: '7', size: 1, sha256: 'e'.repeat(64) });
     await ex.execute({ kind: 'process.kill', pid: 2000, path: `${mount}/vigil-at-home` });
     expect(sys.signals.map((s) => s.pid)).toEqual([2000]);
@@ -666,7 +674,7 @@ describe('the app pinned at install (Linux AppImage)', () => {
     expect(await pinFor(sys, inOpt, opts)).toEqual({ ...pin, path: inOpt, image: '2049:6601' });
     // Through an approved grant too.
     const grant = { selfPaths: [], selfImages: [{ path: inOpt, id: '2049:6601' }] };
-    expect(await regrant(sys, grant, { ...opts, pinFile })).toMatchObject({
+    expect(await regrant(sys, grant, { ...opts, store })).toMatchObject({
       path: inOpt,
       image: '2049:6601',
     });
@@ -686,7 +694,7 @@ describe('the app pinned at install (Linux AppImage)', () => {
   });
 
   it('is re-pinned by an approved grant naming the image', async () => {
-    const o = { ...opts, pinFile };
+    const o = { ...opts, store };
     // An image that is no longer the file at its path is skipped.
     const moved = { path: '/home/alex/Old.AppImage', id: '2049:7777' };
     expect(await regrant(sys, { selfPaths: [], selfImages: [moved] }, o)).toBeUndefined();

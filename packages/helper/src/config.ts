@@ -14,6 +14,8 @@ export interface HelperPaths {
   helperRules: string;
   /** The app the helper was installed for, pinned by install.sh as root (appPin.ts). */
   appPin: string;
+  /** The key that signs the pin; root-only (pinStore.ts). */
+  appPinKey: string;
   /** False on Linux, where there is no Santa. */
   santaLog: string | false;
   osqueryResults: string | false;
@@ -41,6 +43,7 @@ export function macPaths(supportDir = '/Library/Application Support/Vigil'): Hel
     fileAccessPolicy: join(supportDir, 'santa-file-access.plist'),
     helperRules: join(supportDir, 'helper-rules.json'),
     appPin: join(supportDir, 'app-pin.json'),
+    appPinKey: join(supportDir, 'app-pin.key'),
     santaLog: '/var/db/santa/santa.log',
     osqueryResults: '/var/log/osquery/osqueryd.results.log',
     socket: '/var/run/vigil-helper.sock',
@@ -65,6 +68,7 @@ export function linuxPaths(supportDir = '/var/lib/vigil'): HelperPaths {
     fileAccessPolicy: join(supportDir, 'santa-file-access.plist'),
     helperRules: join(supportDir, 'helper-rules.json'),
     appPin: join(supportDir, 'app-pin.json'),
+    appPinKey: join(supportDir, 'app-pin.key'),
     santaLog: false,
     osqueryResults: '/var/log/osquery/osqueryd.results.log',
     socket: '/run/vigil-helper.sock',

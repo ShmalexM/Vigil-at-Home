@@ -15,7 +15,13 @@ import { lstatSync, readFileSync } from 'node:fs';
 import type { System } from '../system.js';
 import { protectionFor } from '../config.js';
 import { ActionError } from './errors.js';
-import { quarantine, resolveTarget, restore, type QuarantineOptions } from './quarantine.js';
+import {
+  quarantine,
+  resolveTarget,
+  restore,
+  type GuardedFile,
+  type QuarantineOptions,
+} from './quarantine.js';
 import type { PersistenceRecord } from './persistence.js';
 
 /** Folders whose items persistence.disable accepts on Linux. */
@@ -125,8 +131,12 @@ export async function disableLinuxPersistence(
   return { quarantine: q, label: name, domain: domainOf(scope), wasLoaded };
 }
 
-export async function restoreLinuxPersistence(sys: System, rec: PersistenceRecord): Promise<void> {
-  restore(rec.quarantine);
+export async function restoreLinuxPersistence(
+  sys: System,
+  rec: PersistenceRecord,
+  guards?: readonly GuardedFile[],
+): Promise<void> {
+  restore(rec.quarantine, guards);
   const scope = scopeOf(rec.domain);
   if (scope.kind === 'autostart') return;
   const args = scopeArgs(scope);

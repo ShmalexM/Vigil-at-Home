@@ -21,7 +21,8 @@ import {
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { Approvals } from './approval.js';
-import { pinFor, writePin } from './appPin.js';
+import { pinFor } from './appPin.js';
+import { AppPinStore } from './pinStore.js';
 import { defaultPaths, installedSelf, SANTA_SYNC_PORT } from './config.js';
 import { runDaemon } from './daemon.js';
 import { ensureOsquery, removeOsquery } from './osquery.js';
@@ -93,13 +94,14 @@ async function main(argv: string[]): Promise<number> {
         return 2;
       }
       const sys = realSystem();
-      const file = defaultPaths().appPin;
+      const paths = defaultPaths();
+      mkdirSync(dirname(paths.appPin), { recursive: true, mode: 0o755 });
+      const store = new AppPinStore(sys, { file: paths.appPin, keyFile: paths.appPinKey });
+      await store.load();
       // Whatever happens, an older app's pin doesn't outlive this install.
-      writePin(file, undefined);
+      await store.write(undefined);
       const pin = await pinFor(sys, arg, { installed: installedSelf(sys.platform) });
-      if (!pin) return 0;
-      mkdirSync(dirname(file), { recursive: true, mode: 0o755 });
-      writePin(file, pin);
+      if (pin) await store.write(pin);
       return 0;
     }
     default:

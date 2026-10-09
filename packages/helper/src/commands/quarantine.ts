@@ -14,6 +14,7 @@ import {
   mkdirSync,
   realpathSync,
   renameSync,
+  readdirSync,
   rmdirSync,
   existsSync,
 } from 'node:fs';
@@ -43,6 +44,47 @@ export interface QuarantineOptions {
   protectedExact?: Set<string>;
   /** Picks the protected lists when they aren't given. macOS when absent. */
   platform?: Platform;
+  /**
+   * Files the helper keeps (the app pin and its key, pinStore.ts), by path
+   * and device and inode. A move that ends up taking or replacing one of
+   * them, by whatever path it got there, is undone and refused.
+   */
+  guarded?: () => readonly GuardedFile[];
+}
+
+/** A file the helper keeps, by path and the device and inode it should have there. */
+export interface GuardedFile {
+  path: string;
+  id: string;
+}
+
+/** A move took or replaced a file the helper keeps; it was undone. */
+export class GuardTripped extends ActionError {
+  constructor(path: string) {
+    super('refused', `moving ${path} would have moved a file Vigil's helper keeps; undone`);
+  }
+}
+
+function lstatIdOf(path: string): string | undefined {
+  try {
+    const st = lstatSync(path, { bigint: true });
+    return `${st.dev}:${st.ino}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Checked synchronously right after a move to `arrived`: whether what
+ * arrived is one of the guarded files (a hard link to it, say), or whether
+ * any guarded file is no longer at its path with its device and inode (the
+ * move took a folder holding it, or replaced it).
+ */
+export function tookGuarded(arrived: string, guards: readonly GuardedFile[] | undefined): boolean {
+  if (!guards?.length) return false;
+  const moved = lstatIdOf(arrived);
+  if (moved !== undefined && guards.some((g) => g.id === moved)) return true;
+  return guards.some((g) => lstatIdOf(g.path) !== g.id);
 }
 
 /** macOS disks ignore case by default, so paths there are compared without it. */
@@ -150,12 +192,14 @@ export function quarantine(
   const slot = join(opts.quarantineDir, actionId);
   mkdirSync(slot, { mode: 0o700 });
   const storedPath = join(slot, basename(path));
+  const guards = opts.guarded?.();
   try {
     // Linux homes are often their own partition, so a move there may have to copy.
-    if (opts.platform === 'linux') moveAcrossDisks(path, storedPath);
+    if (opts.platform === 'linux') moveAcrossDisks(path, storedPath, guards);
     else renameSync(path, storedPath);
   } catch (err) {
     rmSync(slot, { recursive: true, force: true });
+    if (err instanceof GuardTripped) throw err;
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'EXDEV') {
       throw new ActionError(
@@ -164,6 +208,12 @@ export function quarantine(
       );
     }
     throw new ActionError('failed', `could not move ${path}: ${(err as Error).message}`);
+  }
+  // Whatever path got the move there, it must not have taken a file the helper keeps.
+  if (tookGuarded(storedPath, guards)) {
+    undoMove(storedPath, path, opts);
+    rmSync(slot, { recursive: true, force: true });
+    throw new GuardTripped(path);
   }
   if (!st.isSymbolicLink()) chmodSync(storedPath, 0o000);
   return {
@@ -181,7 +231,7 @@ export function quarantine(
  * (links stay links, times are kept) and then delete the source. The copy
  * is complete before anything is deleted, so a failure leaves the original.
  */
-export function moveAcrossDisks(from: string, to: string): void {
+export function moveAcrossDisks(from: string, to: string, guards?: readonly GuardedFile[]): void {
   try {
     renameSync(from, to);
     return;
@@ -200,10 +250,52 @@ export function moveAcrossDisks(from: string, to: string): void {
     rmSync(to, { recursive: true, force: true });
     throw err;
   }
+  // The source is about to be deleted: never with a file the helper keeps in it.
+  if (guards?.length && holdsGuarded(from, guards)) {
+    rmSync(to, { recursive: true, force: true });
+    throw new GuardTripped(from);
+  }
   rmSync(from, { recursive: true, force: true });
 }
 
-export function restore(rec: QuarantineRecord): void {
+/** Whether `path`, or anything under it (not following links), is one of the guarded files. */
+function holdsGuarded(path: string, guards: readonly GuardedFile[]): boolean {
+  const ids = new Set(guards.map((g) => g.id));
+  const stack = [path];
+  let seen = 0;
+  while (stack.length) {
+    const p = stack.pop()!;
+    // Too big to check: treat as holding one, and leave the source alone.
+    if (++seen > 200_000) return true;
+    let st;
+    try {
+      st = lstatSync(p, { bigint: true });
+    } catch {
+      continue;
+    }
+    if (ids.has(`${st.dev}:${st.ino}`)) return true;
+    if (st.isDirectory()) {
+      try {
+        for (const name of readdirSync(p)) stack.push(join(p, name));
+      } catch {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Put a move back after a guard tripped; a failure leaves it where it is, reported by the caller. */
+function undoMove(from: string, to: string, opts: QuarantineOptions): void {
+  try {
+    if (opts.platform === 'linux') moveAcrossDisks(from, to);
+    else renameSync(from, to);
+  } catch {
+    // Left in the quarantine slot; the refusal says what happened.
+  }
+}
+
+export function restore(rec: QuarantineRecord, guards?: readonly GuardedFile[]): void {
   if (existsSync(rec.originalPath)) {
     throw new ActionError(
       'refused',
@@ -216,7 +308,16 @@ export function restore(rec: QuarantineRecord): void {
   const isLink = lstatSync(rec.storedPath).isSymbolicLink();
   if (!isLink) chmodSync(rec.storedPath, rec.mode);
   // Only Linux quarantines ever cross disks; on macOS this is a plain rename.
-  moveAcrossDisks(rec.storedPath, rec.originalPath);
+  moveAcrossDisks(rec.storedPath, rec.originalPath, guards);
+  // A restore that landed on, or replaced, a file the helper keeps goes back.
+  if (tookGuarded(rec.originalPath, guards)) {
+    try {
+      moveAcrossDisks(rec.originalPath, rec.storedPath);
+    } catch {
+      // Left where it landed; the refusal says what happened.
+    }
+    throw new GuardTripped(rec.originalPath);
+  }
   try {
     if (!isLink) chownSync(rec.originalPath, rec.uid, rec.gid);
   } catch {

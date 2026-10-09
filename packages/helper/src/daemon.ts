@@ -28,6 +28,7 @@ import {
 } from '@vigil/sensors';
 import { Approvals } from './approval.js';
 import { pinCandidate, repinFromGrant } from './appPin.js';
+import { AppPinStore } from './pinStore.js';
 import { defaultPaths, installedSelf, SANTA_SYNC_PORT, type HelperPaths } from './config.js';
 import { Executor, type ActionOutcome } from './executor.js';
 import { FastPath } from './fastpath.js';
@@ -149,6 +150,10 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       })
     : undefined;
 
+  // The app pin, signed and kept in memory (pinStore.ts).
+  const pinStore = new AppPinStore(sys, { file: paths.appPin, keyFile: paths.appPinKey, log });
+  await pinStore.load();
+
   const executor: Executor = new Executor({
     sys,
     journal,
@@ -172,13 +177,13 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     fastPath,
     ...(fapolicyd ? { fapolicyd } : {}),
     // The app pinned at install, never paused, stopped or blocked by hash.
-    appPin: paths.appPin,
+    appPin: pinStore,
     repin: {
       // Read before the password dialog; the approval re-pins only this code.
       candidate: (grant) => pinCandidate(sys, grant, { installed: installedSelf(sys.platform) }),
       commit: async (bound) => {
         const pin = await repinFromGrant(sys, bound, {
-          pinFile: paths.appPin,
+          store: pinStore,
           installed: installedSelf(sys.platform),
         });
         if (pin) log(`pinned the app at ${pin.path}`);

@@ -22,6 +22,7 @@ import { PolicyRefused, type FastPath, type SelfSet } from './fastpath.js';
 import type { PreexecSync } from './preexec.js';
 import { APPROVAL_TTL_MS, type Approvals } from './approval.js';
 import { pinnedHashes, runsPinnedApp, type PinCandidate } from './appPin.js';
+import type { AppPinStore } from './pinStore.js';
 import { ActionError } from './commands/errors.js';
 import {
   identifyProcess,
@@ -37,6 +38,7 @@ import {
   realParentPath,
   restore,
   touchesHelperState,
+  GuardTripped,
   type QuarantineOptions,
   type QuarantineRecord,
 } from './commands/quarantine.js';
@@ -75,7 +77,7 @@ export interface ExecutorDeps {
    * The app pinned at install (appPin.ts): a process running it is never
    * paused or stopped, and its program never blocked by hash.
    */
-  appPin?: string;
+  appPin?: AppPinStore;
   /** Re-pins the app a self grant covers, with the grant's password (appPin.ts). */
   repin?: {
     /** Before the password is asked for: the app the grant would pin (pinCandidate). */
@@ -125,16 +127,17 @@ export class Executor {
   private isOwnHash(identifier: string): boolean {
     const id = identifier.toLowerCase();
     if (this.self().hashes.includes(id)) return true;
-    return this.d.appPin ? pinnedHashes(this.d.appPin).includes(id) : false;
+    return pinnedHashes(this.d.appPin?.current()).includes(id);
   }
 
-  /** The pin check for a process about to be paused or stopped; absent without a pin file. */
+  /** The pin check for a process about to be paused or stopped; absent without a pin store. */
   private pinCheck(): { isPinnedApp?: (id: ProcessIdentity) => Promise<boolean | 'changed'> } {
-    const file = this.d.appPin;
-    if (!file) return {};
+    const store = this.d.appPin;
+    if (!store) return {};
     const sys = this.d.sys;
     return {
-      isPinnedApp: (id) => runsPinnedApp(sys, file, id, () => identifyProcess(sys, id.pid)),
+      isPinnedApp: (id) =>
+        runsPinnedApp(sys, store.current(), id, () => identifyProcess(sys, id.pid)),
     };
   }
 
@@ -144,11 +147,26 @@ export class Executor {
       throw new ActionError('refused', `${path} is protected`);
   }
 
-  /** Quarantine settings with the protected folders of the OS the helper acts on. */
+  /**
+   * Quarantine settings with the protected folders of the OS the helper acts
+   * on, and the files the helper keeps that no move may take (pinStore.ts).
+   */
   private get quarantineOpts(): QuarantineOptions {
-    return this.d.sys.platform === 'linux'
-      ? { platform: 'linux', ...this.d.quarantine }
-      : this.d.quarantine;
+    const store = this.d.appPin;
+    const opts: QuarantineOptions = store
+      ? { guarded: () => store.guarded(), ...this.d.quarantine }
+      : { ...this.d.quarantine };
+    return this.d.sys.platform === 'linux' ? { platform: 'linux', ...opts } : opts;
+  }
+
+  /** Run a file command; if a move took a file the helper keeps, put that file back from memory. */
+  private async guardedMove<T>(fn: () => Promise<T> | T): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err instanceof GuardTripped) await this.d.appPin?.repair().catch(() => undefined);
+      throw err;
+    }
   }
 
   /** The app each pending self-grant approval re-pins (appPin.ts pinCandidate), by nonce. */
@@ -375,27 +393,22 @@ export class Executor {
       }
       case 'file.quarantine': {
         const id = Journal.newId();
-        const rec = quarantine(cmd.path, id, this.quarantineOpts);
+        const rec = await this.guardedMove(() => quarantine(cmd.path, id, this.quarantineOpts));
         return this.record(cmd, `quarantined ${rec.originalPath}`, { quarantine: rec }, id);
       }
       case 'file.restore': {
         const entry = this.findContainment(cmd)!;
         const rec = entry.undo?.quarantine as QuarantineRecord;
-        restore(rec);
+        await this.guardedMove(() => restore(rec, this.quarantineOpts.guarded?.()));
         return this.release(entry, cmd, `restored ${rec.originalPath}`);
       }
       case 'persistence.disable': {
         const id = Journal.newId();
-        const rec =
+        const rec = await this.guardedMove(() =>
           sys.platform === 'linux'
-            ? await disableLinuxPersistence(
-                sys,
-                cmd.path,
-                id,
-                this.quarantineOpts,
-                this.d.launchDirs,
-              )
-            : await disablePersistence(sys, cmd.path, id, this.d.quarantine, this.d.launchDirs);
+            ? disableLinuxPersistence(sys, cmd.path, id, this.quarantineOpts, this.d.launchDirs)
+            : disablePersistence(sys, cmd.path, id, this.quarantineOpts, this.d.launchDirs),
+        );
         return this.record(
           cmd,
           `disabled startup item ${rec.label ?? rec.quarantine.originalPath}`,
@@ -406,8 +419,12 @@ export class Executor {
       case 'persistence.enable': {
         const entry = this.findContainment(cmd)!;
         const rec = entry.undo?.persistence as PersistenceRecord;
-        if (sys.platform === 'linux') await restoreLinuxPersistence(sys, rec);
-        else await restorePersistence(sys, rec);
+        const guards = this.quarantineOpts.guarded?.();
+        await this.guardedMove(() =>
+          sys.platform === 'linux'
+            ? restoreLinuxPersistence(sys, rec, guards)
+            : restorePersistence(sys, rec, guards),
+        );
         return this.release(
           entry,
           cmd,
@@ -461,6 +478,7 @@ export class Executor {
             syncedRev: this.d.rules.syncedRev,
           },
           firewall: await this.firewall.list(),
+          ...(this.d.appPin ? { appPin: this.d.appPin.status() } : {}),
           ...this.d.statusExtra?.(),
         };
       case 'helper.journal':

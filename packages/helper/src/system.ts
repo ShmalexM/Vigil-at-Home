@@ -17,6 +17,7 @@ export const BINARIES = {
   santactl: '/Applications/Santa.app/Contents/MacOS/santactl',
   osascript: '/usr/bin/osascript',
   codesign: '/usr/bin/codesign',
+  chflags: '/usr/bin/chflags',
   osqueryd: '/opt/osquery/lib/osquery.app/Contents/MacOS/osqueryd',
 } as const;
 
@@ -32,6 +33,7 @@ export const LINUX_BINARIES = {
   dpkgQuery: '/usr/bin/dpkg-query',
   rpm: '/usr/bin/rpm',
   fagenrules: '/usr/sbin/fagenrules',
+  chattr: '/usr/bin/chattr',
   osqueryd: '/opt/osquery/bin/osqueryd',
 } as const;
 

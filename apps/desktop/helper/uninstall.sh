@@ -18,6 +18,8 @@ launchctl bootout "system/$LABEL" 2>/dev/null || true
 rm -f "/Library/LaunchDaemons/$LABEL.plist"
 rm -f /Library/PrivilegedHelperTools/vigil-helper
 rm -rf /Library/PrivilegedHelperTools/vigil-helper.d
-rm -f "/Library/Application Support/Vigil/app-pin.json"
+# The pin and its key are kept immutable by the helper; clear that before removing them.
+chflags nouchg "/Library/Application Support/Vigil/app-pin.json" "/Library/Application Support/Vigil/app-pin.key" 2>/dev/null || true
+rm -f "/Library/Application Support/Vigil/app-pin.json" "/Library/Application Support/Vigil/app-pin.key" "/Library/Application Support/Vigil/app-pin.json.tmp" "/Library/Application Support/Vigil/app-pin.key.tmp"
 rm -f /var/run/vigil-helper.sock
 echo "Vigil helper removed. Quarantined files are still in /Library/Application Support/Vigil."

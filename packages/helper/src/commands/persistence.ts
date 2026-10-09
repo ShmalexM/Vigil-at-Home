@@ -10,6 +10,7 @@ import {
   quarantine,
   resolveTarget,
   restore,
+  type GuardedFile,
   type QuarantineOptions,
   type QuarantineRecord,
 } from './quarantine.js';
@@ -87,8 +88,12 @@ export async function disablePersistence(
   return { quarantine: q, label, domain, wasLoaded };
 }
 
-export async function restorePersistence(sys: System, rec: PersistenceRecord): Promise<void> {
-  restore(rec.quarantine);
+export async function restorePersistence(
+  sys: System,
+  rec: PersistenceRecord,
+  guards?: readonly GuardedFile[],
+): Promise<void> {
+  restore(rec.quarantine, guards);
   if (rec.wasLoaded) {
     const r = await sys.run('launchctl', ['bootstrap', rec.domain, rec.quarantine.originalPath]);
     if (r.code !== 0) {

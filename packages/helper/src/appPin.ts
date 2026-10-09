@@ -32,14 +32,17 @@
 // by a helper update. The grant's approval is bound to the code on disk
 // when the password was asked for (pinCandidate), and on macOS only code
 // signed with Vigil's bundle id is pinned at all.
+//
+// The pin is kept by pinStore.ts: signed with a root-only key, held in
+// memory, and flagged immutable on disk, so only the helper can set it.
 
-import { chmodSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { insideInstalledRoot, looksLikeAppImage, type SelfImage } from '@vigil/core/self';
 import { readCodeIdentity } from './codeDirectory.js';
 import { VIGIL_BUNDLE_ID } from './config.js';
 import { sameStat } from './openedFile.js';
+import type { AppPinStore } from './pinStore.js';
 import type { System } from './system.js';
 import type { ProcessIdentity } from './commands/process.js';
 import { selfImageOf } from './commands/selfImage.js';
@@ -77,28 +80,6 @@ export const AppPin = z.discriminatedUnion('platform', [
   }),
 ]);
 export type AppPin = z.infer<typeof AppPin>;
-
-/** The pinned app, or undefined when there is none or the file doesn't parse. */
-export function readPin(file: string): AppPin | undefined {
-  try {
-    const parsed = AppPin.safeParse(JSON.parse(readFileSync(file, 'utf8')));
-    return parsed.success ? parsed.data : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** Replace the pin; undefined removes it. Readable by all, so the app can tell it is pinned. */
-export function writePin(file: string, pin: AppPin | undefined): void {
-  if (!pin) {
-    rmSync(file, { force: true });
-    return;
-  }
-  const tmp = `${file}.tmp`;
-  writeFileSync(tmp, JSON.stringify(pin) + '\n', { mode: 0o644 });
-  chmodSync(tmp, 0o644);
-  renameSync(tmp, file);
-}
 
 /** The CDHash and Executable lines of `codesign -d -vvv` (written to stderr). */
 export function parseCodesignIdentity(output: string): CodeIdentity | undefined {
@@ -239,7 +220,8 @@ function pinImage(sys: System, path: string, opts: PinOptions): AppPin | undefin
 }
 
 export interface RepinOptions extends PinOptions {
-  pinFile: string;
+  /** Where the new pin is kept (pinStore.ts). */
+  store: AppPinStore;
 }
 
 /** The app a self grant would pin: the grant path it came from, and its pin as computed then. */
@@ -315,13 +297,12 @@ export async function repinFromGrant(
     return undefined;
   }
   if (!pin || !sameCode(pin, bound.pin)) return undefined;
-  writePin(opts.pinFile, pin);
+  await opts.store.write(pin);
   return pin;
 }
 
-/** The pinned program's hashes, which no hash block may name. Reads only the pin. */
-export function pinnedHashes(pinFile: string): string[] {
-  const pin = readPin(pinFile);
+/** The pinned program's hashes, which no hash block may name. */
+export function pinnedHashes(pin: AppPin | undefined): string[] {
   if (!pin) return [];
   return pin.platform === 'darwin' ? [pin.cdhash, pin.sha256] : [pin.sha256];
 }
@@ -349,11 +330,10 @@ export function pinnedHashes(pinFile: string): string[] {
  */
 export async function runsPinnedApp(
   sys: System,
-  pinFile: string,
+  pin: AppPin | undefined,
   id: ProcessIdentity,
   recheck: () => Promise<ProcessIdentity | undefined>,
 ): Promise<boolean | 'changed'> {
-  const pin = readPin(pinFile);
   if (!pin || pin.platform !== (sys.platform ?? 'darwin')) return false;
   if (pin.platform === 'linux') return runsPinnedImage(sys, pin, id.pid);
   const running = await codesign(sys, String(id.pid));
