@@ -717,7 +717,7 @@ describe('startup items are read as the path’s user', () => {
     sys.labels.set(plist, 'com.evil.agent');
     await expect(
       disablePersistence(sys, plist, 'p0', opts(), /LaunchAgents$/),
-    ).rejects.toMatchObject({ code: 'refused', message: /another user/ });
+    ).rejects.toMatchObject({ code: 'not-your-item', message: /another user/ });
     expect(existsSync(plist)).toBe(true);
     expect(sys.runs.filter((r) => r.bin === 'launchctl')).toEqual([]);
   });

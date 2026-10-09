@@ -43,7 +43,10 @@ import {
 import { listDigest } from '@vigil/detection/fastpath';
 import { z } from 'zod';
 import type { ActionOutcome } from './executor.js';
+import { ActionError } from './commands/errors.js';
 import {
+  APP_WORDED_CODES,
+  type AppWordedCode,
   HelperAction,
   RuleExceptionSchema,
   type DetectionListSet,
@@ -60,7 +63,7 @@ export interface HelperRan {
   outcome?: ActionOutcome;
   error?: string;
   /** Why it was not done, when the app words that itself (core ActionRecord result errorCode). */
-  errorCode?: 'move-stalled';
+  errorCode?: 'move-stalled' | AppWordedCode;
 }
 
 /** Actions that move an item, which can take a while; everything else is quick containment. */
@@ -368,22 +371,35 @@ export class FastPath {
   }
 
   /**
-   * Run the rules on one event and carry out what block-mode rules ask for.
-   * Never throws: a failed action is reported to the app like any other.
+   * Run the rules on one event and carry out what block-mode rules ask for,
+   * moves included (see start). Never throws: a failed action is reported
+   * to the app like any other.
    */
   async check(e: SensorEvent): Promise<HelperRan[]> {
-    if (!this.engine) return [];
+    const { ran, moves } = await this.start(e);
+    return [...ran, ...(await moves)];
+  }
+
+  /**
+   * The same in two parts. `ran` is every pause, kill and block the rules
+   * ask for, all done before this resolves and before any move starts.
+   * `moves` is the quarantines and startup items they ask for, started
+   * then, each waited on for a while only (one still running after that
+   * goes on by itself; transfer.ts bounds it). The daemon waits on `ran`
+   * alone before the next event, so a stuck move never holds up a block.
+   */
+  async start(e: SensorEvent): Promise<{ ran: HelperRan[]; moves: Promise<HelperRan[]> }> {
+    const none = { ran: [], moves: Promise.resolve([]) };
+    if (!this.engine) return none;
     let detections;
     try {
       detections = this.engine.evaluate(e as Parameters<DetectionEngine['evaluate']>[0]);
     } catch (err) {
       this.opts.log?.(`fast path: ${(err as Error).message}`);
-      return [];
+      return none;
     }
     const ran: HelperRan[] = [];
     const moves: { ruleId: string; action: Action; parsed: HelperAction }[] = [];
-    // Pauses, kills and blocks first, all of them, before any move starts:
-    // none of them waits on a move, so a move that stalls leaves them in force.
     for (const d of detections) {
       if (d.mode !== 'block') continue;
       for (const action of d.execute) {
@@ -397,10 +413,14 @@ export class FastPath {
         ran.push(await this.runOne(d.match.ruleId, action, this.opts.run(parsed.data)));
       }
     }
-    // Then the moves, each waited on for a while only. One still running
-    // after that goes on by itself (transfer.ts bounds it), and the next
-    // event is looked at.
+    return { ran, moves: this.runMoves(moves) };
+  }
+
+  private async runMoves(
+    moves: { ruleId: string; action: Action; parsed: HelperAction }[],
+  ): Promise<HelperRan[]> {
     const wait = this.opts.moveWaitMs ?? MOVE_WAIT_MS;
+    const ran: HelperRan[] = [];
     for (const m of moves) {
       const run = this.opts.run(m.parsed);
       let timer: NodeJS.Timeout | undefined;
@@ -440,7 +460,16 @@ export class FastPath {
     try {
       return { ruleId, action, at: Date.now(), outcome: await run };
     } catch (err) {
-      return { ruleId, action, at: Date.now(), error: (err as Error).message };
+      const code = err instanceof ActionError ? err.code : undefined;
+      return {
+        ruleId,
+        action,
+        at: Date.now(),
+        error: (err as Error).message,
+        ...(code && (APP_WORDED_CODES as readonly string[]).includes(code)
+          ? { errorCode: code as AppWordedCode }
+          : {}),
+      };
     }
   }
 

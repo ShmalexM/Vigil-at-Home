@@ -148,6 +148,25 @@ describe('a restore its owner can’t write back', () => {
   });
 });
 
+describe('a startup item Vigil won’t turn off', () => {
+  it('shows one calm line for a linked folder, and for another user’s item', () => {
+    const linked = rec(
+      { kind: 'persistence.disable', path: '/home/a/.config/autostart/x.desktop' },
+      { status: 'failed', result: { at: 1, error: 'x', errorCode: 'startup-folder-linked' } },
+    );
+    expect(actionErrorText(linked, [linked])).toBe(
+      'Vigil couldn’t turn off this startup item because its folder is a link to somewhere else.',
+    );
+    const other = rec(
+      { kind: 'persistence.disable', path: '/home/b/.config/autostart/x.desktop' },
+      { status: 'failed', result: { at: 1, error: 'x', errorCode: 'not-your-item' } },
+    );
+    expect(actionErrorText(other, [other])).toBe(
+      'Vigil only acts on startup items that belong to you.',
+    );
+  });
+});
+
 describe('a move the helper stopped waiting on', () => {
   it('shows one calm line for it', () => {
     const r = rec(

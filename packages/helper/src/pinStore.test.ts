@@ -18,6 +18,8 @@ import { createHmac } from 'node:crypto';
 import type { AppPin } from './appPin.js';
 import { quarantine, type QuarantineOptions } from './commands/quarantine.js';
 import { AppPinStore, removePinStore } from './pinStore.js';
+import { pinRemove } from './pinRemove.js';
+import { createServer } from 'node:net';
 import {
   LINUX_BINARIES,
   realSystem,
@@ -433,5 +435,53 @@ describe('the tripwire on moves', () => {
     expect(existsSync(join(home, 'evil'))).toBe(false);
     expect(existsSync(join(root, 'Quarantine', 'q2', 'evil'))).toBe(true);
     expect(logs).toHaveLength(2);
+  });
+});
+
+describe('vigil-helper pin-remove', () => {
+  const run = (sys: Flags, euid: number | undefined, socket = join(root, 'helper.sock')) => {
+    const errors: string[] = [];
+    const code = pinRemove({
+      euid,
+      socket,
+      dir: state,
+      publicFile: join(root, 'app-pin.json'),
+      sys: sys as unknown as System,
+      error: (m) => errors.push(m),
+    });
+    return { code, errors };
+  };
+
+  it('refuses anyone but root, and touches nothing', async () => {
+    const sys = new Flags('linux');
+    await (await open(sys)).write(PIN);
+    sys.runs = [];
+    for (const euid of [1000, undefined]) {
+      const r = run(sys, euid);
+      expect(await r.code).toBe(1);
+      expect(r.errors.join()).toMatch(/must run as root/);
+    }
+    expect(sys.runs).toEqual([]);
+    expect(existsSync(file)).toBe(true);
+  });
+
+  it('refuses while the daemon answers on its socket', async () => {
+    const sys = new Flags('linux');
+    await (await open(sys)).write(PIN);
+    const sock = join(root, 'helper.sock');
+    const server = createServer(() => undefined);
+    await new Promise<void>((r) => server.listen(sock, r));
+    try {
+      const r = run(sys, 0, sock);
+      expect(await r.code).toBe(1);
+      expect(r.errors.join()).toMatch(/helper is running/);
+      expect(existsSync(file)).toBe(true);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+    // Stopped: the pin goes, flags cleared first.
+    expect(await run(sys, 0, sock).code).toBe(0);
+    expect(existsSync(state)).toBe(false);
+    expect(sys.immutable.size).toBe(0);
   });
 });

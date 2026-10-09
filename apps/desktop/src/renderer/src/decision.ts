@@ -53,14 +53,19 @@ function programBlocked(actions: readonly ActionRecord[]): boolean {
  * The one line shown where the user asked for a quarantine the helper
  * refused because an installer or the system owns the item (it says the
  * app is blocked only when this alert really blocked it), or for a restore
- * refused because the item's owner can't write where it goes back, or for
- * a move the helper's own rules stopped waiting on.
+ * refused because the item's owner can't write where it goes back, for a
+ * move the helper's own rules stopped waiting on, or for a startup item it
+ * won't turn off (its folder is a link elsewhere, or it is another user's).
  */
 export function refusalNote(r: ActionRecord, actions: readonly ActionRecord[]): string | undefined {
   if (r.result?.errorCode === 'owner-cannot-write')
     return 'Vigil can’t put this back because its owner can’t write to that folder.';
   if (r.result?.errorCode === 'move-stalled')
     return 'Vigil couldn’t move this in time. Anything it stopped or blocked stays that way.';
+  if (r.result?.errorCode === 'startup-folder-linked')
+    return 'Vigil couldn’t turn off this startup item because its folder is a link to somewhere else.';
+  if (r.result?.errorCode === 'not-your-item')
+    return 'Vigil only acts on startup items that belong to you.';
   if (r.action.kind !== 'file.quarantine' || r.result?.errorCode !== 'installer-owned') return;
   if (!inAppBundle(r.action.path))
     return 'Vigil can’t move this item because it belongs to the system. Remove it yourself if you don’t need it.';

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -266,11 +267,11 @@ describe('Linux startup items', () => {
     sys.console = statSync(path).uid + 1;
     await expect(
       disableLinuxPersistence(sys, path, 'o1', qopts(), dirs(), () => PASSWD),
-    ).rejects.toMatchObject({ code: 'refused', message: /another user/ });
+    ).rejects.toMatchObject({ code: 'not-your-item', message: /another user/ });
     sys.console = undefined;
     await expect(
       disableLinuxPersistence(sys, path, 'o2', qopts(), dirs(), () => PASSWD),
-    ).rejects.toMatchObject({ code: 'refused' });
+    ).rejects.toMatchObject({ code: 'not-your-item' });
     expect(existsSync(path)).toBe(true);
     expect(sys.runs).toEqual([]);
   });
@@ -289,9 +290,51 @@ describe('Linux startup items', () => {
     );
     await expect(
       disableLinuxPersistence(sys, join(linked, 'sshd.service'), 'l1', qopts(), both, () => PASSWD),
-    ).rejects.toMatchObject({ code: 'refused', message: /another folder/ });
+    ).rejects.toMatchObject({ code: 'startup-folder-linked' });
     expect(existsSync(join(system, 'sshd.service'))).toBe(true);
     expect(sys.runs).toEqual([]);
+  });
+
+  it('follows a /home link only root could make, as on ostree systems, and no other', async () => {
+    // Stands in for /home -> var/home (Fedora Silverblue and other ostree systems).
+    const os = join(root, 'os');
+    const auto = join(os, 'var', 'home', 'alex', '.config', 'autostart');
+    mkdirSync(auto, { recursive: true });
+    symlinkSync('var/home', join(os, 'home'));
+    const written = join(os, 'home', 'alex', '.config', 'autostart');
+    const path = join(written, 'updater.desktop');
+    writeFileSync(join(auto, 'updater.desktop'), '[Desktop Entry]\nExec=/tmp/x\n');
+    sys.console = statSync(join(auto, 'updater.desktop')).uid;
+    const startup = new RegExp(`^${written.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
+    const disable = () => disableLinuxPersistence(sys, path, 'h1', qopts(), startup, () => PASSWD);
+    if (process.getuid!() !== 0) {
+      // Not root: the link and its folders are a user's, so nothing is followed.
+      await expect(disable()).rejects.toMatchObject({ code: 'startup-folder-linked' });
+      expect(existsSync(path)).toBe(true);
+      return;
+    }
+    const rec = await disable();
+    expect(rec.quarantine.originalPath).toBe(join(auto, 'updater.desktop'));
+    expect(existsSync(path)).toBe(false);
+    await restoreLinuxPersistence(sys, rec, qopts());
+    expect(existsSync(path)).toBe(true);
+    // The same link, but leading into a folder others can write to: refused.
+    const open = join(os, 'var', 'open');
+    mkdirSync(join(open, 'alex', '.config', 'autostart'), { recursive: true });
+    chmodSync(open, 0o777);
+    writeFileSync(
+      join(open, 'alex', '.config', 'autostart', 'updater.desktop'),
+      '[Desktop Entry]\n',
+    );
+    rmSync(join(os, 'home'));
+    symlinkSync('var/open', join(os, 'home'));
+    await expect(disable()).rejects.toMatchObject({ code: 'startup-folder-linked' });
+    // A link at the home itself, even root's, is refused.
+    rmSync(join(os, 'home'));
+    mkdirSync(join(os, 'home'));
+    symlinkSync(join(os, 'var', 'home', 'alex'), join(os, 'home', 'alex'));
+    await expect(disable()).rejects.toMatchObject({ code: 'startup-folder-linked' });
+    expect(existsSync(join(auto, 'updater.desktop'))).toBe(true);
   });
 
   it('refuses files outside startup folders and the wrong kind of file', async () => {

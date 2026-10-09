@@ -230,12 +230,16 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   const hub = new SensorHub({
     santaLogPath: paths.santaLog,
     osqueryResultsPath: paths.osqueryResults,
-    // One event at a time, in order: a block finishes before the next event
-    // is looked at, and the app hears about each event with what was done.
+    // One event at a time, in order: its pauses, kills and blocks finish
+    // before the next event is looked at. Its moves go on off that chain
+    // (fastPath.start), so a stuck one never holds up a later block, and the
+    // app hears about the event, with what was done, once they end or stop
+    // being waited on.
     sink: (e) => {
       delivered = delivered.then(async () => {
-        const ran = [...(await stopBlockedLaunch(e)), ...(await fastPath.check(e))];
-        server.publish(e, ran);
+        const blocked = await stopBlockedLaunch(e);
+        const { ran, moves } = await fastPath.start(e);
+        void moves.then((moved) => server.publish(e, [...blocked, ...ran, ...moved]));
       });
     },
     // Signatures of programs that started before Vigil (codesign is macOS-only).

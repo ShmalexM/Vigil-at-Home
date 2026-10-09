@@ -98,6 +98,11 @@ describe('HelperLink', () => {
     const fake = fakeClient((cmd) => {
       if (cmd.kind === 'file.quarantine')
         throw new HelperCallError('belongs to root', 'installer-owned');
+      if (cmd.kind === 'persistence.disable')
+        throw new HelperCallError(
+          'no',
+          cmd.path.includes('/a/') ? 'startup-folder-linked' : 'not-your-item',
+        );
       throw new HelperCallError('no', 'refused');
     });
     const link = new HelperLink(socket(), async () => fake.client);
@@ -106,6 +111,15 @@ describe('HelperLink', () => {
     expect(r).toMatchObject({
       errorCode: 'installer-owned',
       error: expect.stringMatching(/^Not done/),
+    });
+    // Startup items in a linked folder, or another user's: their own codes.
+    const linked = '/home/a/.config/autostart/x.desktop';
+    expect(await link.execute({ kind: 'persistence.disable', path: linked })).toMatchObject({
+      errorCode: 'startup-folder-linked',
+    });
+    const theirs = '/home/b/.config/autostart/y.desktop';
+    expect(await link.execute({ kind: 'persistence.disable', path: theirs })).toMatchObject({
+      errorCode: 'not-your-item',
     });
     // Other refusals carry no code.
     const other = await link.execute({ kind: 'process.suspend', pid: 5 });

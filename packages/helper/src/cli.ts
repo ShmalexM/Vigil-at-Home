@@ -10,6 +10,7 @@
 // vigil-helper osquery-remove    (root) stop Vigil's osquery job, restore osquery's old config
 // vigil-helper pin-app <path>    (root) pin the app the helper is installed for (appPin.ts):
 //                                its main executable on macOS, its AppImage on Linux
+// vigil-helper pin-remove        (root) remove the pin once the helper has stopped (pinRemove.ts)
 // vigil-helper fs-child          one file operation as a user, for the daemon (commands/fsChild.ts)
 
 import {
@@ -23,7 +24,8 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { Approvals } from './approval.js';
 import { pinFor } from './appPin.js';
-import { AppPinStore, removePinStore } from './pinStore.js';
+import { AppPinStore } from './pinStore.js';
+import { pinRemove } from './pinRemove.js';
 import { runFsChild } from './commands/fsChild.js';
 import { daemonAnswers } from './socketProbe.js';
 import { defaultPaths, installedSelf, SANTA_SYNC_PORT } from './config.js';
@@ -91,7 +93,7 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case 'pin-app': {
-      if (process.getuid?.() !== 0) {
+      if (process.geteuid?.() !== 0) {
         console.error('pin-app must run as root (install.sh runs it)');
         return 1;
       }
@@ -116,17 +118,14 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case 'pin-remove': {
-      if (process.getuid?.() !== 0) {
-        console.error('pin-remove must run as root (uninstall.sh runs it)');
-        return 1;
-      }
       const paths = defaultPaths();
-      if (await daemonAnswers(paths.socket)) {
-        console.error('the helper is running; stop it before pin-remove (uninstall.sh does)');
-        return 1;
-      }
-      await removePinStore(realSystem(), paths.appPinDir, paths.appPin);
-      return 0;
+      return pinRemove({
+        euid: process.geteuid?.(),
+        socket: paths.socket,
+        dir: paths.appPinDir,
+        publicFile: paths.appPin,
+        sys: realSystem(),
+      });
     }
     default:
       console.error(

@@ -161,9 +161,29 @@ export interface HelperRequest {
  * `owner-cannot-write`: a restore refused because the item's owner can't
  * write where it goes back, or it has more than one owner; restores run as
  * the item's owner (commands/quarantine.ts).
+ * `startup-folder-linked`: a startup item whose folder is a link to
+ * somewhere else, which Vigil does not follow (commands/persistence.ts).
+ * `not-your-item`: a startup item in another user's folder, or not the
+ * asking user's own (commands/persistence.ts).
  */
 export type ErrorCode =
-  'invalid' | 'refused' | 'failed' | 'not_found' | 'installer-owned' | 'owner-cannot-write';
+  | 'invalid'
+  | 'refused'
+  | 'failed'
+  | 'not_found'
+  | 'installer-owned'
+  | 'owner-cannot-write'
+  | 'startup-folder-linked'
+  | 'not-your-item';
+
+/** The codes the app words itself, in one calm line, rather than showing the message. */
+export const APP_WORDED_CODES = [
+  'installer-owned',
+  'owner-cannot-write',
+  'startup-folder-linked',
+  'not-your-item',
+] as const;
+export type AppWordedCode = (typeof APP_WORDED_CODES)[number];
 
 export type HelperResponse =
   | { id: string; ok: true; result: unknown }

@@ -177,6 +177,20 @@ export class HelperLink
           errorCode: 'owner-cannot-write',
         };
       }
+      if (err instanceof HelperCallError && err.code === 'startup-folder-linked') {
+        return {
+          at: Date.now(),
+          error: 'Not done: its folder is a link to somewhere else',
+          errorCode: 'startup-folder-linked',
+        };
+      }
+      if (err instanceof HelperCallError && err.code === 'not-your-item') {
+        return {
+          at: Date.now(),
+          error: 'Not done: it belongs to another user',
+          errorCode: 'not-your-item',
+        };
+      }
       const error =
         err instanceof HelperCallError && err.code === 'refused'
           ? `Not done: ${err.message}`
@@ -377,7 +391,7 @@ export class HelperLink
         : {
             at,
             error: r.error ?? 'The Vigil helper could not do this',
-            ...(r.errorCode === 'move-stalled' ? { errorCode: 'move-stalled' as const } : {}),
+            ...(r.errorCode ? { errorCode: r.errorCode } : {}),
           };
       const key = JSON.stringify(r.action);
       const entry = this.helperRan.get(key);

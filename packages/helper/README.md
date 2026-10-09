@@ -140,12 +140,16 @@ an event while working fine; Santa logs every program launch.
 - **Bounded moves.** A move (or read) still running after two minutes is stopped: its
   reading process is killed, and its writing process removes what it made and is killed
   too. An item may hold at most 200,000 entries and 8 GiB, and at most four moves run at
-  once. The helper's own rules never wait on a move: pauses, kills and blocks are all
-  done first, and a move still running after 15 seconds goes on by itself while the
-  next event is looked at. The app then shows that the item was not moved in time.
-- **Startup items.** One is turned off only in the startup folder as written: a folder
-  that is a link elsewhere is refused. An item in a user's folder must be that user's,
-  and that user must be the one asking (the console user, who owns the socket).
+  once. The helper's own rules never wait on a move: each event's pauses, kills and blocks
+  are done first, and its moves go on beside the next events. The event is reported
+  once they end, or after 15 seconds, when the app shows the item was not moved in time.
+- **Startup items.** One is turned off only in the startup folder as written. The one
+  link followed is one above the user's home that only root could have made (like
+  `/home -> var/home` on ostree systems): root's, in a folder that is root's alone, and
+  leading to one too. Any other link on the way, such as a startup folder a dotfile
+  manager links in, is refused with its own code, and the app says so in one line. An
+  item in a user's folder must be that user's, and that user must be the one asking
+  (the console user, who owns the socket): Vigil is a single-user personal tool.
 - **App grants.** The app named in a self grant is hashed off the event loop (up to
   1 GiB), one grant at a time; a newer grant replaces one still waiting for the
   password. At most 64 approvals wait at once, and a nonce offered with a command it
@@ -155,7 +159,9 @@ an event while working fine; Santa logs every program launch.
   highest generation signed is kept in a signed counter (`pin/app-pin.gen`), so an
   older pin put back while the helper was stopped is refused at start, and pins are
   checked only with the key loaded at start. `vigil-helper pin-remove`, which the
-  uninstallers run, clears the immutable flag and removes the pin folder.
+  uninstallers run once the helper has stopped, clears the immutable flag and removes
+  the pin folder. Like `pin-app` it is a root command line only (not a socket command),
+  and it refuses while the daemon answers.
 - **Network blocks.** Loopback, link-local and multicast addresses are refused, and so
   are ranges wider than /8 (IPv4) or /24 (IPv6). Single ports are not supported yet.
   pf forgets its tables at reboot, so the helper re-applies active blocks from its

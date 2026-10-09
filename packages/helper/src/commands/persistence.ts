@@ -2,8 +2,9 @@
 // plist into quarantine so it does not come back at the next login or boot.
 // Undo moves the plist back and loads it again.
 
-import { basename, dirname } from 'node:path';
-import { actorFor, readAs } from './transfer.js';
+import { lstatSync, realpathSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { actorFor, readAs, rootOnly } from './transfer.js';
 import type { System } from '../system.js';
 import { ActionError } from './errors.js';
 import {
@@ -40,29 +41,82 @@ export function launchdDomain(
   return `gui/${ownerUid}`;
 }
 
+/** The user's home folder `dir` is in, as written (…/home/<name>, …/Users/<name>, /root). */
+export function homeOf(dir: string): string | undefined {
+  if (dir === '/root' || dir.startsWith('/root/')) return '/root';
+  return /^(.*?\/(?:home|Users)\/[^/]+)(?=\/|$)/.exec(dir)?.[1];
+}
+
+const linked = (dir: string) =>
+  new ActionError(
+    'startup-folder-linked',
+    `${dir} is a link to somewhere else; Vigil only turns off items in the startup folder itself`,
+  );
+
 /**
- * The real location of a startup item at `path`, which must be the folder
- * as written: a startup folder that is a link elsewhere is refused, so the
- * folder checked is the one acted on. Vetted like any quarantine.
+ * The real location of a startup item at `path`. The folder is taken as
+ * written, with one exception: a link above the user's home that only root
+ * could have made, like /home -> var/home on ostree systems. Such a link
+ * must be root's, in a folder that is root's alone, and lead to a folder
+ * that is root's alone too (rootOnly). Every other link on the way (at or
+ * under the home, like a startup folder a dotfile manager links in) is
+ * refused, so the folder checked is the one acted on. Vetted like any
+ * quarantine.
  */
-export function startupTarget(path: string, opts: QuarantineOptions): string {
+export async function startupTarget(
+  sys: System,
+  path: string,
+  opts: QuarantineOptions,
+): Promise<string> {
   const real = resolveTarget(path, opts);
-  if (dirname(real) !== dirname(path))
-    throw new ActionError(
-      'refused',
-      `${dirname(path)} leads to another folder; Vigil only turns off items in the startup folder itself`,
-    );
+  const dir = dirname(path);
+  if (dirname(real) === dir) return real;
+  const home = homeOf(dir);
+  let written = '/';
+  let resolved = '/';
+  for (const name of dir.split('/').filter(Boolean)) {
+    written = join(written, name);
+    let st;
+    try {
+      st = lstatSync(written);
+    } catch {
+      throw linked(dir);
+    }
+    if (!st.isSymbolicLink()) {
+      resolved = join(resolved, name);
+      continue;
+    }
+    const aboveHome = home !== undefined && home.startsWith(written + '/');
+    let target: string;
+    try {
+      target = realpathSync(written);
+    } catch {
+      throw linked(dir);
+    }
+    if (
+      !aboveHome ||
+      st.uid !== 0 ||
+      !(await rootOnly(sys, resolved)) ||
+      !(await rootOnly(sys, target))
+    )
+      throw linked(dir);
+    resolved = target;
+  }
+  // The rest of the path, after the trusted links, is exactly as written.
+  if (dirname(real) !== resolved) throw linked(dir);
   return real;
 }
 
 /**
  * A user's own startup item (one in a home folder) is turned off only for
  * that user: it must be theirs, and they must be the one asking (the
- * helper's socket belongs to the console user).
+ * helper's socket belongs to the console user). Vigil is a single-user
+ * personal tool, so this also stops its own rules from acting on another
+ * local user's startup items.
  */
 export function checkOwnItem(path: string, ownerUid: number, consoleUid: number | undefined): void {
   if (consoleUid === undefined || ownerUid !== consoleUid)
-    throw new ActionError('refused', `${path} belongs to another user`);
+    throw new ActionError('not-your-item', `${path} belongs to another user`);
 }
 
 async function readLabel(sys: System, plist: Buffer): Promise<string | undefined> {
@@ -89,7 +143,7 @@ export async function disablePersistence(
     );
   }
   // Vetted before launchd is touched, so a protected file is never even unloaded.
-  const real = startupTarget(path, opts);
+  const real = await startupTarget(sys, path, opts);
   // Read as whoever controls the path (commands/transfer.ts), never by root through it.
   const file = await readAs(await (opts.actorFor ?? actorFor)(sys, real), real);
   // Anywhere but the two system folders, an agent is a user's own.

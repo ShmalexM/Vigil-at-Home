@@ -198,10 +198,19 @@ export const ActionRecord = z.object({
       error: z.string().optional(),
       /**
        * Why it failed, when the app words that itself: an item an installer
-       * or the system owns, one its owner can't put back, or a move the
-       * helper's own rules didn't wait on.
+       * or the system owns, one its owner can't put back, a move the
+       * helper's own rules didn't wait on, or a startup item Vigil won't
+       * turn off (its folder is a link elsewhere, or it is another user's).
        */
-      errorCode: z.enum(['installer-owned', 'owner-cannot-write', 'move-stalled']).optional(),
+      errorCode: z
+        .enum([
+          'installer-owned',
+          'owner-cannot-write',
+          'move-stalled',
+          'startup-folder-linked',
+          'not-your-item',
+        ])
+        .optional(),
       quarantineId: Id.optional(),
     })
     .optional(),

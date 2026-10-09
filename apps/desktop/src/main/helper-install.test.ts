@@ -416,3 +416,24 @@ describe('helper install', () => {
     expect(helperMatch(dir, 'linux', root, deb).installed).toBe('none');
   });
 });
+
+describe('the uninstallers', () => {
+  const script = (rel: string) =>
+    readFileSync(join(import.meta.dirname, '..', '..', 'helper', rel), 'utf8');
+  it.each([
+    ['uninstall.sh', 'launchctl bootout', '/Library/PrivilegedHelperTools/vigil-helper'],
+    ['linux/uninstall.sh', 'systemctl disable --now', '/usr/libexec/vigil-helper'],
+  ])(
+    '%s stops the helper before pin-remove, and runs it before removing the helper',
+    (rel, stop, bin) => {
+      const text = script(rel);
+      const at = (needle: string) => {
+        const i = text.indexOf(needle);
+        expect(i, needle).toBeGreaterThanOrEqual(0);
+        return i;
+      };
+      expect(at(stop)).toBeLessThan(at(`${bin} pin-remove`));
+      expect(at(`${bin} pin-remove`)).toBeLessThan(at(`rm -f ${bin}\n`));
+    },
+  );
+});

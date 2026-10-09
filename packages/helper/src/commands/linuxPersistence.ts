@@ -99,7 +99,7 @@ export async function disableLinuxPersistence(
     throw new ActionError('invalid', `${name} does not belong in ${dirname(path)}`);
   }
   // Vetted before systemd is touched, so a protected file is never even stopped.
-  const real = startupTarget(path, startupQuarantine(opts));
+  const real = await startupTarget(sys, path, startupQuarantine(opts));
   // Read as whoever controls the path (commands/transfer.ts), never by root through it.
   const file = await readAs(await (opts.actorFor ?? actorFor)(sys, real), real);
   // Anywhere but /etc, an item is a user's own.
