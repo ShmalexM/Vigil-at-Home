@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DetectionEngine, macosCoreRules, memoryStores } from '@vigil/detection';
@@ -21,7 +29,8 @@ const sha = (data: string | Buffer) => createHash('sha256').update(data).digest(
 
 let dir: string;
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'vigil-ownhash-'));
+  // Resolved up front: the helper reports real paths, and on macOS /var links to /private/var.
+  dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'vigil-ownhash-')));
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
