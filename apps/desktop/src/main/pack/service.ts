@@ -47,10 +47,13 @@ import {
   type NoteToolCallInput,
   type NoteUsage,
   type PackView,
+  type RuleDraft,
   type ToolApproval,
   type ToolView,
 } from '../../shared/pack.js';
+import { ExcludeScope } from '../../shared/ipc.js';
 import type { ToolListing } from '../agents/tools.js';
+import type { RuleDraftRequest } from '../rule-suggestions.js';
 import { connectorSlug, type ConnectorHub, type RemoteTool } from './connectors.js';
 import type { Notebook } from './notebook.js';
 import { memoryTainted, type PackMemory, type PromptMemory } from './memory.js';
@@ -103,6 +106,8 @@ const HOUR = 60 * 60_000;
  * write asked again on a later run lands on the card it already has.
  */
 const HELD_MS = 24 * HOUR;
+/** Rule changes one answer may draft; any more are dropped. */
+const MAX_RULE_DRAFTS = 2;
 /** Pack jobs need a model that can use tools: never Jev, which only picks labels. */
 const JOB_PROVIDERS = ['claude', 'codex', 'api', 'ollama'] as const;
 
@@ -141,6 +146,13 @@ export interface PackDeps {
   /** Where each dog writes down what it was asked, looked at and answered. */
   notebook?: Pick<Notebook, 'write' | 'list' | 'clear' | 'tally'> &
     Partial<Pick<Notebook, 'prune'>>;
+  /**
+   * Where the Lead dog's rule drafts go: the same Suggested changes queue as
+   * the rule reviewer's. It only ever adds a suggestion the user accepts.
+   */
+  rules?: {
+    draft(req: RuleDraftRequest, by: { provider: string; name: string }): Omit<RuleDraft, 'id'>;
+  };
   /** Lasting facts from the person's own words; background for runs, never a decision. */
   memory?: Pick<
     PackMemory,
@@ -206,12 +218,25 @@ const MemoryChangeRecord = z.object({
   note: z.string().optional(),
   tainted: z.boolean().optional(),
 });
+const RuleDraftRecord = z.object({
+  id: z.string(),
+  kind: z.enum(['exclude', 'turn-down']),
+  ruleId: z.string().optional(),
+  ruleName: z.string().optional(),
+  change: z.string().optional(),
+  proposalId: z.string().optional(),
+  status: z.enum(['waiting', 'already', 'failed']),
+  note: z.string().optional(),
+  warnings: z.array(z.string()).optional(),
+  hits: z.object({ before: z.number(), after: z.number() }).optional(),
+});
 const ChatRecord = z.object({
   id: z.string(),
   at: z.number(),
   from: z.enum(['you', 'lead']),
   text: z.string(),
   actions: z.array(ActionRecord).optional(),
+  rules: z.array(RuleDraftRecord).optional(),
   memory: z.array(MemoryChangeRecord).optional(),
   used: z.array(z.string()).optional(),
   tainted: z.boolean().optional(),
@@ -219,7 +244,7 @@ const ChatRecord = z.object({
 });
 
 const LEAD_JOB =
-  'Talks with you, answers questions about this Mac from Vigil’s data, and looks after the pack: adds dogs for jobs you describe, changes them, sends them off, retires them.';
+  'Talks with you, answers questions about this Mac from Vigil’s data, and looks after the pack: adds dogs for jobs you describe, changes them, sends them off, retires them. Can suggest a rule change to quiet a noisy alert; it waits under Suggested changes on Rules until you accept it.';
 
 const HELPERS: Record<HelperId, { name: string; breed: Breed; job: string }> = {
   explainer: {
@@ -259,6 +284,22 @@ const LeadAnswer = z.object({
       }),
     )
     .max(5),
+  /**
+   * Rule changes to suggest, to quiet an alert. Vigil builds and checks each
+   * one and adds it under Suggested changes; it never applies one.
+   */
+  ruleChanges: z
+    .array(
+      z.object({
+        kind: z.enum(['exclude', 'turn-down']),
+        alertId: z.string().max(64).optional(),
+        ruleId: z.string().max(100).optional(),
+        scope: ExcludeScope.optional(),
+        why: z.string().max(1000),
+      }),
+    )
+    .max(5)
+    .optional(),
   /** Lasting facts from the person's words to keep in the pack's memory. */
   remember: z
     .array(
@@ -330,7 +371,11 @@ const LEAD_INSTRUCTIONS = [
   'Vigil applies changes as the person’s permission mode allows (data.mode): in "ask" they wait for the person, so say you have asked, not that it is done.',
   '',
   'What you cannot do, and must not offer: block, allow, release or quarantine anything; approve, edit or turn off a rule; change Vigil’s settings; touch a built-in helper’s job. If asked, say the person does that themselves in Vigil.',
-  'Where they do it: to stop an alert repeating, they open the alert and use "Stop alerting on this" there (or "Edit rule"), or change the rule on the Rules page. Rule changes the AI suggests wait under "Suggested changes" on the Rules page until they accept them.',
+  'What you can do about a noisy alert: suggest a rule change in `ruleChanges` (at most two per answer). It is only a suggestion: Vigil builds and checks it itself and adds it under "Suggested changes" on the Rules page, and nothing changes until the person accepts it there. When they say "make this stop alerting" (or "stop telling me about this"), the alert is the one in data.lookingAt (on alerts) or one whose id they typed; suggest:',
+  "- exclude: by `alertId`, stop the alert's rule matching what it was about. `scope` picks what: this_signer (the app by its developer signature; best for a signed app), this_binary (this exact program file, by hash), this_path (this path) or this_host (this network host). Prefer this_signer, then this_binary.",
+  '- turn-down: by `alertId` or `ruleId`, move a rule that is noisy for everything to Shadow, where it keeps recording without alerting.',
+  'Give `why` in one plain sentence. Then tell the person it waits for their OK under Suggested changes on Rules; never say it is done. Do not suggest a change that is already waiting (see `rules` in data.earlier). Rules about coding agents and their tool requests are changed only by the person.',
+  'Where they do it themselves: on the alert, "Stop alerting on this" (or "Edit rule"), or the rule on the Rules page.',
   'Breeds: shepherd, doberman, husky, golden, beagle, corgi, dachshund, chihuahua. Match the breed to the job when you can (a beagle follows trails through logs, a doberman guards, a husky runs long overnight jobs).',
   'data.lookingAt, when present, is the Vigil page the person had open and the id of what was selected there. When they say "this" or "what\'s this?", that is what they mean: ask for a read.',
   'Keep `reply` short and friendly, plain words, no markdown headings.',
@@ -562,7 +607,8 @@ export class PackService {
     const at = this.now();
     const savedLead = saved.find((d) => d.role === 'lead');
     out.push(
-      (savedLead && this.withNewVigilTools(savedLead)) ?? {
+      // The Lead dog's job is fixed, so a saved one picks up the current wording.
+      (savedLead && this.withNewVigilTools({ ...savedLead, job: LEAD_JOB })) ?? {
         id: 'lead',
         role: 'lead',
         name: 'Scout',
@@ -939,13 +985,19 @@ export class PackService {
         ]),
       };
       const actions = v.actions.map((a) => this.consider(a, turn, refs));
+      // The Claude plan only explains: an answer it wrote proposes no rule change.
+      // The runner says which login it used; when it didn't say, assume the plan.
+      const viaPlan = result.provider === 'claude' && result.viaPlan !== false;
+      // Only ever suggestions: each waits under Suggested changes until the person accepts it.
+      const rules = this.draftRules(v, result.provider, lead.name, viaPlan);
       const memoryChanges = this.considerMemory(v, turn, mine.id);
       const said = v.reply.trim();
-      if (said || actions.length || memoryChanges.length || !read)
+      if (said || actions.length || rules.length || memoryChanges.length || !read)
         this.reply({
           text: said || (read ? 'Let me look.' : 'Okay.'),
           tainted: false,
           ...(actions.length ? { actions } : {}),
+          ...(rules.length ? { rules } : {}),
           ...(memoryChanges.length ? { memory: memoryChanges } : {}),
         });
       let answer = said;
@@ -1044,6 +1096,17 @@ export class PackService {
         return {
           from: 'lead',
           text: m.text.slice(0, 1500),
+          // Rule drafts by id, kind and status: the change's wording holds
+          // this Mac's data (a path, a signer), which the acting path never sees.
+          ...(m.rules
+            ? {
+                rules: m.rules.map((r) => ({
+                  kind: r.kind,
+                  ...(r.ruleId ? { ruleId: r.ruleId } : {}),
+                  status: r.status,
+                })),
+              }
+            : {}),
           ...(m.actions
             ? {
                 actions: m.actions.map((a) => ({
@@ -1355,6 +1418,43 @@ export class PackService {
         note: err instanceof Error ? err.message : String(err),
       };
     }
+  }
+
+  /**
+   * Rule changes the Lead dog drafted. Each goes to the Suggested changes
+   * queue through the same checks as the rule reviewer's, in every mode,
+   * Full access included: a rule only changes when the person accepts it on
+   * the Rules page. The answer may rest on alert text anyone could write, so
+   * Vigil builds the change itself and the card says exactly what it does.
+   */
+  private draftRules(
+    answer: z.infer<typeof LeadAnswer>,
+    provider: string,
+    name: string,
+    viaPlan: boolean,
+  ): RuleDraft[] {
+    return (answer.ruleChanges ?? []).slice(0, MAX_RULE_DRAFTS).map((r) => {
+      const id = newId(this.now());
+      if (viaPlan)
+        return {
+          id,
+          kind: r.kind,
+          status: 'failed',
+          note: 'Your Claude plan only explains. Suggesting rule changes needs another AI in Settings › AI.',
+        };
+      if (!this.o.rules)
+        return { id, kind: r.kind, status: 'failed', note: 'Detection isn’t running' };
+      const req: RuleDraftRequest = { kind: r.kind, why: r.why };
+      if (r.alertId) req.alertId = r.alertId;
+      if (r.ruleId) req.ruleId = r.ruleId;
+      if (r.scope) req.scope = r.scope;
+      try {
+        return { id, ...this.o.rules.draft(req, { provider, name }) };
+      } catch (err) {
+        const note = err instanceof Error ? err.message : String(err);
+        return { id, kind: r.kind, status: 'failed', note };
+      }
+    });
   }
 
   /** The user answers a change the Lead dog asked for. */

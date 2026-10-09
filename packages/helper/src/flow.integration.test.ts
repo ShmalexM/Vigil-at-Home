@@ -281,23 +281,15 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
       return true;
     };
     client = await HelperClient.connect(paths.socket, approver);
-    const out = await client.call<{ needLists: string[] }>({
+    // Rules and the lists they read go in as one command.
+    await client.call({
       kind: 'detection.sync',
       rules: set.rules,
       exceptions: [],
       selfPaths: [],
       lists: Object.fromEntries(Object.entries(lists).map(([n, e]) => [n, listDigest(e)])),
+      entries: lists,
     });
-    for (const name of out.needLists) {
-      await client.call({
-        kind: 'detection.list.set',
-        list: name,
-        digest: listDigest(lists[name]!),
-        part: 0,
-        parts: 1,
-        entries: lists[name]!,
-      });
-    }
     // Only to see what happened; the helper blocks whether or not anyone listens.
     client.onEvent((e, ran) => {
       if (e.kind === 'process.exec') launchesSeen++;

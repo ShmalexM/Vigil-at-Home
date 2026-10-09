@@ -22,7 +22,7 @@ import { Button, Card, Chip, SectionHead, SeverityMark, StatusMark } from '../co
 import { evidenceSub, isHookRequest, realProcess, STOPPED_ANSWER } from '../evidence';
 import { actorLabel, clock, describeAction, describeEvent, seenTimes, timeAgo } from '../format';
 import { actionErrorText } from '../decision';
-import { helperNote, PASSWORD_CANCELLED } from '../format';
+import { helperNote, notChangedText } from '../format';
 import { modeLabel, quieterMode } from '../rule-modes';
 import { ExcludeFromAlert } from '../components/ExcludeFromAlert';
 import { useAgentLinks, type AgentLinks } from './Activity';
@@ -429,15 +429,19 @@ function RuleCard({
     if (!quieter) return;
     const result = await vigil.quietRule(rule.id);
     if (!result.ok) return refused(result.mode);
-    if (result.helper === 'declined') {
-      toast({ text: `${rule.name}: ${PASSWORD_CANCELLED}` });
+    // Nothing changes until the helper takes it: a cancel or a refusal leaves the rule as it was.
+    const notChanged = notChangedText(result.helper, result.reason);
+    if (notChanged) {
+      toast({ text: `${rule.name}: ${notChanged}` });
       return;
     }
     toast({
       text: `${rule.name}: ${modeLabel(rule, quieter)}. It stops alerting and keeps logging matches in Activity.${helperNote(result.helper)}`,
       undo: () =>
         void vigil.undoQuietRule(rule.id, result.token).then((undone) => {
-          if (!undone.ok) refused(undone.mode);
+          if (!undone.ok) return refused(undone.mode);
+          const kept = notChangedText(undone.helper, undone.reason);
+          if (kept) toast({ text: `${rule.name}: ${kept}` });
         }),
     });
   };

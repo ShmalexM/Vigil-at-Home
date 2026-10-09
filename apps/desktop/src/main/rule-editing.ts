@@ -8,8 +8,9 @@ import {
 } from '@vigil/detection';
 import { userOrigin } from '@vigil/detection/user';
 import type { ExcludeScope, ExclusionInput, RuleCheck, RuleEditorView } from '../shared/ipc.js';
+import { notChangedText } from '../shared/helper-outcome.js';
 import type { Store } from './db/store.js';
-import type { Detector } from './detection.js';
+import { notApplied, type Detector } from './detection.js';
 
 /** Fields the editor manages itself; left out of the JSON the user edits. */
 const BOOKKEEPING = ['version', 'createdAt', 'updatedAt', 'origin', 'provenance', 'editedFrom'];
@@ -17,7 +18,10 @@ const BOOKKEEPING = ['version', 'createdAt', 'updatedAt', 'origin', 'provenance'
 /**
  * The Rules screen's editor, on top of the detection engine's RuleEditor.
  * Every change here comes from the UI, so it carries a user origin; the
- * engine validates, lints and compiles it before anything runs.
+ * engine validates, lints and compiles it before anything runs. Each change
+ * is made only once the helper takes it: one that weakens a blocking rule
+ * waits on the admin password, and if that is cancelled (or the helper
+ * refuses) nothing changes and the result says so.
  */
 export class RuleEditing {
   constructor(
@@ -62,23 +66,27 @@ export class RuleEditing {
     };
   }
 
-  save(ruleJson: string): RuleCheck {
+  async save(ruleJson: string): Promise<RuleCheck> {
     const parsed = parseJson(ruleJson);
     if ('error' in parsed) return { ok: false, errors: [parsed.error], warnings: [] };
-    return this.done(this.detector.editor.save(parsed.value, userOrigin('rules-screen')));
+    return this.done(() => this.detector.editor.save(parsed.value, userOrigin('rules-screen')));
   }
 
-  revert(id: string): void {
-    this.detector.editor.revert(id, userOrigin('rules-screen'));
-    this.detector.rulesChanged();
+  revert(id: string): Promise<RuleCheck> {
+    return this.done(() => {
+      this.detector.editor.revert(id, userOrigin('rules-screen'));
+      return { ok: true, errors: [], warnings: [] };
+    });
   }
 
-  delete(id: string): void {
-    this.detector.editor.delete(id, userOrigin('rules-screen'));
-    this.detector.rulesChanged();
+  delete(id: string): Promise<RuleCheck> {
+    return this.done(() => {
+      this.detector.editor.delete(id, userOrigin('rules-screen'));
+      return { ok: true, errors: [], warnings: [] };
+    });
   }
 
-  addExclusion(ruleId: string, input: ExclusionInput): RuleCheck {
+  addExclusion(ruleId: string, input: ExclusionInput): Promise<RuleCheck> {
     const value =
       input.op === 'in'
         ? input.value
@@ -87,35 +95,42 @@ export class RuleEditing {
             .filter(Boolean)
         : input.value.trim();
     const condition = { field: input.field, op: input.op, value, nocase: true };
-    return this.done(
+    return this.done(() =>
       this.detector.editor.addExclusion(ruleId, condition, userOrigin('rules-screen')),
     );
   }
 
-  removeExclusion(ruleId: string, index: number): RuleCheck {
-    return this.done(
+  removeExclusion(ruleId: string, index: number): Promise<RuleCheck> {
+    return this.done(() =>
       this.detector.editor.removeExclusion(ruleId, index, userOrigin('rules-screen')),
     );
   }
 
-  removeException(id: string): void {
-    this.detector.feedback.removeException(id, userOrigin('rules-screen'));
+  removeException(id: string): Promise<RuleCheck> {
+    return this.done(() => {
+      this.detector.feedback.removeException(id, userOrigin('rules-screen'));
+      return { ok: true, errors: [], warnings: [] };
+    });
   }
 
   /** "Never alert on this again" from an alert, as an exclusion on its rule. */
-  excludeFromAlert(alertId: string, scope: ExcludeScope): RuleCheck {
+  async excludeFromAlert(alertId: string, scope: ExcludeScope): Promise<RuleCheck> {
     const d = this.store.getAlertDetection(alertId) as Detection | undefined;
     if (!d) {
       return { ok: false, errors: ['This alert did not come from a detection rule'], warnings: [] };
     }
-    return this.done(
+    return this.done(() =>
       this.detector.editor.excludeEvent(d.match.ruleId, d.event, scope, userOrigin('alert')),
     );
   }
 
-  private done(r: EditResult): RuleCheck {
-    if (r.ok) this.detector.rulesChanged();
-    return check(r);
+  /** Make the change once the helper takes it; if it doesn't, nothing changed. */
+  private async done(fn: () => EditResult): Promise<RuleCheck> {
+    const { value: r, helper, reason } = await this.detector.userChange(fn);
+    const out: RuleCheck = { ...check(r), helper };
+    if (r.ok && notApplied(helper))
+      return { ...out, ok: false, errors: [notChangedText(helper, reason)!] };
+    return out;
   }
 }
 
