@@ -159,7 +159,7 @@ function RuleRow({
   editing: boolean;
   onEdit: (on: boolean) => void;
 }) {
-  const { rule, matches, learningUntil } = view;
+  const { rule, matches, slow, legacy, learningUntil } = view;
   const controlsId = useId();
   const toast = useToast();
   const [confirmBlock, setConfirmBlock] = useState(false);
@@ -215,6 +215,14 @@ function RuleRow({
             <span className="t-h3 ellipsis">{rule.name}</span>
             {rule.origin === 'ai' && <Chip tone="ai">AI-drafted</Chip>}
             {rule.origin === 'user' && <Chip>Yours</Chip>}
+            {slow && (
+              <Chip
+                tone="fair"
+                title="This rule took longer than it should to match. It is still on and decides every event in full. Narrow its fields or shorten its patterns."
+              >
+                Slow: review
+              </Chip>
+            )}
             {!tool && interrupts === 'popup' && (
               <span className="rule-interrupts" title={INTERRUPT_TEXT.popup.long}>
                 <BellRing size={12} aria-hidden /> {INTERRUPT_TEXT.popup.short}
@@ -232,6 +240,14 @@ function RuleRow({
           <span className={`t-small ${expanded ? '' : 'clamp-2'}`} title={rule.description}>
             {rule.description}
           </span>
+          {legacy && (
+            <span
+              className="t-small muted"
+              title="Saved before Vigil ran patterns in limited time. It still runs exactly as it did; a regex without lookaheads or large repeat counts would get the time limit."
+            >
+              Older pattern: runs as before, without the time limit
+            </span>
+          )}
         </div>
         <span className="row rule-meta">
           <SeverityMark severity={rule.severity} />

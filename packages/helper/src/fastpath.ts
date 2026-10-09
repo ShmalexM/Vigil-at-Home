@@ -33,10 +33,17 @@ import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { isRelease, type Action, type SensorEvent } from '@vigil/core';
 import { selfKey, selfRoots, underSelfRoot, type SelfImage } from '@vigil/core/self';
 import {
+  adoptLegacyUses,
+  admitSavedRules,
   compileRule,
   DetectionEngine,
   DetectionRule,
+  isBuiltinRuleId,
+  legacyKey,
+  legacyRuleIds,
   memoryStores,
+  retainLegacyUses,
+  type LegacyUse,
   type RuleException,
   type Stores,
 } from '@vigil/detection';
@@ -131,6 +138,19 @@ const Saved = z.object({
   /** The app's own blocking rules, by fingerprint (DetectionSync.appRules). */
   appRules: z.array(z.object({ id: z.string(), name: z.string(), digest: z.string() })).default([]),
   /**
+   * By rule id, the regex tests (field, case setting, text) it runs on the
+   * backtracking engine as it did before rule patterns moved to the
+   * linear-time one (legacy.ts in @vigil/detection). Missing in a file an
+   * earlier release wrote: every rule in it ran then, so loading it adopts
+   * them. Only a rule still in force keeps its entry.
+   */
+  legacyUses: z
+    .record(
+      z.string(),
+      z.array(z.object({ field: z.string(), nocase: z.boolean(), pattern: z.string() })),
+    )
+    .optional(),
+  /**
    * Whether a self grant was ever taken. Files from before self.grant only
    * ever came from syncs that carried one.
    */
@@ -147,9 +167,41 @@ const EMPTY: Saved = {
   selfHashes: [],
   lists: {},
   retired: {},
+  legacyUses: {},
   appRules: [],
   selfGranted: false,
 };
+
+/**
+ * The rule with its origin as this helper knows it: built-in only when Vigil
+ * ships a rule with that id. A pattern's trust (isTrustedPattern) depends on
+ * the origin, so it never comes from what the app sent.
+ */
+function ownOrigin(r: DetectionRule): DetectionRule {
+  const origin = isBuiltinRuleId(r.id) ? 'builtin' : r.origin === 'builtin' ? 'user' : r.origin;
+  return origin === r.origin ? r : { ...r, origin };
+}
+
+/** A rule as this helper would run it. */
+interface Planned {
+  rule: DetectionRule;
+  /** How its patterns run: which are timed and which keep the backtracking engine. */
+  how: string;
+  legacy: LegacyUse[];
+}
+
+function planned(rule: DetectionRule): Planned {
+  const c = compileRule(rule);
+  const legacy = c.legacy.map(legacyKey).sort();
+  return { rule, how: JSON.stringify([c.untrusted, legacy]), legacy: c.legacy };
+}
+
+/** Each rule's regex tests that run on the backtracking engine, for the saved file. */
+function legacyOf(plan: Planned[]): Record<string, LegacyUse[]> {
+  const out: Record<string, LegacyUse[]> = {};
+  for (const p of plan) if (p.legacy.length) out[p.rule.id] = p.legacy;
+  return out;
+}
 
 /** Rule fields that change what an alert says, not what gets blocked. */
 const WORDING = new Set([
@@ -169,6 +221,8 @@ const WORDING = new Set([
 
 export class FastPath {
   private state: Saved = EMPTY;
+  /** The rules in force, as planned. */
+  private running = new Map<string, Planned>();
   /** Whether the installer's folders may still be named as Vigil without the password. */
   private selfGrace = true;
   private engine: DetectionEngine | undefined;
@@ -211,7 +265,8 @@ export class FastPath {
   dropOwnBlocks(): void {
     const rules = this.withoutOwnBlocks(this.state.rules);
     if (rules.length === this.state.rules.length) return;
-    this.apply({ ...this.state, rev: this.state.rev + 1, rules });
+    const plan = rules.flatMap((r) => this.running.get(r.id) ?? []);
+    this.apply({ ...this.state, rev: this.state.rev + 1, rules, legacyUses: legacyOf(plan) }, plan);
     this.save();
   }
 
@@ -230,10 +285,20 @@ export class FastPath {
       this.opts.log?.('fast path: ignoring saved rules that do not parse');
       return;
     }
-    // A rule a newer release no longer compiles (stricter regex and glob
-    // checks) is dropped on its own; the rest keep blocking.
-    const rules = this.withoutOwnBlocks(
-      parsed.data.rules.filter((r) => {
+    // A saved rule keeps blocking as it did. Only this root-owned file says
+    // which rules keep an older pattern (legacy.ts): one an earlier release
+    // wrote adopts every rule in it, since each ran then. A rule that no
+    // longer compiles at all is dropped on its own; the rest keep blocking.
+    let rules: DetectionRule[];
+    const saved = parsed.data.rules.map(ownOrigin);
+    if (parsed.data.legacyUses === undefined) {
+      const admitted = admitSavedRules(saved);
+      for (const d of admitted.dropped)
+        this.opts.log?.(`fast path: dropping saved rule: ${d.error}`);
+      rules = admitted.rules;
+    } else {
+      for (const [id, uses] of Object.entries(parsed.data.legacyUses)) adoptLegacyUses(id, uses);
+      rules = saved.filter((r) => {
         try {
           compileRule(r);
           return true;
@@ -241,10 +306,13 @@ export class FastPath {
           this.opts.log?.(`fast path: dropping saved rule: ${(err as Error).message}`);
           return false;
         }
-      }),
-    );
+      });
+    }
+    // A rule that blocks one of Vigil's own programs by hash is dropped too.
+    rules = this.withoutOwnBlocks(rules);
     try {
-      this.apply({ ...parsed.data, rules });
+      const plan = rules.map(planned);
+      this.apply({ ...parsed.data, rules, legacyUses: legacyOf(plan) }, plan);
     } catch (err) {
       this.opts.log?.(`fast path: saved rules did not load: ${(err as Error).message}`);
     }
@@ -264,7 +332,6 @@ export class FastPath {
   loosening(cmd: DetectionSync): string[] {
     const self = carriedSelf(cmd);
     const out = self ? this.selfLoosening(self) : [];
-    const next = new Map(cmd.rules.map((r) => [r.id, r]));
     const rules: string[] = [];
     // The app's own blocking rules: dropping one or changing what it blocks.
     const nextApp = new Map((cmd.appRules ?? []).map((r) => [r.id, r.digest]));
@@ -273,10 +340,30 @@ export class FastPath {
       if (d === undefined) rules.push(`stop blocking with “${r.name}”`);
       else if (d !== r.digest) rules.push(`change what “${r.name}” blocks`);
     }
+    // Judged by outcome: the rules this helper would actually run after the
+    // sync, compiled as it would compile them, against the ones it runs now.
+    // A rule that would be left out for any reason (removed, no longer
+    // compiling, skipped as an older pattern) or run differently counts.
+    let next: Map<string, Planned>;
+    try {
+      next = new Map(this.plan(cmd).map((p) => [p.rule.id, p]));
+    } catch {
+      // sync() refuses it and nothing changes.
+      next = new Map(this.running);
+    }
+    // Origins are the helper's own (ownOrigin) on both sides: what the app
+    // claims never counts by itself, and an id this helper does not ship is
+    // the user's however often the app calls it built-in.
     for (const r of this.state.rules) {
       const n = next.get(r.id);
+      const now = this.running.get(r.id);
       if (!n) rules.push(`stop blocking with “${r.name}”`);
-      else if (enforced(n) !== enforced(r)) rules.push(`change what “${r.name}” blocks`);
+      else if (
+        enforced(n.rule) !== enforced(r) ||
+        n.how !== now?.how ||
+        n.rule.origin !== ownOrigin(r).origin
+      )
+        rules.push(`change what “${r.name}” blocks`);
     }
     const had = new Set(this.state.exceptions.map(canonical));
     const added = cmd.exceptions.filter((e) => !had.has(canonical(e)));
@@ -315,7 +402,9 @@ export class FastPath {
 
   /** Replace what is Vigil's own. The executor asks for the password first (selfLoosening()). */
   grantSelf(cmd: SelfFields): { rev: number } {
-    this.apply({ ...this.state, rev: this.state.rev + 1, ...this.selfFrom(cmd) });
+    this.apply({ ...this.state, rev: this.state.rev + 1, ...this.selfFrom(cmd) }, [
+      ...this.running.values(),
+    ]);
     this.save();
     return { rev: this.state.rev };
   }
@@ -332,13 +421,14 @@ export class FastPath {
   }
 
   /**
-   * Throws RuleCompileError if a rule doesn't compile. That includes a regex or
-   * glob that could take too long to match (regexProblem, globProblem): adding
-   * rules needs no password, so the same checks as the app's keep one rule
-   * from stalling every check here.
+   * Throws RuleCompileError if a rule doesn't compile as this helper would
+   * run it (plan()). That includes a regex or glob that could take too long to
+   * match (regexProblem, globProblem): adding rules needs no password, so the
+   * same checks as the app's keep one rule from stalling every check here. A
+   * rule the app marks as an older pattern is skipped instead (plan()).
    */
   checkRules(cmd: DetectionSync): void {
-    for (const r of cmd.rules) compileRule({ ...r, mode: 'block' });
+    this.plan(cmd);
   }
 
   /**
@@ -368,9 +458,17 @@ export class FastPath {
     // Only an app from before self.grant sends the self set with the rules.
     const self = carriedSelf(cmd);
     const selfFields = self ? this.selfFrom(self) : {};
+    // Throws RuleCompileError before anything changes (checkRules does the
+    // same before any password is asked for).
+    const planAll = this.plan(cmd, (err) =>
+      this.opts.log?.(`fast path: skipping rule with an older pattern: ${err.message}`),
+    );
+    // Less any rule that would block one of Vigil's own programs by hash.
+    const kept = new Set(this.withoutOwnBlocks(planAll.map((p) => p.rule)));
+    const plan = planAll.filter((p) => kept.has(p.rule));
     const next: Saved = {
       rev: this.state.rev + 1,
-      rules: this.withoutOwnBlocks(cmd.rules),
+      rules: plan.map((p) => p.rule),
       appRules: cmd.appRules ?? [],
       exceptions: cmd.exceptions,
       selfPaths: this.state.selfPaths,
@@ -380,11 +478,37 @@ export class FastPath {
       ...selfFields,
       lists,
       retired,
+      legacyUses: legacyOf(plan),
     };
     if (cmd.syncId) next.syncId = cmd.syncId;
-    this.apply(next);
+    this.apply(next, plan);
     this.save();
     return { applied: true, needLists: [], rev: this.state.rev };
+  }
+
+  /**
+   * The rules this sync would have the helper run, compiled. Origins are the
+   * helper's own (ownOrigin). A rule the app marks as an older pattern
+   * (`legacy`) runs only if this helper already let that exact test keep the
+   * backtracking engine; otherwise it is left out (and `skipped` hears why).
+   * Any other rule that does not compile throws.
+   */
+  private plan(cmd: DetectionSync, skipped?: (err: Error) => void): Planned[] {
+    const older = new Set(cmd.legacy ?? []);
+    const out: Planned[] = [];
+    for (const raw of cmd.rules) {
+      const rule = ownOrigin(raw);
+      if (!older.has(rule.id)) {
+        out.push(planned(rule));
+        continue;
+      }
+      try {
+        out.push(planned(rule));
+      } catch (err) {
+        skipped?.(err as Error);
+      }
+    }
+    return out;
   }
 
   /** The rules in force. */
@@ -416,7 +540,9 @@ export class FastPath {
     const entries = inc.parts.flat() as string[];
     if (listDigest(entries) !== cmd.digest) throw new Error(`list ${cmd.list} arrived damaged`);
     const lists = { ...this.state.lists, [cmd.list]: entries };
-    this.apply({ ...this.state, rev: this.state.rev + 1, lists, retired: this.retire(lists) });
+    this.apply({ ...this.state, rev: this.state.rev + 1, lists, retired: this.retire(lists) }, [
+      ...this.running.values(),
+    ]);
     this.save();
     return { complete: true };
   }
@@ -592,7 +718,12 @@ export class FastPath {
     return out;
   }
 
-  private apply(next: Saved): void {
+  /**
+   * Put `next` in force. `plan` is its rules compiled (planned). Legacy
+   * permissions follow: a rule no longer run, or no longer using a test,
+   * loses that test's permission, here and in the saved file.
+   */
+  private apply(next: Saved, plan: Planned[]): void {
     const stores: Stores = memoryStores();
     for (const name of new Set([...Object.keys(next.lists), ...Object.keys(next.retired)])) {
       const entries = [...(next.lists[name] ?? []), ...Object.keys(next.retired[name] ?? {})];
@@ -609,11 +740,17 @@ export class FastPath {
               selfHashes: next.selfHashes,
             },
             recordHistory: false,
+            // The rule keeps blocking; the app times its own copy and tells the user.
+            onSlowRule: (rule, ms) =>
+              this.opts.log?.(`fast path: rule ${rule.id} spent ${Math.round(ms)} ms matching`),
           },
         )
       : undefined;
     this.engine = engine;
     this.state = next;
+    this.running = new Map(plan.map((p) => [p.rule.id, p]));
+    for (const id of legacyRuleIds()) if (!this.running.has(id)) retainLegacyUses(id, []);
+    for (const p of plan) retainLegacyUses(p.rule.id, p.legacy);
     this.digests = new Map(Object.entries(next.lists).map(([n, e]) => [n, listDigest(e)]));
   }
 

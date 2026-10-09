@@ -15,6 +15,7 @@ import {
   type FirstSeenSpec,
 } from './rules/compile.js';
 import { compileField, keyOf, type FieldGetter } from './rules/fields.js';
+import { adoptLegacyUses, legacyKey, retainLegacyUses, type LegacyUse } from './rules/legacy.js';
 import { SafetyFloor, type SafetyConfig } from './safety.js';
 import type { Stores } from './state/stores.js';
 import {
@@ -37,7 +38,24 @@ export interface EngineConfig {
   /** Append every evaluated event to the history store (for replay). Default true. */
   recordHistory?: boolean;
   newId?: () => string;
+  /**
+   * A rule with a regex or glob Vigil does not ship spent more than
+   * SLOW_RULE_BUDGET_MS matching within SLOW_RULE_WINDOW_MS. Called once per
+   * rule until it is loaded again; `e` is the event it was matching when it
+   * went over. The rule stays on and every answer it gave stands.
+   */
+  onSlowRule?: (rule: DetectionRule, ms: number, e: DetectionEvent) => void;
+  /**
+   * This engine holds the rules in force (the app's, not a replay's): when
+   * one of them changes or is removed here, the legacy permissions it no
+   * longer uses are revoked (rules/legacy.ts).
+   */
+  holdsLegacy?: boolean;
 }
+
+/** Matching time one rule may take within SLOW_RULE_WINDOW_MS before onSlowRule hears of it. */
+export const SLOW_RULE_BUDGET_MS = 250;
+export const SLOW_RULE_WINDOW_MS = 60_000;
 
 interface CompiledRule {
   rule: DetectionRule;
@@ -50,6 +68,14 @@ interface CompiledRule {
   dedupeKey: FieldGetter[];
   dedupeWindowMs: number;
   santaFrom: FieldGetter | undefined;
+  /** Has a regex or glob Vigil does not ship: its matching is timed. */
+  untrusted: boolean;
+  /**
+   * Regexes this saved rule runs on the backtracking engine, as it did before
+   * rule patterns moved to the linear-time one (rules/legacy.ts). Empty for
+   * any rule that runs entirely in linear time or is Vigil's own.
+   */
+  legacy: LegacyUse[];
   sequence:
     | {
         steps: { kinds: Set<string>; condition: CompiledCondition }[];
@@ -111,15 +137,26 @@ export class RuleCompileError extends Error {
   }
 }
 
+/**
+ * @param opts.adoptLegacy the rule was saved before this release and is
+ *   being loaded: a regex the linear-time engine can't run keeps the
+ *   backtracking engine instead of failing (admitSavedRules).
+ */
 export function compileRule(
   input: DetectionRuleInput | DetectionRule,
   defaultDedupeWindowSec = 3600,
+  opts: { adoptLegacy?: boolean } = {},
 ): CompiledRule {
   const rule = DetectionRule.parse(input);
   try {
     const scopePrefix = `${[...rule.eventKinds].sort().join('+')}:`;
-    const condition = compileCondition(rule.condition, scopePrefix);
-    const exclusions = rule.exclusions.map((x) => compileCondition(x, scopePrefix));
+    const ctx = { ruleId: rule.id, origin: rule.origin, adoptLegacy: opts.adoptLegacy === true };
+    const condition = compileCondition(rule.condition, scopePrefix, ctx);
+    const exclusions = rule.exclusions.map((x) => compileCondition(x, scopePrefix, ctx));
+    const steps = (rule.sequence?.steps ?? []).map((st) => ({
+      kinds: new Set<string>(st.eventKinds),
+      condition: compileCondition(st.condition, scopePrefix, ctx),
+    }));
     return {
       rule,
       condition,
@@ -130,12 +167,19 @@ export function compileRule(
       dedupeKey: (rule.dedupe?.key ?? []).map(compileField),
       dedupeWindowMs: (rule.dedupe?.windowSec ?? defaultDedupeWindowSec) * 1000,
       santaFrom: rule.santa ? compileField(rule.santa.from) : undefined,
+      untrusted: [condition, ...exclusions, ...steps.map((st) => st.condition)].some(
+        (x) => x.untrusted,
+      ),
+      legacy: [
+        ...new Map(
+          [condition, ...exclusions, ...steps.map((st) => st.condition)]
+            .flatMap((x) => x.legacy)
+            .map((u) => [legacyKey(u), u]),
+        ).values(),
+      ],
       sequence: rule.sequence
         ? {
-            steps: rule.sequence.steps.map((st) => ({
-              kinds: new Set<string>(st.eventKinds),
-              condition: compileCondition(st.condition, scopePrefix),
-            })),
+            steps,
             key: rule.sequence.key.map(compileField),
             windowMs: rule.sequence.windowSec * 1000,
           }
@@ -144,6 +188,40 @@ export function compileRule(
   } catch (err) {
     throw new RuleCompileError(rule.id, (err as Error).message);
   }
+}
+
+/**
+ * Rules saved by an earlier release, ready to load. A rule whose regexes the
+ * linear-time engine can't run, but which compiled before (regexProblem and
+ * globProblem are unchanged), keeps running as it did: those regexes stay on
+ * the backtracking engine for that rule (rules/legacy.ts), and the engine
+ * lists it in legacyRules(). A rule that no longer compiles at all is left
+ * out and reported in `dropped`, rather than keeping every rule from loading.
+ * Call it once, with what was saved before anything new is added.
+ */
+export function admitSavedRules(saved: ReadonlyArray<DetectionRuleInput | DetectionRule>): {
+  rules: DetectionRule[];
+  dropped: { id: string; error: string }[];
+} {
+  const rules: DetectionRule[] = [];
+  const dropped: { id: string; error: string }[] = [];
+  for (const r of saved) {
+    try {
+      rules.push(compileRule(r).rule);
+      continue;
+    } catch {
+      // Tried again below as a rule saved before.
+    }
+    try {
+      const c = compileRule(r, undefined, { adoptLegacy: true });
+      adoptLegacyUses(c.rule.id, c.legacy);
+      rules.push(c.rule);
+    } catch (err) {
+      const id = (r as { id?: unknown }).id;
+      dropped.push({ id: typeof id === 'string' ? id : '?', error: (err as Error).message });
+    }
+  }
+  return { rules, dropped };
 }
 
 /** Bounded map of key -> timestamps, oldest keys evicted first. */
@@ -219,6 +297,12 @@ export class DetectionEngine {
   private readonly recordHistory: boolean;
   private readonly makeId: () => string;
   private readonly state: EvalState;
+  private readonly holdsLegacy: boolean;
+  private readonly onSlowRule: EngineConfig['onSlowRule'];
+  /** Matching time per timed rule in the current window (performance.now() ms). */
+  private readonly spent = new Map<string, { since: number; ms: number }>();
+  /** Rules reported to onSlowRule, until they are loaded again. */
+  private readonly slow = new Set<string>();
 
   constructor(
     rules: Array<DetectionRuleInput | DetectionRule>,
@@ -229,6 +313,8 @@ export class DetectionEngine {
     this.defaultDedupeWindowSec = cfg.defaultDedupeWindowSec ?? 3600;
     this.recordHistory = cfg.recordHistory ?? true;
     this.makeId = cfg.newId ?? (() => newId());
+    this.onSlowRule = cfg.onSlowRule;
+    this.holdsLegacy = cfg.holdsLegacy === true;
     this.safety = new SafetyFloor(cfg.safety);
     this.state = {
       baselineHas: (scope, key) => stores.baseline.has(scope, key),
@@ -250,21 +336,33 @@ export class DetectionEngine {
       if (ids.has(c.rule.id)) throw new RuleCompileError(c.rule.id, 'duplicate rule id');
       ids.add(c.rule.id);
     }
+    if (this.holdsLegacy) {
+      for (const id of this.byId.keys()) if (!ids.has(id)) retainLegacyUses(id, []);
+      for (const c of compiled) retainLegacyUses(c.rule.id, c.legacy);
+    }
     this.byId = new Map(compiled.map((c) => [c.rule.id, c]));
+    this.spent.clear();
+    this.slow.clear();
     this.reindex();
     for (const id of ids) this.bump(id);
   }
 
   upsertRule(rule: DetectionRuleInput | DetectionRule): DetectionRule {
     const c = compileRule(rule, this.defaultDedupeWindowSec);
+    if (this.holdsLegacy) retainLegacyUses(c.rule.id, c.legacy);
     this.byId.set(c.rule.id, c);
+    this.spent.delete(c.rule.id);
+    this.slow.delete(c.rule.id);
     this.reindex();
     this.bump(c.rule.id);
     return c.rule;
   }
 
   removeRule(ruleId: string): void {
+    if (this.holdsLegacy) retainLegacyUses(ruleId, []);
     this.byId.delete(ruleId);
+    this.spent.delete(ruleId);
+    this.slow.delete(ruleId);
     this.reindex();
     this.bump(ruleId);
   }
@@ -281,6 +379,19 @@ export class DetectionEngine {
 
   private bump(ruleId: string): void {
     this.revisions.set(ruleId, this.revision(ruleId) + 1);
+  }
+
+  /**
+   * Saved rules with a regex that runs on the backtracking engine as it did
+   * before (rules/legacy.ts), so it can't be time-limited. Still timed.
+   */
+  legacyRules(): string[] {
+    return [...this.byId.values()].filter((c) => c.legacy.length).map((c) => c.rule.id);
+  }
+
+  /** Rules that went over their matching budget (onSlowRule), for review. */
+  slowRules(): string[] {
+    return [...this.slow];
   }
 
   getRule(ruleId: string): DetectionRule | undefined {
@@ -456,10 +567,10 @@ export class DetectionEngine {
       if (c.sequence && !this.chainReady(c, e)) return undefined;
       if (!rule.eventKinds.includes(e.kind)) return undefined;
     }
-    if (!c.condition.test(e, this.state)) return undefined;
+    if (!this.holds(c, c.condition, e)) return undefined;
     if (
       c.exclusions.some(
-        (x, i) => ![...c.exclusionFields[i]!].some((f) => ignore.has(f)) && x.test(e, this.state),
+        (x, i) => ![...c.exclusionFields[i]!].some((f) => ignore.has(f)) && this.holds(c, x, e),
       )
     )
       return undefined;
@@ -586,7 +697,7 @@ export class DetectionEngine {
     const done = st?.done ?? 0;
     if (done >= seq.steps.length) return true;
     const step = seq.steps[done]!;
-    if (step.kinds.has(e.kind) && step.condition.test(e, this.state)) {
+    if (step.kinds.has(e.kind) && this.holds(c, step.condition, e)) {
       this.chains.delete(ckey); // re-insert to keep recency order
       this.chains.set(ckey, { done: done + 1, start: st?.start ?? e.ts });
       if (this.chains.size > MAX_WINDOW_ENTRIES)
@@ -607,6 +718,41 @@ export class DetectionEngine {
     if (k === undefined) return false;
     const st = this.chains.get(`${c.rule.id}␞${k}`);
     return !!st && e.ts - st.start <= seq.windowMs && st.done >= seq.steps.length;
+  }
+
+  /**
+   * One of the rule's conditions on this event, timed when the rule has a
+   * pattern Vigil does not ship. The linear-time engine already bounds each
+   * test; this catches a rule that is still costly overall, such as many
+   * long patterns on every event.
+   *
+   * Going over the budget never turns the rule off or changes its answer.
+   * The command lines it reads are the attacker's to choose, so a slow input
+   * must not be a way to switch off the rule meant to catch it. A match runs
+   * to the end before its time is known, so the answer is always the full
+   * one; the overrun is only reported, once, for the user to review.
+   */
+  private holds(c: CompiledRule, cond: CompiledCondition, e: DetectionEvent): boolean {
+    if (!c.untrusted) return cond.test(e, this.state);
+    const start = performance.now();
+    try {
+      return cond.test(e, this.state);
+    } finally {
+      const end = performance.now();
+      const id = c.rule.id;
+      let w = this.spent.get(id);
+      if (!w || end - w.since > SLOW_RULE_WINDOW_MS)
+        this.spent.set(id, (w = { since: start, ms: 0 }));
+      w.ms += end - start;
+      if (w.ms > SLOW_RULE_BUDGET_MS && !this.slow.has(id)) {
+        this.slow.add(id);
+        try {
+          this.onSlowRule?.(c.rule, w.ms, e);
+        } catch {
+          // Reporting must not change what the rule decided.
+        }
+      }
+    }
   }
 
   private isExcepted(

@@ -431,6 +431,10 @@ export interface RuleView {
   rule: Rule;
   /** Matches in the last 14 days (the detection engine's replay window), all modes. */
   matches: number;
+  /** It spent too long matching since it was loaded (a "Slow rule" in Noticed): worth a review. */
+  slow?: boolean;
+  /** A saved rule with an older pattern that runs as before, without the time limit new rules have. */
+  legacy?: boolean;
   /**
    * Set while the rule compares against a baseline Vigil is still learning:
    * until then it only records, whatever its mode says.

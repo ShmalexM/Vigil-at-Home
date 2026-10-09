@@ -37,10 +37,11 @@ import { RuleEditing } from './rule-editing.js';
 import type { ActionExecutor } from './executor.js';
 import { Scheduler } from './scheduler.js';
 import { reportFeedHealth } from './sensor-health.js';
-import { SensorRegistry } from './sensors.js';
+import { ruleMatcherHealth, SensorRegistry } from './sensors.js';
 import { computeStatus } from './status.js';
 import { TEST_RULE } from './test-alert.js';
 import { WORTH_A_LOOK_RULE } from './worth-a-look.js';
+import { SLOW_RULE } from './slow-rule.js';
 import { UsageService } from './usage.js';
 
 /** Scheduled jobs as people know them, for a stuck-work note in the status. */
@@ -139,6 +140,9 @@ export class VigilCore {
     });
     store.upsertRule(TEST_RULE);
     store.upsertRule(WORTH_A_LOOK_RULE);
+    store.upsertRule(SLOW_RULE);
+    const matcher = ruleMatcherHealth();
+    if (matcher) this.sensors.report(matcher);
   }
 
   start(): void {
@@ -470,16 +474,23 @@ export class VigilCore {
 
   rules(): RuleView[] {
     const counts = this.store.ruleMatchCounts(this.now() - RULE_REVIEW_DAYS * DAY);
+    const slow = this.detector?.slowRules() ?? new Set<string>();
+    const legacy = this.detector?.legacyRules() ?? new Set<string>();
     const engine = (this.detector?.rules() ?? []).map(({ rule, mode, learningUntil }) => ({
       rule: { ...rule, mode },
       matches: counts.get(rule.id) ?? 0,
       ...(learningUntil !== undefined ? { learningUntil } : {}),
+      ...(slow.has(rule.id) ? { slow: true } : {}),
+      ...(legacy.has(rule.id) ? { legacy: true } : {}),
     }));
     const own = this.store
       .listRules()
       .filter(
         (r) =>
-          r.id !== TEST_RULE.id && r.id !== WORTH_A_LOOK_RULE.id && !this.detector?.hasRule(r.id),
+          r.id !== TEST_RULE.id &&
+          r.id !== WORTH_A_LOOK_RULE.id &&
+          r.id !== SLOW_RULE.id &&
+          !this.detector?.hasRule(r.id),
       )
       .map((rule) => ({ rule, matches: counts.get(rule.id) ?? 0 }));
     return [...engine, ...own];

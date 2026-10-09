@@ -150,6 +150,13 @@ export const DetectionSync = z.strictObject({
   selfHashes: SelfHashes.optional(),
   lists: z.record(ListName, Digest),
   /**
+   * Ids of rules the app runs with an older pattern the linear-time engine
+   * can't run (legacy.ts in @vigil/detection). The helper runs such a rule
+   * only when it had that pattern in that rule already; otherwise it skips
+   * the rule rather than refusing the sync. This grants nothing on its own.
+   */
+  legacy: z.array(z.string().max(256)).max(64).optional(),
+  /**
    * The contents of the named lists the helper may not have, so rules and
    * lists go in force together in this one command. A named list it doesn't
    * carry must already be on the helper with that digest.

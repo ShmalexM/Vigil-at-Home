@@ -1,7 +1,7 @@
 import type { ActionKind } from '@vigil/core';
 import { isIP } from 'node:net';
 import type { Condition, DetectionRule, FieldTest } from '../types.js';
-import { globProblem, regexProblem, TEMPLATE_RE, templateFields } from './compile.js';
+import { patternProblems, TEMPLATE_RE, templateFields, type PatternContext } from './compile.js';
 import { KNOWN_FIELDS } from './fields.js';
 
 export interface LintResult {
@@ -155,25 +155,15 @@ function lintPreflight(rule: DetectionRule, errors: string[], warnings: string[]
   if (rule.santa) errors.push('pre-flight rules cannot add Santa rules');
 }
 
-function checkMatch(c: FieldTest, errors: string[]): number {
+function checkMatch(c: FieldTest, ctx: PatternContext, errors: string[]): number {
   let regexes = 0;
   if (!KNOWN_FIELDS.has(c.field)) errors.push(`unknown field "${c.field}"`);
   const values = Array.isArray(c.value) ? c.value : c.value === undefined ? [] : [c.value];
   if (c.op !== 'exists' && values.length === 0) errors.push(`${c.field} ${c.op} needs a value`);
-  if (c.op === 'regex') {
-    for (const v of values) {
-      regexes++;
-      const p = regexProblem(String(v));
-      if (p) errors.push(`${c.field}: ${p}`);
-    }
-  }
-  if (c.op === 'glob') {
-    for (const v of values) {
-      if (String(v).length > 512) errors.push(`${c.field}: glob too long`);
-      const p = globProblem(String(v));
-      if (p) errors.push(`${c.field}: ${p}`);
-    }
-  }
+  if (c.op === 'regex') regexes += values.length;
+  if (c.op === 'glob')
+    for (const v of values) if (String(v).length > 512) errors.push(`${c.field}: glob too long`);
+  errors.push(...patternProblems(c, ctx));
   if (c.op === 'cidr') {
     for (const v of values) {
       const [addr, prefix] = String(v).split('/');
@@ -194,13 +184,14 @@ function lintCondition(
   errors: string[],
   lists: Set<string> | undefined,
   warnings: string[],
+  ctx: PatternContext,
 ) {
   let nodes = 0;
   let regexes = 0;
   walk(c, 1, (n, depth) => {
     nodes++;
     if (depth > MAX_DEPTH) errors.push(`condition nested deeper than ${MAX_DEPTH}`);
-    if (isMatch(n)) regexes += checkMatch(n, errors);
+    if (isMatch(n)) regexes += checkMatch(n, ctx, errors);
     if ('firstSeen' in n)
       for (const k of n.firstSeen.key)
         if (!KNOWN_FIELDS.has(k)) errors.push(`unknown field "${k}"`);
@@ -219,15 +210,16 @@ export function lintRule(rule: DetectionRule, opts: LintOptions = {}): LintResul
   const errors: string[] = [];
   const warnings: string[] = [];
   const lists = opts.knownLists ? new Set(opts.knownLists) : undefined;
+  const ctx: PatternContext = { ruleId: rule.id, origin: rule.origin };
 
-  lintCondition(rule.condition, errors, lists, warnings);
+  lintCondition(rule.condition, errors, lists, warnings, ctx);
   for (const x of rule.exclusions) {
-    lintCondition(x, errors, lists, warnings);
+    lintCondition(x, errors, lists, warnings, ctx);
     if (!hasSpecificTest(x))
       errors.push('an exclusion must name something specific, or it would hide everything');
   }
   for (const st of rule.sequence?.steps ?? []) {
-    lintCondition(st.condition, errors, lists, warnings);
+    lintCondition(st.condition, errors, lists, warnings, ctx);
     if (!hasSpecificTest(st.condition))
       errors.push('each step of a sequence must test something specific');
   }

@@ -48,6 +48,8 @@ export interface HelperRuleSet {
   selfImages?: SelfImage[];
   selfHashes?: string[];
   lists: Record<string, string[]>;
+  /** Rules that run an older pattern the linear-time engine can't (legacy.ts). */
+  legacy?: string[];
 }
 
 /** What is Vigil's own, as the helper takes it in a self grant. */
@@ -294,6 +296,7 @@ export class HelperLink
         rules: set.rules,
         appRules: set.appRules,
         exceptions: set.exceptions,
+        legacy: set.legacy ?? [],
         self: opts.withSelf ? selfOf(set) : null,
         lists: Object.keys(digests).sort(),
       });
@@ -312,6 +315,7 @@ export class HelperLink
         // the helper is updated with the app; nothing is put in force unasked.
         ...(opts.withSelf ? selfOf(set) : {}),
         lists: digests,
+        ...(set.legacy?.length ? { legacy: set.legacy } : {}),
         ...(opts.syncId ? { syncId: opts.syncId } : {}),
       };
       let carry = changed;

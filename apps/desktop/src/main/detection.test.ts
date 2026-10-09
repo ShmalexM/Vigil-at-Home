@@ -1,18 +1,29 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { PreflightRequest, SensorEvent } from '@vigil/core';
-import type { SessionStart } from '@vigil/detection';
+import {
+  DetectionRule,
+  forgetLegacyPatterns,
+  simulateLinearEngine,
+  sqliteStores,
+  SLOW_RULE_BUDGET_MS,
+  type SessionStart,
+} from '@vigil/detection';
+import { userOrigin } from '@vigil/detection/user';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { QuietRuleResult } from '../shared/ipc.js';
-import { describe, expect, it, vi } from 'vitest';
 import { Store } from './db/store.js';
 import { Detector, type DetectorOptions } from './detection.js';
 import { DryRunExecutor } from './executor.js';
 import { VigilCore } from './service.js';
+import { SLOW_RULE } from './slow-rule.js';
 import { makeRule } from './testing.js';
 
 const BAD = 'a'.repeat(64);
 
-function setup(extra: Partial<DetectorOptions> = {}) {
+function setup(extra: Partial<DetectorOptions> = {}, saved: DetectionRule[] = []) {
   const db = new DatabaseSync(':memory:');
+  // Rules an earlier release saved, there before the app starts.
+  for (const r of saved) sqliteStores(db).rules.save(r, 1);
   const store = new Store(db);
   const executor = new DryRunExecutor();
   const core = new VigilCore(store, executor, true);
@@ -53,6 +64,86 @@ function exec(path: string, sha256?: string): SensorEvent {
 }
 
 describe('Detector', () => {
+  afterEach(() => {
+    simulateLinearEngine(undefined);
+    forgetLegacyPatterns();
+  });
+
+  const ownRule = (id: string, value: string, mode: 'alert' | 'block' = 'block') =>
+    DetectionRule.parse({
+      id,
+      version: 1,
+      name: `Rule ${id}`,
+      description: '',
+      origin: 'user',
+      mode,
+      severity: 'high',
+      fidelity: 'high',
+      eventKinds: ['process.exec'],
+      condition: { field: 'process.path', op: 'regex', value },
+      response: [{ kind: 'process.kill', pid: '{{process.pid}}' }],
+      reasons: ['Matched.'],
+      tags: [],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+  it('keeps a saved rule whose pattern needs the usual engine, quietly marked as older', async () => {
+    // A lookahead: compiled before rule patterns moved to the linear-time engine.
+    const older = ownRule('older', '^/tmp/(?=e)evil$');
+    const { core, store, popups } = setup({}, [older, ownRule('newer', '^/tmp/[0-9a-f]{40}$')]);
+    const views = core.rules();
+    expect(views.find((r) => r.rule.id === 'older')).toMatchObject({
+      rule: { mode: 'block' },
+      legacy: true,
+    });
+    expect(views.find((r) => r.rule.id === 'newer')?.legacy).toBeUndefined();
+    // No popup, alert or badge for being older; it blocks as it did.
+    expect(store.listAlerts()).toEqual([]);
+    expect(popups).toEqual([]);
+    await core.handleEvent(exec('/tmp/evil'));
+    expect(store.listAlerts().map((a) => a.ruleId)).toContain('older');
+    // The helper hears it is one, so it can skip it if it never had it.
+    const set = core.detector!.helperRules();
+    expect(set.rules.map((r) => r.id)).toContain('older');
+    expect(set.legacy).toEqual(['older']);
+  });
+
+  it('refuses the same pattern in a new rule, with the reason', () => {
+    const { core } = setup({}, [ownRule('older', '^/tmp/(?=e)evil$')]);
+    const out = core.detector!.editor.validate({
+      ...ownRule('brand-new', '^/tmp/(?=e)evil$'),
+      origin: undefined,
+    });
+    expect(out.ok).toBe(false);
+    expect(out.errors.join()).toMatch(/linear-time.*lookahead/);
+  });
+
+  it('does not let a deleted older rule come back with the same id and pattern', () => {
+    const older = ownRule('older', '^/tmp/(?=e)evil$');
+    const { core } = setup({}, [older]);
+    const editor = core.detector!.editor;
+    // Kept while it stays as saved, edits included.
+    expect(editor.validate({ ...older, name: 'Renamed' }).ok).toBe(true);
+    editor.delete('older', userOrigin('rules-screen'));
+    for (const again of [older, { ...older, condition: { ...older.condition, nocase: true } }]) {
+      const out = editor.validate(again);
+      expect(out.ok).toBe(false);
+      expect(out.errors.join()).toMatch(/linear-time.*lookahead/);
+    }
+  });
+
+  it('says in sensor health when the linear-time engine is missing, and keeps saved rules', () => {
+    expect(setup().core.sensors.get('rule-matcher')).toBeUndefined();
+    simulateLinearEngine(false);
+    const { core } = setup({}, [ownRule('mine', '^/tmp/x[0-9]+$')]);
+    expect(core.sensors.get('rule-matcher')).toMatchObject({ state: 'degraded' });
+    expect(core.status().reasons.join()).toMatch(/Rule matcher/);
+    expect(core.rules().find((r) => r.rule.id === 'mine')).toMatchObject({ legacy: true });
+    const out = core.detector!.editor.validate(ownRule('brand-new', '^/tmp/y$'));
+    expect(out.errors.join()).toMatch(/can't run the linear-time matcher/);
+  });
+
   it('stores ordinary events with how many rules checked them', async () => {
     const { core, store, popups } = setup();
     await core.handleEvent(exec('/usr/bin/git'));
@@ -98,6 +189,46 @@ describe('Detector', () => {
       helper: 'applied',
     });
     expect(core.rules().find((r) => r.rule.id === 'known-bad-hash')?.rule.mode).toBe('alert');
+  });
+
+  it('notes a slow rule of your own once, quietly, and keeps it on', async () => {
+    const { core, store, popups } = setup();
+    core.detector!.engine.upsertRule({
+      id: 'my-rule',
+      version: 1,
+      name: 'My rule',
+      description: '',
+      origin: 'user',
+      mode: 'block',
+      severity: 'high',
+      fidelity: 'high',
+      eventKinds: ['process.exec'],
+      condition: { field: 'process.path', op: 'regex', value: '^/tmp/x[0-9]+$' },
+      response: [],
+      reasons: ['Ran from /tmp.'],
+      tags: [],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    // Every timed condition test looks like it took SLOW_RULE_BUDGET_MS.
+    let t = 0;
+    let calls = 0;
+    const clock = vi
+      .spyOn(performance, 'now')
+      .mockImplementation(() => (calls++ % 2 ? (t += SLOW_RULE_BUDGET_MS) : t));
+    for (let i = 0; i < 3; i++) await core.handleEvent(exec('/usr/bin/git'));
+    clock.mockRestore();
+    await vi.waitFor(() => expect(store.listAlerts()).toHaveLength(1));
+    const [note] = store.listAlerts();
+    expect(note).toMatchObject({
+      ruleId: SLOW_RULE.id,
+      notify: 'silent',
+      title: 'Slow rule: My rule',
+    });
+    expect(popups).toEqual([]);
+    const mine = core.rules().find((r) => r.rule.id === 'my-rule');
+    expect(mine).toMatchObject({ rule: { mode: 'block' }, slow: true });
+    expect(core.rules().some((r) => r.rule.id === SLOW_RULE.id)).toBe(false);
   });
 
   it('the Rules screen hears that a cancelled password left the rule blocking', async () => {

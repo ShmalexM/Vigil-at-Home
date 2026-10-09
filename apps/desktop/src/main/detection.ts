@@ -24,7 +24,7 @@ import {
   RulePipeline,
   RuleReviewer,
   builtinRulesFor,
-  compileRule,
+  admitSavedRules,
   decide,
   mergeRules,
   sqliteStores,
@@ -52,6 +52,7 @@ import type { AlertService } from './alerts.js';
 import type { EventBodyRow, Store } from './db/store.js';
 import type { HelperRuleSet } from './helper.js';
 import type { HelperSelf } from './self-path.js';
+import { noteSlowRule } from './slow-rule.js';
 
 const KEY_REVIEW = 'detection.review';
 
@@ -195,20 +196,23 @@ export class Detector {
     // An agent added, edited or switched off changes the tags of what is running now.
     this.registry.onChange(() => this.tracker.retag());
     const builtins = builtinRulesFor(opts.platform ?? process.platform);
-    // A saved rule that no longer compiles (a newer release checks regexes and
-    // globs more strictly) is left out, rather than keeping every rule from loading.
-    const saved = this.stores.rules.list().filter((r) => {
-      try {
-        compileRule(r);
-        return true;
-      } catch {
-        return false;
-      }
-    });
+    // A saved rule keeps running as it did before. One whose regex the
+    // linear-time engine can't run keeps that regex on the usual engine, as an
+    // older pattern (legacyRules); one that no longer compiles at all is left
+    // out, rather than keeping every rule from loading.
+    const { rules: saved, dropped } = admitSavedRules(this.stores.rules.list());
+    for (const d of dropped) console.error(`[detection] saved rule left out: ${d.error}`);
     this.engine = new DetectionEngine(mergeRules(builtins, saved), this.stores, {
       learningUntil: opts.installedAt + LEARNING_DAYS * DAY,
       safety: { selfPaths: opts.selfPaths },
       recordHistory: false,
+      holdsLegacy: true,
+      // The rule stays on; the user hears of it once, quietly, and Rules flags it.
+      onSlowRule: (rule, ms, e) => {
+        noteSlowRule(this.alerts, rule, ms, e).catch((err: unknown) =>
+          console.error('[detection] could not note a slow rule:', err),
+        );
+      },
     });
     this.feedback = new Feedback(this.engine, undefined, this.now);
     this.feeds = new FeedImporter(DEFAULT_FEEDS, this.stores.lists, this.stores.feeds, {
@@ -477,6 +481,9 @@ export class Detector {
     );
     const all = this.engine.listRules();
     const { rules, lists } = fastPathRules(all.filter((r) => !needApp.has(r.id)));
+    // The helper runs an older pattern only for a rule it already had; it
+    // skips one it did not, and this engine keeps blocking with it.
+    const legacy = new Set(this.engine.legacyRules());
     return {
       rules,
       appRules: appBlockingRules(
@@ -484,6 +491,9 @@ export class Detector {
         rules.map((r) => r.id),
       ),
       exceptions,
+      ...(rules.some((r) => legacy.has(r.id))
+        ? { legacy: rules.filter((r) => legacy.has(r.id)).map((r) => r.id) }
+        : {}),
       selfPaths: this.helperSelf.paths,
       selfImages: this.helperSelf.images,
       selfHashes: this.helperSelf.hashes,
@@ -502,6 +512,16 @@ export class Detector {
 
   hasRule(id: string): boolean {
     return this.engine.getRule(id) !== undefined;
+  }
+
+  /** Saved rules with an older pattern that runs as before, without the time limit. */
+  legacyRules(): ReadonlySet<string> {
+    return new Set(this.engine.legacyRules());
+  }
+
+  /** Rules that went over their matching budget since they were last loaded, for review. */
+  slowRules(): ReadonlySet<string> {
+    return new Set(this.engine.slowRules());
   }
 
   /**

@@ -1,9 +1,16 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
-import { DetectionEngine, macosCoreRules, memoryStores } from '@vigil/detection';
+import {
+  builtinRulesFor,
+  DetectionEngine,
+  DetectionRule,
+  macosCoreRules,
+  memoryStores,
+  simulateLinearEngine,
+} from '@vigil/detection';
 import { fastPathRules, listDigest } from '@vigil/detection/fastpath';
 import { RuleStore, type SensorEvent } from '@vigil/sensors';
 import { Approvals } from './approval.js';
@@ -317,6 +324,8 @@ describe('blocking rules in the helper', () => {
       { field: 'path', op: 'regex' as const, value: '(a|a)*$' },
       { field: 'path', op: 'regex' as const, value: '((a+))+$' },
       { field: 'path', op: 'regex' as const, value: '(?:x|x)+y' },
+      // Not one Vigil ships, so it must run in linear time, which has no lookahead.
+      { field: 'path', op: 'regex' as const, value: '/tmp/(?=x)' },
     ]) {
       const bad = { ...sync, rules: [...sync.rules, { ...sync.rules[0]!, id: 'slow', condition }] };
       await expect(client.call(bad), condition.value).rejects.toMatchObject({ code: 'invalid' });
@@ -345,6 +354,112 @@ describe('blocking rules in the helper', () => {
     loaded.load();
     expect(loaded.status().rules).toBe(sync.rules.length);
     expect(logs.join('\n')).toMatch(/slow/);
+  });
+
+  it('keeps blocking with a saved rule whose pattern only the usual engine runs', async () => {
+    const { sync } = appSet({});
+    // Ran before rule patterns moved to the linear-time engine, which has no lookahead.
+    const older = {
+      ...sync.rules[0]!,
+      id: 'older-look',
+      condition: { field: 'process.path', op: 'regex' as const, value: '^/tmp/(?=p)payload$' },
+    };
+    const file = join(root, 'saved-with-older-pattern.json');
+    // Written by an earlier release: no `legacy` field.
+    writeFileSync(
+      file,
+      JSON.stringify({ ...sync, rev: 3, rules: [...sync.rules, older], lists: {}, retired: {} }),
+    );
+    const logs: string[] = [];
+    const loaded = new FastPath({
+      file,
+      run: async () => ({ ok: true }) as unknown as ActionOutcome,
+      log: (m) => logs.push(m),
+    });
+    loaded.load();
+    expect(loaded.status().rules).toBe(sync.rules.length + 1);
+    const ran = await loaded.check(exec(6100, 'c'.repeat(64)));
+    expect(ran.map((r) => r.ruleId)).toContain('older-look');
+
+    // The app syncs it back, marked as an older pattern: kept, and recorded.
+    loaded.sync({ ...sync, rules: [...sync.rules, older], legacy: ['older-look'], lists: {} });
+    expect(loaded.status().rules).toBe(sync.rules.length + 1);
+    const saved = JSON.parse(readFileSync(file, 'utf8')) as { legacyUses: unknown };
+    expect(saved.legacyUses).toEqual({
+      'older-look': [{ field: 'process.path', nocase: false, pattern: '^/tmp/(?=p)payload$' }],
+    });
+
+    // One this helper never had is skipped when marked, refused when not.
+    const fresh = { ...older, id: 'fresh-look' };
+    loaded.sync({
+      ...sync,
+      rules: [...sync.rules, older, fresh],
+      legacy: ['older-look', 'fresh-look'],
+      lists: {},
+    });
+    expect(loaded.status().rules).toBe(sync.rules.length + 1);
+    expect(logs.join('\n')).toMatch(/skipping rule with an older pattern: rule fresh-look/);
+    expect(() => loaded.sync({ ...sync, rules: [...sync.rules, older, fresh], lists: {} })).toThrow(
+      /fresh-look/,
+    );
+
+    // A file this release wrote adopts nothing it does not list.
+    const other = { ...older, id: 'other-look' };
+    const file2 = join(root, 'saved-by-this-release.json');
+    writeFileSync(
+      file2,
+      JSON.stringify({
+        ...sync,
+        rules: [...sync.rules, other],
+        lists: {},
+        retired: {},
+        legacyUses: {},
+      }),
+    );
+    const again = new FastPath({ file: file2, run: () => Promise.reject(new Error('unused')) });
+    again.load();
+    expect(again.status().rules).toBe(sync.rules.length);
+  });
+
+  it('revokes an older pattern once its rule is removed, here and in the saved file', () => {
+    const { sync } = appSet({});
+    const older = {
+      ...sync.rules[0]!,
+      id: 'older-gone',
+      condition: { field: 'process.path', op: 'regex' as const, value: '^/tmp/(?=q)payload$' },
+    };
+    const file = join(root, 'saved-then-removed.json');
+    writeFileSync(
+      file,
+      JSON.stringify({ ...sync, rules: [...sync.rules, older], lists: {}, retired: {} }),
+    );
+    const helper = () =>
+      new FastPath({ file, run: async () => ({ ok: true }) as unknown as ActionOutcome });
+    const h = helper();
+    h.load();
+    expect(h.status().rules).toBe(sync.rules.length + 1);
+    // Removed (the executor asks for the password first).
+    h.sync({ ...sync, lists: {} });
+    const saved = JSON.parse(readFileSync(file, 'utf8')) as { legacyUses: object };
+    expect(saved.legacyUses).toEqual({});
+    // The same id and text again, or with the case setting or field changed: not run.
+    const variants = [
+      older,
+      { ...older, condition: { ...older.condition, nocase: true } },
+      { ...older, condition: { ...older.condition, field: 'path' } },
+    ];
+    for (const again of variants) {
+      h.sync({ ...sync, rules: [...sync.rules, again], legacy: ['older-gone'], lists: {} });
+      expect(h.status().rules).toBe(sync.rules.length);
+      expect(() => h.sync({ ...sync, rules: [...sync.rules, again], lists: {} })).toThrow(
+        /older-gone/,
+      );
+    }
+    // Nor after a restart.
+    const later = helper();
+    later.load();
+    later.sync({ ...sync, rules: [...sync.rules, older], legacy: ['older-gone'], lists: {} });
+    expect(later.status().rules).toBe(sync.rules.length);
   });
 
   it('needs the admin password to turn a rule off, change it or add a path', async () => {
@@ -390,6 +505,152 @@ describe('blocking rules in the helper', () => {
     expect(fast.status().rules).toBe(rest.length);
     expect(fast.status().rev).toBeGreaterThan(rev);
     await client.call(sync);
+  });
+
+  /** A built-in rule with a regex the linear-time engine can't run (a lookahead). */
+  const shippedLookahead = (): DetectionRule => {
+    const has = (c: unknown): boolean =>
+      !!c &&
+      typeof c === 'object' &&
+      (((c as { op?: string }).op === 'regex' &&
+        [(c as { value?: unknown }).value].flat().some((v) => String(v).includes('(?!'))) ||
+        Object.values(c).some(has));
+    const r = builtinRulesFor('darwin').find(
+      (x) => x.eventKinds.includes('process.exec') && has(x.condition),
+    )!;
+    return DetectionRule.parse({ ...r, mode: 'block' });
+  };
+
+  /** The policy in force plus `extra`, sent with the password; then the password is off. */
+  async function inForce(extra: DetectionRule): Promise<DetectionSync> {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    const cmd = { ...sync, rules: [...sync.rules, extra] };
+    approve = true;
+    await syncWith(cmd, lists);
+    approve = false;
+    prompts.length = 0;
+    return cmd;
+  }
+
+  async function restore(): Promise<void> {
+    approve = true;
+    await client.call(appSet({ known_bad_sha256: [BAD] }).sync);
+    approve = false;
+  }
+
+  /** The rule as the root-owned file holds it, and the file's older patterns. */
+  const savedRule = (id: string) => {
+    const saved = JSON.parse(readFileSync(rulesFile, 'utf8')) as {
+      rules: DetectionRule[];
+      legacyUses: Record<string, unknown>;
+    };
+    return { rule: saved.rules.find((r) => r.id === id), legacyUses: saved.legacyUses };
+  };
+
+  it('keeps a built-in rule as Vigil’s when a sync calls it yours and an older pattern', async () => {
+    const rule = shippedLookahead();
+    const cmd = await inForce(rule);
+    const before = savedRule(rule.id);
+    expect(before.rule?.origin).toBe('builtin');
+    simulateLinearEngine(false);
+    try {
+      const claimed = {
+        ...cmd,
+        rules: cmd.rules.map((r) => (r.id === rule.id ? { ...r, origin: 'user' as const } : r)),
+        legacy: [rule.id],
+      };
+      // What the helper enforces would not change, so nothing is loosened.
+      expect(fast.loosening(claimed)).toEqual([]);
+      await client.call(claimed);
+      expect(prompts).toEqual([]);
+      // Never dropped or weakened: the same rule, still Vigil's, its regexes trusted.
+      expect(fast.status().rules).toBe(cmd.rules.length);
+      expect(savedRule(rule.id)).toEqual(before);
+    } finally {
+      simulateLinearEngine(undefined);
+      await restore();
+    }
+  });
+
+  it('keeps your edit of a built-in rule as Vigil’s when a sync calls it yours', async () => {
+    // Edited, still with the regexes Vigil ships, which only the usual engine runs.
+    const shipped = shippedLookahead();
+    const edited = DetectionRule.parse({
+      ...shipped,
+      name: `${shipped.name} (edited)`,
+      editedFrom: shipped.version,
+      exclusions: [...shipped.exclusions, { field: 'process.path', op: 'eq', value: '/x' }],
+    });
+    const cmd = await inForce(edited);
+    const before = savedRule(edited.id);
+    expect(before.rule?.origin).toBe('builtin');
+    try {
+      const claimed = {
+        ...cmd,
+        rules: cmd.rules.map((r) => (r.id === edited.id ? { ...r, origin: 'user' as const } : r)),
+        legacy: [edited.id],
+      };
+      expect(fast.loosening(claimed)).toEqual([]);
+      await client.call(claimed);
+      expect(prompts).toEqual([]);
+      expect(fast.status().rules).toBe(cmd.rules.length);
+      expect(savedRule(edited.id)).toEqual(before);
+      // Weakening it still needs the password, and without it nothing changes.
+      const weaker = {
+        ...claimed,
+        rules: claimed.rules.filter((r) => r.id !== edited.id),
+      };
+      await expect(client.call(weaker)).rejects.toMatchObject({ code: 'refused' });
+      expect(savedRule(edited.id)).toEqual(before);
+    } finally {
+      await restore();
+    }
+  });
+
+  it('never asks again for a built-in rule a newer app ships and this helper does not', async () => {
+    const base = appSet({ known_bad_sha256: [BAD] }).sync.rules[0]!;
+    const newer = DetectionRule.parse({ ...base, id: 'shipped-by-a-newer-app', origin: 'builtin' });
+    const cmd = await inForce(newer);
+    try {
+      expect(savedRule(newer.id).rule?.origin).toBe('user');
+      for (let i = 0; i < 5; i++) {
+        if (i === 3) {
+          // The helper restarts from its saved policy.
+          fast = makeFastPath(executor);
+          fast.load();
+        }
+        expect(fast.loosening(cmd)).toEqual([]);
+        await client.call(cmd);
+        expect(fast.status().rules).toBe(cmd.rules.length);
+      }
+      expect(prompts).toEqual([]);
+      sys.processes.set(7100, { path: '/tmp/payload', started: 'T' });
+      expect((await fast.check(exec(7100, BAD))).map((r) => r.ruleId)).toContain(newer.id);
+    } finally {
+      await restore();
+    }
+  });
+
+  it('needs the password to drop a rule that would no longer compile', async () => {
+    const extra = { ...appSet({}).sync.rules[0]!, id: 'gone-soon' };
+    const cmd = await inForce(DetectionRule.parse(extra));
+    try {
+      // Marked as an older pattern and no longer compiling: it would be left out.
+      const broken = {
+        ...cmd,
+        rules: cmd.rules.map((r) =>
+          r.id === 'gone-soon'
+            ? { ...r, condition: { field: 'process.path', op: 'regex' as const, value: 'a(?=b)' } }
+            : r,
+        ),
+        legacy: ['gone-soon'],
+      };
+      expect(fast.loosening(broken)).toEqual([`stop blocking with “${extra.name}”`]);
+      await expect(client.call(broken)).rejects.toMatchObject({ code: 'refused' });
+      expect(fast.status().rules).toBe(cmd.rules.length);
+    } finally {
+      await restore();
+    }
   });
 
   it('answers detection.status only once a sync read before it is in force', async () => {
