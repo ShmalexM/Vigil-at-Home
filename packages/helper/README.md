@@ -106,9 +106,18 @@ an event while working fine; Santa logs every program launch.
   resume re-checks the start time.
 - **Protected processes.** Anything under `/System`, `/usr/libexec`, `/usr/sbin` or
   `/sbin`, plus Santa and Vigil, is never paused or killed.
-- **Protected paths.** macOS system folders, top-level folders, home folders and Vigil's
-  own files are never quarantined. Symlinked parent folders are resolved and checked
-  again. Restore never overwrites something new.
+- **Protected paths.** macOS system folders, top-level folders, home folders, and the
+  files of Vigil, Santa and osquery (helper, launch items, units, socket, data) are never
+  quarantined, nor is a folder that holds one. Paths are checked by name first and then by
+  identity (device and inode), so another spelling of a protected path, or a hard link to a
+  protected file, is refused too. Files with more than one hard link are refused.
+- **No redirected moves.** The item is held open while it is checked and locked through
+  that handle. The folder on the far side of a move is pinned (an open handle on Linux,
+  the working folder on macOS) and checked through the pin, so a folder swapped for a
+  link after the checks is noticed rather than followed. Restore never overwrites
+  something new, and recreates missing folders for their original owner.
+- **Startup items.** Launch items and units of Vigil and its sensors are refused by name,
+  by label, by the names systemd knows them by, and by the program they run.
 - **Network blocks.** Loopback, link-local and multicast addresses are refused, and so
   are ranges wider than /8 (IPv4) or /24 (IPv6). Single ports are not supported yet.
   pf forgets its tables at reboot, so the helper re-applies active blocks from its

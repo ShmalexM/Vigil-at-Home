@@ -261,6 +261,15 @@ select {
   gap: 7px;
   transition: color 0.15s;
 }
+.hold.calm,
+.hold.calm:hover {
+  border-color: var(--ac-ln);
+  background: var(--ac-bg);
+  color: var(--ac-tx);
+}
+.hold.calm .hold-fill {
+  background: var(--ac);
+}
 .hold.holding .hold-label,
 .hold.done .hold-label {
   color: #fff;
@@ -552,6 +561,8 @@ select {
   margin: 0;
   color: var(--tx0);
   min-width: 0;
+  /* Long paths and command lines (a node_modules binary, an esbuild path) wrap instead of widening the card. */
+  overflow-wrap: anywhere;
 }
 .kv dd > .row {
   flex-wrap: wrap;

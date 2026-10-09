@@ -30,6 +30,8 @@ import {
   elapsedShare,
   remainingPercent,
   type LimitPace,
+  costNote,
+  estimateNote,
 } from './usage-format';
 import { computer } from '../platform';
 
@@ -198,12 +200,12 @@ function CostSection({
               {formatCount(totals.runs)} {totals.runs === 1 ? 'run' : 'runs'}
               {metric === 'cost' && (
                 <>
-                  {' · API estimate'}
+                  {` · ${costNote(totals)}`}
                   <span
                     className="usage-info"
                     tabIndex={0}
                     title={[
-                      'Claude Code reports what each run would cost at API prices; your plan is not charged per run.',
+                      'Claude Code reports what each run would cost at API prices. On a claude.ai plan the run counts toward the plan, and extra usage, if you turned it on, can be charged; on another login Vigil can’t tell.',
                       ...(usesBilled
                         ? [
                             'Jev, cloud API keys and Codex on an OpenAI key show what you were billed.',
@@ -242,7 +244,9 @@ function CostSection({
                     {metric === 'cost'
                       ? p.unpricedRuns === p.runs
                         ? 'Unpriced'
-                        : formatUsd(p.costUsd)
+                        : p.provider === 'ollama' && p.costUsd === 0 && p.unpricedRuns === 0
+                          ? 'Local, free'
+                          : formatUsd(p.costUsd)
                       : formatTokens(p.totalTokens)}
                   </span>
                 </div>
@@ -250,6 +254,16 @@ function CostSection({
                   {metric === 'cost'
                     ? `${p.unpricedRuns === p.runs ? 'Unpriced' : `${formatPercent(shareOf)} of cost`} · ${formatTokens(p.totalTokens)} tokens`
                     : `${formatPercent(shareOf)} of tokens · ${p.unpricedRuns === p.runs ? 'unpriced' : formatUsd(p.costUsd)}`}
+                  {metric === 'cost' && estimateNote(p) && ` · ${estimateNote(p)}`}
+                  {p.failed > 0 && (
+                    <span
+                      className="usage-failed"
+                      title={`Runs that timed out or failed. They used no tokens that Vigil saw. A local model too big for this ${computer} often times out.`}
+                    >
+                      {' · '}
+                      {formatCount(p.failed)} failed
+                    </span>
+                  )}
                 </span>
               </div>
             );

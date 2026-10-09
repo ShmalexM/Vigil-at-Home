@@ -304,7 +304,7 @@ export class Executor {
       case 'file.restore': {
         const entry = this.findContainment(cmd)!;
         const rec = entry.undo?.quarantine as QuarantineRecord;
-        restore(rec);
+        restore(rec, this.quarantineOpts);
         return this.release(entry, cmd, `restored ${rec.originalPath}`);
       }
       case 'persistence.disable': {
@@ -329,8 +329,8 @@ export class Executor {
       case 'persistence.enable': {
         const entry = this.findContainment(cmd)!;
         const rec = entry.undo?.persistence as PersistenceRecord;
-        if (sys.platform === 'linux') await restoreLinuxPersistence(sys, rec);
-        else await restorePersistence(sys, rec);
+        if (sys.platform === 'linux') await restoreLinuxPersistence(sys, rec, this.quarantineOpts);
+        else await restorePersistence(sys, rec, this.d.quarantine);
         return this.release(
           entry,
           cmd,

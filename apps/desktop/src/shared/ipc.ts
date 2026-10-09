@@ -151,6 +151,8 @@ export const EventQuery = z.object({
   agent: AgentId.optional(),
   /** Only events from one agent session. */
   agentSession: AgentSessionId.optional(),
+  /** Only events this rule matched, in any mode. */
+  rule: z.string().min(1).max(100).optional(),
 });
 export type EventQuery = z.infer<typeof EventQuery>;
 
@@ -191,9 +193,13 @@ export const calls = {
   getStatus: z.tuple([]),
   listAlerts: z.tuple([z.enum(['open', 'resolved']).optional()]),
   getAlertDetail: z.tuple([Id]),
+  alertEvidence: z.tuple([Id]),
   decide: z.tuple([Id, DecisionInput]),
   reopen: z.tuple([Id]),
   clearNoticed: z.tuple([z.array(Id).min(1).max(500)]),
+  staleAlerts: z.tuple([]),
+  alertCounts: z.tuple([]),
+  clearStale: z.tuple([z.array(Id).min(1).max(2000)]),
   /** Every Noticed alert raised up to this time (when the user opened the confirm). */
   clearNoticedUpTo: z.tuple([z.number().int().nonnegative()]),
   undoAction: z.tuple([Id]),
@@ -201,6 +207,8 @@ export const calls = {
   rejectProposal: z.tuple([Id]),
   listRules: z.tuple([]),
   setRuleMode: z.tuple([z.string(), RuleMode]),
+  quietRule: z.tuple([z.string()]),
+  undoQuietRule: z.tuple([z.string(), z.string().min(1).max(200)]),
   getRuleEditor: z.tuple([RuleId]),
   previewRule: z.tuple([RuleJson]),
   saveRule: z.tuple([RuleJson]),
@@ -392,10 +400,28 @@ export interface RuleModeResult {
   helper: HelperOutcome;
 }
 
+/**
+ * "Only log this rule": done, with the override it replaced (null: the rule
+ * ran in its own mode) and a token for its undo, or refused, with the mode the
+ * rule is in, because that changed since the screen drew it.
+ */
+export type QuietRuleResult =
+  | { ok: true; prior: RuleMode | null; token: string; rule: Rule; helper: HelperOutcome }
+  | { ok: false; mode: RuleMode };
+
+/** Its undo: done, or refused because the rule changed since (the mode it is in now). */
+export type UndoQuietRuleResult =
+  { ok: true; rule: Rule; helper: HelperOutcome } | { ok: false; mode: RuleMode };
+
 export interface RuleView {
   rule: Rule;
   /** Matches in the last 14 days (the detection engine's replay window), all modes. */
   matches: number;
+  /**
+   * Set while the rule compares against a baseline Vigil is still learning:
+   * until then it only records, whatever its mode says.
+   */
+  learningUntil?: number;
 }
 
 /** Everything the rule editor shows for one rule. */
@@ -576,16 +602,26 @@ export interface CallResults {
   getStatus: StatusView;
   listAlerts: Alert[];
   getAlertDetail: AlertDetail | null;
+  /** The alert's evidence as redacted JSON, to paste elsewhere (VigilCore.alertEvidence). */
+  alertEvidence: string | null;
   decide: Alert;
   reopen: Alert;
   /** How many of the given alerts were cleared. */
   clearNoticed: number;
+  /** Open alerts a rule's exclusion now lets off (VigilCore.staleAlerts). */
+  staleAlerts: string[];
+  /** Every alert by status, beyond the newest that listAlerts returns. */
+  alertCounts: { open: number; resolved: number };
+  /** How many of them were closed. */
+  clearStale: number;
   clearNoticedUpTo: number;
   undoAction: ActionRecord;
   approveProposal: ActionRecord;
   rejectProposal: void;
   listRules: RuleView[];
   setRuleMode: RuleModeResult;
+  quietRule: QuietRuleResult;
+  undoQuietRule: UndoQuietRuleResult;
   getRuleEditor: RuleEditorView | null;
   previewRule: RuleCheck;
   saveRule: RuleCheck;

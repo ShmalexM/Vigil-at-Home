@@ -120,6 +120,9 @@
     grid-template-columns: 84px minmax(0, 1fr);
   }
 }
+.split-detail {
+  min-width: 0;
+}
 .split-list {
   position: sticky;
   top: 44px;
@@ -127,6 +130,7 @@
   gap: 2px;
 }
 .subject {
+  overflow-wrap: anywhere;
   padding: 8px 10px;
   border-radius: var(--radius-sm);
   background: var(--bg2);
@@ -358,6 +362,9 @@ body.transparent {
   color: var(--tx1);
   cursor: pointer;
 }
+.feed-line > svg {
+  flex: none;
+}
 .feed-line:hover {
   background: var(--bg2);
 }
@@ -379,7 +386,8 @@ body.transparent {
 }
 .feed-row .chip {
   flex: none;
-  max-width: 260px;
+  /* At narrow widths the event's own line keeps most of the row. */
+  max-width: min(260px, 32%);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -561,4 +569,9 @@ div.history-row:hover {
 /* Needs you, shown next to (never inside) the protection level. */
 .needs-line {
   gap: 8px;
+}
+/* "Showing the newest 200 of 355" above a capped list. */
+.list-note {
+  display: block;
+  padding: 4px 12px 8px;
 }

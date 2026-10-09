@@ -13,7 +13,18 @@ export class FakeSystem implements System {
   readonly pfTable = new Set<string>();
   readonly loaded = new Set<string>();
   labels = new Map<string, string>();
+  /** ProgramArguments[0] of a plist, by path. */
+  programs = new Map<string, string>();
   console: number | undefined = 501;
+  /**
+   * The helper's pid in this fake. Fixed, so the fake pids tests use never
+   * collide with the test runner's real pid.
+   */
+  pid = 999_999;
+
+  selfPid(): number {
+    return this.pid;
+  }
 
   async run(bin: BinaryName, args: string[], opts: { input?: string } = {}): Promise<RunResult> {
     this.runs.push({ bin, args, input: opts.input });
@@ -42,8 +53,15 @@ export class FakeSystem implements System {
         return ok();
       }
       case 'plutil': {
-        const label = this.labels.get(args.at(-1)!);
-        return label ? ok(label + '\n') : fail();
+        const path = args.at(-1)!;
+        const key = args[args.indexOf('-extract') + 1];
+        const value =
+          key === 'Label'
+            ? this.labels.get(path)
+            : key === 'ProgramArguments.0'
+              ? this.programs.get(path)
+              : undefined;
+        return value ? ok(value + '\n') : fail();
       }
       case 'launchctl': {
         const [verb, target, path] = args;
