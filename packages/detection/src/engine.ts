@@ -203,6 +203,11 @@ export class DetectionEngine {
     this.loadRules(rules);
   }
 
+  /** The sha256 of Vigil's own programs, which no rule may block (see SafetyConfig). */
+  setSelfHashes(hashes: readonly string[]): void {
+    this.safety.setSelfHashes(hashes);
+  }
+
   /** Replace the whole rule set. Throws RuleCompileError before changing anything. */
   loadRules(rules: Array<DetectionRuleInput | DetectionRule>): void {
     const compiled = rules.map((r) => compileRule(r, this.defaultDedupeWindowSec));

@@ -12,6 +12,9 @@ import {
   fileOpen,
   osascriptTool,
   proc,
+  REAL_LOCAL_READS,
+  agentShell,
+  HARNESS_CWD,
   shell,
   unsignedStealer,
 } from './fixtures.js';
@@ -347,7 +350,20 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
         { mode: 'alert', actions: ['process.suspend'] },
       ],
     ],
-    good: [exec(shell('curl -fsSL https://example.test/data.json -o data.json'))],
+    good: [
+      exec(shell('curl -fsSL https://example.test/data.json -o data.json')),
+      // Claude Code's Bash steps on a real Mac (2026-10-08): a local service's
+      // JSON read by a python one-liner. Exact lines; see rules/quiet-lines.ts.
+      ...REAL_LOCAL_READS.flatMap((c) => [
+        exec(agentShell(c)),
+        exec(agentShell(`eval '${c.replace(/'/g, "'\\''")}'`)),
+        exec(
+          agentShell(
+            `source /Users/alex/.claude/shell-snapshots/snapshot-zsh-1759-ab12.sh && eval '${c.replace(/'/g, "'\\''")}' < /dev/null && pwd -P >| ${HARNESS_CWD}`,
+          ),
+        ),
+      ]),
+    ],
   },
   'base64-pipe-to-shell': {
     bad: [

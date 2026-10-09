@@ -30,8 +30,10 @@ on:
       - apps/desktop/helper/**
       - apps/desktop/scripts/build-helper.mjs
 
+# Read-only by default: pull requests build here too. Only the release job,
+# which drafts the GitHub release, can write.
 permissions:
-  contents: write
+  contents: read
 
 # Hosted Mac runners are scarce, so a newer push to the same pull request
 # replaces the older build. Hand-started builds always finish.
@@ -47,6 +49,8 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
@@ -140,6 +144,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
@@ -209,10 +215,16 @@ jobs:
 
   release:
     needs: [mac, linux]
-    if: needs.mac.outputs.version != ''
+    # Only a hand-started run can draft a release; a pull request's build can
+    # never reach this job, whatever its steps print.
+    if: github.event_name == 'workflow_dispatch' && needs.mac.outputs.version != ''
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v7
         with:
           path: dist
@@ -228,6 +240,9 @@ jobs:
             echo "::notice::A release for v$VERSION already exists, so no new draft was made."
             exit 0
           fi
+          (cd dist && sha256sum *.dmg *.zip *.deb *.AppImage > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
           flags=(--draft --target "$GITHUB_SHA" --title "Vigil at Home $VERSION" --notes-file .github/release-notes.md)
           [[ "$VERSION" == *-* ]] && flags+=(--prerelease)
-          gh release create "v$VERSION" "${flags[@]}" dist/*.dmg dist/*.zip dist/*.deb dist/*.AppImage
+          gh release create "v$VERSION" "${flags[@]}" dist/*.dmg dist/*.zip dist/*.deb dist/*.AppImage \
+            dist/SHA256SUMS.txt

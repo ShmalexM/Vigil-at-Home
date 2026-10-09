@@ -163,3 +163,15 @@ describe('pre-flight rules', () => {
     ).not.toMatch(/never set on a tool request/);
   });
 });
+
+describe('patterns', () => {
+  const errors = (op: string, value: string) =>
+    lint({ id: 'p', condition: { field: 'path', op, value } }).errors.join(' ');
+
+  it('refuses a glob or regex that could take too long to match', () => {
+    expect(errors('glob', '**a**a**a**a**a**a!')).toMatch(/path: glob has 6 wildcards/);
+    expect(errors('glob', '**a**a**a!')).toMatch(/path: glob has 2 wildcards that can stop/);
+    expect(errors('regex', '(a|a)*$')).toMatch(/path: regex repeats a group/);
+    expect(errors('glob', '~/Library/**/Cookies')).toBe('');
+  });
+});

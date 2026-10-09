@@ -1,13 +1,13 @@
 // Turns lines of osquery's filesystem results log into SensorEvents.
 
-import { createHash } from 'node:crypto';
 import type { EventOfKind, SensorEvent } from '@vigil/core';
 import { defined, pidOf } from '../types.js';
 import { QUERY_NAMES } from './config.js';
 import { LINUX_QUERY_NAMES } from './linuxConfig.js';
 import { osquerySigning } from '../signing.js';
+import { lineEventId } from '../eventId.js';
 
-interface OsqueryResultLine {
+export interface OsqueryResultLine {
   name?: string;
   unixTime?: number | string;
   action?: 'added' | 'removed';
@@ -26,10 +26,6 @@ export interface OsqueryParseOptions {
   includeBaseline?: boolean;
 }
 
-function id(line: string): string {
-  return 'osquery:' + createHash('sha256').update(line).digest('hex').slice(0, 32);
-}
-
 function port(v: string | undefined): number | undefined {
   const n = pidOf(v);
   return n !== undefined && n <= 65535 ? n : undefined;
@@ -46,21 +42,35 @@ function launchdMechanism(path: string): EventOfKind<'persistence'>['mechanism']
 }
 
 export function osqueryLineToEvents(line: string, opts: OsqueryParseOptions = {}): SensorEvent[] {
-  let parsed: OsqueryResultLine;
+  const parsed = parseOsqueryLine(line);
+  return parsed === undefined ? [] : osqueryResultToEvents(line, parsed, opts);
+}
+
+/** One results-log line as JSON, or undefined if it isn't JSON. */
+export function parseOsqueryLine(line: string): OsqueryResultLine | undefined {
   try {
-    parsed = JSON.parse(line) as OsqueryResultLine;
+    return JSON.parse(line) as OsqueryResultLine;
   } catch {
-    return [];
+    return undefined;
   }
+}
+
+/** osqueryLineToEvents for a line already parsed with parseOsqueryLine. */
+export function osqueryResultToEvents(
+  line: string,
+  parsed: OsqueryResultLine,
+  opts: OsqueryParseOptions = {},
+): SensorEvent[] {
   const c = parsed.columns;
   if (!c || typeof c !== 'object') return [];
   // Event tables only ever hold new activity, so their first run is real too.
   const evented = parsed.name === LINUX_QUERY_NAMES.processEvents;
   if (Number(parsed.counter) === 0 && !opts.includeBaseline && !evented) return [];
   const unix = Number(parsed.unixTime);
+  const lineTs = Number.isFinite(unix) && unix > 0 ? unix * 1000 : undefined;
   const base = {
-    id: id(line),
-    ts: Number.isFinite(unix) && unix > 0 ? unix * 1000 : Date.now(),
+    id: lineEventId('osquery:', line, lineTs),
+    ts: lineTs ?? Date.now(),
     source: 'osquery' as const,
     raw: parsed,
   };
@@ -232,12 +242,14 @@ function commandLine(json: string | undefined, plain: string | undefined): strin
  * rows a run replaces come back as "removed" and say nothing new.
  */
 export function osqueryHealth(line: string): { denylisted: string[] } | undefined {
-  let parsed: OsqueryResultLine;
-  try {
-    parsed = JSON.parse(line) as OsqueryResultLine;
-  } catch {
-    return undefined;
-  }
+  const parsed = parseOsqueryLine(line);
+  return parsed === undefined ? undefined : osqueryResultHealth(parsed);
+}
+
+/** osqueryHealth for a line already parsed with parseOsqueryLine. */
+export function osqueryResultHealth(
+  parsed: OsqueryResultLine,
+): { denylisted: string[] } | undefined {
   if (parsed.name !== QUERY_NAMES.health) return undefined;
   const c = parsed.columns;
   const off = parsed.action !== 'removed' && c?.denylisted === '1' && c.name;

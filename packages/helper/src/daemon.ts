@@ -36,7 +36,7 @@ import {
   syncTlsPaths,
 } from '@vigil/sensors';
 import { Approvals } from './approval.js';
-import { defaultPaths, SANTA_SYNC_PORT, type HelperPaths } from './config.js';
+import { defaultPaths, installedSelf, SANTA_SYNC_PORT, type HelperPaths } from './config.js';
 import { Executor, type ActionOutcome } from './executor.js';
 import { FastPath } from './fastpath.js';
 import { Journal } from './journal.js';
@@ -229,6 +229,8 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       return out.result as ActionOutcome;
     },
     log,
+    ...(sys.fileId ? { fileId: (p: string) => sys.fileId?.(p) } : {}),
+    installed: installedSelf(sys.platform),
   });
   fastPath.load();
 

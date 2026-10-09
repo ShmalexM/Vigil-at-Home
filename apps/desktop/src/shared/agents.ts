@@ -178,6 +178,9 @@ export type VigilToolName =
   | 'list_alerts'
   | 'get_alert'
   | 'search_events'
+  | 'list_rules'
+  | 'get_rule'
+  | 'list_actions'
   | 'list_agents'
   | 'get_agent_session';
 
@@ -188,6 +191,12 @@ export interface VigilToolInfo {
   description: string;
   /** Its arguments, as the agent sees them (`?` marks optional ones). */
   args: string;
+  /**
+   * Only for Vigil's own pack, never for the agents it watches: which rules
+   * are off or only log, and where exceptions are, would show an agent where
+   * to look for a way around them.
+   */
+  packOnly?: true;
 }
 
 /**
@@ -214,8 +223,29 @@ export const VIGIL_TOOLS: readonly VigilToolInfo[] = [
   },
   {
     name: 'search_events',
-    description: 'What Vigil saw in the last 7 days, by kind or text, newest first.',
-    args: 'kind?, text?, since?, limit?',
+    description:
+      'What Vigil saw in the last 7 days, newest first: by kind, text, agent, rule matches or the AI’s unusual and suspicious labels.',
+    args: 'kind?, text?, agent?, matched?, label?, since?, limit?',
+  },
+  {
+    name: 'list_rules',
+    description: 'The rules, busiest first: name, mode, severity and matches in the last 7 days.',
+    args: 'mode?, limit?',
+    packOnly: true,
+  },
+  {
+    name: 'get_rule',
+    description:
+      'One rule: what it looks for in words, its mode, matches in the last 7 days and how many exclusions it has.',
+    args: 'id',
+    packOnly: true,
+  },
+  {
+    name: 'list_actions',
+    description:
+      'What Vigil did, newest first: blocks, quarantines, releases and undos, with who asked and how it went.',
+    args: 'since?, limit?',
+    packOnly: true,
   },
   {
     name: 'list_agents',
