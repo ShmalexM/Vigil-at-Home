@@ -245,6 +245,25 @@ describe('Store', () => {
     expect(stats.byGroup).toMatchObject({ programs: 1, network: 1, files: 0 });
   });
 
+  it('pages the feed by (ts, id), so events sharing a ts are not skipped', () => {
+    const s = memoryStore();
+    const ids = ['e1', 'e2', 'e3', 'e4', 'e5'];
+    s.insertEvents(ids.map((id, i) => ({ event: { ...makeExec(), id, ts: i < 4 ? 2000 : 1000 } })));
+    const all: string[] = [];
+    let last: { ts: number; id: string } | undefined;
+    for (;;) {
+      const page = s.listEventViews({
+        limit: 2,
+        ...(last ? { before: last.ts, beforeId: last.id } : {}),
+      });
+      if (page.length === 0) break;
+      all.push(...page.map((v) => v.event.id));
+      const e = page.at(-1)!.event;
+      last = { ts: e.ts, id: e.id };
+    }
+    expect(all).toEqual(['e4', 'e3', 'e2', 'e1', 'e5']);
+  });
+
   it('searches events since a time by kind and text, within a scan budget', () => {
     const s = memoryStore();
     const exec = (path: string, ts: number) => ({ ...makeExec(path), ts });
@@ -413,12 +432,12 @@ describe('Store: agents', () => {
 
     const db = new DatabaseSync(join(dir, 'copy.db'));
     const s = new Store(db);
-    expect(migrations).toHaveLength(7);
-    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 7 });
+    expect(migrations).toHaveLength(8);
+    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 8 });
     const columns = (db.prepare('PRAGMA table_info(events)').all() as { name: string }[]).map(
       (c) => c.name,
     );
-    expect(columns).toEqual(expect.arrayContaining(['agent_session', 'agent_id']));
+    expect(columns).toEqual(expect.arrayContaining(['agent_session', 'agent_id', 'args']));
     const indexes = (
       db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index'`).all() as { name: string }[]
     ).map((r) => r.name);
@@ -511,10 +530,17 @@ describe('Store: agents', () => {
       { agent: 'claude-code' },
       { agent: 'claude-code', group: 'programs' as const },
       { agent: 'claude-code', before: 5000 },
+      { agent: 'claude-code', before: 5000, beforeId: 'x' },
     ]) {
       const steps = plan(q);
       expect(steps.join('\n'), JSON.stringify(q)).toContain('events_agent_ts');
       // Ordering rows of equal ts by id is fine; sorting every row is not.
+      expect(steps, JSON.stringify(q)).not.toContain('USE TEMP B-TREE FOR ORDER BY');
+    }
+    // The whole feed pages through the ts index too, sorting only ties by id.
+    for (const q of [{ before: 5000 }, { before: 5000, beforeId: 'x' }]) {
+      const steps = plan(q).join('\n');
+      expect(steps, JSON.stringify(q)).toMatch(/USING INDEX \w*ts\w*/);
       expect(steps, JSON.stringify(q)).not.toContain('USE TEMP B-TREE FOR ORDER BY');
     }
     // The agent comes from the event's own tag, and a tool request's agent.

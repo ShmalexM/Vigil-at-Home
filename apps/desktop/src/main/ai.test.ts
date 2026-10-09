@@ -6,6 +6,8 @@ import type {
   VigilAi,
   VigilAiOptions,
 } from '@vigil/ai';
+import { defaultAiSettings } from '@vigil/ai';
+import { localNames } from '@vigil/ai/redact';
 import { AiBridge, type KeySource } from './ai.js';
 import { DryRunExecutor, type ActionExecutor } from './executor.js';
 import { VigilCore } from './service.js';
@@ -123,6 +125,14 @@ describe('AiBridge settings', () => {
     expect(s.api).toMatchObject({ enabled: true, preset: 'openrouter' });
     expect(new URL(s.api.baseUrl).hostname).toBe('openrouter.ai');
     expect(s.jev.enabled).toBe(true);
+  });
+
+  it("redacts this Mac's user and host names", () => {
+    const { ai } = setup();
+    expect(ai.settings().redaction).toEqual({
+      ...defaultAiSettings('/x').redaction,
+      ...localNames(),
+    });
   });
 
   it('runs Codex on an OpenAI API key when the user picks it', async () => {

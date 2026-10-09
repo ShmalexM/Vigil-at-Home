@@ -23,32 +23,32 @@ check reports anything over budget and fails only on a clear overrun (the
 Activity Monitor shows (physical footprint), summed over all of Vigil's
 processes.
 
-| Part                                        | Measure                       | Budget                                                        |
-| ------------------------------------------- | ----------------------------- | ------------------------------------------------------------- |
-| App, nothing open                           | CPU                           | ≤ 0.5%                                                        |
-|                                             | Wakeups                       | ≤ 5 per second                                                |
-|                                             | Memory                        | ≤ 180 MB                                                      |
-| App, main window open                       | Memory                        | ≤ 400 MB                                                      |
-| App, after windows close                    | Memory                        | ≤ 200 MB (closed windows are released)                        |
-| App, handling 50 events/s (rules + storage) | CPU                           | ≤ 3%                                                          |
-|                                             | Disk written per 1,000 events | ≤ 2 MB                                                        |
-|                                             | Disk used per 1,000 events    | ≤ 700 KB                                                      |
-| Start-up                                    | Launch to menu-bar item       | ≤ 3 s                                                         |
-| Menu-bar popover                            | First open / reopen           | ≤ 800 ms / ≤ 150 ms                                           |
-| osquery (Vigil's schedule)                  | CPU                           | ≤ 1.5% (its watchdog stops it at 10%)                         |
-|                                             | Memory                        | ≤ 80 MB (watchdog: 200 MB)                                    |
-| Reading the sensor logs                     | CPU / wakeups                 | ≤ 0.1% / ≤ 2 per second                                       |
-| Local classifier (optional)                 | CPU, averaged over an hour    | ≤ 2%, only on mains power and when the Mac is not busy        |
-|                                             | Memory while loaded           | ≤ 0.6 GB on 8 GB Macs, ≤ 1.2 GB otherwise; unloaded when idle |
-| Database                                    | Size on disk                  | ≤ 1 GB, oldest unreferenced events dropped first              |
-| Agent pre-flight hook (Claude Code)         | Per tool call it checks       | about 60–150 ms (Node.js start-up); Vigil answers in ≤ 5 ms   |
-|                                             | Between tool calls            | nothing: no process, timer or wakeup                          |
-| Vigil tools for agents (MCP, opt-in)        | Per call                      | one bounded read: 50 rows and 64 KB at most                   |
-|                                             | All calls together            | ≤ 50 ms of main-thread time a second (bursts of 150 ms)       |
-|                                             | Between calls                 | nothing in Vigil; the agent keeps its MCP server process      |
-| Agent process tracker                       | Memory                        | about 2 MB (8,192 processes at most)                          |
-|                                             | Time per event                | ≤ 5 µs on average                                             |
-| Agent ancestry on stored events             | Disk per event                | ≤ 40 B on average                                             |
+| Part                                        | Measure                       | Budget                                                                                  |
+| ------------------------------------------- | ----------------------------- | --------------------------------------------------------------------------------------- |
+| App, nothing open                           | CPU                           | ≤ 0.5%                                                                                  |
+|                                             | Wakeups                       | ≤ 5 per second                                                                          |
+|                                             | Memory                        | ≤ 180 MB                                                                                |
+| App, main window open                       | Memory                        | ≤ 400 MB                                                                                |
+| App, after windows close                    | Memory                        | ≤ 200 MB (closed windows are released)                                                  |
+| App, handling 50 events/s (rules + storage) | CPU                           | ≤ 3%                                                                                    |
+|                                             | Disk written per 1,000 events | ≤ 2 MB                                                                                  |
+|                                             | Disk used per 1,000 events    | ≤ 700 KB                                                                                |
+| Start-up                                    | Launch to menu-bar item       | ≤ 3 s                                                                                   |
+| Menu-bar popover                            | First open / reopen           | ≤ 800 ms / ≤ 150 ms                                                                     |
+| osquery (Vigil's schedule)                  | CPU                           | ≤ 1.5% (its watchdog stops it at 10%)                                                   |
+|                                             | Memory                        | ≤ 80 MB (watchdog: 200 MB)                                                              |
+| Reading the sensor logs                     | CPU / wakeups                 | ≤ 0.1% / ≤ 2 per second                                                                 |
+| Local classifier (optional)                 | CPU, averaged over an hour    | ≤ 2%, only on mains power, never when hot; on a loaded Mac at most one batch per 30 min |
+|                                             | Memory while loaded           | ≤ 0.6 GB on 8 GB Macs, ≤ 1.2 GB otherwise; unloaded when idle                           |
+| Database                                    | Size on disk                  | ≤ 1 GB, oldest unreferenced events dropped first                                        |
+| Agent pre-flight hook (Claude Code)         | Per tool call it checks       | about 60–150 ms (Node.js start-up); Vigil answers in ≤ 5 ms                             |
+|                                             | Between tool calls            | nothing: no process, timer or wakeup                                                    |
+| Vigil tools for agents (MCP, opt-in)        | Per call                      | one bounded read: 50 rows and 64 KB at most                                             |
+|                                             | All calls together            | ≤ 50 ms of main-thread time a second (bursts of 150 ms)                                 |
+|                                             | Between calls                 | nothing in Vigil; the agent keeps its MCP server process                                |
+| Agent process tracker                       | Memory                        | about 2 MB (8,192 processes at most)                                                    |
+|                                             | Time per event                | ≤ 5 µs on average                                                                       |
+| Agent ancestry on stored events             | Disk per event                | ≤ 40 B on average                                                                       |
 
 Blocking is outside the budget on purpose: a block never waits for anything on
 this page, and nothing here ever slows or pauses it.
@@ -100,6 +100,11 @@ doesn't: the app only answers a line on a local socket. See
 3. **Store what rules read.** The sensor's `raw` record roughly doubles an
    event's size and no rule reads it, so the event log drops it. Events an
    alert refers to keep it.
+   Command-line arguments of launches no rule matched are stored once each
+   (`apps/desktop/src/main/db/arg-dictionary.ts`) and each event keeps a
+   packed list of their ids; reading an event puts the exact arguments back.
+   A new query on `events` that reads `body` also reads `args`
+   (`arg-dictionary.test.ts` checks).
 4. **No fast polling.** Nothing wakes the Mac more than once a second while
    idle. Prefer being told (kqueue via `fs.watch`, powerMonitor events) over
    asking, and don't leave timers running when there is nothing to do.
@@ -109,8 +114,13 @@ doesn't: the app only answers a line on a local socket. See
    run 4× less often on battery and pause when the Mac is hot or asleep. If
    macOS never says the Mac woke up, Vigil checks every two minutes and
    counts it awake once someone uses it or it has run ten minutes without a
-   check firing late (a late check means it slept: dark wakes don't count). Every call
-   a scheduled task makes to the outside world (AI providers, connectors,
+   check firing late (a late check means it slept: dark wakes don't count).
+   Battery, heat and sleep always hold the classifier. Load alone (common on
+   a Mac running coding agents all day) holds it for at most 30 minutes:
+   then one batch goes anyway, inside the same hourly batch and CPU budgets,
+   so a Mac that is always busy is labelled slowly rather than never
+   (`power.busyReason()`, `maxBusyWaitMs` in packages/ai). Every call a
+   scheduled task makes to the outside world (AI providers, connectors,
    child processes) has its own time limit, so tasks always finish; one still
    running after 30 minutes shows as stuck in the status until it does.
 6. **Renderers only while visible.** Each window's page is its own process
@@ -213,6 +223,24 @@ items (macOS 13 and later), osquery's launchd query runs every 5 minutes
 instead of every minute. Reading the two logs every 200 ms wakes the Mac more
 than the rest of Vigil put together; the Sensors change that watches the
 log folder and polls every 2 s only as a fallback (PR #19) fits the budget.
+
+### Stored launches
+
+On a developer's Mac with coding agents running, six hours held 270,000
+launches no rule matched, about 2.9 KB each, and arguments were 88% of those
+bytes. Agents re-run the same wrappers (`sandbox-exec`, `env`, shells), so
+31.5 million arguments came from only 165,000 distinct strings. Storing each
+argument once and a 2–3 byte id per use, on a synthetic workload shaped like
+that one (100,000 launches, 123 arguments each, 500 repeated commands, 27%
+with one unique argument):
+
+|                         | Database | Writing | Reading all back   | Search |
+| ----------------------- | -------- | ------- | ------------------ | ------ |
+| Arguments in each event | 495 MB   | 9.4 s   | 2.6 s (26 µs each) | 3 ms   |
+| Arguments as ids        | 57 MB    | 4.5 s   | 2.0 s (20 µs each) | 7 ms   |
+
+Reading back is what replaying a rule over history costs, and it got a
+little faster because there is less JSON to parse.
 
 ### Local classifier
 

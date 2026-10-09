@@ -4,6 +4,7 @@ import { z } from 'zod';
 import {
   classifierRuntime,
   createEventClassifier,
+  DEFAULT_MAX_BUSY_WAIT_MS,
   eventLine,
   pickClassifierModel,
   recommendedClassifierModel,
@@ -16,6 +17,7 @@ import { createApiAdapter, isSafeBaseUrl } from './providers/openaiCompatible.js
 import { createAiRunner } from './runner.js';
 import { defaultAiSettings } from './settings.js';
 import { readTool } from './tools.js';
+import { MONTHLY_CAP_HELD } from './types.js';
 import type { AdapterRunInput, PromptLogEntry, ProviderAdapter, ProviderId } from './types.js';
 
 const GB = 1024 ** 3;
@@ -394,6 +396,89 @@ describe('event labelling with a small local model', () => {
     expect(ollama.runs).toBe(2);
   });
 
+  it('still labels a batch now and then on a Mac that is always busy', async () => {
+    const ollama = ready('ollama', { suspicious: [], unusual: [] });
+    let now = 0;
+    const classifier = createEventClassifier({
+      runner: createAiRunner({
+        settings: { ...defaultAiSettings('/tmp/v'), order: ['ollama'] },
+        adapters: [ollama],
+        log: { record: () => {} },
+      }),
+      maxEventsPerBatch: 5,
+      maxBatchesPerHour: 60,
+      busyReason: () => why,
+      now: () => now,
+    });
+    const why: 'power' | 'load' | undefined = 'load';
+    expect(await classifier.classify([exec('e1', '/a')])).toMatchObject({ reason: 'busy' });
+    now += DEFAULT_MAX_BUSY_WAIT_MS;
+    expect((await classifier.classify([exec('e1', '/a')])).ok).toBe(true);
+    // Then it waits again.
+    now += 60_000;
+    expect(await classifier.classify([exec('e2', '/b')])).toMatchObject({ reason: 'busy' });
+    expect(ollama.runs).toBe(1);
+  });
+
+  it('never gives way on battery or when the Mac is hot, however long it waited', async () => {
+    const ollama = ready('ollama', { suspicious: [], unusual: [] });
+    let now = 0;
+    const clock = {};
+    const make = () =>
+      createEventClassifier({
+        runner: createAiRunner({
+          settings: { ...defaultAiSettings('/tmp/v'), order: ['ollama'] },
+          adapters: [ollama],
+          log: { record: () => {} },
+        }),
+        maxEventsPerBatch: 5,
+        maxBatchesPerHour: 60,
+        busyReason: () => 'power',
+        clock,
+        now: () => now,
+      });
+    now += 10 * DEFAULT_MAX_BUSY_WAIT_MS;
+    expect(await make().classify([exec('e1', '/a')])).toMatchObject({ reason: 'busy' });
+    expect(ollama.runs).toBe(0);
+    // An isBusy alone (no reason) never gives way either.
+    const plain = createEventClassifier({
+      runner: createAiRunner({
+        settings: { ...defaultAiSettings('/tmp/v'), order: ['ollama'] },
+        adapters: [ollama],
+        log: { record: () => {} },
+      }),
+      maxEventsPerBatch: 5,
+      maxBatchesPerHour: 60,
+      isBusy: () => true,
+      now: () => now,
+    });
+    now += 10 * DEFAULT_MAX_BUSY_WAIT_MS;
+    expect(await plain.classify([exec('e1', '/a')])).toMatchObject({ reason: 'busy' });
+  });
+
+  it('keeps the busy wait across a rebuilt classifier', async () => {
+    const ollama = ready('ollama', { suspicious: [], unusual: [] });
+    let now = 0;
+    const clock = {};
+    const make = () =>
+      createEventClassifier({
+        runner: createAiRunner({
+          settings: { ...defaultAiSettings('/tmp/v'), order: ['ollama'] },
+          adapters: [ollama],
+          log: { record: () => {} },
+        }),
+        maxEventsPerBatch: 5,
+        maxBatchesPerHour: 60,
+        busyReason: () => 'load',
+        clock,
+        now: () => now,
+      });
+    make();
+    now += DEFAULT_MAX_BUSY_WAIT_MS;
+    // A settings change rebuilt it; the wait it already did still counts.
+    expect((await make().classify([exec('e1', '/a')])).ok).toBe(true);
+  });
+
   it('charges local batches by CPU time, so a slow Mac does fewer', async () => {
     let now = 0;
     const slow: ProviderAdapter = {
@@ -583,6 +668,34 @@ describe('Jev as the event labeller', () => {
       expect(calls.length).toBe(allowed ? 1 : 0);
       expect(local.runs).toBe(1);
     }
+  });
+
+  it('says the cap held Jev back when no local model can take over', async () => {
+    const { f, calls } = jevFetch(jevReply);
+    const log: PromptLogEntry[] = [];
+    const ollama: ProviderAdapter = {
+      id: 'ollama',
+      probe: async () => ({ provider: 'ollama', state: 'not_installed' }),
+      run: async () => ({ kind: 'error', message: 'x', audit: audit() }),
+    };
+    const classifier = createEventClassifier({
+      jev: createJevClient({ getApiKey: async () => 'k', log: { record: () => {} }, fetch: f }),
+      jevAllowed: async () => false,
+      runner: createAiRunner({
+        settings: { ...defaultAiSettings('/tmp/v'), order: ['ollama'] },
+        adapters: [ollama],
+        log: { record: (e) => log.push(e) },
+      }),
+      maxEventsPerBatch: 5,
+      maxBatchesPerHour: 5,
+    });
+    const result = await classifier.classify([exec('evt-a', '/Users/Shared/.x/run')]);
+    expect(result).toMatchObject({ ok: false, reason: 'failed', detail: MONTHLY_CAP_HELD });
+    expect(calls).toHaveLength(0);
+    // The attempt that reached no AI is still in the log.
+    expect(log).toEqual([
+      expect.objectContaining({ purpose: 'classify', provider: null, outcome: 'no_provider' }),
+    ]);
   });
 
   it('never sends events without a key, or over plain http', async () => {

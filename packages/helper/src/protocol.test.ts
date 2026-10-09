@@ -33,6 +33,23 @@ describe('request validation', () => {
     expect(req({ ...part, entries: Array(1001).fill('x') })).toHaveProperty('error');
   });
 
+  it('takes Vigil’s own programs apart from the rules, the executor deciding on the password', () => {
+    const grant = {
+      kind: 'self.grant',
+      selfPaths: ['/Applications/Vigil at Home.app'],
+      selfImages: [{ path: '/home/a/Vigil.AppImage', id: '2049:5501' }],
+      selfHashes: ['c'.repeat(64)],
+    };
+    expect(req(grant)).toEqual({ id: 'r1', command: grant });
+    expect(needsApproval(grant as HelperCommand)).toBe(false);
+    expect(req({ ...grant, rules: [] })).toHaveProperty('error');
+    expect(req({ ...grant, selfPaths: Array(9).fill('/a/b') })).toHaveProperty('error');
+    expect(req({ kind: 'self.grant' })).toHaveProperty('error');
+    // Rules without a self set, as apps that send self.grant do.
+    const sync = { kind: 'detection.sync', rules: [], exceptions: [], lists: {} };
+    expect(req(sync)).toEqual({ id: 'r1', command: sync });
+  });
+
   it('accepts the core actions and the helper queries', () => {
     for (const command of [
       { kind: 'process.suspend', pid: 123, path: '/tmp/x' },

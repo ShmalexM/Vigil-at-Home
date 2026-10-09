@@ -21,6 +21,10 @@ You only do steps 2 and 3 once. Building from source skips them; see the README.
 
 Setup in the app installs osquery, fapolicyd and the Vigil helper, asking for your password through your desktop's own dialog. On GNOME, Scout shows in the top bar once the AppIndicator extension is on (Ubuntu has it on already). Linux builds are for 64-bit Intel and AMD computers for now.
 
+## Checking your download
+
+`SHA256SUMS.txt` lists the SHA-256 of every file in this release. Check yours with `shasum -a 256 -c SHA256SUMS.txt --ignore-missing` (Mac) or `sha256sum -c SHA256SUMS.txt --ignore-missing` (Linux).
+
 ## What works in this build
 
 See the README's status section. Until the sensors and the Vigil helper are installed, blocks are simulated and labelled that way in the app.

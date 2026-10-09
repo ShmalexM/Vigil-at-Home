@@ -106,7 +106,16 @@ export class PowerPolicy extends EventEmitter<{ change: [PowerMode] }> {
    * asleep, or the Mac is already busy.
    */
   isBusy(): boolean {
-    return this.current !== 'normal' || this.load() > BUSY_LOAD_PER_CORE;
+    return this.busyReason() !== undefined;
+  }
+
+  /**
+   * Why optional work should wait: 'power' (battery, heat, sleep: always
+   * wait) or 'load' (the Mac is busy: work that has waited long may go).
+   */
+  busyReason(): 'power' | 'load' | undefined {
+    if (this.current !== 'normal') return 'power';
+    return this.load() > BUSY_LOAD_PER_CORE ? 'load' : undefined;
   }
 
   private compute(): PowerMode {

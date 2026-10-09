@@ -47,7 +47,9 @@ describe('bounded outside calls', () => {
   it('a JSON-RPC request with no answer fails at its limit', async () => {
     const rpc = new JsonRpcStdio(process.execPath, ['-e', STUBBORN], {}, process.cwd(), handlers);
     const started = Date.now();
-    await expect(rpc.request('thread/start', {}, 300)).rejects.toThrow('thread/start: no answer');
+    await expect(rpc.request('thread/start', {}, 300)).rejects.toThrow(
+      'thread/start did not answer',
+    );
     expect(Date.now() - started).toBeLessThan(1_500);
     rpc.close();
   });
