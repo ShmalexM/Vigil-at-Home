@@ -62,6 +62,13 @@ function realpathOrUndefined(path: string): string | undefined {
   }
 }
 
+/** `path` without trailing slashes (a loop, so a long run of them stays cheap). */
+function trimSlashes(path: string): string {
+  let end = path.length;
+  while (end > 1 && path[end - 1] === '/') end--;
+  return path.slice(0, end);
+}
+
 /**
  * The folders the helper keeps for itself: the quarantine folder and its
  * whole state folder (the one configured and the platform's default), each
@@ -72,7 +79,7 @@ function helperRoots(opts: QuarantineOptions): string[] {
   const roots = new Set<string>();
   for (const dir of [opts.quarantineDir, opts.stateDir, protectionFor(opts.platform).stateDir]) {
     if (!dir) continue;
-    const trimmed = dir.replace(/\/+$/, '');
+    const trimmed = trimSlashes(dir);
     for (const r of [trimmed, realpathOrUndefined(trimmed)])
       if (r) roots.add(caseless(opts) ? r.toLowerCase() : r);
   }
@@ -212,7 +219,7 @@ export async function restore(
   opts: QuarantineOptions,
 ): Promise<void> {
   const slot = dirname(rec.storedPath);
-  if (dirname(slot) !== opts.quarantineDir.replace(/\/+$/, ''))
+  if (dirname(slot) !== trimSlashes(opts.quarantineDir))
     throw new ActionError('refused', 'the quarantined copy is not in the quarantine folder');
   let exists = true;
   try {
