@@ -200,6 +200,15 @@ export const LINUX_PROTECTED_PROCESS_PREFIXES = [
   '/opt/Vigil at Home/',
 ];
 
+/**
+ * Where the installer puts Vigil itself, root-owned on both systems. The
+ * helper's first-ever sync may name these as Vigil's own without the admin
+ * password (FastPath `installed`); nothing else.
+ */
+export function installedSelf(platform: Platform = 'darwin'): string[] {
+  return platform === 'linux' ? ['/opt/Vigil at Home'] : ['/Applications/Vigil at Home.app'];
+}
+
 export interface Protection {
   prefixes: string[];
   exact: Set<string>;
