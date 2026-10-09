@@ -61,11 +61,13 @@ export function PileBox({ alert, onDone }: { alert: Alert; onDone: (n: number) =
       <div className="row wrap">
         <HoldButton
           label={`That was me, all ${n}`}
+          calm
           disabled={busy}
           onConfirm={() => void decideAll('expected')}
         />
         <HoldButton
           label={`Looks fine, all ${n}`}
+          calm
           disabled={busy}
           onConfirm={() => void decideAll('benign')}
         />

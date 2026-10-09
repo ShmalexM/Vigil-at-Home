@@ -21,6 +21,8 @@ describe('AlertService', () => {
     expect((executor as DryRunExecutor).log).toEqual([suspend]);
     expect(alert.containment).toBe('active');
     expect(alert.actionIds).toHaveLength(1);
+    // Recorded as simulated at the time, so the popup can say "would have" truthfully later.
+    expect(store.getAction(alert.actionIds[0]!)?.result?.simulated).toBe(true);
     expect(popups.map((a) => a.id)).toEqual([alert.id]);
     expect(store.ruleMatchCounts(0).get('test.rule')).toBe(1);
   });

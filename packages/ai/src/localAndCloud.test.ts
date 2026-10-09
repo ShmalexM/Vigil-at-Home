@@ -7,6 +7,7 @@ import {
   DEFAULT_MAX_BUSY_WAIT_MS,
   eventLine,
   pickClassifierModel,
+  classifierModelChoice,
   recommendedClassifierModel,
 } from './classifier.js';
 import { CLASSIFIER_CLAUDE_MODEL, createVigilAi } from './index.js';
@@ -294,6 +295,11 @@ describe('event labelling with a small local model', () => {
     expect(pickClassifierModel(installed, 16 * GB)).toBe('qwen2.5:1.5b');
     expect(pickClassifierModel(installed, 8 * GB)).toBe('llama3.2:1b');
     expect(pickClassifierModel([{ name: 'gpt-oss:20b' }], 8 * GB)).toBeUndefined();
+    // A model set in settings wins, but only when it's installed.
+    expect(classifierModelChoice(installed, 'gpt-oss:20b', 8 * GB)).toBe('gpt-oss:20b');
+    expect(classifierModelChoice(installed, 'mistral:7b', 8 * GB)).toBeUndefined();
+    expect(classifierModelChoice([{ name: 'mistral:latest' }], 'mistral', 8 * GB)).toBe('mistral');
+    expect(classifierModelChoice(installed, undefined, 8 * GB)).toBe('llama3.2:1b');
     expect(classifierRuntime(8)).toEqual({
       numCtx: 4096,
       numPredict: 256,

@@ -52,6 +52,25 @@ export function pickClassifierModel(
   return list.find((m) => names.has(m));
 }
 
+/**
+ * The model the event labeller will use, or nothing: the one set in
+ * settings (`classifier.model`) when it's installed, otherwise
+ * {@link pickClassifierModel}. createAi wires the labeller this way, and
+ * setup's check calls this so the two can't disagree.
+ */
+export function classifierModelChoice(
+  installed: ReadonlyArray<{ name: string }>,
+  override?: string,
+  memoryBytes: number = totalmem(),
+): string | undefined {
+  if (override) {
+    return installed.some((m) => m.name === override || m.name === `${override}:latest`)
+      ? override
+      : undefined;
+  }
+  return pickClassifierModel(installed, memoryBytes);
+}
+
 /** Ollama settings that keep a small model light: short context, half the cores, unloaded soon. */
 export function classifierRuntime(cores: number = cpus().length) {
   return {

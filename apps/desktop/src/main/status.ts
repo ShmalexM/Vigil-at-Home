@@ -1,6 +1,6 @@
 import type { Alert } from '@vigil/core';
 import { isNoticed, needsDecision } from '../shared/attention.js';
-import { pileUp } from '../shared/piles.js';
+import { pileUp, untouched } from '../shared/piles.js';
 
 export type Level = 'good' | 'fair' | 'poor';
 
@@ -22,6 +22,11 @@ export interface Status {
   needsYou: number;
   /** Open alerts Vigil only noticed. */
   noticed: number;
+  /**
+   * Of those, the ones "Those were me" may close: nothing taken, held or
+   * suggested on them (shared/piles.ts untouched), so no suggestion expires.
+   */
+  noticedClearable: number;
   /** Why protection isn't Good, most serious first. Empty when every layer runs. */
   reasons: string[];
 }
@@ -51,11 +56,18 @@ export function computeStatus(
     }
   }
   const level: Level = poor.length ? 'poor' : fair.length ? 'fair' : 'good';
+  return { level, ...alertCounts(openAlerts), reasons: [...poor, ...fair] };
+}
+
+/** Needs you and Noticed, counted over every open alert. */
+export function alertCounts(
+  openAlerts: readonly Alert[],
+): Pick<Status, 'needsYou' | 'noticed' | 'noticedClearable'> {
+  const noticed = openAlerts.filter(isNoticed);
   return {
-    level,
     // A pile is one decision, so it counts once.
     needsYou: pileUp(openAlerts.filter(needsDecision)).length,
-    noticed: openAlerts.filter(isNoticed).length,
-    reasons: [...poor, ...fair],
+    noticed: noticed.length,
+    noticedClearable: noticed.filter(untouched).length,
   };
 }
