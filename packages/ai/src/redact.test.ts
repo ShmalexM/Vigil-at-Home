@@ -469,7 +469,14 @@ describe('redaction, round two', () => {
     keeps('{"auth":null,"data":[1,2,3]}');
     keeps('{"has_password":true,"user":"bob"}');
     keeps('{"password":false,"secret":null,"token":true,"n":1}');
-    expect(redact('{"apiToken":123456789,"n":1}')).toBe('{"apiToken":<redacted>,"n":1}');
+    // Replaced by a string, so the field is still JSON.
+    expect(redact('{"apiToken":123456789,"n":1}')).toBe('{"apiToken":"<redacted>","n":1}');
+    expect(JSON.parse(redact('{"apiToken":123456789,"n":1}'))).toEqual({
+      apiToken: '<redacted>',
+      n: 1,
+    });
+    // In JSON held in a string, the quotes can't be written as they are.
+    expect(redact(JSON.stringify(JSON.stringify({ apiToken: 123456789 })))).toBe(WITHHELD);
     expect(redact('TOKEN=abc;other=1')).toBe(WITHHELD);
     expect(redact('?access_token=a&api_key=b&page=2')).toBe(WITHHELD);
     expect(redact('{"token":abc,"page":2}')).toBe(WITHHELD);
@@ -1111,9 +1118,12 @@ describe('redaction, the nine findings of the second review', () => {
   it('9: counts keys toward the write budget as they are written', () => {
     const stringify = vi.spyOn(JSON, 'stringify');
     try {
-      const out = redactAndSerialize({ ['a'.repeat(1_000_000)]: 1, b: 2 }, { maxBytes: 32 });
+      // A key within the cap is read, and kept; one past it is replaced unread.
+      const out = redactAndSerialize({ ['a'.repeat(400_000)]: 1, b: 2 }, { maxBytes: 32 });
       expect(JSON.parse(out.text)).toEqual({ b: 2 });
       expect(out.omitted).toBe(1);
+      const past = redactAndSerialize({ ['a'.repeat(1_000_000)]: 1 }, { maxBytes: 64 });
+      expect(JSON.parse(past.text)).toEqual({ '[REDACTED_KEY_1]': 1 });
       for (const [arg] of stringify.mock.calls) {
         if (typeof arg === 'string') expect(arg.length).toBeLessThanOrEqual(33);
       }
@@ -2275,6 +2285,393 @@ describe('redaction of more credential names, signatures, sessions and escaped J
       }
     }
   }, 30_000);
+});
+
+describe('redaction of secrets in object keys', () => {
+  const redact = (text: string) => redactField(text);
+  const W = 'whsec_aaaaaaaaaaaaaaaaaaaaaaaa';
+  /** One key of each kind any rule finds, with what must not survive. */
+  const SECRET_KEYS: ReadonlyArray<readonly [string, string]> = [
+    [W, 'whsec_'],
+    ['sk-ant-api03-aaaaaaaaaaaaaaaaaaaaaaaa', 'sk-ant'],
+    ['ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'ghp_'],
+    ['AKIAABCDEFGHIJKLMNOP', 'AKIA'],
+    ['eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlc2ln', 'eyJ'],
+    ['xoxb-1234567890-abcdefghij', 'xoxb'],
+    ['-----BEGIN RSA PRIVATE KEY-----', 'PRIVATE KEY'],
+    ['PGPASSWORD=hunter2', 'hunter2'],
+    ['Authorization: Bearer abcdefghijklmnopqrstuvwxyz', 'abcdefghijklmnop'],
+    ['postgres://admin:hunter2@db.example', 'hunter2'],
+    ['curl -u bob:hunter2 https://example.invalid', 'hunter2'],
+  ];
+  const absent = (out: unknown, secret: string) => {
+    expect(JSON.stringify(out)).not.toContain(secret);
+  };
+
+  it('replaces a secret key in the exported decision note, single- and double-encoded', () => {
+    const note = JSON.stringify({ [W]: 'ok' });
+    const evidence = { alert: { decision: { note } } };
+    const once = redactValue(evidence, {}) as { alert: { decision: { note: string } } };
+    expect(once.alert.decision.note).toBe('{"[REDACTED_KEY_1]":"ok"}');
+    expect(JSON.parse(once.alert.decision.note)).toEqual({ '[REDACTED_KEY_1]': 'ok' });
+    const serialized = redactAndSerialize(evidence, { maxBytes: 10_000 });
+    absent(serialized.text, 'whsec_');
+    expect(JSON.parse(serialized.text)).toEqual({
+      alert: { decision: { note: '{"[REDACTED_KEY_1]":"ok"}' } },
+    });
+    expect(redact(note)).toBe('{"[REDACTED_KEY_1]":"ok"}');
+    // JSON.stringify applied again, and again.
+    const twice = JSON.stringify(note);
+    expect(redact(twice)).toBe(JSON.stringify('{"[REDACTED_KEY_1]":"ok"}'));
+    expect(JSON.parse(JSON.parse(redact(twice)) as string)).toEqual({ '[REDACTED_KEY_1]': 'ok' });
+    const thrice = JSON.stringify(twice);
+    absent(redact(thrice), 'whsec_');
+    JSON.parse(redact(thrice));
+    const deep = redactValue({ note: twice }, {}) as { note: string };
+    expect(JSON.parse(JSON.parse(deep.note) as string)).toEqual({ '[REDACTED_KEY_1]': 'ok' });
+    // Past the depth JSON in a string is read to, the field is withheld.
+    let many = note;
+    for (let i = 0; i < 6; i++) many = JSON.stringify(many);
+    absent(redact(many), 'whsec_');
+  });
+
+  it('reads every kind of secret in a key, in text and in structured data', () => {
+    for (const [key, secret] of SECRET_KEYS) {
+      const text = JSON.stringify({ [key]: 'ok' });
+      const out = redact(text);
+      absent(out, secret);
+      if (out !== WITHHELD) expect(JSON.parse(out)).toEqual({ '[REDACTED_KEY_1]': 'ok' });
+      absent(redact(JSON.stringify(text)), secret);
+      // A key such as PGPASSWORD=x also names its value a secret.
+      const value = redactValue({ [key]: 'ok' }, {}) as Record<string, unknown>;
+      expect(Object.keys(value)).toEqual(['[REDACTED_KEY_1]']);
+      absent(value, secret);
+      absent(redactAndSerialize({ a: { [key]: 1 } }, { maxBytes: 10_000 }).text, secret);
+    }
+  });
+
+  it('reads keys at every depth, and in arrays of objects', () => {
+    const text = JSON.stringify({
+      a: { b: { [W]: { c: 1 } } },
+      list: [{ [W]: 1 }, { ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa: 2 }, { plain: 3 }],
+    });
+    const out = redact(text);
+    expect(JSON.parse(out)).toEqual({
+      a: { b: { '[REDACTED_KEY_1]': { c: 1 } } },
+      list: [{ '[REDACTED_KEY_2]': 1 }, { '[REDACTED_KEY_3]': 2 }, { plain: 3 }],
+    });
+    expect(
+      redactValue({ a: { b: { [W]: { c: 1 } } }, list: [{ [W]: 1 }, { x: [{ [W]: 2 }] }] }, {}),
+    ).toEqual({
+      a: { b: { '[REDACTED_KEY_1]': { c: 1 } } },
+      list: [{ '[REDACTED_KEY_2]': 1 }, { x: [{ '[REDACTED_KEY_3]': 2 }] }],
+    });
+    // Under a credential key, keys are still read.
+    expect(redactValue({ password: { [W]: 'hunter2' } }, {})).toEqual({
+      password: { '[REDACTED_KEY_1]': '<redacted>' },
+    });
+  });
+
+  it('replaces a secret key whose value is a secret too', () => {
+    const value = 'sk-ant-api03-bbbbbbbbbbbbbbbbbbbbbbbb';
+    const out = redactValue({ [W]: value, [`${W}x`]: { password: 'hunter2' } }, {});
+    absent(out, 'whsec_');
+    absent(out, 'sk-ant');
+    absent(out, 'hunter2');
+    expect(out).toEqual({
+      '[REDACTED_KEY_1]': WITHHELD,
+      '[REDACTED_KEY_2]': { password: '<redacted>' },
+    });
+    const text = redact(JSON.stringify({ [W]: { password: 'hunter2' } }));
+    expect(JSON.parse(text)).toEqual({ '[REDACTED_KEY_1]': { password: '<redacted>' } });
+    // A token alone in a string is free text: the field is withheld.
+    expect(redact(JSON.stringify({ [W]: value }))).toBe(WITHHELD);
+  });
+
+  it('numbers placeholders so no two keys of an object are the same', () => {
+    const out = redact(
+      JSON.stringify({ [W]: 1, [`${W}b`]: 2, '[REDACTED_KEY_1]': 3, '[REDACTED_KEY_3]': 4 }),
+    );
+    const parsed = JSON.parse(out) as Record<string, number>;
+    expect(Object.keys(parsed)).toHaveLength(4);
+    expect(parsed).toEqual({
+      '[REDACTED_KEY_2]': 1,
+      '[REDACTED_KEY_4]': 2,
+      '[REDACTED_KEY_1]': 3,
+      '[REDACTED_KEY_3]': 4,
+    });
+    // Written with escapes, an existing placeholder is still seen.
+    const escaped = redact(`{"\\u005bREDACTED_KEY_1]":1,"${W}":2}`);
+    expect(Object.keys(JSON.parse(escaped) as object)).toEqual([
+      '[REDACTED_KEY_1]',
+      '[REDACTED_KEY_2]',
+    ]);
+    const value = redactValue({ '[REDACTED_KEY_1]': 1, [W]: 2, [`${W}b`]: 3 }, {});
+    expect(Object.keys(value as object).sort()).toEqual([
+      '[REDACTED_KEY_1]',
+      '[REDACTED_KEY_2]',
+      '[REDACTED_KEY_3]',
+    ]);
+  });
+
+  it('leaves ordinary keys and Vigil’s own field names as they are', () => {
+    const names = [
+      'process.args',
+      'args',
+      'programArgs',
+      'signing_id',
+      'signingId',
+      'team_id',
+      'teamId',
+      'cdhash',
+      'hookSession',
+      'session_id',
+      'agent-keychain-password',
+      'agent-secret-read',
+      'agent-secret-upload',
+      'amos-password-dialog',
+      'agent-aws-paste-exfil',
+      'preflight-socket-tampered',
+      'com.apple.security.cs.disable-library-validation',
+      'com.apple.security.cs.allow-unsigned-executable-memory',
+      'tokenCount',
+      'max_tokens',
+      '/Users/alexm/Library/LaunchAgents/com.example.plist',
+      'https://example.com/path',
+      'me@example.com',
+      '',
+      ' ',
+      'a.b-c_d',
+      '日本語',
+    ];
+    // Values a credential-named rule id (agent-keychain-password) would hide are not the point here.
+    const value = Object.fromEntries(names.map((name) => [name, true]));
+    const text = JSON.stringify(value);
+    expect(Object.keys(JSON.parse(redact(text)) as object)).toEqual(names);
+    expect(Object.keys(redactValue(value, {}) as object)).toEqual(names);
+    expect(redact(JSON.stringify(text))).toBe(JSON.stringify(text));
+    const serialized = redactAndSerialize({ list: [value, value] }, { maxBytes: 100_000 });
+    expect(JSON.parse(serialized.text)).toEqual({ list: [value, value] });
+  });
+
+  it('runs in linear time on wide and deep keys', () => {
+    const time = (fn: () => void) => {
+      const started = performance.now();
+      fn();
+      return performance.now() - started;
+    };
+    const wide = (n: number, key: (i: number) => string) =>
+      '{' + Array.from({ length: n }, (_, i) => `"${key(i)}":${i}`).join(',') + '}';
+    const inputs = [
+      wide(10_000, (i) => `${W}${i}`),
+      wide(20_000, (i) => `k${i}`),
+      wide(10_000, (i) => `\\u005bREDACTED_KEY_${i}]`),
+      wide(10_000, (i) => `password${i}=x`),
+      '{"a":'.repeat(100_000),
+      '[{"' + `${W}":`.repeat(10_000),
+      '{"\\u005c'.repeat(50_000),
+    ];
+    for (const input of inputs) {
+      expect(input.length).toBeLessThanOrEqual(MAX_REDACT_CHARS);
+      for (const text of [input, JSON.stringify(input).slice(0, MAX_REDACT_CHARS)]) {
+        const took = time(() => redact(text));
+        expect(took, `${text.slice(0, 16)}… took ${took.toFixed(1)} ms`).toBeLessThan(400);
+      }
+    }
+    const object = Object.fromEntries(
+      Array.from({ length: 50_000 }, (_, i) => [i % 2 ? `${W}${i}` : `k${i}`, i]),
+    );
+    const took = time(() => redactValue(object, {}));
+    expect(took, `50,000 keys took ${took.toFixed(1)} ms`).toBeLessThan(1000);
+  }, 30_000);
+});
+
+describe('redaction of more command-line and URL secrets', () => {
+  const redact = (text: string) => redactField(text);
+  const HEX = 'ab12'.repeat(128);
+
+  it('withholds a password given to a tool on the command line', () => {
+    for (const line of [
+      'security add-generic-password -a me -s svc -w hunter2',
+      "security add-generic-password -a me -s svc -w 'hunter2' -U",
+      'security add-internet-password -a me -s host -whunter2',
+      'aws configure set aws_secret_access_key abcd1234',
+      'aws configure set aws_session_token abcd1234',
+      'aws configure set profile.dev.aws_secret_access_key abcd1234',
+      'npm config set //registry.npmjs.org/:_authToken abc123',
+      'npm config set _auth abc123',
+      'npm config set _password abc123',
+      'pnpm config set //npm.example/:_authToken "abc123"',
+      'npm config set "//npm.example/:_authToken" "abc123"',
+      'npm config set --location=user //npm.example/:_authToken abc123',
+      'yarn config set npmAuthToken abc123',
+      'zip -P hunter2 out.zip dir',
+      'zip -r -P hunter2 out.zip dir',
+      'unzip -P hunter2 a.zip',
+      'htpasswd -b .htpasswd alice hunter2',
+      'htpasswd -bc .htpasswd alice hunter2',
+      'htpasswd -nb alice hunter2',
+      'smbclient //host/share -U alice%hunter2',
+      'smbclient //host/share -Ualice%hunter2',
+      "smbclient //host/share --user='DOM\\alice%hunter2'",
+      'lftp -u alice,hunter2 ftp.example.com',
+      'lftp -e "open -u alice,hunter2 ftp.example.com"',
+    ]) {
+      expect(redact(line), line).toBe(WITHHELD);
+      expect(redactArgv(line.split(' ')), line).toEqual(line.split(' ').map(() => WITHHELD));
+    }
+  });
+
+  it('leaves ordinary commands as they are', () => {
+    for (const line of [
+      'zip -r out.zip dir',
+      'gzip -9 file',
+      'security find-generic-password -s x',
+      'security find-generic-password -s x -w',
+      'security add-generic-password -a me -s svc -w',
+      'security add-generic-password -a me -s svc -w -U',
+      'aws configure list',
+      'aws configure set region us-east-1',
+      'aws s3 ls s3://bucket',
+      'npm config set registry https://registry.npmjs.org/',
+      'npm install left-pad',
+      'npm config set init-license MIT',
+      'yarn config set npmRegistryServer https://registry.example',
+      'aws configure set aws_access_key_id AKIDEXAMPLE',
+      'npm config set //npm.example/:_authToken',
+      'smbclient -L host',
+      'smbclient //host/share -U alice',
+      'lftp -u alice ftp.example.com',
+      'htpasswd -c .htpasswd alice',
+      'htpasswd -D .htpasswd alice',
+      'the pw field is empty',
+      'pw',
+      'pwd',
+      'PWD=/tmp',
+      'cd /tmp && pwd',
+      'OLDPWD=/tmp',
+      'q=hello%20world&page=2',
+      'a+b=c',
+    ]) {
+      expect(redact(line), line).toBe(line);
+      expect(redactArgv(line.split(' ')), line).toEqual(line.split(' '));
+    }
+  });
+
+  it('reads pw as a credential name only where it is a name given a value', () => {
+    expect(redact('DB_PW=hunter2')).toBe('DB_PW=<redacted>');
+    expect(redact('pw=hunter2')).toBe('pw=<redacted>');
+    expect(redact('MYSQL_PW=hunter2')).toBe('MYSQL_PW=<redacted>');
+    expect(redact('export DB_PW=hunter2; run')).toBe(WITHHELD);
+    expect(redact('{"pw":"hunter2"}')).toBe('{"pw":"<redacted>"}');
+    // A password name: even a short number is the secret.
+    expect(redact('{"pw":1234}')).toBe('{"pw":"<redacted>"}');
+    expect(redactValue({ pw: 'hunter2', dbPw: 'x', pw_file: '/etc/pw' }, {})).toEqual({
+      pw: '<redacted>',
+      dbPw: '<redacted>',
+      pw_file: '/etc/pw',
+    });
+    expect(redactValue({ pwd: '/Users/x' }, {})).toEqual({ pwd: '/Users/<user>' });
+  });
+
+  it('decodes percent-encoded and + names before matching them', () => {
+    for (const text of [
+      'a=1&pass%77ord=hunter2&b=2',
+      '%70assword=hunter2',
+      '%70%61%73%73%77%6f%72%64=hunter2',
+      'api+key=abcdef',
+      'grant_type=password&client%5Fsecret=abc123',
+      'curl -d "user=me&pass%77ord=hunter2" https://example.invalid',
+    ]) {
+      expect(redact(text), text).toBe(WITHHELD);
+    }
+    // A field that is one URL cuts the value out.
+    expect(redact('https://h.example/?pass%77ord=hunter2&a=1')).toBe(
+      'https://h.example/?pass%77ord=<redacted>&a=1',
+    );
+    expect(redact('https://h.example/?api+key=abc123')).toBe(
+      'https://h.example/?api+key=<redacted>',
+    );
+    // Encoded names that aren't a credential's, and benign values, stay.
+    expect(redact('q=hello%20world&page%5F=2')).toBe('q=hello%20world&page%5F=2');
+    expect(redact('pass%77ord=&x=1')).toBe('pass%77ord=&x=1');
+  });
+
+  it('redacts a signed URL’s signature by name, hex or not', () => {
+    const goog = `https://storage.googleapis.com/b/o?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Signature=${HEX}`;
+    expect(redact(goog)).toBe(
+      'https://storage.googleapis.com/b/o?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Signature=<redacted>',
+    );
+    const amz = `https://b.s3.amazonaws.com/o?X-Amz-Date=1&X-Amz-Signature=${HEX.slice(0, 64)}`;
+    expect(redact(amz)).toBe(
+      'https://b.s3.amazonaws.com/o?X-Amz-Date=1&X-Amz-Signature=<redacted>',
+    );
+    expect(redact(`curl "${goog}"`)).toBe(WITHHELD);
+    // Not a shell assignment (the name has dashes): free text, withheld.
+    expect(redact(`X-Goog-Signature=${HEX}`)).toBe(WITHHELD);
+    expect(redact(JSON.stringify({ 'X-Goog-Signature': HEX }))).toBe(
+      '{"X-Goog-Signature":"<redacted>"}',
+    );
+    expect(redactValue({ 'X-Amz-Signature': HEX, 'x-goog-signature': 'abc' }, {})).toEqual({
+      'X-Amz-Signature': '<redacted>',
+      'x-goog-signature': '<redacted>',
+    });
+    // A code signature's hex stays: only the signed-URL names changed.
+    const code = { cdhash: HEX.slice(0, 40), signature: HEX, sig: HEX.slice(0, 64) };
+    expect(redactValue(code, {})).toEqual(code);
+    expect(redact(JSON.stringify(code))).toBe(JSON.stringify(code));
+  });
+
+  it('runs in linear time on hostile input for these forms', () => {
+    const units = [
+      'security add-generic-password -w ',
+      ' -w',
+      'aws configure set a.',
+      'aws configure set aws_session_token ',
+      'npm config set ',
+      'set -a ',
+      'set _auth ',
+      ':_authToken ',
+      'zip -P',
+      ' -P ',
+      'htpasswd -b ',
+      ' -b a',
+      ' -bbbbbbbbbbbbbbbb',
+      'smbclient -U ',
+      ' -U a',
+      'lftp -u ',
+      ' -u a',
+      'pass%77ord=',
+      '%41',
+      '%',
+      'a+',
+      '&a%41=',
+      'DB_PW=',
+      'X-Goog-Signature=',
+    ];
+    const size = 512 * 1024;
+    for (const unit of units) {
+      const input = unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+      for (const text of [input, `htpasswd smbclient lftp zip ${input.slice(30)}`]) {
+        const started = performance.now();
+        redact(text);
+        redactArgv(text.split(' ').slice(0, 20_000));
+        const took = performance.now() - started;
+        expect(took, `${JSON.stringify(unit)} took ${took.toFixed(1)} ms`).toBeLessThan(400);
+      }
+    }
+    for (const input of [
+      'htpasswd -' + 'b'.repeat(size - 10),
+      'smbclient -U ' + 'a'.repeat(size - 20),
+      'lftp -u ' + 'a'.repeat(size - 20),
+      'aws configure set ' + 'a.'.repeat((size - 30) / 2),
+    ]) {
+      const started = performance.now();
+      redact(input);
+      const took = performance.now() - started;
+      expect(took, `${input.slice(0, 16)}… took ${took.toFixed(1)} ms`).toBeLessThan(400);
+    }
+  }, 60_000);
 });
 
 describe('child environment', () => {
