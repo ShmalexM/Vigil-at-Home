@@ -1,6 +1,6 @@
 import { authorizeAction, type Action, type ProcessRef } from '@vigil/core';
 import { BlockList, isIP } from 'node:net';
-import { clip, globMatcher, globToRegExp } from './rules/compile.js';
+import { globMatcher } from './rules/compile.js';
 import type { DetectionEvent } from './types.js';
 
 /**
@@ -27,14 +27,14 @@ export const DEFAULT_PROTECTED_PATH_GLOBS = [
 ];
 
 /** Never quarantined, whatever the rule says. */
-const PROTECTED_FILE_GLOBS = [...DEFAULT_PROTECTED_PATH_GLOBS, '/usr/**', '/bin/**'];
+export const PROTECTED_FILE_GLOBS = [...DEFAULT_PROTECTED_PATH_GLOBS, '/usr/**', '/bin/**'];
 
 /**
  * Apple command-line tools that malware drives (osascript, curl, bash,
  * python3...). An instance started by something else may be paused or killed;
  * one started by launchd (a system service) may not.
  */
-const APPLE_TOOL_GLOBS = ['/bin/*', '/usr/bin/*'];
+export const APPLE_TOOL_GLOBS = ['/bin/*', '/usr/bin/*'];
 
 export const DEFAULT_NEVER_BLOCK_NETWORKS = [
   '0.0.0.0/8',
@@ -50,7 +50,7 @@ export const DEFAULT_NEVER_BLOCK_NETWORKS = [
 /** Refuse to firewall ranges wider than this: it would cut off too much. */
 const MIN_PREFIX = { ipv4: 16, ipv6: 48 } as const;
 
-const SYSTEM_PERSISTENCE_GLOBS = ['/System/**'];
+export const SYSTEM_PERSISTENCE_GLOBS = ['/System/**'];
 
 function toBlockList(networks: string[], label: string): BlockList {
   const bl = new BlockList();
@@ -68,8 +68,8 @@ function toBlockList(networks: string[], label: string): BlockList {
 export class SafetyFloor {
   private readonly protectedPaths: ((path: string) => boolean)[];
   private readonly protectedFiles: ((path: string) => boolean)[];
-  private readonly appleTools = APPLE_TOOL_GLOBS.map((g) => globToRegExp(g));
-  private readonly systemPersistence = SYSTEM_PERSISTENCE_GLOBS.map((g) => globToRegExp(g));
+  private readonly appleTools = APPLE_TOOL_GLOBS.map((g) => globMatcher(g));
+  private readonly systemPersistence = SYSTEM_PERSISTENCE_GLOBS.map((g) => globMatcher(g));
   private readonly selfPaths: string[];
   private readonly neverBlock: BlockList;
 
@@ -102,7 +102,7 @@ export class SafetyFloor {
     if (!p) return 'there is no process to act on';
     if (p.pid <= 1) return 'it is a core macOS process';
     if (p.signing === 'apple') {
-      const tool = this.appleTools.some((r) => r.test(clip(p.path)));
+      const tool = this.appleTools.some((fits) => fits(p.path));
       if (!tool || p.ppid === 1 || p.ppid === undefined) {
         return 'it is part of macOS (signed by Apple)';
       }
@@ -141,7 +141,7 @@ export class SafetyFloor {
         return undefined;
       }
       case 'persistence.disable':
-        return this.systemPersistence.some((r) => r.test(clip(action.path)))
+        return this.systemPersistence.some((fits) => fits(action.path))
           ? 'the launch item belongs to macOS'
           : undefined;
       case 'file.quarantine': {

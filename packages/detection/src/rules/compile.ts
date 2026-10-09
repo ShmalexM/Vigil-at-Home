@@ -272,9 +272,9 @@ export function globProblem(glob: string): string | undefined {
 /**
  * Path globs. `**` crosses directories, `*` and `?` do not, and a leading `~`
  * means any user's home folder. Case-insensitive by default because APFS is.
- * Rules check globProblem first; this only builds the regex, which runs on
- * the backtracking engine: it is for globs Vigil ships. Any other glob is
- * matched by globMatcher.
+ * Rules check globProblem first; this only builds the regex. Vigil itself
+ * matches globs with globMatcher, which needs no regex; this regex is the
+ * reference it is tested against (and what the bench package uses).
  */
 export function globToRegExp(glob: string, ignoreCase = true): RegExp {
   let src = '';
@@ -409,11 +409,26 @@ function stepsTest(steps: GlobStep[], fold: (c: number) => number): (s: string) 
 /**
  * A glob as a test, matching exactly what globToRegExp's regex does, but
  * without a regex: its time is linear in the path whatever the glob, and it
- * needs no regex engine of any kind. Used for every glob Vigil does not ship:
- * in rules, agent identities and protected paths. Throws on a glob
- * globProblem refuses.
+ * needs no regex engine of any kind. Used for every glob Vigil matches,
+ * shipped or not: in rules, agent identities and the safety floor's path
+ * lists. Throws on a glob globProblem refuses.
  */
 export function globMatcher(glob: string, ignoreCase = true): (s: string) => boolean {
+  const k = `${ignoreCase ? 'i' : 's'}${glob}`;
+  let m = matchers.get(k);
+  if (!m) {
+    m = buildGlobMatcher(glob, ignoreCase);
+    // Bounded: rules are rebuilt often (replays), from much the same globs.
+    if (matchers.size >= 4096) matchers.delete(matchers.keys().next().value!);
+    matchers.set(k, m);
+  }
+  return m;
+}
+
+/** Built matchers by case setting and glob. Each resets its scratch space on every call. */
+const matchers = new Map<string, (s: string) => boolean>();
+
+function buildGlobMatcher(glob: string, ignoreCase: boolean): (s: string) => boolean {
   const problem = globProblem(glob);
   if (problem) throw new Error(problem);
   const fold = ignoreCase ? caseFold : (c: number) => c;
@@ -509,12 +524,13 @@ function patternTest(
   const test = (re: RegExp) => (s: string) => re.test(clip(s));
   // Vigil's own patterns keep the usual engine (they need lookarounds);
   // any other runs in linear time, so no pattern can stall the checks.
-  if (isTrustedPattern(use))
-    return test(
-      c.op === 'regex' ? new RegExp(value, nocase ? 'i' : '') : globToRegExp(value, nocase),
-    );
+  // Globs never use a regex (globMatcher), so only the timing differs for them.
+  if (c.op === 'glob') {
+    if (!isTrustedPattern(use)) hooks.untrusted();
+    return globMatcher(value, nocase);
+  }
+  if (isTrustedPattern(use)) return test(new RegExp(value, nocase ? 'i' : ''));
   hooks.untrusted();
-  if (c.op === 'glob') return globMatcher(value, nocase);
   try {
     return test(linearRegExp(value, nocase));
   } catch (err) {

@@ -52,10 +52,11 @@ function collect(ruleId: string, c: Condition, into: Set<string>): void {
 /**
  * Whether Vigil itself ships this regex or glob test: the same pattern, field
  * and case setting in the built-in rule of that id (for any platform), or a
- * template's regex on its field. Those were written and tested here, so they
- * keep the usual regex engine and match exactly as they always have.
- * Anything else (rules you write, AI drafts, feeds) runs on the linear-time
- * engine.
+ * template's regex on its field. Those were written and tested here: a
+ * shipped regex keeps the usual regex engine and matches exactly as it always
+ * has, and is not timed. Any other regex (rules you write, AI drafts, feeds)
+ * runs on the linear-time engine and is timed. Globs, shipped or not, never
+ * use a regex (globMatcher); only whether they are timed depends on this.
  *
  * The text alone is not enough. Several shipped regexes are polynomial, not
  * linear, on a crafted 4096-character subject (up to tens of milliseconds a
