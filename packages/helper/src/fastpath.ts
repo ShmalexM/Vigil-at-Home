@@ -31,6 +31,7 @@ import {
   compileRule,
   DetectionEngine,
   DetectionRule,
+  isBuiltinRuleId,
   legacyKey,
   legacyRuleIds,
   memoryStores,
@@ -113,6 +114,16 @@ const EMPTY: Saved = {
   legacyUses: {},
 };
 
+/**
+ * The rule with its origin as this helper knows it: built-in only when Vigil
+ * ships a rule with that id. A pattern's trust (isTrustedPattern) depends on
+ * the origin, so it never comes from what the app sent.
+ */
+function ownOrigin(r: DetectionRule): DetectionRule {
+  const origin = isBuiltinRuleId(r.id) ? 'builtin' : r.origin === 'builtin' ? 'user' : r.origin;
+  return origin === r.origin ? r : { ...r, origin };
+}
+
 /** A rule as this helper would run it. */
 interface Planned {
   rule: DetectionRule;
@@ -182,7 +193,7 @@ export class FastPath {
     // wrote adopts every rule in it, since each ran then. A rule that no
     // longer compiles at all is dropped on its own; the rest keep blocking.
     let rules: DetectionRule[];
-    const saved = parsed.data.rules;
+    const saved = parsed.data.rules.map(ownOrigin);
     if (parsed.data.legacyUses === undefined) {
       const admitted = admitSavedRules(saved);
       for (const d of admitted.dropped)
@@ -216,11 +227,30 @@ export class FastPath {
     // With no rules nothing is blocked yet, so there is nothing to weaken.
     if (this.state.rules.length === 0) return [];
     const out: string[] = [];
-    const next = new Map(cmd.rules.map((r) => [r.id, r]));
+    // Judged by outcome: the rules this helper would actually run after the
+    // sync, compiled as it would compile them, against the ones it runs now.
+    // A rule that would be left out for any reason (removed, no longer
+    // compiling, skipped as an older pattern) or run differently counts.
+    let next: Map<string, Planned>;
+    try {
+      next = new Map(this.plan(cmd).map((p) => [p.rule.id, p]));
+    } catch {
+      // sync() refuses it and nothing changes.
+      next = new Map(this.running);
+    }
+    // The origin a sync claims is never used (ownOrigin), but one that differs
+    // from the rule's own asks to change how its patterns are trusted.
+    const claimed = new Map(cmd.rules.map((r) => [r.id, r.origin]));
     for (const r of this.state.rules) {
       const n = next.get(r.id);
+      const now = this.running.get(r.id);
       if (!n) out.push(`stop blocking with “${r.name}”`);
-      else if (enforced(n) !== enforced(r)) out.push(`change what “${r.name}” blocks`);
+      else if (
+        enforced(n.rule) !== enforced(r) ||
+        n.how !== now?.how ||
+        claimed.get(r.id) !== r.origin
+      )
+        out.push(`change what “${r.name}” blocks`);
     }
     const had = new Set(this.state.exceptions.map(canonical));
     const added = cmd.exceptions.filter((e) => !had.has(canonical(e)));
@@ -270,7 +300,8 @@ export class FastPath {
   }
 
   /**
-   * The rules this sync would have the helper run, compiled. A rule the app marks as an older pattern
+   * The rules this sync would have the helper run, compiled. Origins are the
+   * helper's own (ownOrigin). A rule the app marks as an older pattern
    * (`legacy`) runs only if this helper already let that exact test keep the
    * backtracking engine; otherwise it is left out (and `skipped` hears why).
    * Any other rule that does not compile throws.
@@ -278,7 +309,8 @@ export class FastPath {
   private plan(cmd: DetectionSync, skipped?: (err: Error) => void): Planned[] {
     const older = new Set(cmd.legacy ?? []);
     const out: Planned[] = [];
-    for (const rule of cmd.rules) {
+    for (const raw of cmd.rules) {
+      const rule = ownOrigin(raw);
       if (!older.has(rule.id)) {
         out.push(planned(rule));
         continue;

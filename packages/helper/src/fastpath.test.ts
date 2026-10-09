@@ -2,7 +2,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DetectionEngine, macosCoreRules, memoryStores } from '@vigil/detection';
+import {
+  builtinRulesFor,
+  DetectionEngine,
+  DetectionRule,
+  macosCoreRules,
+  memoryStores,
+  simulateLinearEngine,
+} from '@vigil/detection';
 import { fastPathRules, listDigest } from '@vigil/detection/fastpath';
 import { RuleStore, type SensorEvent } from '@vigil/sensors';
 import { Approvals } from './approval.js';
@@ -413,6 +420,111 @@ describe('blocking rules in the helper', () => {
     expect(fast.status().rules).toBe(rest.length);
     expect(fast.status().rev).toBeGreaterThan(rev);
     await client.call(sync);
+  });
+
+  /** A built-in rule with a regex the linear-time engine can't run (a lookahead). */
+  const shippedLookahead = (): DetectionRule => {
+    const has = (c: unknown): boolean =>
+      !!c &&
+      typeof c === 'object' &&
+      (((c as { op?: string }).op === 'regex' &&
+        [(c as { value?: unknown }).value].flat().some((v) => String(v).includes('(?!'))) ||
+        Object.values(c).some(has));
+    const r = builtinRulesFor('darwin').find(
+      (x) => x.eventKinds.includes('process.exec') && has(x.condition),
+    )!;
+    return DetectionRule.parse({ ...r, mode: 'block' });
+  };
+
+  /** The policy in force plus `extra`, sent with the password; then the password is off. */
+  async function inForce(extra: DetectionRule): Promise<DetectionSync> {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    const cmd = { ...sync, rules: [...sync.rules, extra] };
+    approve = true;
+    await sendLists((await client.call<{ needLists: string[] }>(cmd)).needLists, lists);
+    approve = false;
+    prompts.length = 0;
+    return cmd;
+  }
+
+  async function restore(): Promise<void> {
+    approve = true;
+    await client.call(appSet({ known_bad_sha256: [BAD] }).sync);
+    approve = false;
+  }
+
+  it('needs the password when a sync claims a built-in rule is yours and an older pattern', async () => {
+    const rule = shippedLookahead();
+    const cmd = await inForce(rule);
+    const rev = fast.status().rev;
+    simulateLinearEngine(false);
+    try {
+      const claimed = {
+        ...cmd,
+        rules: cmd.rules.map((r) => (r.id === rule.id ? { ...r, origin: 'user' as const } : r)),
+        legacy: [rule.id],
+      };
+      expect(fast.loosening(claimed)).toEqual([`change what “${rule.name}” blocks`]);
+      await expect(client.call(claimed)).rejects.toMatchObject({ code: 'refused' });
+      expect(prompts).toHaveLength(1);
+      expect(fast.status().rev).toBe(rev);
+      expect(fast.status().rules).toBe(cmd.rules.length);
+    } finally {
+      simulateLinearEngine(undefined);
+      await restore();
+    }
+  });
+
+  it('needs the password when a sync claims your edit of a built-in rule is yours', async () => {
+    // Edited, still with the regexes Vigil ships, which only the usual engine runs.
+    const shipped = shippedLookahead();
+    const edited = DetectionRule.parse({
+      ...shipped,
+      name: `${shipped.name} (edited)`,
+      editedFrom: shipped.version,
+      exclusions: [...shipped.exclusions, { field: 'process.path', op: 'eq', value: '/x' }],
+    });
+    const cmd = await inForce(edited);
+    const rev = fast.status().rev;
+    try {
+      const claimed = {
+        ...cmd,
+        rules: cmd.rules.map((r) => (r.id === edited.id ? { ...r, origin: 'user' as const } : r)),
+        legacy: [edited.id],
+      };
+      expect(fast.loosening(claimed)).toEqual([`change what “${edited.name}” blocks`]);
+      await expect(client.call(claimed)).rejects.toMatchObject({ code: 'refused' });
+      expect(fast.status().rev).toBe(rev);
+      expect(fast.status().rules).toBe(cmd.rules.length);
+      // Even with the password, the helper keeps the rule, as Vigil's.
+      approve = true;
+      await client.call(claimed);
+      expect(fast.status().rules).toBe(cmd.rules.length);
+    } finally {
+      await restore();
+    }
+  });
+
+  it('needs the password to drop a rule that would no longer compile', async () => {
+    const extra = { ...appSet({}).sync.rules[0]!, id: 'gone-soon' };
+    const cmd = await inForce(DetectionRule.parse(extra));
+    try {
+      // Marked as an older pattern and no longer compiling: it would be left out.
+      const broken = {
+        ...cmd,
+        rules: cmd.rules.map((r) =>
+          r.id === 'gone-soon'
+            ? { ...r, condition: { field: 'process.path', op: 'regex' as const, value: 'a(?=b)' } }
+            : r,
+        ),
+        legacy: ['gone-soon'],
+      };
+      expect(fast.loosening(broken)).toEqual([`stop blocking with “${extra.name}”`]);
+      await expect(client.call(broken)).rejects.toMatchObject({ code: 'refused' });
+      expect(fast.status().rules).toBe(cmd.rules.length);
+    } finally {
+      await restore();
+    }
   });
 
   it('lets a held rule change ride on the next password dialog', async () => {

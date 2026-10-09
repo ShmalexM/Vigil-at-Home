@@ -68,18 +68,32 @@ function collect(ruleId: string, c: Condition, into: Set<string>): void {
  * and on the field, and an edit that moves a pattern elsewhere loses it.
  */
 export function isTrustedPattern(use: PatternUse): boolean {
+  load();
+  if (use.op === 'regex' && shipped!.has(key({ ...use, ruleId: undefined }))) return true;
+  return use.origin === 'builtin' && use.ruleId !== undefined && shipped!.has(key(use));
+}
+
+let builtinIds: Set<string> | undefined;
+
+/** Whether Vigil ships a built-in rule with this id, for any platform. */
+export function isBuiltinRuleId(id: string): boolean {
+  load();
+  return builtinIds!.has(id);
+}
+
+function load(): void {
   if (!shipped) {
     const into = new Set<string>();
+    builtinIds = new Set();
     for (const t of TEMPLATE_PATTERNS)
       into.add(key({ field: t.field, op: 'regex', nocase: false, pattern: t.regex }));
     for (const input of [...builtinRulesFor('darwin'), ...builtinRulesFor('linux')]) {
       const r = DetectionRule.parse(input);
+      builtinIds.add(r.id);
       collect(r.id, r.condition, into);
       for (const x of r.exclusions) collect(r.id, x, into);
       for (const st of r.sequence?.steps ?? []) collect(r.id, st.condition, into);
     }
     shipped = into;
   }
-  if (use.op === 'regex' && shipped.has(key({ ...use, ruleId: undefined }))) return true;
-  return use.origin === 'builtin' && use.ruleId !== undefined && shipped.has(key(use));
 }
