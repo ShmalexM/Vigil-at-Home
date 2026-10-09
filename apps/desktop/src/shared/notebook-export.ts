@@ -1,4 +1,4 @@
-import type { DogNote, DogNoteKind, NoteToolCall, NoteUsage } from '../../shared/pack';
+import type { DogNote, DogNoteKind, NoteToolCall, NoteUsage } from './pack.js';
 
 export const NOTE_KIND: Record<DogNoteKind, string> = {
   chat: 'Chat',

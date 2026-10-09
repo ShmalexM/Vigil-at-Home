@@ -3,7 +3,6 @@ import type { RunRequest, RunResult } from '@vigil/ai';
 import type { PreflightReply } from '@vigil/core';
 import { describe, expect, it, vi } from 'vitest';
 import type { z } from 'zod';
-import { notesJson, notesMarkdown } from '../../renderer/src/notebook-export.js';
 import type { ToolListing } from '../agents/tools.js';
 import type { ConnectorHub, ConnectorRecord, RemoteTool } from './connectors.js';
 import { PackMemory } from './memory.js';
@@ -817,11 +816,12 @@ describe('the pack', () => {
       expect(job!.calls!.map((c) => c.outcome)).toEqual(['ran', 'failed']);
       const [chat] = pack.notes({ dog: 'lead' });
       expect(chat!.ask).toMatch(/^Is this key still good\?|withheld/);
-      for (const notes of [pack.notes({ dog: dog.id }), pack.notes({ dog: 'lead' })]) {
+      for (const id of [dog.id, 'lead']) {
         for (const text of [
-          JSON.stringify(notes),
-          notesMarkdown('Notebook', notes),
-          notesJson(undefined, notes),
+          JSON.stringify(pack.notes({ dog: id })),
+          pack.exportNotes({ dog: id }, 'md', 'Notebook'),
+          pack.exportNotes({ dog: id }, 'json', 'Notebook'),
+          pack.exportNotes({}, 'md', 'All notes'),
         ]) {
           expect(text).not.toContain(KEY);
           expect(text).not.toContain('sk-ant');
@@ -849,12 +849,55 @@ describe('the pack', () => {
       expect(notes[0]!.calls).toHaveLength(2);
       for (const text of [
         JSON.stringify(notes),
-        notesMarkdown('Notebook', notes),
-        notesJson(dog.id, notes),
+        pack.exportNotes({ dog: dog.id }, 'md', 'Notebook'),
+        pack.exportNotes({ dog: dog.id }, 'json', 'Notebook'),
       ]) {
         expect(text).not.toContain(PASSWORD);
         expect(text).not.toContain(TOKEN);
       }
+    });
+
+    it('keeps a token used as an object key out of Details and both Copy outputs', async () => {
+      const { pack, handlers } = setup({ vigilResult: { [KEY]: 'found', rows: [] } });
+      const dog = pack.adopt({ ...CREATE, tools: ['vigil.search_events'] } as never);
+      handlers.push(async (req) => {
+        await tool(req, 'search_events').run({ [KEY]: 1 });
+        return { summary: 'ok', findings: [] };
+      });
+      await pack.runDog(dog.id);
+      const notes = pack.notes({ dog: dog.id });
+      expect(notes[0]!.calls).toHaveLength(1);
+      // The rest of the result stays readable.
+      expect(notes[0]!.calls![0]!.result).toContain('"rows":[]');
+      for (const text of [
+        JSON.stringify(notes),
+        pack.exportNotes({ dog: dog.id }, 'md', 'Notebook'),
+        pack.exportNotes({ dog: dog.id }, 'json', 'Notebook'),
+      ]) {
+        expect(text).not.toContain(KEY);
+        expect(text).not.toContain('sk-ant');
+      }
+    });
+
+    it('keeps a dog named with a token out of the Markdown heading and the JSON export', async () => {
+      const { pack, handlers } = setup();
+      // Dog names are at most 32 characters.
+      const NAME = ['sk', 'ant', 'Abc123Def456Ghi789Jk'].join('-');
+      const dog = pack.adopt({ ...CREATE, name: NAME } as never);
+      expect(pack.dogs().find((d) => d.id === dog.id)!.name).toBe(NAME);
+      handlers.push(() => ({ summary: 'ok', findings: [] }));
+      await pack.runDog(dog.id);
+      // The sheet's title is the dog's name, as the page passes it.
+      const md = pack.exportNotes({ dog: dog.id }, 'md', `${NAME}’s notebook`);
+      const all = pack.exportNotes({}, 'md', 'Every note');
+      const json = pack.exportNotes({ dog: dog.id }, 'json', `${NAME}’s notebook`);
+      for (const text of [md, all, json]) {
+        expect(text).not.toContain(NAME);
+        expect(text).not.toContain('sk-ant');
+      }
+      expect(md.split('\n')[0]).toMatch(/^# /);
+      expect(md).toContain('Asked:');
+      expect(JSON.parse(json).notes).toHaveLength(1);
     });
 
     it('writes no risk check for a dog retired while the AI was rating its call', async () => {

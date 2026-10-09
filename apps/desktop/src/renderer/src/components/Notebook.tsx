@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom';
 import type { DogNote, NotesFilter, NoteToolCall } from '../../../shared/pack';
 import { vigil } from '../api';
 import { timeAgo } from '../format';
-import { CALL_OUTCOME, NOTE_KIND, notesJson, notesMarkdown, usageWords } from '../notebook-export';
+import { CALL_OUTCOME, NOTE_KIND, usageWords } from '../../../shared/notebook-export';
 import '../styles/pack.css';
 import { useDialogFocus } from './dialog-focus';
 import { Thinking } from './Thinking';
@@ -41,12 +41,11 @@ export function NotebookSheet({
   const box = useRef<HTMLDivElement>(null);
   useDialogFocus(box, onClose);
   const toast = useToast();
-  // Every note the notebook keeps (up to 200), not only the ones on screen.
+  // Every note the notebook keeps (up to 200), not only the ones on screen,
+  // rendered and redacted as a whole by the app, never here.
   const copy = async (as: 'md' | 'json') => {
-    const all = await vigil.listPackNotes({ ...(JSON.parse(key) as NotesFilter), limit: 200 });
-    await navigator.clipboard.writeText(
-      as === 'md' ? notesMarkdown(title, all, names ? { names } : {}) : notesJson(filter.dog, all),
-    );
+    const text = await vigil.exportPackNotes(JSON.parse(key) as NotesFilter, as, title);
+    await navigator.clipboard.writeText(text);
     toast({ text: as === 'md' ? 'Copied as Markdown' : 'Copied as JSON' });
   };
 

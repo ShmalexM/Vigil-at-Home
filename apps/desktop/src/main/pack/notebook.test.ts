@@ -249,6 +249,57 @@ describe('Notebook redaction', () => {
     expect(JSON.stringify(read)).not.toContain(KEY);
   });
 
+  it('withholds a token used as an object key, in the stored row and on read', () => {
+    const db = new DatabaseSync(':memory:');
+    const book = new Notebook(db);
+    const n = book.write({
+      ...NOTE,
+      calls: [
+        {
+          tool: 'vigil.search_events',
+          title: 'Vigil › Search events',
+          args: { [KEY]: 1 },
+          outcome: 'ran',
+          result: { [KEY]: 'found', nested: [{ [KEY]: true }], count: 2 },
+        },
+        {
+          tool: 'github.read',
+          title: 'GitHub › Read',
+          args: {},
+          outcome: 'ran',
+          // A connector's reply arrives as JSON text.
+          result: JSON.stringify({ [KEY]: 'found', count: 3 }),
+        },
+      ],
+    });
+    // An older row stored the key as it was.
+    db.prepare('INSERT INTO pack_notes (id, ts, dog, subject, body) VALUES (?, ?, ?, ?, ?)').run(
+      'old-3',
+      Date.now(),
+      'lead',
+      null,
+      JSON.stringify({
+        ...NOTE,
+        id: 'old-3',
+        at: Date.now(),
+        lookedAt: [],
+        reasons: [],
+        calls: [{ tool: 't', title: 't', args: '{}', outcome: 'ran', result: `{"${KEY}":1}` }],
+        [KEY]: 'top-level',
+      }),
+    );
+    const stored = db.prepare("SELECT body FROM pack_notes WHERE id != 'old-3'").all();
+    expect(JSON.stringify(stored)).not.toContain(KEY);
+    expect(JSON.stringify(n)).not.toContain(KEY);
+    // The rest of each result stays readable.
+    expect(n.calls![0]!.result).toContain('"count":2');
+    expect(n.calls![1]!.result).toContain('"count":3');
+    const listed = book.list();
+    expect(listed).toHaveLength(2);
+    expect(JSON.stringify(listed)).not.toContain(KEY);
+    expect(JSON.stringify(listed)).not.toContain('sk-ant');
+  });
+
   it('withholds values under credential-named keys, on write and on read', () => {
     const db = new DatabaseSync(':memory:');
     const book = new Notebook(db);

@@ -54,7 +54,13 @@ import type { ConnectorHub, RemoteTool } from './connectors.js';
 import type { Notebook } from './notebook.js';
 import { memoryTainted, type PackMemory, type PromptMemory } from './memory.js';
 import { afterJudge, gateAction, gateTool } from './gate.js';
-import { redactDataForPack, redactTextForPack } from './redaction.js';
+import { notesJson, notesMarkdown } from '../../shared/notebook-export.js';
+import {
+  redactDataForPack,
+  redactMarkdown,
+  redactSerialized,
+  redactTextForPack,
+} from './redaction.js';
 import {
   asksToRead,
   citesReference,
@@ -645,6 +651,20 @@ export class PackService {
   /** A dog's notes, newest first. Only for the person to read; nothing decides on them. */
   notes(filter: NotesFilter = {}): DogNote[] {
     return this.o.notebook?.list(filter) ?? [];
+  }
+
+  /**
+   * Up to 200 notes as Markdown or JSON for Copy, rendered here and redacted
+   * as a whole, so a heading, a title or a dog's name is covered as well as
+   * the notes themselves.
+   */
+  exportNotes(filter: NotesFilter, as: 'md' | 'json', title: string): string {
+    const notes = this.notes({ ...filter, limit: 200 });
+    if (as === 'json') return `${redactSerialized(JSON.parse(notesJson(filter.dog, notes)), 2)}\n`;
+    const names = filter.dog
+      ? undefined
+      : Object.fromEntries(this.dogs().map((d) => [d.id, d.name]));
+    return redactMarkdown(notesMarkdown(title, notes, names ? { names } : {}));
   }
 
   clearNotes(dog?: string): void {

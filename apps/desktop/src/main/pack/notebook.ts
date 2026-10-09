@@ -9,7 +9,7 @@ import type {
   NoteToolCallInput,
   NoteUsage,
 } from '../../shared/pack.js';
-import { redactDataForPack, redactTextForPack } from './redaction.js';
+import { redactDataForPack, redactSerialized, redactTextForPack } from './redaction.js';
 
 /** Notes older than this are dropped. */
 export const NOTE_DAYS = 30;
@@ -53,9 +53,12 @@ export class Notebook {
     this.prune();
   }
 
-  /** Every text field is redacted here, before it is cut to size or stored. */
+  /**
+   * Every text field is redacted here before it is cut to size, and the
+   * whole note again, keys included, as the text that is stored.
+   */
   write(input: DogNoteInput): DogNote {
-    const note: DogNote = {
+    const fields: DogNote = {
       id: newId(this.now()),
       at: this.now(),
       dog: input.dog,
@@ -74,18 +77,21 @@ export class Notebook {
       ...(input.calls?.length ? { calls: input.calls.slice(0, CALLS).map(call) } : {}),
       ...(input.usage ? { usage: usage(input.usage) } : {}),
     };
+    const body = redactSerialized(fields);
+    const note = JSON.parse(body) as DogNote;
     this.db
       .prepare('INSERT INTO pack_notes (id, ts, dog, subject, body) VALUES (?, ?, ?, ?, ?)')
-      .run(note.id, note.at, note.dog, subjectKey(note.subject), JSON.stringify(note));
-    this.trim(note.dog);
+      .run(fields.id, fields.at, fields.dog, subjectKey(fields.subject), body);
+    this.trim(fields.dog);
     this.onChange();
     return note;
   }
 
   /**
-   * Newest first. Redacted again on the way out, so notes written before a
-   * field was redacted, or before the redactor learned a secret, never reach
-   * the page or its Copy buttons as they were stored.
+   * Newest first. Each stored note is redacted again on the way out, keys
+   * included, so notes written before a field was redacted, or before the
+   * redactor learned a secret, never reach the page or its Copy buttons as
+   * they were stored.
    */
   list(filter: NotesFilter = {}): DogNote[] {
     const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
@@ -104,7 +110,7 @@ export class Notebook {
         `SELECT body FROM pack_notes WHERE ${where.join(' AND ')} ORDER BY ts DESC, id DESC LIMIT ?`,
       )
       .all(...args, limit) as { body: string }[];
-    return rows.map((r) => scrub(JSON.parse(r.body) as DogNote));
+    return rows.map((r) => JSON.parse(redactSerialized(JSON.parse(r.body))) as DogNote);
   }
 
   /** Notes per dog since a time, for the diary. */
@@ -179,31 +185,6 @@ function call(c: NoteToolCallInput): NoteToolCall {
     outcome: c.outcome,
     ...(c.reason ? { reason: clip(redactText(c.reason), 300) } : {}),
     ...(c.result !== undefined ? { result: clip(redactData(c.result), 800) } : {}),
-  };
-}
-
-/** A stored note redacted again, field by field, for reading. */
-function scrub(n: DogNote): DogNote {
-  return {
-    ...n,
-    ask: redactText(n.ask),
-    lookedAt: n.lookedAt.map(redactText),
-    answer: redactText(n.answer),
-    reasons: n.reasons.map(redactText),
-    ...(n.readReasons ? { readReasons: n.readReasons.map(redactText) } : {}),
-    ...(n.thinking !== undefined ? { thinking: redactText(n.thinking) } : {}),
-    ...(n.calls
-      ? {
-          calls: n.calls.map((c) => ({
-            ...c,
-            tool: redactText(c.tool),
-            title: redactText(c.title),
-            args: redactText(c.args),
-            ...(c.reason !== undefined ? { reason: redactText(c.reason) } : {}),
-            ...(c.result !== undefined ? { result: redactText(c.result) } : {}),
-          })),
-        }
-      : {}),
   };
 }
 

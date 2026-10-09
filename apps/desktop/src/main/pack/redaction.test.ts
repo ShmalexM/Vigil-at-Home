@@ -1,6 +1,12 @@
 import { MAX_REDACT_CHARS, REDACTED, WITHHELD } from '@vigil/ai/redact';
 import { describe, expect, it } from 'vitest';
-import { redactDataForPack, redactForPack, redactTextForPack } from './redaction.js';
+import {
+  redactDataForPack,
+  redactForPack,
+  redactMarkdown,
+  redactSerialized,
+  redactTextForPack,
+} from './redaction.js';
 
 /** Joined at run time so code scanning doesn't take the samples for real keys. */
 const KEY = ['sk', 'ant', 'Abc123Def456Ghi789Jkl012Mno'].join('-');
@@ -36,5 +42,22 @@ describe('the pack’s redaction', () => {
       },
     };
     expect(JSON.stringify(redactForPack(throws))).toContain(WITHHELD);
+  });
+});
+
+describe('the pack’s sinks', () => {
+  it('redacts keys too, and JSON text inside a value as data', () => {
+    const text = redactSerialized({ [KEY]: 1, result: JSON.stringify({ [KEY]: 'x', n: 2 }) });
+    expect(text).not.toContain(KEY);
+    expect(JSON.parse(text)).toMatchObject({ result: expect.stringContaining('"n":2') });
+  });
+
+  it('leaves clean Markdown alone, and keeps a withheld line’s heading marker', () => {
+    const clean = '# Pip’s notebook\n\n**Asked:** what ran?';
+    expect(redactMarkdown(clean)).toBe(clean);
+    const out = redactMarkdown(`# ${KEY}’s notebook\n\n**Asked:** what ran?`);
+    expect(out).not.toContain(KEY);
+    expect(out).toMatch(/^# /);
+    expect(out).toContain('**Asked:** what ran?');
   });
 });

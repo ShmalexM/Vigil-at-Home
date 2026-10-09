@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { DogNote } from '../../shared/pack';
-import { notesJson, notesMarkdown, usageWords } from './notebook-export';
+import type { DogNote } from './pack.js';
+import { notesJson, notesMarkdown, usageWords } from './notebook-export.js';
 
 const NOTE: DogNote = {
   id: 'n1',

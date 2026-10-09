@@ -145,13 +145,19 @@ or failed, and the first 800 characters of what it returned. Every field of
 a note (what was asked, the answer, reasons, tool titles, error text, and the
 arguments and results as data, before they are written out as text) goes
 through Vigil's redactor before it is stored, and is cut to size only after
-that. Notes are redacted again each time they are read for the page, so the
-Copy buttons and older notes get the same treatment. It also shows the model and, from the Usage page's ledger, the tokens
+that. The whole note is then redacted again as the text that is stored,
+object keys included (the shared redactor keeps keys, so the pack redacts
+each one too, and reads a result that is JSON text as data). Notes are
+redacted the same way each time they are read for the page, so older notes
+get the same treatment. It also shows the model and, from the Usage page's ledger, the tokens
 and estimated cost of the attempt that answered. Notes from before this was
 added simply have no Details.
 
 **Copy as Markdown** and **Copy JSON** at the bottom of the sheet copy up to
-the 200 newest notes in it to the clipboard, for an issue or a file.
+the 200 newest notes in it to the clipboard, for an issue or a file. The app
+renders the export and redacts the finished Markdown or JSON as a whole, so
+the heading, the sheet's title and dog names are covered too; where the whole
+Markdown would be withheld, each line is redacted on its own instead.
 
 ## Memory
 
