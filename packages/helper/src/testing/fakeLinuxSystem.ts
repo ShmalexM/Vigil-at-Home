@@ -12,7 +12,7 @@ interface FakeRule {
 /** Scripted stand-in for Linux: /proc, nftables and systemctl. */
 export class FakeLinuxSystem implements System {
   readonly platform = 'linux' as const;
-  readonly runs: { bin: BinaryName; args: string[]; input?: string | undefined }[] = [];
+  readonly runs: { bin: BinaryName; args: string[]; input?: string | Buffer | undefined }[] = [];
   readonly signals: { pid: number; signal: string }[] = [];
   readonly processes = new Map<number, FakeProcess>();
   readonly rules: FakeRule[] = [];
@@ -23,7 +23,14 @@ export class FakeLinuxSystem implements System {
   private nextHandle = 2;
   console: number | undefined = 1000;
 
-  async run(bin: BinaryName, args: string[], opts: { input?: string } = {}): Promise<RunResult> {
+  async run(
+    bin: BinaryName,
+    args: string[],
+    opts: { input?: string | Buffer } = {},
+  ): Promise<RunResult> {
+    // ACL reads (commands/transfer.ts) are answered without being logged: no ACLs here.
+    if (bin === 'ls')
+      return { code: 0, stdout: `d--------- 1 root wheel 0 ${args.at(-1)}\n`, stderr: '' };
     this.runs.push({ bin, args, input: opts.input });
     if (bin === 'nft' && args.length === 1) return this.nftScript(args[0]!);
     const ok = (stdout = ''): RunResult => ({ code: 0, stdout, stderr: '' });

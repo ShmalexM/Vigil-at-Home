@@ -170,6 +170,13 @@ export class HelperLink
           errorCode: 'installer-owned',
         };
       }
+      if (err instanceof HelperCallError && err.code === 'owner-cannot-write') {
+        return {
+          at: Date.now(),
+          error: 'Not done: its owner can’t write there',
+          errorCode: 'owner-cannot-write',
+        };
+      }
       const error =
         err instanceof HelperCallError && err.code === 'refused'
           ? `Not done: ${err.message}`

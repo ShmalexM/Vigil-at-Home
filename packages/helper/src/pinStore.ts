@@ -220,10 +220,14 @@ export class AppPinStore {
   /**
    * Put back what the helper keeps, from memory, when a file is no longer
    * the one it left (replaced, moved away or gone). Writes the pin in force
-   * when its turn in the queue comes.
+   * when its turn in the queue comes, after reading the file again: a valid
+   * signed pin there that is newer than memory is adopted instead.
    */
   repair(): Promise<void> {
     return this.enqueue(async () => {
+      // A newer pin the helper signed (pin-app, say) is adopted, never overwritten.
+      this.seen = undefined;
+      this.refresh();
       const keyId = this.ids.get(this.keyFile);
       if (this.key && keyId !== undefined && lstatId(this.keyFile) !== keyId) {
         const key = this.key;

@@ -4,7 +4,7 @@ import {
   actionErrorText,
   activeContainment,
   containLabel,
-  installerOwnedNote,
+  refusalNote,
   keepLabel,
   releaseLabel,
   releaseStep,
@@ -88,7 +88,7 @@ describe('a quarantine an installer’s ownership stopped', () => {
 
   it('says the app is blocked only when this alert blocked it', () => {
     const q = refused(app);
-    expect(installerOwnedNote(q, [q, santaBlock()])).toBe(
+    expect(refusalNote(q, [q, santaBlock()])).toBe(
       'Vigil blocked this app from running but can’t move apps an installer put in Applications. Drag it to the Trash to remove it.',
     );
     // No block, a failed one, or one undone since: no claim.
@@ -97,11 +97,11 @@ describe('a quarantine an installer’s ownership stopped', () => {
       [santaBlock({ status: 'failed' })],
       [santaBlock({ status: 'undone' })],
     ])
-      expect(installerOwnedNote(q, [q, ...others])).toBe(
+      expect(refusalNote(q, [q, ...others])).toBe(
         'Vigil can’t move apps an installer put in Applications. Drag it to the Trash to remove it.',
       );
     expect(
-      installerOwnedNote(q, [
+      refusalNote(q, [
         q,
         santaBlock({
           action: {
@@ -117,7 +117,7 @@ describe('a quarantine an installer’s ownership stopped', () => {
 
   it('uses the generic line for something that is not an app', () => {
     const q = refused('/tmp/shared/helper.sh');
-    expect(installerOwnedNote(q, [q, santaBlock()])).toBe(
+    expect(refusalNote(q, [q, santaBlock()])).toBe(
       'Vigil can’t move this item because it belongs to the system. Remove it yourself if you don’t need it.',
     );
   });
@@ -127,11 +127,23 @@ describe('a quarantine an installer’s ownership stopped', () => {
       { kind: 'file.quarantine', path: '/tmp/x' },
       { status: 'failed', result: { at: 1, error: 'boom' } },
     );
-    expect(installerOwnedNote(plain, [plain])).toBeUndefined();
+    expect(refusalNote(plain, [plain])).toBeUndefined();
     expect(actionErrorText(plain, [plain])).toBe('boom');
     const q = refused(app);
     const elsewhere = santaBlock({ alertId: 'other' });
     expect(sameAlert([q, elsewhere], q)).toEqual([q]);
     expect(actionErrorText(q, sameAlert([q, elsewhere], q))).not.toMatch(/blocked/);
+  });
+});
+
+describe('a restore its owner can’t write back', () => {
+  it('shows one calm line for it', () => {
+    const r = rec(
+      { kind: 'file.restore', quarantineId: 'q1' },
+      { status: 'failed', result: { at: 1, error: 'x', errorCode: 'owner-cannot-write' } },
+    );
+    expect(actionErrorText(r, [r])).toBe(
+      'Vigil can’t put this back because its owner can’t write to that folder.',
+    );
   });
 });

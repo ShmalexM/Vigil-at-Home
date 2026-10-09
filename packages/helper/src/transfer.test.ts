@@ -18,13 +18,19 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  childCommand,
-  rootOnly,
   actorFor,
-  transfer,
+  childCommand,
+  macAclLetsOthersWrite,
+  readAs,
+  rootOnly,
   self,
+  transfer,
   type Actor,
 } from './commands/transfer.js';
+import { disablePersistence } from './commands/persistence.js';
+import { daemonAnswers } from './socketProbe.js';
+import { createServer } from 'node:net';
+import { FakeSystem } from './testing/fakeSystem.js';
 import { quarantine, restore, type QuarantineOptions } from './commands/quarantine.js';
 import { AppPinStore } from './pinStore.js';
 import { realSystem, type RunResult, type System } from './system.js';
@@ -165,15 +171,60 @@ function readdirNames(path: string): string[] {
 }
 
 describe('who acts on a path', () => {
-  it('is root only when every folder above is root’s alone', () => {
-    expect(rootOnly('/')).toBe(true);
-    expect(rootOnly(tmpdir())).toBe(false); // writable by everyone, and the last folder
+  const linux = new FakeLinuxSystem();
+  it('is root only when every folder above is root’s alone', async () => {
+    expect(await rootOnly(linux, '/')).toBe(true);
+    expect(await rootOnly(linux, tmpdir())).toBe(false); // writable by everyone, and the last folder
     if (isRoot) {
       // /tmp is sticky: a root-owned folder in it is root's alone.
-      expect(rootOnly(root)).toBe(true);
+      expect(await rootOnly(linux, root)).toBe(true);
+      // A POSIX ACL granting a named user write shows as group write (its mask).
+      chmodSync(root, 0o770);
+      expect(await rootOnly(linux, root)).toBe(false);
       chmodSync(root, 0o777);
-      expect(rootOnly(root)).toBe(false);
+      expect(await rootOnly(linux, root)).toBe(false);
     }
+  });
+
+  it('reads macOS ACLs: an entry letting anyone but root write makes a folder not root’s alone', async () => {
+    const ls = (path: string, acl: string) =>
+      `drwxr-xr-x+ 3 root  wheel  96 Jan  1 00:00 ${path}\n${acl}`;
+    expect(macAclLetsOthersWrite(ls('/x', ' 0: group:everyone deny delete\n'))).toBe(false);
+    expect(macAclLetsOthersWrite(ls('/x', ' 0: user:root allow add_file,delete_child\n'))).toBe(
+      false,
+    );
+    for (const acl of [
+      ' 0: group:staff allow add_file\n',
+      ' 0: user:alex inherited allow list,add_subdirectory\n',
+      ' 0: group:everyone deny delete\n 1: user:Some Name allow delete_child\n',
+      ' 0: group:admin allow writesecurity\n',
+    ])
+      expect(macAclLetsOthersWrite(ls('/x', acl)), acl).toBe(true);
+    // Through rootOnly: one component with such an ACL, or one whose ACL can't be read.
+    const mac = (answer: (path: string) => RunResult) =>
+      ({
+        platform: 'darwin',
+        run: async (_bin: string, args: string[]) => answer(args.at(-1)!),
+      }) as unknown as System;
+    const ok = (out: string): RunResult => ({ code: 0, stdout: out, stderr: '' });
+    expect(
+      await rootOnly(
+        mac((p) => ok(ls(p, ''))),
+        '/',
+      ),
+    ).toBe(true);
+    expect(
+      await rootOnly(
+        mac((p) => ok(ls(p, ' 0: group:staff allow write\n'))),
+        '/',
+      ),
+    ).toBe(false);
+    expect(
+      await rootOnly(
+        mac(() => ({ code: 1, stdout: '', stderr: 'no' })),
+        '/',
+      ),
+    ).toBe(false);
   });
 
   it.skipIf(!isRoot)(
@@ -362,5 +413,152 @@ describe('transfer', () => {
     rmSync(home, { recursive: true });
     await restore(sys, rec, opts);
     expect(readFileSync(join(home, 'evil'), 'utf8')).toBe('x');
+  });
+});
+
+describe('a root folder with something others can change inside', () => {
+  it.skipIf(!isRoot)('is not root’s to move', async () => {
+    const sys = realSystem(undefined, 'linux');
+    chmodSync(root, 0o755);
+    const item = join(root, 'svc');
+    mkdirSync(join(item, 'inner'), { recursive: true });
+    expect(await actorFor(sys, item)).toEqual({ uid: 0, gid: 0 });
+    chmodSync(join(item, 'inner'), 0o777);
+    await expect(actorFor(sys, item)).rejects.toMatchObject({ code: 'installer-owned' });
+  });
+});
+
+describe('restoring what a user owns', () => {
+  it.skipIf(!isRoot)('restores a user’s folder as that user, never as root', async () => {
+    const sys = realSystem(undefined, 'linux');
+    chmodSync(root, 0o755);
+    const home = join(root, 'home');
+    mkdirSync(home);
+    chownSync(home, NOBODY, NOBODY);
+    const app = join(home, 'Tool');
+    mkdirSync(join(app, 'bin'), { recursive: true });
+    writeFileSync(join(app, 'bin', 'run'), 'x');
+    spawnSync('chown', ['-R', `${NOBODY}:${NOBODY}`, app]);
+    const opts: QuarantineOptions = {
+      quarantineDir: join(root, 'Quarantine'),
+      platform: 'linux',
+      protectedPrefixes: [],
+    };
+    const rec = await quarantine(sys, app, 'r1', opts);
+    await restore(sys, rec, opts);
+    for (const p of [app, join(app, 'bin'), join(app, 'bin', 'run')])
+      expect(statSync(p).uid, p).toBe(NOBODY);
+  });
+
+  it.skipIf(!isRoot)(
+    'refuses, calmly, when the owner can’t write where it goes back (records from before too)',
+    async () => {
+      const sys = realSystem(undefined, 'linux');
+      chmodSync(root, 0o755);
+      // A record as the old code left it: the user's tree renamed into the store as it was.
+      const q = join(root, 'Quarantine');
+      mkdirSync(join(q, 'old'), { recursive: true, mode: 0o700 });
+      const stored = join(q, 'old', 'agent');
+      mkdirSync(stored);
+      writeFileSync(join(stored, 'x.plist'), 'x');
+      spawnSync('chown', ['-R', `${NOBODY}:${NOBODY}`, stored]);
+      const sysDir = join(root, 'etc');
+      mkdirSync(sysDir);
+      const rec = {
+        originalPath: join(sysDir, 'agent'),
+        storedPath: stored,
+        mode: 0o755,
+        uid: NOBODY,
+        gid: NOBODY,
+        isDirectory: true,
+      };
+      const opts: QuarantineOptions = {
+        quarantineDir: q,
+        platform: 'linux',
+        protectedPrefixes: [],
+      };
+      await expect(restore(sys, rec, opts)).rejects.toMatchObject({ code: 'owner-cannot-write' });
+      expect(existsSync(rec.originalPath)).toBe(false);
+      expect(existsSync(join(stored, 'x.plist'))).toBe(true);
+      // More than one owner: refused before anything is placed.
+      chownSync(join(stored, 'x.plist'), NOBODY - 1, NOBODY - 1);
+      await expect(restore(sys, rec, opts)).rejects.toMatchObject({ code: 'owner-cannot-write' });
+    },
+  );
+
+  it('gives owners last, once nothing more is written beneath them', () => {
+    // Run as the tests' own user, the placer gives no owners at all; as root it gives them at the end.
+    const dest = join(root, 'placed');
+    const uid = isRoot ? NOBODY : me.uid;
+    const a = archive([
+      { ...dir(''), uid, gid: uid },
+      { t: 'f', rel: 'f', mode: 0o644, uid, gid: uid, mtime: '0', size: 1 },
+      Buffer.from('x'),
+      { t: 'end' },
+    ]);
+    const r = child({ op: 'place', path: dest, owners: true, ...me }, a);
+    expect(r.err).toBe('');
+    expect(statSync(dest).uid).toBe(uid);
+    expect(statSync(join(dest, 'f')).uid).toBe(uid);
+  });
+});
+
+describe('the daemon lock for pin-app', () => {
+  it('sees a daemon on the socket, and none when nothing listens', async () => {
+    const sock = join(root, 'helper.sock');
+    expect(await daemonAnswers(sock)).toBe(false);
+    const server = createServer(() => undefined);
+    await new Promise<void>((r) => server.listen(sock, r));
+    try {
+      expect(await daemonAnswers(sock)).toBe(true);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+    expect(await daemonAnswers(sock)).toBe(false);
+  });
+});
+
+describe('startup items are read as the path’s user', () => {
+  const launch = () => {
+    const dir = join(root, 'LaunchAgents');
+    mkdirSync(dir);
+    return dir;
+  };
+  const opts = (): QuarantineOptions => ({
+    quarantineDir: join(root, 'Quarantine'),
+    protectedPrefixes: [],
+    protectedExact: new Set(),
+  });
+
+  it('hands plutil the bytes, never the path', async () => {
+    const dir = launch();
+    const plist = join(dir, 'com.evil.agent.plist');
+    writeFileSync(plist, '<plist/>');
+    const sys = new FakeSystem();
+    sys.labels.set(plist, 'com.evil.agent');
+    const rec = await disablePersistence(sys, plist, 'p1', opts(), /LaunchAgents$/);
+    expect(rec.label).toBe('com.evil.agent');
+    const plutil = sys.runs.filter((r) => r.bin === 'plutil');
+    expect(plutil.map((r) => r.args)).toEqual([['-extract', 'Label', 'raw', '-o', '-', '-']]);
+    expect(Buffer.from(plutil[0]!.input ?? '').toString()).toBe('<plist/>');
+  });
+
+  it('refuses a link or a FIFO in place of the plist, promptly', async () => {
+    const dir = launch();
+    writeFileSync(join(root, 'secret'), 'x');
+    symlinkSync(join(root, 'secret'), join(dir, 'link.plist'));
+    spawnSync('mkfifo', [join(dir, 'fifo.plist')]);
+    const sys = new FakeSystem();
+    const t0 = Date.now();
+    for (const name of ['link.plist', 'fifo.plist'])
+      await expect(
+        disablePersistence(sys, join(dir, name), 'p2', opts(), /LaunchAgents$/),
+      ).rejects.toMatchObject({ code: 'refused' });
+    expect(Date.now() - t0).toBeLessThan(5000);
+    expect(sys.runs).toEqual([]);
+    // The read itself: as the given user, a link is never followed.
+    await expect(readAs(self(), join(dir, 'link.plist'))).rejects.toMatchObject({
+      code: 'refused',
+    });
   });
 });

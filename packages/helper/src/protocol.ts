@@ -158,8 +158,12 @@ export interface HelperRequest {
  * `installer-owned`: a refusal to move an item root owns in a folder others
  * can write to, like an app a package installed in /Applications
  * (commands/transfer.ts). The app words it for the user.
+ * `owner-cannot-write`: a restore refused because the item's owner can't
+ * write where it goes back, or it has more than one owner; restores run as
+ * the item's owner (commands/quarantine.ts).
  */
-export type ErrorCode = 'invalid' | 'refused' | 'failed' | 'not_found' | 'installer-owned';
+export type ErrorCode =
+  'invalid' | 'refused' | 'failed' | 'not_found' | 'installer-owned' | 'owner-cannot-write';
 
 export type HelperResponse =
   | { id: string; ok: true; result: unknown }

@@ -11,7 +11,7 @@
 // fallback across disks: the archive is the same either way.
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { lstatSync, realpathSync, type Stats } from 'node:fs';
+import { lstatSync, readdirSync, realpathSync, type Stats } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { System } from '../system.js';
@@ -57,24 +57,77 @@ function realExisting(path: string): string {
   }
 }
 
+/** ACL permissions that let a principal add, remove, rename or rewrite entries, or change who may. */
+const ACL_WRITE = new Set([
+  'write',
+  'append',
+  'add_file',
+  'add_subdirectory',
+  'delete_child',
+  'delete',
+  'writesecurity',
+  'chown',
+]);
+
+/**
+ * macOS: whether `ls -led` output gives anyone but root a way to change the
+ * folder. Each ACL line reads "<n>: <kind>:<name> [inherited] allow|deny
+ * <perm>,<perm>...". Deny entries take nothing away from this answer.
+ */
+export function macAclLetsOthersWrite(lsOutput: string): boolean {
+  for (const line of lsOutput.split('\n').slice(1)) {
+    const m = /^\s*\d+:\s+(.+?)\s+(?:inherited\s+)?(allow|deny)\s+(\S+)\s*$/.exec(line);
+    if (!m) continue;
+    if (m[2] !== 'allow' || m[1] === 'user:root') continue;
+    if (m[3]!.split(',').some((p) => ACL_WRITE.has(p))) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether an ACL on folder `dir` lets someone other than root change it.
+ *
+ *   macOS   read with `ls -ledP` (fixed argv) and parsed; an ACL that can't
+ *           be read counts as letting others write.
+ *   Linux   POSIX ACLs need no separate read: with an ACL, the group bits of
+ *           the mode are its mask, which caps every named user and group
+ *           entry (and the owning group), so a mode without group or other
+ *           write (checked by the caller) means no ACL entry can write.
+ */
+async function aclLetsOthersWrite(sys: System, dir: string): Promise<boolean> {
+  if (sys.platform === 'linux') return false;
+  const r = await sys.run('ls', ['-ledP', dir]);
+  if (r.code !== 0) return true;
+  return macAclLetsOthersWrite(r.stdout);
+}
+
+/** Root's alone, by mode: root-owned; writable by no one else, or (above the last) sticky. */
+function rootOnlyMode(st: Stats, last: boolean): boolean {
+  if (st.uid !== 0) return false;
+  if ((st.mode & 0o022) === 0) return true;
+  return !last && (st.mode & 0o1000) !== 0;
+}
+
 /**
  * Whether every folder from / to `dir` is root's alone: each a real folder
- * owned by root. `dir` itself is writable by no one else; a folder above it
- * may be only when sticky (like /tmp), where no one else can rename or
- * remove the root-owned folder below it.
+ * owned by root, with no ACL letting anyone else write to it. `dir` itself
+ * is writable by no one else; a folder above it may be only when sticky
+ * (like /tmp), where no one else can rename or remove the root-owned folder
+ * below it.
  */
-export function rootOnly(dir: string): boolean {
+export async function rootOnly(sys: System, dir: string): Promise<boolean> {
   const all = folders(dir);
-  return all.every((f, i) => {
+  for (const [i, f] of all.entries()) {
+    let st;
     try {
-      const st = lstatSync(f);
-      if (!st.isDirectory() || st.uid !== 0) return false;
-      if ((st.mode & 0o022) === 0) return true;
-      return i < all.length - 1 && (st.mode & 0o1000) !== 0;
+      st = lstatSync(f);
     } catch {
       return false;
     }
-  });
+    if (!st.isDirectory() || !rootOnlyMode(st, i === all.length - 1)) return false;
+    if (await aclLetsOthersWrite(sys, f)) return false;
+  }
+  return true;
 }
 
 /**
@@ -83,26 +136,56 @@ export function rootOnly(dir: string): boolean {
  * every folder among them is root's alone as in rootOnly. A path through a
  * user's folder or link is a user's path wherever it ends up.
  */
-export function rootOnlyAsWritten(dir: string): boolean {
-  const all = folders(dir);
-  const existing: { st: Stats }[] = [];
-  for (const f of all) {
+export async function rootOnlyAsWritten(sys: System, dir: string): Promise<boolean> {
+  const existing: { path: string; st: Stats }[] = [];
+  for (const f of folders(dir)) {
     try {
-      existing.push({ st: lstatSync(f) });
+      existing.push({ path: f, st: lstatSync(f) });
     } catch {
       break;
     }
   }
-  return existing.every(({ st }, i) => {
+  for (const [i, { path, st }] of existing.entries()) {
     if (st.uid !== 0) return false;
-    if (st.isSymbolicLink()) return true;
-    if (!st.isDirectory()) return false;
-    if ((st.mode & 0o022) === 0) return true;
-    return i < existing.length - 1 && (st.mode & 0o1000) !== 0;
-  });
+    if (st.isSymbolicLink()) continue;
+    if (!st.isDirectory() || !rootOnlyMode(st, i === existing.length - 1)) return false;
+    if (await aclLetsOthersWrite(sys, path)) return false;
+  }
+  return true;
 }
 
-async function groupOf(sys: System, uid: number): Promise<number> {
+/** At most this many folders are checked inside an item root would move; more is refused. */
+const TREE_MAX = 2000;
+
+/**
+ * Whether every folder in the tree at `dir` (itself included, links not
+ * followed) is root's alone as rootOnly asks of the last folder, so root
+ * walking and emptying it can't be redirected.
+ */
+async function treeRootOnly(sys: System, dir: string): Promise<boolean> {
+  const stack = [dir];
+  let seen = 0;
+  while (stack.length) {
+    const d = stack.pop()!;
+    if (++seen > TREE_MAX) return false;
+    let st;
+    try {
+      st = lstatSync(d);
+    } catch {
+      return false;
+    }
+    if (!st.isDirectory()) continue;
+    if (!rootOnlyMode(st, true) || (await aclLetsOthersWrite(sys, d))) return false;
+    try {
+      for (const name of readdirSync(d)) stack.push(join(d, name));
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+export async function groupOf(sys: System, uid: number): Promise<number> {
   if (uid === process.getuid?.()) return process.getgid?.() ?? 0;
   const r = await sys.run('id', ['-g', String(uid)]);
   const gid = Number(r.stdout.trim());
@@ -134,11 +217,13 @@ export async function actorFor(sys: System, path: string): Promise<Actor> {
   } catch {
     item = undefined;
   }
-  // A user's folder inside root's is still the user's to change.
+  // A user's folder inside root's is still the user's to change, and so is
+  // a root folder with anything inside it others can change.
   if (
-    rootOnlyAsWritten(dirname(path)) &&
-    rootOnly(parent) &&
-    !(item?.isDirectory() && item.uid !== 0)
+    !(item?.isDirectory() && item.uid !== 0) &&
+    (await rootOnlyAsWritten(sys, dirname(path))) &&
+    (await rootOnly(sys, parent)) &&
+    (!item?.isDirectory() || (await treeRootOnly(sys, path)))
   )
     return { uid: 0, gid: 0 };
   let uid = lstatSync(parent).uid;
@@ -151,6 +236,33 @@ export async function actorFor(sys: System, path: string): Promise<Actor> {
     uid = item.uid;
   }
   return { uid, gid: await groupOf(sys, uid) };
+}
+
+/** One small regular file, read by `actor` without following a link (fsChild read). */
+export async function readAs(
+  actor: Actor,
+  path: string,
+): Promise<{ uid: number; gid: number; mode: number; data: Buffer }> {
+  const run = start({ op: 'read', path, uid: actor.uid, gid: actor.gid });
+  const chunks: Buffer[] = [];
+  run.child.stdout!.on('data', (c: Buffer) => chunks.push(c));
+  run.child.stdin!.end();
+  const r = await run.done;
+  if (r.code !== 0) {
+    if (/ENOENT/.test(r.message)) throw new ActionError('not_found', `${path} does not exist`);
+    throw new ActionError('refused', `could not read ${path}: ${r.message}`);
+  }
+  const buf = Buffer.concat(chunks);
+  const nl = buf.indexOf(10);
+  const head = JSON.parse(buf.subarray(0, nl).toString('utf8')) as {
+    uid: number;
+    gid: number;
+    mode: number;
+    size: number;
+  };
+  const data = buf.subarray(nl + 1);
+  if (data.length !== head.size) throw new ActionError('failed', `could not read ${path}`);
+  return { uid: head.uid, gid: head.gid, mode: head.mode, data };
 }
 
 interface Run {

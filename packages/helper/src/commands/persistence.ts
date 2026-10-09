@@ -3,7 +3,7 @@
 // Undo moves the plist back and loads it again.
 
 import { basename, dirname } from 'node:path';
-import { lstatSync, readFileSync } from 'node:fs';
+import { actorFor, readAs } from './transfer.js';
 import type { System } from '../system.js';
 import { ActionError } from './errors.js';
 import {
@@ -40,8 +40,11 @@ export function launchdDomain(
   return `gui/${ownerUid}`;
 }
 
-async function readLabel(sys: System, path: string): Promise<string | undefined> {
-  const r = await sys.run('plutil', ['-extract', 'Label', 'raw', '-o', '-', path]);
+async function readLabel(sys: System, plist: Buffer): Promise<string | undefined> {
+  // From stdin: plutil never opens a path here.
+  const r = await sys.run('plutil', ['-extract', 'Label', 'raw', '-o', '-', '-'], {
+    input: plist,
+  });
   const label = r.stdout.trim();
   // Labels are reverse-DNS style; refuse anything that could confuse launchctl.
   return r.code === 0 && /^[A-Za-z0-9._-]{1,255}$/.test(label) ? label : undefined;
@@ -61,18 +64,12 @@ export async function disablePersistence(
     );
   }
   // Vetted before launchd is touched, so a protected file is never even unloaded.
-  resolveTarget(path, opts);
-  let st;
-  try {
-    st = lstatSync(path);
-  } catch {
-    throw new ActionError('not_found', `${path} does not exist`);
-  }
-  if (!st.isFile()) throw new ActionError('refused', `${path} is not a regular file`);
-  readFileSync(path); // readable
+  const real = resolveTarget(path, opts);
+  // Read as whoever controls the path (commands/transfer.ts), never by root through it.
+  const file = await readAs(await (opts.actorFor ?? actorFor)(sys, real), real);
 
-  const label = await readLabel(sys, path);
-  const domain = launchdDomain(path, st.uid, sys.consoleUid());
+  const label = await readLabel(sys, file.data);
+  const domain = launchdDomain(path, file.uid, sys.consoleUid());
   let wasLoaded = false;
   if (label) {
     const print = await sys.run('launchctl', ['print', `${domain}/${label}`]);

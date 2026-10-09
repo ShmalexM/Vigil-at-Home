@@ -51,13 +51,13 @@ function programBlocked(actions: readonly ActionRecord[]): boolean {
 
 /**
  * The one line shown where the user asked for a quarantine the helper
- * refused because an installer or the system owns the item. It says the
- * app is blocked only when this alert really blocked it.
+ * refused because an installer or the system owns the item (it says the
+ * app is blocked only when this alert really blocked it), or for a restore
+ * refused because the item's owner can't write where it goes back.
  */
-export function installerOwnedNote(
-  r: ActionRecord,
-  actions: readonly ActionRecord[],
-): string | undefined {
+export function refusalNote(r: ActionRecord, actions: readonly ActionRecord[]): string | undefined {
+  if (r.result?.errorCode === 'owner-cannot-write')
+    return 'Vigil can’t put this back because its owner can’t write to that folder.';
   if (r.action.kind !== 'file.quarantine' || r.result?.errorCode !== 'installer-owned') return;
   if (!inAppBundle(r.action.path))
     return 'Vigil can’t move this item because it belongs to the system. Remove it yourself if you don’t need it.';
@@ -71,7 +71,7 @@ export function actionErrorText(
   r: ActionRecord,
   actions: readonly ActionRecord[],
 ): string | undefined {
-  return installerOwnedNote(r, actions) ?? r.result?.error;
+  return refusalNote(r, actions) ?? r.result?.error;
 }
 
 /** The actions taken for the same alert as `r` (just `r` when it answers none). */

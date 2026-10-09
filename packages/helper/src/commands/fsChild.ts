@@ -20,6 +20,11 @@
 //          or written through. Missing parent folders are made when asked.
 //          If anything fails, it removes what it created, each only while
 //          it is still the device and inode it created, and nothing else.
+//          As root, owners are given last, deepest first, once nothing more
+//          is written beneath them.
+//   read   Write one small regular file's owner, mode and bytes to stdout,
+//          read through one descriptor opened without following a link
+//          and without blocking.
 //
 // Archive: frames of one JSON line, followed for a file by exactly `size`
 // bytes. The last frame is {"t":"end"}. Failures exit non-zero with one
@@ -52,7 +57,7 @@ import {
 import { dirname, isAbsolute, join, normalize } from 'node:path';
 
 export interface FsRequest {
-  op: 'pack' | 'place';
+  op: 'pack' | 'place' | 'read';
   path: string;
   /** Who to run as. */
   uid: number;
@@ -356,8 +361,10 @@ export function place(req: FsRequest, input: FdReader): void {
   const created: Created[] = [];
   const dirs: { path: string; mode: number; mtime: string }[] = [];
   const asRoot = process.getuid?.() === 0;
-  const chown = (fn: () => void) => {
-    if (req.owners && asRoot) fn();
+  /** Owners to give once everything is written, in the order things were made. */
+  const owners: { path: string; uid: number; gid: number; kind: 'd' | 'f' | 'l' }[] = [];
+  const chown = (path: string, frame: { uid: number; gid: number; t: 'd' | 'f' | 'l' }) => {
+    if (req.owners && asRoot) owners.push({ path, uid: frame.uid, gid: frame.gid, kind: frame.t });
   };
   try {
     if (req.parents) makeParents(req.path, created);
@@ -382,12 +389,12 @@ export function place(req: FsRequest, input: FdReader): void {
         mkdirSync(path, 0o700);
         created.push({ path, id: idOf(lstatSync(path, { bigint: true })), dir: true });
         madeDirs.add(frame.rel);
-        chown(() => lchownSync(path, frame.uid, frame.gid));
+        chown(path, frame);
         dirs.push({ path, mode, mtime: frame.mtime });
       } else if (frame.t === 'l') {
         symlinkSync(frame.target, path);
         created.push({ path, id: idOf(lstatSync(path, { bigint: true })), dir: false });
-        chown(() => lchownSync(path, frame.uid, frame.gid));
+        chown(path, frame);
       } else {
         const fd = openSync(
           path,
@@ -403,7 +410,7 @@ export function place(req: FsRequest, input: FdReader): void {
             writeAll(fd, chunk);
             left -= chunk.length;
           }
-          chown(() => fchownSync(fd, frame.uid, frame.gid));
+          chown(path, frame);
           fchmodSync(fd, mode);
           const t = nsToDate(frame.mtime);
           futimesSync(fd, t, t);
@@ -422,9 +429,66 @@ export function place(req: FsRequest, input: FdReader): void {
         throw new Refusal(`${d.path} changed while it was filled`);
       chmodPath(d.path, d.mode);
     }
+    // Owners last, children before the folders holding them, so nothing is
+    // written beneath a folder once someone else owns it.
+    for (const o of owners.reverse()) giveOwner(o, created);
   } catch (err) {
     undoCreated(created);
     throw err;
+  }
+}
+
+/** Give `o` its owner, through a descriptor (by name for a link), only while it is what this run made. */
+function giveOwner(
+  o: { path: string; uid: number; gid: number; kind: 'd' | 'f' | 'l' },
+  created: Created[],
+): void {
+  const c = created.find((x) => x.path === o.path);
+  if (!c) throw new Refusal(`${o.path} was not made here`);
+  if (o.kind === 'l') {
+    if (idOf(lstatSync(o.path, { bigint: true })) !== c.id)
+      throw new Refusal(`${o.path} changed while it was placed`);
+    lchownSync(o.path, o.uid, o.gid);
+    return;
+  }
+  const flags =
+    constants.O_RDONLY |
+    constants.O_NOFOLLOW |
+    constants.O_NONBLOCK |
+    (o.kind === 'd' ? constants.O_DIRECTORY : 0);
+  const fd = openSync(o.path, flags);
+  try {
+    if (idOf(fstatSync(fd, { bigint: true })) !== c.id)
+      throw new Refusal(`${o.path} changed while it was placed`);
+    fchownSync(fd, o.uid, o.gid);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// ---------------------------------------------------------------- read
+
+const READ_MAX = 1 << 20;
+
+/** One small regular file: a JSON line with its owner, mode and size, then its bytes. */
+export function readOne(req: FsRequest, out = 1): void {
+  const fd = openSync(req.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const st = fstatSync(fd, { bigint: true });
+    if (!st.isFile()) throw new Refusal(`${req.path} is not a regular file`);
+    if (st.size > BigInt(READ_MAX)) throw new Refusal(`${req.path} is too large`);
+    const buf = Buffer.alloc(Number(st.size));
+    let got = 0;
+    while (got < buf.length) {
+      const n = readSync(fd, buf, got, buf.length - got, got);
+      if (n <= 0) break;
+      got += n;
+    }
+    const head = { uid: Number(st.uid), gid: Number(st.gid), mode: Number(st.mode), size: got };
+    writeAll(out, Buffer.from(JSON.stringify(head) + '\n'));
+    writeAll(out, buf.subarray(0, got));
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -443,7 +507,7 @@ function parseRequest(line: string | undefined): FsRequest {
   if (line === undefined) throw new Refusal('no request');
   const r = JSON.parse(line) as FsRequest;
   if (
-    (r.op !== 'pack' && r.op !== 'place') ||
+    (r.op !== 'pack' && r.op !== 'place' && r.op !== 'read') ||
     typeof r.path !== 'string' ||
     !isAbsolute(r.path) ||
     normalize(r.path) !== r.path ||
@@ -465,6 +529,7 @@ export function runFsChild(): number {
     becomeUser(req.uid, req.gid);
     process.umask(0o077);
     if (req.op === 'pack') pack(req, input);
+    else if (req.op === 'read') readOne(req);
     else place(req, input);
     return 0;
   } catch (err) {

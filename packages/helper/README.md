@@ -127,10 +127,16 @@ an event while working fine; Santa logs every program launch.
   its folder and the helper's own in two small processes (`commands/fsChild.ts`): the
   side in your folders runs as you (the folder's owner), with your groups, so a folder
   swapped for a link mid-move leads only where you could already go. Root acts directly
-  only where every folder on the path is root's alone. Files are created with
+  only where every folder on the path is root's alone: root-owned, not writable by
+  group or others, and with no ACL letting anyone else write (read with `ls -le` on
+  macOS; on Linux a POSIX ACL's mask shows in the group bits). Files are created with
   `O_EXCL|O_NOFOLLOW`, the original is removed only after the copy is complete, and a
   failed copy removes only what it created. A root-owned item in a folder others can
-  write to (like a package-installed app in `/Applications`) is refused.
+  write to (like a package-installed app in `/Applications`) is refused. Anything a
+  user owns is restored as that user; when they can't write where it goes back, the
+  restore is refused. Startup items are read the same way before they are turned off.
+- **One pin writer.** `pin-app` refuses to run while the daemon answers on its socket,
+  and the daemon re-reads the signed pin before repairing it, adopting a newer one.
 - **Network blocks.** Loopback, link-local and multicast addresses are refused, and so
   are ranges wider than /8 (IPv4) or /24 (IPv6). Single ports are not supported yet.
   pf forgets its tables at reboot, so the helper re-applies active blocks from its

@@ -10,13 +10,13 @@
 // runs as the user who controls it (transfer.ts), and root writes only in
 // its own quarantine folder.
 
-import { chmodSync, lstatSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, normalize } from 'node:path';
 import { protectionFor } from '../config.js';
 import type { Platform } from '../platform.js';
 import type { System } from '../system.js';
 import { ActionError } from './errors.js';
-import { actorFor, self, transfer, type Actor } from './transfer.js';
+import { actorFor, groupOf, self, transfer, type Actor } from './transfer.js';
 
 export interface QuarantineRecord {
   originalPath: string;
@@ -193,6 +193,19 @@ export async function quarantine(
   };
 }
 
+/** Every owner but root of the stored item and what is in it, from the helper's own store. */
+function storedOwners(path: string): Set<number> {
+  const owners = new Set<number>();
+  const stack = [path];
+  while (stack.length) {
+    const p = stack.pop()!;
+    const st = lstatSync(p);
+    if (st.uid !== 0) owners.add(st.uid);
+    if (st.isDirectory()) for (const n of readdirSync(p)) stack.push(join(p, n));
+  }
+  return owners;
+}
+
 export async function restore(
   sys: System,
   rec: QuarantineRecord,
@@ -221,7 +234,19 @@ export async function restore(
   }
   vetPath(rec.originalPath, opts);
   vetPath(realParentPath(rec.originalPath), opts);
-  const actor = await (opts.actorFor ?? actorFor)(sys, rec.originalPath);
+  // Anything of a user's goes back as that user, so root never fills a
+  // folder someone else owns (this covers records from before, too).
+  const owners = storedOwners(rec.storedPath);
+  if (owners.size > 1)
+    throw new ActionError(
+      'owner-cannot-write',
+      `${rec.originalPath} belongs to more than one user; Vigil can't put it back as one of them`,
+    );
+  const owner = [...owners][0];
+  const actor =
+    owner !== undefined
+      ? { uid: owner, gid: await groupOf(sys, owner) }
+      : await (opts.actorFor ?? actorFor)(sys, rec.originalPath);
   await checkGuard(opts, 'before the move', 'nothing was moved');
   const isLink = stored.isSymbolicLink();
   // The store is root's own: readable again only for the copy back.
@@ -238,6 +263,11 @@ export async function restore(
     );
   } catch (err) {
     if (!isLink) chmodSync(rec.storedPath, 0o000);
+    if (actor.uid !== 0 && /EACCES|EPERM/.test((err as Error).message))
+      throw new ActionError(
+        'owner-cannot-write',
+        `${rec.originalPath} can't be put back: its owner can't write to that folder`,
+      );
     throw err;
   }
   rmSync(slot, { recursive: true, force: true });

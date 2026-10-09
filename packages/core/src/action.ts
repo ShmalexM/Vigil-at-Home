@@ -197,7 +197,7 @@ export const ActionRecord = z.object({
       at: Timestamp,
       error: z.string().optional(),
       /** Why it failed, when the app words that itself: an item an installer or the system owns. */
-      errorCode: z.enum(['installer-owned']).optional(),
+      errorCode: z.enum(['installer-owned', 'owner-cannot-write']).optional(),
       quarantineId: Id.optional(),
     })
     .optional(),

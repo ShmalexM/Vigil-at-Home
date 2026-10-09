@@ -18,6 +18,7 @@ export const BINARIES = {
   osascript: '/usr/bin/osascript',
   codesign: '/usr/bin/codesign',
   chflags: '/usr/bin/chflags',
+  ls: '/bin/ls',
   id: '/usr/bin/id',
   osqueryd: '/opt/osquery/lib/osquery.app/Contents/MacOS/osqueryd',
 } as const;
@@ -58,7 +59,7 @@ export interface System {
   run(
     bin: BinaryName,
     args: string[],
-    opts?: { input?: string; timeoutMs?: number },
+    opts?: { input?: string | Buffer; timeoutMs?: number },
   ): Promise<RunResult>;
   signal(pid: number, signal: 'SIGSTOP' | 'SIGCONT' | 'SIGKILL'): void;
   /** uid of the user logged in at the screen, if any. */

@@ -5,7 +5,7 @@ import { vigil } from '../api';
 import {
   activeContainment,
   containLabel,
-  installerOwnedNote,
+  refusalNote,
   keepLabel,
   releaseLabel,
   releaseStep,
@@ -40,7 +40,7 @@ export function DecisionControls({
   const active = activeContainment(actions);
   const contained = alert.containment === 'active';
   // A quarantine an installer's ownership stopped: one calm line, here, instead of closing.
-  const note = actions.map((r) => installerOwnedNote(r, actions)).find(Boolean);
+  const note = actions.map((r) => refusalNote(r, actions)).find(Boolean);
 
   const decide = async (
     verdict: 'malicious' | 'benign' | 'expected',
@@ -58,7 +58,7 @@ export function DecisionControls({
     let held = false;
     for (const p of pending) {
       const r = await vigil.approveProposal(p.id);
-      if (r.result?.errorCode === 'installer-owned') held = true;
+      if (r.result?.errorCode) held = true;
     }
     if (held) {
       // Recorded as malicious, but the view stays open so the line about the item is seen.

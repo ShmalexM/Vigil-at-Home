@@ -25,6 +25,7 @@ import { Approvals } from './approval.js';
 import { pinFor } from './appPin.js';
 import { AppPinStore } from './pinStore.js';
 import { runFsChild } from './commands/fsChild.js';
+import { daemonAnswers } from './socketProbe.js';
 import { defaultPaths, installedSelf, SANTA_SYNC_PORT } from './config.js';
 import { runDaemon } from './daemon.js';
 import { ensureOsquery, removeOsquery } from './osquery.js';
@@ -100,6 +101,11 @@ async function main(argv: string[]): Promise<number> {
       }
       const sys = realSystem();
       const paths = defaultPaths();
+      // The daemon keeps its own pin in memory; pinning under it would be undone or lost.
+      if (await daemonAnswers(paths.socket)) {
+        console.error('the helper is running; stop it before pin-app (install.sh does)');
+        return 1;
+      }
       mkdirSync(dirname(paths.appPinDir), { recursive: true, mode: 0o755 });
       const store = new AppPinStore(sys, { dir: paths.appPinDir, publicFile: paths.appPin });
       await store.load();

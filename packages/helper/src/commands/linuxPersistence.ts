@@ -11,7 +11,8 @@
 // part of the system and never touched.
 
 import { basename, dirname } from 'node:path';
-import { lstatSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { actorFor, readAs } from './transfer.js';
 import type { System } from '../system.js';
 import { protectionFor } from '../config.js';
 import { ActionError } from './errors.js';
@@ -98,17 +99,11 @@ export async function disableLinuxPersistence(
     throw new ActionError('invalid', `${name} does not belong in ${dirname(path)}`);
   }
   // Vetted before systemd is touched, so a protected file is never even stopped.
-  resolveTarget(path, startupQuarantine(opts));
-  let st;
-  try {
-    st = lstatSync(path);
-  } catch {
-    throw new ActionError('not_found', `${path} does not exist`);
-  }
-  if (!st.isFile()) throw new ActionError('refused', `${path} is not a regular file`);
-  readFileSync(path); // readable
+  const real = resolveTarget(path, startupQuarantine(opts));
+  // Read as whoever controls the path (commands/transfer.ts), never by root through it.
+  const file = await readAs(await (opts.actorFor ?? actorFor)(sys, real), real);
 
-  const scope = unitScope(path, st.uid, passwd);
+  const scope = unitScope(path, file.uid, passwd);
   let wasLoaded = false;
   if (scope.kind !== 'autostart') {
     const args = scopeArgs(scope);

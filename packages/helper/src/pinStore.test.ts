@@ -188,6 +188,22 @@ describe('the signed app pin', () => {
 });
 
 describe('one queue for the pin', () => {
+  it('repairs by adopting a newer signed pin on disk, never writing over it', async () => {
+    const daemon = await open();
+    await daemon.write(OTHER);
+    // Another helper process (pin-app) signs a newer pin with the same key.
+    const other = await open();
+    await other.write(PIN);
+    const written = readFileSync(file, 'utf8');
+    await daemon.repair();
+    expect(daemon.current()).toEqual(PIN);
+    expect(readFileSync(file, 'utf8')).toBe(written);
+    // A missing file is still put back, from the pin now in force.
+    rmSync(file);
+    await daemon.repair();
+    expect((await open()).current()).toEqual(PIN);
+  });
+
   it('ends with the new pin when a repair races a write', async () => {
     const sys = new Flags('linux');
     const store = await open(sys);
