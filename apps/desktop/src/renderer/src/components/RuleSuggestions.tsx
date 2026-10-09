@@ -1,8 +1,8 @@
 import { Check, RefreshCw, Sparkles, X } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { RuleSuggestionView, RuleSuggestionsView } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
-import { helperNote, PASSWORD_CANCELLED, timeAgo } from '../format';
+import { helperNote, notChangedText, timeAgo } from '../format';
 import { draftIsToolRule } from '../rule-modes';
 import { ImpactSummary, ReplaySummary } from './RuleEditor';
 import { useToast } from './Toasts';
@@ -19,6 +19,18 @@ const RETIRE_TO: Record<NonNullable<RuleSuggestionView['retireTo']>, string> = {
   shadow: 'Shadow',
   disabled: 'Off',
 };
+
+/** The suggestion to scroll to once Rules shows it. */
+let focusOn: string | undefined;
+const SHOW = 'vigil-show-suggestion';
+
+/** Open Rules at one suggestion, e.g. from the Lead dog's card in chat. */
+export function showSuggestion(id: string): void {
+  focusOn = id;
+  location.hash = 'rules';
+  // Already on Rules, the hash doesn't change; tell the list directly.
+  setTimeout(() => window.dispatchEvent(new Event(SHOW)), 0);
+}
 
 /**
  * What the AI, or Vigil from the user's own answers, suggested for the rules
@@ -94,12 +106,26 @@ function subtitle(review: RuleSuggestionsView['review'], pending: number): strin
 function Suggestion({ s, onDone }: { s: RuleSuggestionView; onDone: () => void }) {
   const toast = useToast();
   const [showJson, setShowJson] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const el = useRef<HTMLDivElement>(null);
   const fromVigil = s.provider === 'vigil';
+  useEffect(() => {
+    const show = () => {
+      if (focusOn !== s.id) return;
+      focusOn = undefined;
+      el.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      setFocused(true);
+    };
+    show();
+    window.addEventListener(SHOW, show);
+    return () => window.removeEventListener(SHOW, show);
+  }, [s.id]);
   const accept = async () => {
-    const { helper } = await vigil.acceptRuleSuggestion(s.id);
-    if (helper === 'declined') {
-      // Everything went back, so the suggestion is still here to accept later.
-      toast({ text: `${s.ruleName}: ${PASSWORD_CANCELLED}` });
+    const { helper, helperReason } = await vigil.acceptRuleSuggestion(s.id);
+    const notChanged = notChangedText(helper, helperReason);
+    if (notChanged) {
+      // Nothing changed, so the suggestion is still here to accept later.
+      toast({ text: `${s.ruleName}: ${notChanged}` });
       onDone();
       return;
     }
@@ -122,7 +148,7 @@ function Suggestion({ s, onDone }: { s: RuleSuggestionView; onDone: () => void }
     onDone();
   };
   return (
-    <div className="suggestion">
+    <div className={`suggestion ${focused ? 'focused' : ''}`} ref={el}>
       <div className="row">
         <Chip tone={fromVigil ? undefined : 'ai'}>
           {!fromVigil && <Sparkles size={12} />} {KIND[s.kind]}
@@ -130,7 +156,12 @@ function Suggestion({ s, onDone }: { s: RuleSuggestionView; onDone: () => void }
         <span className="t-h3 grow ellipsis">{s.ruleName}</span>
         {s.kind === 'new_rule' && <SeverityMark severity={s.severity as never} />}
         <span className="t-small nowrap">
-          {fromVigil ? 'Vigil, from your answers' : s.provider} · {timeAgo(s.createdAt)}
+          {fromVigil
+            ? 'Vigil, from your answers'
+            : s.by
+              ? `Suggested by ${s.by} (${s.provider})`
+              : s.provider}{' '}
+          · {timeAgo(s.createdAt)}
         </span>
       </div>
       <p className="t-small" style={{ margin: 0 }}>

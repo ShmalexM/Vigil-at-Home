@@ -608,6 +608,26 @@ describe('Only log this rule', () => {
     expect(await core.undoQuietRule(ID, tokenOf(quiet))).toEqual({ ok: false, mode: 'alert' });
   });
 
+  it('undo works once the helper took the quiet', async () => {
+    const { core } = setup();
+    core.detector!.syncHelper = async () => 'applied';
+    const quiet = await core.quietRule(ID);
+    expect(quiet).toMatchObject({ ok: true, helper: 'applied' });
+    expect(modeOf(core)).toBe('shadow');
+    expect(await core.undoQuietRule(ID, tokenOf(quiet))).toMatchObject({ ok: true });
+    expect(modeOf(core)).toBe('alert');
+  });
+
+  it('a quiet the password was cancelled for changes nothing and has no undo', async () => {
+    const { core } = setup();
+    core.detector!.syncHelper = async () => 'declined';
+    const quiet = await core.quietRule(ID);
+    expect(quiet).toMatchObject({ ok: true, helper: 'declined' });
+    expect(modeOf(core)).toBe('alert');
+    core.detector!.syncHelper = async () => 'applied';
+    expect(await core.undoQuietRule(ID, tokenOf(quiet))).toEqual({ ok: false, mode: 'alert' });
+  });
+
   it('undo leaves a newer change alone', async () => {
     const { core } = setup();
     const quiet = await core.quietRule(ID);

@@ -121,6 +121,10 @@ const Saved = z.object({
   lists: z.record(z.string(), z.array(z.string())),
   /** Entries lists dropped, by list, with when (ms). Still blocking until RETIRE_MS later. */
   retired: z.record(z.string(), z.record(z.string(), z.number())).default({}),
+  /** The app's id for the sync in force, so it can tell whether a sync it lost track of went in. */
+  syncId: z.string().optional(),
+  /** The app's own blocking rules, by fingerprint (DetectionSync.appRules). */
+  appRules: z.array(z.object({ id: z.string(), name: z.string(), digest: z.string() })).default([]),
   /**
    * Whether a self grant was ever taken. Files from before self.grant only
    * ever came from syncs that carried one.
@@ -138,6 +142,7 @@ const EMPTY: Saved = {
   selfHashes: [],
   lists: {},
   retired: {},
+  appRules: [],
   selfGranted: false,
 };
 
@@ -220,6 +225,13 @@ export class FastPath {
     const out = self ? this.selfLoosening(self) : [];
     const next = new Map(cmd.rules.map((r) => [r.id, r]));
     const rules: string[] = [];
+    // The app's own blocking rules: dropping one or changing what it blocks.
+    const nextApp = new Map((cmd.appRules ?? []).map((r) => [r.id, r.digest]));
+    for (const r of this.state.appRules) {
+      const d = nextApp.get(r.id);
+      if (d === undefined) rules.push(`stop blocking with “${r.name}”`);
+      else if (d !== r.digest) rules.push(`change what “${r.name}” blocks`);
+    }
     for (const r of this.state.rules) {
       const n = next.get(r.id);
       if (!n) rules.push(`stop blocking with “${r.name}”`);
@@ -268,12 +280,46 @@ export class FastPath {
   }
 
   /**
-   * Replace the rules. Returns the lists whose contents the app should send;
-   * until they arrive the current contents stay in force.
+   * The lists a sync names whose contents neither it carries nor the helper
+   * already has. A sync missing any is not applied (sync() says which), so
+   * the app can send it again with them; nothing is held in between.
    */
-  sync(cmd: DetectionSync): { needLists: string[]; rev: number } {
+  missingLists(cmd: DetectionSync): string[] {
+    return Object.keys(cmd.lists).filter(
+      (n) => cmd.entries?.[n] === undefined && this.digests.get(n) !== cmd.lists[n],
+    );
+  }
+
+  /**
+   * Throws RuleCompileError if a rule doesn't compile. That includes a regex or
+   * glob that could take too long to match (regexProblem, globProblem): adding
+   * rules needs no password, so the same checks as the app's keep one rule
+   * from stalling every check here.
+   */
+  checkRules(cmd: DetectionSync): void {
+    for (const r of cmd.rules) compileRule({ ...r, mode: 'block' });
+  }
+
+  /**
+   * Replace the rules and the lists they read, in one step: every rule must
+   * compile, every list it carries must match its digest, and no list may
+   * drop more than it may in a week; then all of it goes in force and is
+   * saved, or none of it does. Lists it names but doesn't carry keep their
+   * current contents, which must match the named digest; if any doesn't,
+   * nothing changes and `needLists` says which to send.
+   */
+  sync(cmd: DetectionSync): { applied: boolean; needLists: string[]; rev: number } {
+    this.checkRules(cmd);
+    const needLists = this.missingLists(cmd);
+    if (needLists.length) return { applied: false, needLists, rev: this.state.rev };
     const lists: Saved['lists'] = {};
     for (const name of Object.keys(cmd.lists)) {
+      const sent = cmd.entries?.[name];
+      if (sent !== undefined) {
+        if (listDigest(sent) !== cmd.lists[name]) throw new Error(`list ${name} arrived damaged`);
+        lists[name] = [...new Set(sent)];
+        continue;
+      }
       const have = this.state.lists[name];
       if (have) lists[name] = have;
     }
@@ -281,13 +327,10 @@ export class FastPath {
     // Only an app from before self.grant sends the self set with the rules.
     const self = carriedSelf(cmd);
     const selfFields = self ? this.selfFrom(self) : {};
-    // Throws RuleCompileError before anything changes. That includes a regex or
-    // glob that could take too long to match (regexProblem, globProblem): adding
-    // rules needs no password, so the same checks as the app's keep one rule
-    // from stalling every check here.
-    this.apply({
+    const next: Saved = {
       rev: this.state.rev + 1,
       rules: cmd.rules,
+      appRules: cmd.appRules ?? [],
       exceptions: cmd.exceptions,
       selfPaths: this.state.selfPaths,
       selfImages: this.state.selfImages,
@@ -296,15 +339,27 @@ export class FastPath {
       ...selfFields,
       lists,
       retired,
-    });
-    this.save();
-    return {
-      needLists: Object.keys(cmd.lists).filter((n) => this.digests.get(n) !== cmd.lists[n]),
-      rev: this.state.rev,
     };
+    if (cmd.syncId) next.syncId = cmd.syncId;
+    this.apply(next);
+    this.save();
+    return { applied: true, needLists: [], rev: this.state.rev };
   }
 
-  /** One part of a list. The list changes only once every part is in and the digest matches. */
+  /** The rules in force. */
+  rules(): DetectionRule[] {
+    return this.state.rules;
+  }
+
+  /** Which sync is in force: the app's id for it, if it gave one. */
+  syncId(): string | undefined {
+    return this.state.syncId;
+  }
+
+  /**
+   * One part of a list, on its own (a feed refresh). The list changes only
+   * once every part is in and the digest matches.
+   */
   putList(cmd: DetectionListSet): { complete: boolean } {
     let inc = this.incoming.get(cmd.list);
     if (!inc || inc.digest !== cmd.digest || inc.parts.length !== cmd.parts) {
