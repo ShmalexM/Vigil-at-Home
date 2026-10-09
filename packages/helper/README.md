@@ -141,8 +141,9 @@ an event while working fine; Santa logs every program launch.
   reading process is killed, and its writing process removes what it made and is killed
   too. An item may hold at most 200,000 entries and 8 GiB, and at most four moves run at
   once. The helper's own rules never wait on a move: each event's pauses, kills and blocks
-  are done first, and its moves go on beside the next events. The event is reported
-  once they end, or after 15 seconds, when the app shows the item was not moved in time.
+  are done first, and its moves go on beside the next events. Events still reach the
+  app in the order they happened, each once its moves end, or after 15 seconds, when the
+  app shows the item was not moved in time.
 - **Startup items.** One is turned off only in the startup folder as written. The one
   link followed is one above the user's home that only root could have made (like
   `/home -> var/home` on ostree systems): root's, in a folder that is root's alone, and

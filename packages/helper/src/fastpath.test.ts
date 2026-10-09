@@ -8,7 +8,7 @@ import { RuleStore, type SensorEvent } from '@vigil/sensors';
 import { Approvals } from './approval.js';
 import { HelperClient } from './client.js';
 import { Executor, type ActionOutcome } from './executor.js';
-import { FastPath, PolicyRefused, RETIRE_MS, type HelperRan } from './fastpath.js';
+import { eventPipeline, FastPath, PolicyRefused, RETIRE_MS, type HelperRan } from './fastpath.js';
 import { Journal } from './journal.js';
 import { LIST_PART_MAX, type DetectionSync, type SelfGrant } from './protocol.js';
 import { HelperServer } from './server.js';
@@ -882,4 +882,53 @@ describe('a move that stalls', () => {
     expect(existsSync(first) && existsSync(second)).toBe(true);
     expect(blocked()).toBe(true);
   }, 15_000);
+});
+
+describe('the order events reach the app', () => {
+  it('contains each event without waiting on earlier moves, and reports them in order', async () => {
+    const contained: string[] = [];
+    const published: string[] = [];
+    const moves = new Map<string, () => void>();
+    const deliver = eventPipeline<string>(
+      async (e) => {
+        contained.push(e);
+        const ran: HelperRan[] = [];
+        return {
+          ran,
+          moves: new Promise<HelperRan[]>((resolve) => moves.set(e, () => resolve([]))),
+        };
+      },
+      (e) => published.push(e),
+    );
+    const tick = () => new Promise((r) => setTimeout(r, 10));
+    deliver('A');
+    deliver('B');
+    deliver('C');
+    await tick();
+    // A's move is still running: B and C are contained all the same, but nothing is reported out of order.
+    expect(contained).toEqual(['A', 'B', 'C']);
+    expect(published).toEqual([]);
+    moves.get('B')!();
+    moves.get('C')!();
+    await tick();
+    expect(published).toEqual([]);
+    moves.get('A')!();
+    await tick();
+    expect(published).toEqual(['A', 'B', 'C']);
+  });
+
+  it('goes on after an event whose handling failed', async () => {
+    const published: string[] = [];
+    const deliver = eventPipeline<string>(
+      async (e) => {
+        if (e === 'bad') throw new Error('no');
+        return { ran: [], moves: Promise.resolve([]) };
+      },
+      (e) => published.push(e),
+    );
+    deliver('bad');
+    deliver('next');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(published).toEqual(['next']);
+  });
 });

@@ -581,3 +581,33 @@ function safeJson(raw: string): unknown {
     return undefined;
   }
 }
+
+/**
+ * How the daemon hands sensor events to the rules and on to the app. Each
+ * event is contained (its pauses, kills and blocks, `contain`) one at a
+ * time, in order, and the next event is contained without waiting on the
+ * moves before it. Events reach the app (`publish`) in that same order,
+ * each with everything done about it: one whose moves are still running
+ * holds back the reports after it, never the blocks. The app's rules (chain
+ * rules, first-seen) see events in the order they happened.
+ */
+export function eventPipeline<E>(
+  contain: (e: E) => Promise<{ ran: HelperRan[]; moves: Promise<HelperRan[]> }>,
+  publish: (e: E, ran: HelperRan[]) => void,
+): (e: E) => void {
+  let contained = Promise.resolve();
+  let published = Promise.resolve();
+  return (e) => {
+    const done = contained.then(() => contain(e));
+    contained = done.then(
+      () => undefined,
+      () => undefined,
+    );
+    published = published
+      .then(async () => {
+        const { ran, moves } = await done;
+        publish(e, [...ran, ...(await moves)]);
+      })
+      .catch(() => undefined);
+  };
+}

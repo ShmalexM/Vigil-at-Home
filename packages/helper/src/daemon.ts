@@ -31,7 +31,7 @@ import { pinCandidate, repinFromGrant } from './appPin.js';
 import { AppPinStore } from './pinStore.js';
 import { defaultPaths, installedSelf, SANTA_SYNC_PORT, type HelperPaths } from './config.js';
 import { Executor, type ActionOutcome } from './executor.js';
-import { FastPath } from './fastpath.js';
+import { eventPipeline, FastPath } from './fastpath.js';
 import { Journal } from './journal.js';
 import {
   ensureOsquery,
@@ -226,22 +226,22 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     }
   };
 
-  let delivered = Promise.resolve();
+  const deliver = eventPipeline<SensorEvent>(
+    async (e) => {
+      const blocked = await stopBlockedLaunch(e);
+      const { ran, moves } = await fastPath.start(e);
+      return { ran: [...blocked, ...ran], moves };
+    },
+    (e, ran) => server.publish(e, ran),
+  );
   const hub = new SensorHub({
     santaLogPath: paths.santaLog,
     osqueryResultsPath: paths.osqueryResults,
     // One event at a time, in order: its pauses, kills and blocks finish
-    // before the next event is looked at. Its moves go on off that chain
-    // (fastPath.start), so a stuck one never holds up a later block, and the
-    // app hears about the event, with what was done, once they end or stop
-    // being waited on.
-    sink: (e) => {
-      delivered = delivered.then(async () => {
-        const blocked = await stopBlockedLaunch(e);
-        const { ran, moves } = await fastPath.start(e);
-        void moves.then((moved) => server.publish(e, [...blocked, ...ran, ...moved]));
-      });
-    },
+    // before the next event is looked at; its moves go on beside the next
+    // events, so a stuck one never holds up a later block. The app hears
+    // about events in order, each with what was done (eventPipeline).
+    sink: deliver,
     // Signatures of programs that started before Vigil (codesign is macOS-only).
     ...(process.platform === 'darwin' && !linux ? { signatureLookup: signatureLookup(sys) } : {}),
     // Linux: whether the package manager installed each program, answered at
