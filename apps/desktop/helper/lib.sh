@@ -154,6 +154,17 @@ vh_switch() {
   fi
 }
 
+# The names of the complete versions, one per line. A function rather than
+# inline in $(...): macOS's /bin/sh (bash 3.2) can't parse a case pattern's
+# ")" inside a command substitution.
+vh_complete_names() {
+  for _p in "$DEST"/versions/*; do
+    _name=${_p##*/}
+    case $_name in *[!A-Za-z0-9._-]*) continue ;; esac
+    if vh_complete "$_p"; then printf '%s\n' "$_name"; fi
+  done
+}
+
 # After the switch and restart: remove the files from before versions, and
 # prune versions/. A version folder goes only when all of these hold:
 #   - it was last changed more than VH_GRACE_MINUTES ago, so it isn't one
@@ -186,13 +197,7 @@ vh_finish() {
     if [ -L "$_p" ] && vh_is_old "$_p"; then vh_remove "$_p"; fi
   done
   # The two newest complete versions, by name, which starts with the time.
-  _newest=$(
-    for _p in "$DEST"/versions/*; do
-      _name=${_p##*/}
-      case $_name in *[!A-Za-z0-9._-]*) continue ;; esac
-      if vh_complete "$_p"; then printf '%s\n' "$_name"; fi
-    done | LC_ALL=C sort | tail -n 2
-  )
+  _newest=$(vh_complete_names | LC_ALL=C sort | tail -n 2)
   for _p in "$DEST"/versions/* "$DEST"/versions/.*; do
     _name=${_p##*/}
     case $_name in . | ..) continue ;; esac
