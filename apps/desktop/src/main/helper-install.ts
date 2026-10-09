@@ -139,6 +139,9 @@ export function helperMatch(
   return { installed: same ? 'current' : 'outdated', bundle };
 }
 
+/** How ELEVATED_ENTRY starts its message when it refuses to run anything. */
+const REFUSED = 'Not running the helper script';
+
 /**
  * The first command that runs as root, for every way the helper is installed
  * or removed. The helper files sit in a folder the user can write (the app,
@@ -172,7 +175,7 @@ export const ELEVATED_ENTRY = [
   'PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; umask 077;',
   'src=$1; script=$2; shift 2;',
   'vh_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; };',
-  'vh_refuse() { echo "Not running the helper script: $*" >&2; exit 1; };',
+  `vh_refuse() { echo "${REFUSED}: $*" >&2; exit 1; };`,
   'd=$(mktemp -d /tmp/vigil-helper.XXXXXX);',
   `trap 'rm -rf "$d"' EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM;`,
   'found=;',
@@ -314,7 +317,7 @@ export function helperInstallCommand(
   // Linux: root can't read an AppImage's mount, so copy the helper out first,
   // as runWithPkexec does. The entry checks the copy before root runs any of it.
   if (platform === 'linux')
-    return `d=$(mktemp -d) && cp -R ${shellQuote(dir)}/. "$d" && ${entry} "$d" ${script} ${checks}`;
+    return `d=$(mktemp -d) && cp -R ${shellQuote(dir)}/. "$d" && ${entry} "$d" ${script} ${checks}; rm -rf "$d"`;
   return `${entry} ${shellQuote(dir)} ${script} ${checks}`;
 }
 
@@ -450,8 +453,12 @@ export async function runHelperScript(
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
-  // When the password-dialog route fails, the same install works from a terminal.
-  const command = script === 'install' ? helperInstallCommand(dir, platform) : undefined;
+  // When the password-dialog route fails, the same install works from a terminal,
+  // unless root refused files that changed after Vigil checked them.
+  const command =
+    script === 'install' && !r.error?.includes(REFUSED)
+      ? helperInstallCommand(dir, platform)
+      : undefined;
   return !r.ok && r.error !== 'cancelled' && command ? { ...r, command } : r;
 }
 

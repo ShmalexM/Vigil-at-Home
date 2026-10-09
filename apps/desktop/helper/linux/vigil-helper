@@ -5,11 +5,16 @@
 # always come from the same version. Node starts with an empty environment so
 # nothing from the user's session (NODE_OPTIONS and the like) carries into Node
 # running as root.
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
 D=/usr/libexec/vigil-helper.d
-V=$(readlink "$D/current") || { echo "The Vigil helper isn't installed: $D/current is missing." >&2; exit 1; }
-case $V in
-  versions/*/* | versions/.* | versions/) echo "Unexpected $D/current: $V" >&2; exit 1 ;;
-  versions/*) ;;
-  *) echo "Unexpected $D/current: $V" >&2; exit 1 ;;
+V=$(readlink "$D/current" && echo /) || { echo "The Vigil helper isn't installed: $D/current is missing." >&2; exit 1; }
+# The / keeps a newline at the end of the link from being dropped.
+V=${V%?/}
+# One plain version name (what install.sh makes), nothing else.
+N=${V#versions/}
+case $V in versions/*) ;; *) N= ;; esac
+case $N in
+  '' | .* | *[!A-Za-z0-9._-]*) echo "Unexpected $D/current: $V" >&2; exit 1 ;;
 esac
-exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "$D/$V/node" "$D/$V/helper.mjs" "$@"
+exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "$D/versions/$N/node" "$D/versions/$N/helper.mjs" "$@"

@@ -121,11 +121,12 @@ vh_build() {
 vh_current() {
   VH_CURRENT=
   [ -L "$DEST/current" ] || return 0
-  _t=$(readlink "$DEST/current" 2>/dev/null) || return 0
-  case $_t in
-    versions/*/* | versions/.* | versions/) ;;
-    versions/*) VH_CURRENT=${_t#versions/} ;;
-  esac
+  _t=$(readlink "$DEST/current" 2>/dev/null && echo /) || return 0
+  _t=${_t%?/} # the / keeps a trailing newline in the link from being dropped
+  case $_t in versions/*) ;; *) return 0 ;; esac
+  _n=${_t#versions/}
+  case $_n in '' | .* | *[!A-Za-z0-9._-]*) return 0 ;; esac
+  VH_CURRENT=$_n
 }
 
 # Point `current` at versions/$1 by renaming a new symlink over it. Another

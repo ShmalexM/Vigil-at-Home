@@ -121,7 +121,7 @@ describe('helper install', () => {
       `${entry} ${shellQuote(dir)} install.sh ${checks}`,
     );
     expect(helperInstallCommand(dir, 'linux')).toBe(
-      `d=$(mktemp -d) && cp -R ${shellQuote(dir)}/. "$d" && ${entry} "$d" linux/install.sh ${checks}`,
+      `d=$(mktemp -d) && cp -R ${shellQuote(dir)}/. "$d" && ${entry} "$d" linux/install.sh ${checks}; rm -rf "$d"`,
     );
     expect(shellQuote("a b'c")).toBe(`'a b'\\''c'`);
     expect(helperInstallCommand(null)).toBeUndefined();
@@ -424,6 +424,20 @@ describe('helper install', () => {
     expect(
       await runHelperScript('install', dir, fails({ code: 126, stdout: '', stderr: '' }), 'linux'),
     ).toEqual({ ok: false, error: 'cancelled' });
+    // Root refused files that changed after Vigil checked them: no command to paste.
+    const tampered = await runHelperScript(
+      'install',
+      dir,
+      fails({
+        code: 1,
+        stdout: '',
+        stderr:
+          '0:1: execution error: Not running the helper script: install.sh changed after Vigil checked it (1)',
+      }),
+      'darwin',
+    );
+    expect(tampered.error).toMatch(/changed after Vigil checked it/);
+    expect(tampered.command).toBeUndefined();
     const mac = await runHelperScript(
       'install',
       dir,
@@ -523,4 +537,43 @@ describe('helper install', () => {
       expect(helperMatch(dir, platform, root).installed).toBe('outdated');
     });
   }
+});
+
+describe('helper launcher', () => {
+  it('runs the helper only from one plain version name', () => {
+    const root = mkdtempSync(join(tmpdir(), 'vigil-launcher-'));
+    const d = join(root, 'vigil-helper.d');
+    const version = '20261009T000000Z.1.abc';
+    mkdirSync(join(d, 'versions', version), { recursive: true });
+    for (const rel of ['vigil-helper', 'linux/vigil-helper']) {
+      const src = readFileSync(join(import.meta.dirname, '..', '..', 'helper', rel), 'utf8');
+      const launcher = join(root, 'vigil-helper');
+      writeFileSync(launcher, src.replace(/^D=.*$/m, `D=${shellQuote(d)}`));
+      const run = (target: string) => {
+        rmSync(join(d, 'current'), { force: true });
+        symlinkSync(target, join(d, 'current'));
+        return spawnSync('/bin/sh', [launcher, 'daemon'], { encoding: 'utf8' });
+      };
+      for (const bad of [
+        'versions/..',
+        'versions/.',
+        'versions/',
+        'versions/a/b',
+        '/tmp',
+        'x',
+        'versions/a=b',
+        'versions/.hidden',
+        'versions/a\n',
+      ]) {
+        const r = run(bad);
+        expect(r.status, `${rel} ${bad}`).toBe(1);
+        expect(r.stderr, `${rel} ${bad}`).toMatch(/Unexpected/);
+      }
+      // A plain name gets as far as starting that version's node (absent here).
+      const ok = run(`versions/${version}`);
+      expect(ok.stderr).not.toMatch(/Unexpected/);
+      expect(ok.stderr).toContain(`versions/${version}/node`);
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
 });
