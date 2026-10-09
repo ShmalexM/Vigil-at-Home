@@ -129,6 +129,16 @@ describe('processes on Linux', () => {
     expect(await identifyProcess(sys, 4243)).toBeUndefined();
     expect(sys.runs.some((r) => r.bin === 'lsof')).toBe(false);
   });
+
+  it("refuses the helper's own pid as the system reports it, not the test runner's", async () => {
+    const sys = new FakeLinuxSystem();
+    sys.processes.set(sys.pid, { path: '/home/alex/Downloads/evil', started: STARTED });
+    await expect(suspendProcess(sys, sys.pid, {})).rejects.toMatchObject({ code: 'refused' });
+    // The runner's real pid is just another fake process here.
+    sys.processes.set(process.pid, { path: '/home/alex/Downloads/evil', started: STARTED });
+    await suspendProcess(sys, process.pid, {});
+    expect(sys.signals).toEqual([{ pid: process.pid, signal: 'SIGSTOP' }]);
+  });
 });
 
 describe('nftables firewall', () => {
@@ -242,6 +252,7 @@ describe('Linux startup items', () => {
     expect(existsSync(path)).toBe(false);
     expect(sys.active.has('user:alex miner.service')).toBe(false);
     expect(sys.runs.map((r) => r.args.join(' '))).toEqual([
+      '--user -M alex@ show -p Id,Names,ExecStart miner.service',
       '--user -M alex@ is-active --quiet miner.service',
       '--user -M alex@ stop miner.service',
       '--user -M alex@ daemon-reload',
@@ -387,6 +398,33 @@ describe('Linux startup items', () => {
     await expect(
       disableLinuxPersistence(sys, '/usr/lib/systemd/system/ssh.service', 'c', qopts()),
     ).rejects.toMatchObject({ code: 'invalid' });
+  });
+
+  it("refuses Vigil's and the sensors' own units before stopping anything", async () => {
+    for (const name of ['vigil-helper.service', 'osqueryd.service', 'fapolicyd.service']) {
+      const path = join(unitDir, name);
+      writeFileSync(path, '[Service]\n');
+      sys.active.add(`user:alex ${name}`);
+      await expect(
+        disableLinuxPersistence(sys, path, 'd', qopts(), dirs(), () => PASSWD),
+      ).rejects.toMatchObject({ code: 'refused' });
+      expect(existsSync(path)).toBe(true);
+    }
+    expect(sys.runs).toEqual([]);
+  });
+
+  it('vets the file before stopping its unit', async () => {
+    // A startup folder inside the quarantine: the move would be refused, so nothing is stopped.
+    const inside = join(root, 'quarantine', 'systemd', 'user');
+    mkdirSync(inside, { recursive: true });
+    const path = join(inside, 'x.service');
+    writeFileSync(path, '');
+    sys.active.add('user:alex x.service');
+    const re = new RegExp('^' + inside.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$');
+    await expect(
+      disableLinuxPersistence(sys, path, 'e', qopts(), re, () => PASSWD),
+    ).rejects.toMatchObject({ code: 'refused' });
+    expect(sys.runs).toEqual([]);
   });
 });
 

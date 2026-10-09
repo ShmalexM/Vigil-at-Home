@@ -1,14 +1,33 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  chownSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RuleStore } from '@vigil/sensors';
 import { Approvals } from './approval.js';
-import { vetPath } from './commands/quarantine.js';
+import { quarantine, restore, vetPath, type QuarantineOptions } from './commands/quarantine.js';
+import { disablePersistence } from './commands/persistence.js';
+import { isProtectedProcess } from './commands/process.js';
+import { self } from './commands/transfer.js';
 import { Executor } from './executor.js';
 import { Journal } from './journal.js';
+import { realSystem } from './system.js';
 import { FakeSystem } from './testing/fakeSystem.js';
 import { FakeLinuxSystem } from './testing/fakeLinuxSystem.js';
+
+const isRoot = process.getuid?.() === 0;
+const NOBODY = 65534;
 
 const opts = { quarantineDir: '/Library/Application Support/Vigil/Quarantine' };
 
@@ -24,11 +43,142 @@ describe('vetPath', () => {
     }
   });
 
+  it("refuses the helper's own state in its support folder, in any case", () => {
+    for (const path of [
+      '/Library/Application Support/Vigil',
+      '/Library/Application Support/Vigil/santa-rules.json',
+      '/Library/Application Support/Vigil/helper-journal.json',
+      '/Library/Application Support/Vigil/helper-rules.json',
+      '/Library/Application Support/Vigil/santa-sync',
+      '/library/application support/vigil/santa-rules.json',
+      '/APPLICATIONS/Santa.app',
+    ]) {
+      expect(() => vetPath(path, opts), path).toThrow(expect.objectContaining({ code: 'refused' }));
+    }
+  });
+
   it('still allows ordinary files next to them', () => {
     expect(vetPath('/Applications/Vigil at Home Evil.app', opts)).toBe(
       '/Applications/Vigil at Home Evil.app',
     );
     expect(vetPath('/Users/you/Downloads/evil', opts)).toBe('/Users/you/Downloads/evil');
+    expect(vetPath('/Library/Application Support/Vigilant/x', opts)).toBe(
+      '/Library/Application Support/Vigilant/x',
+    );
+  });
+});
+
+describe('protected processes', () => {
+  it('never stops osquery on macOS', () => {
+    expect(isProtectedProcess('/opt/osquery/lib/osquery.app/Contents/MacOS/osqueryd')).toBe(true);
+    expect(isProtectedProcess('/usr/local/bin/osqueryd')).toBe(true);
+    expect(isProtectedProcess('/usr/local/bin/other')).toBe(false);
+  });
+});
+
+describe('restore', () => {
+  let root: string;
+  const sys = new FakeSystem();
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'vigil-restore-')));
+  });
+  afterEach(() => {
+    // The store locks what it keeps; open it up so it can be cleaned away.
+    const q = join(root, 'Quarantine');
+    if (existsSync(q)) chmodSync(q, 0o700);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  // The user's side of a move runs as the user, so a folder they swap for a
+  // link leads only where they could already write.
+  it.skipIf(!isRoot)('never moves back through a folder swapped for a symlink', async () => {
+    chmodSync(root, 0o755);
+    const q: QuarantineOptions = { quarantineDir: join(root, 'Quarantine') };
+    const downloads = join(root, 'Downloads');
+    const dir = join(downloads, 'stuff');
+    mkdirSync(dir, { recursive: true });
+    for (const d of [downloads, dir]) chownSync(d, NOBODY, NOBODY);
+    writeFileSync(join(dir, 'evil'), 'x');
+    chownSync(join(dir, 'evil'), NOBODY, NOBODY);
+    const real = realSystem();
+    const rec = await quarantine(real, join(dir, 'evil'), 'a1', q);
+    // Root's own folder, which the user can't write to.
+    const elsewhere = join(root, 'elsewhere');
+    mkdirSync(elsewhere, { mode: 0o755 });
+    renameSync(dir, join(downloads, 'old'));
+    symlinkSync(elsewhere, dir);
+    await expect(restore(real, rec, q)).rejects.toThrow();
+    expect(existsSync(join(elsewhere, 'evil'))).toBe(false);
+    expect(existsSync(rec.storedPath)).toBe(true);
+  });
+
+  it('recreates a deleted folder and moves the file back', async () => {
+    const q: QuarantineOptions = {
+      quarantineDir: join(root, 'Quarantine'),
+      actorFor: async () => self(),
+    };
+    const dir = join(root, 'Downloads', 'stuff');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'evil'), 'x');
+    const rec = await quarantine(sys, join(dir, 'evil'), 'a2', q);
+    rmSync(join(root, 'Downloads'), { recursive: true });
+    await restore(sys, rec, q);
+    expect(readFileSync(join(dir, 'evil'), 'utf8')).toBe('x');
+  });
+});
+
+describe('disabling startup items', () => {
+  let root: string;
+  let launchDir: string;
+  let sys: FakeSystem;
+  const launchDirs = () => new RegExp('^' + launchDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$');
+
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'vigil-persist-')));
+    launchDir = join(root, 'Library', 'LaunchDaemons');
+    mkdirSync(launchDir, { recursive: true });
+    sys = new FakeSystem();
+    sys.console = process.getuid!();
+  });
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it("refuses Vigil's and the sensors' own plists before unloading anything", async () => {
+    const q = { quarantineDir: join(root, 'Quarantine') };
+    for (const name of [
+      'com.vigilathome.helper.plist',
+      'com.northpolesec.santa.daemon.plist',
+      'com.google.santa.daemon.plist',
+      'io.osquery.agent.plist',
+    ]) {
+      const path = join(launchDir, name);
+      writeFileSync(path, `<plist><!-- ${name} --></plist>`);
+      sys.labels.set(path, name.replace(/\.plist$/, ''));
+      await expect(disablePersistence(sys, path, 'p', q, launchDirs())).rejects.toMatchObject({
+        code: 'refused',
+      });
+      expect(existsSync(path)).toBe(true);
+    }
+    // Named innocently on disk, but Vigil's job inside.
+    const renamed = join(launchDir, 'innocent.plist');
+    writeFileSync(renamed, '<plist><!-- innocent --></plist>');
+    sys.labels.set(renamed, 'com.vigilathome.helper');
+    await expect(disablePersistence(sys, renamed, 'p', q, launchDirs())).rejects.toMatchObject({
+      code: 'refused',
+    });
+    expect(existsSync(renamed)).toBe(true);
+    expect(sys.runs.filter((r) => r.bin === 'launchctl')).toEqual([]);
+  });
+
+  it('vets the plist the way the quarantine will before unloading it', async () => {
+    // The plist sits inside the quarantine folder, which is never moved from.
+    const q = { quarantineDir: join(root, 'Library') };
+    const path = join(launchDir, 'com.example.agent.plist');
+    writeFileSync(path, '<plist/>');
+    sys.labels.set(path, 'com.example.agent');
+    await expect(disablePersistence(sys, path, 'p', q, launchDirs())).rejects.toMatchObject({
+      code: 'refused',
+    });
+    expect(sys.runs).toEqual([]);
   });
 
   it("refuses everything in the helper's state folder, in any case, and what holds it", () => {

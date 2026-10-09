@@ -16,7 +16,18 @@ export class FakeSystem implements System {
   readonly pfTable = new Set<string>();
   readonly loaded = new Set<string>();
   labels = new Map<string, string>();
+  /** ProgramArguments[0] of a plist, by path. */
+  programs = new Map<string, string>();
   console: number | undefined = 501;
+  /**
+   * The helper's pid in this fake. Fixed, so the fake pids tests use never
+   * collide with the test runner's real pid.
+   */
+  pid = 999_999;
+
+  selfPid(): number {
+    return this.pid;
+  }
 
   async run(
     bin: BinaryName,
@@ -52,20 +63,29 @@ export class FakeSystem implements System {
         return ok();
       }
       case 'plutil': {
-        // From stdin ("-"): the label of the file whose bytes these are.
-        if (args.at(-1) === '-') {
+        let path = args.at(-1)!;
+        // From stdin ("-"): the file whose bytes these are.
+        if (path === '-') {
           const input = Buffer.from(opts.input ?? '');
-          for (const [path, l] of this.labels) {
+          const match = [...new Set([...this.labels.keys(), ...this.programs.keys()])].find((p) => {
             try {
-              if (readFileSync(path).equals(input)) return ok(l + '\n');
+              return readFileSync(p).equals(input);
             } catch {
-              // Not a file here.
+              return false; // Not a file here.
             }
-          }
-          return fail();
+          });
+          if (!match) return fail();
+          path = match;
         }
-        const label = this.labels.get(args.at(-1)!);
-        return label ? ok(label + '\n') : fail();
+        const key = args[args.indexOf('-extract') + 1];
+        // Programs for the launch item keys; `labels` answers any other key.
+        const value =
+          key === 'ProgramArguments.0'
+            ? this.programs.get(path)
+            : key === 'Program'
+              ? undefined
+              : this.labels.get(path);
+        return value ? ok(value + '\n') : fail();
       }
       case 'launchctl': {
         const [verb, target, path] = args;

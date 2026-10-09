@@ -64,6 +64,8 @@ export interface FsRequest {
   gid: number;
   /** place: create missing parent folders. */
   parents?: boolean;
+  /** place: the mode of the folder the item goes into, when it has to be made (else 0755). */
+  parentMode?: number;
   /** place: the top entry's mode, instead of the archived one. */
   topMode?: number;
   /** place, as root: give entries their archived owner. */
@@ -361,7 +363,7 @@ function undoCreated(created: Created[]): void {
   }
 }
 
-function makeParents(path: string, created: Created[]): void {
+function makeParents(path: string, created: Created[], innerMode = 0o755): void {
   const missing: string[] = [];
   for (let p = dirname(path); ; p = dirname(p)) {
     try {
@@ -377,7 +379,7 @@ function makeParents(path: string, created: Created[]): void {
   for (const p of missing) {
     mkdirSync(p, 0o700);
     created.push({ path: p, id: idOf(lstatSync(p, { bigint: true })), dir: true });
-    chmodPath(p, 0o755);
+    chmodPath(p, p === dirname(path) ? innerMode & 0o7777 : 0o755);
   }
 }
 
@@ -411,7 +413,7 @@ export function place(req: FsRequest, input: FdReader): void {
     }
   };
   try {
-    if (req.parents) makeParents(req.path, created);
+    if (req.parents) makeParents(req.path, created, req.parentMode);
     const madeDirs = new Set<string>();
     let first = true;
     for (;;) {

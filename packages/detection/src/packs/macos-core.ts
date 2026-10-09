@@ -768,6 +768,28 @@ export const macosCoreRules: DetectionRuleInput[] = [
 
   // ----------------------------------------------------------------- shadow
   rule({
+    id: 'download-then-run',
+    name: 'Download and code runner in one command',
+    description:
+      "A shell command both downloads something and has a way to run code, such as a shell, an interpreter, eval or a pipe into a program that is not a plain reader. It doesn't check that the download is what runs, so it only records, to measure how often it would fire.",
+    mode: 'shadow',
+    severity: 'medium',
+    fidelity: 'low',
+    eventKinds: ['process.exec'],
+    condition: {
+      all: [
+        { field: 'process.name', op: 'in', value: SHELLS },
+        { field: 'process.downloadThenRun', op: 'eq', value: true },
+        // Claude Code's exact local-service reads (see rules/quiet-lines.ts).
+        { not: { field: 'process.quietDownloadLine', op: 'eq', value: true } },
+      ],
+    },
+    reasons: [
+      'A command downloads something and could run code in the same line: {{process.commandLine}}',
+    ],
+    tags: ['attack.execution', 'attack.t1059.004'],
+  }),
+  rule({
     id: 'unsigned-first-network',
     name: "Unsigned program's first network connection",
     description:

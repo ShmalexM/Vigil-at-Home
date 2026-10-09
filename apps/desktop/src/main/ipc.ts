@@ -9,6 +9,8 @@ import type { Connectors } from './pack/connectors.js';
 import type { PackService } from './pack/service.js';
 import type { AgentService } from './agents/service.js';
 import type { UpdateChecker } from './updates.js';
+import type { FeedKeyStore } from './onboarding/keys.js';
+import { keyedFeeds, type FeedKeysView } from '../shared/setup.js';
 import { onboardingHandlers } from './onboarding/ipc.js';
 import type { OnboardingService } from './onboarding/service.js';
 import type { VigilCore } from './service.js';
@@ -41,9 +43,14 @@ export function registerIpc(
   updates: UpdateChecker,
   agents: AgentService,
   pack: { service: PackService; connectors: Connectors },
+  feedKeys: FeedKeyStore,
   helper: HelperControl = noHelper,
 ): void {
   let ruleSuggestions: RuleSuggestions | undefined;
+  const feedKeysView = (): FeedKeysView => ({
+    ...feedKeys.view(),
+    feeds: keyedFeeds(core.detector?.feedStatus() ?? []),
+  });
   const suggestions = () => {
     if (!core.detector) throw new Error('Detection is not running');
     ruleSuggestions ??= new RuleSuggestions(
@@ -120,6 +127,17 @@ export function registerIpc(
     fitPopup: (height) => windows.fitPopup(height),
     quit: () => app.quit(),
     ...onboardingHandlers(setup, () => windows.openMain('home')),
+    getFeedKeys: () => feedKeysView(),
+    saveFeedKey: (name, key) => {
+      feedKeys.set(name, key);
+      // Retry a feed refused for want of this key now rather than at the next check.
+      void core.detector?.feeds.run().catch((err) => console.error('[feeds] run failed:', err));
+      return feedKeysView();
+    },
+    clearFeedKey: (name) => {
+      feedKeys.clear(name);
+      return feedKeysView();
+    },
     installHelper: () => helper.install(),
     uninstallHelper: () => helper.uninstall(),
     getUsage: (days) => core.usage.report(days),
@@ -131,6 +149,7 @@ export function registerIpc(
     downloadUpdate: () => updates.download(),
     getAi: () => ai.view(),
     getAiPrefs: () => ai.prefs(),
+    turnAiBackOn: () => ai.turnBackOn(),
     setAiPrefs: (patch) => ai.setPrefs(patch),
     explainAlert: (id) => ai.explainOnRequest(core, id),
     signInAi: (provider) => ai.signIn(provider),

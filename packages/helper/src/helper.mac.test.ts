@@ -213,7 +213,7 @@ describe.skipIf(!enabled)('helper on a real Mac', () => {
   });
 
   describe('startup items', () => {
-    const label = 'com.vigilathome.test.sleeper';
+    const label = 'com.example.vigiltest.sleeper';
     const plist = `/Library/LaunchDaemons/${label}.plist`;
 
     afterAll(async () => {
@@ -254,7 +254,7 @@ describe.skipIf(!enabled)('helper on a real Mac', () => {
       uid && uid !== 0
         ? execFileSync('/usr/bin/stat', ['-f', '%Su', '/dev/console'], { encoding: 'utf8' }).trim()
         : undefined;
-    const label = 'com.vigilathome.test.agent';
+    const label = 'com.example.vigiltest.agent';
     const dir = user ? `/Users/${user}/Library/LaunchAgents` : '';
     const plist = `${dir}/${label}.plist`;
 

@@ -6,16 +6,31 @@
 // restore. Restore never overwrites something that has since appeared at
 // the original path.
 //
+// What may be moved is decided twice: by name (vetPath, the quick first
+// pass), then by identity (protectedSet.ts), which catches other spellings
+// of a protected path and hard links to protected files.
+//
 // Root never acts through a path a user can change: each side of a move
 // runs as the user who controls it (transfer.ts), and root writes only in
-// its own quarantine folder.
+// its own quarantine folder. Something swapped in after the checks is
+// copied as that user could copy it, never changed in place: a protected
+// file the user can only read is left as it was.
 
 import { chmodSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import type { BigIntStats } from 'node:fs';
 import { basename, dirname, isAbsolute, join, normalize } from 'node:path';
 import { protectionFor } from '../config.js';
 import type { Platform } from '../platform.js';
 import type { System } from '../system.js';
 import { ActionError } from './errors.js';
+import {
+  checkFolders,
+  checkIdentity,
+  checkSelf,
+  protectedIds,
+  protectedPaths,
+  type ProtectedIds,
+} from './protectedSet.js';
 import { actorFor, groupOf, self, transfer, type Actor } from './transfer.js';
 
 export interface QuarantineRecord {
@@ -25,6 +40,8 @@ export interface QuarantineRecord {
   uid: number;
   gid: number;
   isDirectory: boolean;
+  /** Owner and mode of the folder it came from, for making it again on restore. Absent in older records. */
+  parent?: { uid: number; gid: number; mode: number };
 }
 
 export interface QuarantineOptions {
@@ -39,6 +56,8 @@ export interface QuarantineOptions {
   protectedExact?: Set<string>;
   /** Picks the protected lists when they aren't given. macOS when absent. */
   platform?: Platform;
+  /** Vigil's own files on this machine (runtime, socket, data), protected like the built-in lists. */
+  selfPaths?: string[];
   /**
    * A tripwire over the files the helper keeps (pinStore.ts): whether they
    * are all still where and what the helper left them. Checked before and
@@ -104,14 +123,26 @@ export function vetPath(path: string, opts: QuarantineOptions): string {
   }
   const protection = protectionFor(opts.platform);
   const exact = opts.protectedExact ?? protection.exact;
-  const prefixes = opts.protectedPrefixes ?? protection.prefixes;
+  const prefixes = [
+    ...(opts.protectedPrefixes ?? protection.prefixes),
+    ...protection.processPrefixes,
+    ...protection.services,
+    ...(opts.selfPaths ?? []),
+  ];
+  // macOS disks ignore case by default, so /library/... is /Library/... there.
+  // Other spellings the disk treats as equal are caught by identity later.
   const key = (s: string) => (caseless(opts) ? s.toLowerCase() : s);
   const p = key(path);
   if (
     [...exact].some((e) => key(e) === p) ||
     prefixes.some((raw) => {
       const pre = key(raw);
-      return p === pre.replace(/\/$/, '') || p.startsWith(pre.endsWith('/') ? pre : pre + '/');
+      // The protected path, anything inside it, or a folder that holds it.
+      return (
+        p === pre.replace(/\/$/, '') ||
+        p.startsWith(pre.endsWith('/') ? pre : pre + '/') ||
+        pre.startsWith(p + '/')
+      );
     }) ||
     touchesHelperState(path, opts) ||
     protection.homes.some((re) => re.test(path))
@@ -121,28 +152,63 @@ export function vetPath(path: string, opts: QuarantineOptions): string {
   return path;
 }
 
+/** Everything protected from file moves, by identity. */
+export function protectedFor(opts: QuarantineOptions): ProtectedIds {
+  return protectedIds(protectedPaths(opts));
+}
+
 /** The path with symlinks in its parent folders resolved, or the path itself when they don't exist. */
 export function realParentPath(path: string): string {
   try {
-    return join(realpathSync(dirname(path)), basename(path));
+    return join(realpathSync.native(dirname(path)), basename(path));
   } catch {
     return path;
   }
 }
 
+function lstatOrNull(path: string): BigIntStats | null {
+  try {
+    return lstatSync(path, { bigint: true });
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Resolve symlinks in the parent folders and vet the real location too, so a
- * symlinked folder cannot redirect the move into a protected place.
+ * Resolve symlinks in the parent folders and vet the real location by name,
+ * then by identity: the target itself (a link is judged as the link, never
+ * what it points to) and every folder above it.
  */
-export function resolveTarget(path: string, opts: QuarantineOptions): string {
+export function resolveTarget(
+  path: string,
+  opts: QuarantineOptions,
+  ids: ProtectedIds = protectedFor(opts),
+): string {
   vetPath(path, opts);
   let parent: string;
   try {
-    parent = realpathSync(dirname(path));
+    // The kernel's own spelling of the folders (on macOS, as named on disk).
+    parent = realpathSync.native(dirname(path));
   } catch {
     throw new ActionError('not_found', `${path} does not exist`);
   }
-  return vetPath(join(parent, basename(path)), opts);
+  const real = vetPath(join(parent, basename(path)), opts);
+  checkIdentity(real, lstatOrNull(real), ids);
+  return real;
+}
+
+/** What may be quarantined: a file with no other names, a folder or a link, none of them protected. */
+function vetItem(path: string, st: BigIntStats, ids: ProtectedIds): void {
+  if (!st.isFile() && !st.isDirectory() && !st.isSymbolicLink()) {
+    throw new ActionError('refused', `${path} is not a file, folder or link`);
+  }
+  if (st.isFile() && st.nlink > 1n) {
+    throw new ActionError(
+      'refused',
+      `${path} has other hard links; quarantine would leave those names in place`,
+    );
+  }
+  checkSelf(path, st, ids);
 }
 
 /** The tripwire (QuarantineOptions guard): refuse, and log, when a file the helper keeps changed. */
@@ -159,16 +225,13 @@ export async function quarantine(
   actionId: string,
   opts: QuarantineOptions,
 ): Promise<QuarantineRecord> {
-  const path = resolveTarget(requestedPath, opts);
-  let st;
-  try {
-    // lstat: a symlink is quarantined as the link itself, never its target.
-    st = lstatSync(path);
-  } catch {
-    throw new ActionError('not_found', `${path} does not exist`);
-  }
-  if (!st.isFile() && !st.isDirectory() && !st.isSymbolicLink())
-    throw new ActionError('refused', `${path} is not a file, folder or link`);
+  const ids = protectedFor(opts);
+  const path = resolveTarget(requestedPath, opts, ids);
+  // lstat: a symlink is quarantined as the link itself, never its target.
+  const st = lstatOrNull(path);
+  if (!st) throw new ActionError('not_found', `${path} does not exist`);
+  vetItem(path, st, ids);
+  const folder = lstatSync(dirname(path));
   const actor = await (opts.actorFor ?? actorFor)(sys, path);
   await checkGuard(opts, 'before the move', 'nothing was moved');
   mkdirSync(opts.quarantineDir, { recursive: true, mode: 0o700 });
@@ -197,9 +260,10 @@ export async function quarantine(
     originalPath: path,
     storedPath,
     mode: stored.mode & 0o7777,
-    uid: st.uid,
-    gid: st.gid,
+    uid: Number(st.uid),
+    gid: Number(st.gid),
     isDirectory: stored.isDirectory(),
+    parent: { uid: folder.uid, gid: folder.gid, mode: folder.mode & 0o7777 },
   };
 }
 
@@ -278,6 +342,8 @@ export async function restore(
   }
   vetPath(rec.originalPath, opts);
   vetPath(realParentPath(rec.originalPath), opts);
+  // By identity too: no folder it goes back into is one of the protected ones.
+  checkFolders(dirname(rec.originalPath), protectedFor(opts));
   const isLink = stored.isSymbolicLink();
   // The store is root's own: readable again only for the copy back, and
   // for listing who owns what is in it.
@@ -293,6 +359,7 @@ export async function restore(
       { path: rec.originalPath, actor },
       {
         parents: true,
+        ...(rec.parent ? { parentMode: rec.parent.mode } : {}),
         ...(isLink ? {} : { topMode: rec.mode }),
         owners: actor.uid === 0,
       },

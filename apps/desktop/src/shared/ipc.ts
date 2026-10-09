@@ -53,6 +53,9 @@ import type { UsageLimitsView, UsageReport } from './usage.js';
 import {
   ApiKeyInput,
   ApiKeyProvider,
+  FeedKey,
+  FeedKeyName,
+  type FeedKeysView,
   SettingsPane,
   SetupAction,
   SetupMode,
@@ -233,6 +236,10 @@ export const calls = {
   restartSetup: z.tuple([]),
   saveApiKey: z.tuple([ApiKeyInput]),
   clearApiKey: z.tuple([ApiKeyProvider]),
+  /** Keys for threat feeds that need one, such as abuse.ch's Auth-Key. Only whether one is saved comes back. */
+  getFeedKeys: z.tuple([]),
+  saveFeedKey: z.tuple([FeedKeyName, FeedKey]),
+  clearFeedKey: z.tuple([FeedKeyName]),
   openSettingsPane: z.tuple([SettingsPane]),
   installHelper: z.tuple([]),
   uninstallHelper: z.tuple([]),
@@ -244,6 +251,7 @@ export const calls = {
   getAi: z.tuple([]),
   /** The saved AI switches only, without probing the vendors' CLIs. */
   getAiPrefs: z.tuple([]),
+  turnAiBackOn: z.tuple([]),
   setAiPrefs: z.tuple([AiPrefsPatch]),
   /** The user asked for an explanation of this alert (may use their Claude plan). */
   explainAlert: z.tuple([Id]),
@@ -346,6 +354,8 @@ export interface StatusView {
   helperInstallable: boolean;
   /** True when the installed helper is older than (or not) the one this build ships. */
   helperOutdated: boolean;
+  /** Why the AI can't work because of its switches, for one quiet line on Home. */
+  aiOff?: string;
 }
 
 export interface HelperInstallResult {
@@ -600,6 +610,9 @@ export interface CallResults {
   restartSetup: void;
   saveApiKey: SetupView;
   clearApiKey: SetupView;
+  getFeedKeys: FeedKeysView;
+  saveFeedKey: FeedKeysView;
+  clearFeedKey: FeedKeysView;
   openSettingsPane: void;
   installHelper: HelperInstallResult;
   uninstallHelper: HelperInstallResult;
@@ -607,6 +620,7 @@ export interface CallResults {
   getUsageLimits: UsageLimitsView;
   getAi: AiView;
   getAiPrefs: AiView['prefs'];
+  turnAiBackOn: AiView['prefs'];
   setAiPrefs: AiView['prefs'];
   explainAlert: AiActionResult;
   signInAi: AiActionResult;

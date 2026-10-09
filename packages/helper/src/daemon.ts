@@ -5,12 +5,16 @@
 //   - the app's blocking rules, run on that stream before it leaves (FastPath)
 //
 //   Santa ──santa.log──┐                                    ┌── socket ──► Vigil app (popup, rules, AI)
-//   osquery ──results──┼─► SensorHub ─► FastPath ─► publish ┤   (event + what the helper ran)
-//   Santa ──sync HTTPS─┘   (blocks it made)  │ kill/block     └── commands ◄── Vigil app
+//   osquery ──results──┴─► SensorHub ─► FastPath ─► publish ┤   (event + what the helper ran)
+//                                            │ kill/block     └── commands ◄── Vigil app
 //                                            ▼ Executor
-//         ◄── rules ─── RuleStore ◄── santa.block / santa.allow
+//   Santa ◄─sync HTTPS── rules ─── RuleStore ◄── santa.block / santa.allow
 //   osqueryd -S ◄── SensorHub: a 2 s look at suspicious programs' connections
+//
+// Events Santa uploads over sync are not used: any local account can post to
+// the port, and santa.log already has the same executions and file accesses.
 
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import { chmodSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -67,11 +71,19 @@ export interface DaemonOptions {
   fapolicydRulesDir?: string;
   /** Linux: the trust answer for a program path. Defaults to the dpkg/rpm index. */
   trust?: (path: string) => SignatureInfo | undefined;
+  /** How long to wait before trying the sync port again when it is taken. */
+  syncRetryMs?: number;
 }
 
 /** What helper.status reports about each sensor. The app decides what counts as stale. */
 export interface SensorHealth {
-  santa: { installed: boolean; lastEventAt: number | null; lastSyncAt: number | null };
+  santa: {
+    installed: boolean;
+    lastEventAt: number | null;
+    lastSyncAt: number | null;
+    /** Why the sync server isn't listening (it keeps retrying), or null. */
+    syncError: string | null;
+  };
   osquery: { installed: boolean; lastEventAt: number | null };
 }
 
@@ -115,7 +127,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       ? { santa: false as const, osquery: LINUX_BINARIES.osqueryd }
       : { santa: BINARIES.santactl, osquery: OSQUERYD_PATH });
   // Created below, after the socket is up; status calls before then report no activity.
-  const live: { hub?: SensorHub; sync?: SantaSyncServer } = {};
+  const live: { hub?: SensorHub; sync?: SantaSyncServer; syncError?: string } = {};
   const sensors = (): SensorHealth => {
     const seen = live.hub?.lastEventAt();
     return {
@@ -123,6 +135,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
         installed: bins.santa !== false && existsSync(bins.santa),
         lastEventAt: seen?.santa ?? null,
         lastSyncAt: live.sync?.lastSyncAt ?? null,
+        syncError: live.syncError ?? null,
       },
       osquery: { installed: existsSync(bins.osquery), lastEventAt: seen?.osquery ?? null },
     };
@@ -164,7 +177,22 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     journal,
     approvals,
     rules,
-    quarantine: { quarantineDir: paths.quarantineDir, stateDir: paths.supportDir, log },
+    quarantine: {
+      quarantineDir: paths.quarantineDir,
+      stateDir: paths.supportDir,
+      log,
+      // The helper's own files where this install put them, on top of the
+      // built-in lists: its state, socket, launcher, runtime and code.
+      selfPaths: [
+        paths.supportDir,
+        paths.socket,
+        paths.approvalsDir,
+        paths.helperExecutable,
+        `${paths.helperExecutable}.d`,
+        process.execPath,
+        ...(process.argv[1] ? [process.argv[1]] : []),
+      ],
+    },
     syncPort,
     ...(linux
       ? {}
@@ -257,28 +285,40 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   live.hub = hub;
 
   let https: HttpsServer | undefined;
+  let syncRetry: NodeJS.Timeout | undefined;
+  let stopped = false;
   if (!linux) {
     const sync = new SantaSyncServer({
       store: rules,
-      onEvent: (e) => hub.emit(e),
       log,
       eventDetailUrl: 'vigil://santa/event?sha256=%file_sha%',
       eventDetailText: 'Open Vigil',
     });
     live.sync = sync;
-    const server = createHttpsServer(
-      {
-        key: readFileSync(tls.serverKey),
-        cert: readFileSync(tls.serverCert),
-        minVersion: 'TLSv1.2',
-      },
+    const server = createSyncHttpsServer(
+      { key: readFileSync(tls.serverKey), cert: readFileSync(tls.serverCert) },
       sync.handler,
     );
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(syncPort, '127.0.0.1', () => resolve());
-    });
     https = server;
+    // Another account can hold the port first. Blocking, sensors and the
+    // socket don't depend on it, so keep them running and try again later.
+    const listenSync = async (): Promise<void> => {
+      if (stopped) return;
+      try {
+        await listenUnlessStopped(server, syncPort, () => stopped);
+        if (stopped) return;
+        if (live.syncError) log(`Santa sync listening on port ${syncPort}`);
+        delete live.syncError;
+      } catch (err) {
+        const msg = (err as Error).message;
+        if (live.syncError !== msg) log(`Santa sync server: ${msg}; retrying`);
+        live.syncError = msg;
+        if (stopped) return;
+        syncRetry = setTimeout(() => void listenSync(), opts.syncRetryMs ?? 30_000);
+        syncRetry.unref();
+      }
+    };
+    await listenSync();
   }
 
   if (fapolicyd) {
@@ -352,21 +392,80 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   renew.unref();
 
   log(
-    https
+    https?.listening
       ? `ready: socket ${paths.socket}, Santa sync on https://127.0.0.1:${syncPort}/`
       : `ready: socket ${paths.socket}`,
   );
 
   return async () => {
+    stopped = true;
+    clearTimeout(syncRetry);
     clearInterval(renew);
     clearInterval(osqueryTimer);
     await hub.stop();
     await server.close();
-    if (https) {
+    if (https?.listening) {
       const server = https;
       await new Promise<void>((r) => server.close(() => r()));
     }
   };
+}
+
+/**
+ * Limits on the Santa sync port. Any local process can connect, so slow or
+ * idle clients are cut off and only a few connections are kept at once.
+ */
+export const SYNC_SERVER_LIMITS: Readonly<{
+  maxConnections: number;
+  handshakeTimeoutMs: number;
+  headersTimeoutMs: number;
+  requestTimeoutMs: number;
+  keepAliveTimeoutMs: number;
+}> = {
+  maxConnections: 16,
+  handshakeTimeoutMs: 10_000,
+  headersTimeoutMs: 15_000,
+  requestTimeoutMs: 30_000,
+  keepAliveTimeoutMs: 5_000,
+};
+
+export function createSyncHttpsServer(
+  tls: { key: Buffer; cert: Buffer },
+  handler: (req: IncomingMessage, res: ServerResponse) => void,
+  l: typeof SYNC_SERVER_LIMITS = SYNC_SERVER_LIMITS,
+): HttpsServer {
+  const server = createHttpsServer(
+    {
+      ...tls,
+      minVersion: 'TLSv1.2',
+      handshakeTimeout: l.handshakeTimeoutMs,
+      headersTimeout: l.headersTimeoutMs,
+      requestTimeout: l.requestTimeoutMs,
+      keepAliveTimeout: l.keepAliveTimeoutMs,
+    },
+    handler,
+  );
+  server.maxConnections = l.maxConnections;
+  return server;
+}
+
+/**
+ * Listens on 127.0.0.1. If the helper stopped while the listen was under
+ * way, closes the server again so the port is not left bound.
+ */
+export function listenUnlessStopped(
+  server: HttpsServer,
+  port: number,
+  stopped: () => boolean,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', () => {
+      server.off('error', reject);
+      if (stopped()) server.close(() => resolve());
+      else resolve();
+    });
+  });
 }
 
 function writeFileAccessPolicy(path: string): void {

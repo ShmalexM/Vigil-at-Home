@@ -120,9 +120,13 @@ an event while working fine; Santa logs every program launch.
   resume re-checks the start time.
 - **Protected processes.** Anything under `/System`, `/usr/libexec`, `/usr/sbin` or
   `/sbin`, plus Santa and Vigil, is never paused or killed.
-- **Protected paths.** macOS system folders, top-level folders, home folders and Vigil's
-  own files are never quarantined. Symlinked parent folders are resolved and checked
-  again. Restore never overwrites something new.
+- **Protected paths.** macOS system folders, top-level folders, home folders, and the
+  files of Vigil, Santa and osquery (helper, launch items, units, socket, data) are never
+  quarantined, nor is a folder that holds one. Paths are checked by name first and then by
+  identity (device and inode), so another spelling of a protected path, or a hard link to a
+  protected file, is refused too. Files with more than one hard link are refused.
+  Symlinked parent folders are resolved and checked again. Restore never overwrites
+  something new, and makes a missing folder again with the mode it had.
 - **No root writes through your folders.** Quarantine and restore copy an item between
   its folder and the helper's own in two small processes (`commands/fsChild.ts`): the
   side in your folders runs as you (the folder's owner), with your groups, so a folder
@@ -144,7 +148,9 @@ an event while working fine; Santa logs every program launch.
   are done first, and its moves go on beside the next events. Events still reach the
   app in the order they happened, each once its moves end, or after 15 seconds, when the
   app shows the item was not moved in time.
-- **Startup items.** One is turned off only in the startup folder as written. The only
+- **Startup items.** Launch items and units of Vigil and its sensors are refused by name
+  (as written and where they really are), by label, by the names systemd knows them by,
+  and by the program they run. One is turned off only in the startup folder as written. The only
   links followed are ones only root could have made, above the user's home (or anywhere
   in a path with no home), like `/home -> var/home` on ostree systems or
   `/var -> private/var` on macOS: root's, in a folder that is root's alone, and leading

@@ -18,10 +18,21 @@ export class FakeLinuxSystem implements System {
   readonly rules: FakeRule[] = [];
   /** Units that are running, as "<scope> <unit>" with scope "system" or "user:<name>". */
   readonly active = new Set<string>();
+  /** `systemctl show` output by unit; a unit not listed reports only its own name. */
+  readonly shown = new Map<string, string>();
   tableExists = false;
   fagenrulesFails = false;
   private nextHandle = 2;
   console: number | undefined = 1000;
+  /**
+   * The helper's pid in this fake. Fixed, so the fake pids tests use never
+   * collide with the test runner's real pid.
+   */
+  pid = 999_999;
+
+  selfPid(): number {
+    return this.pid;
+  }
 
   async run(
     bin: BinaryName,
@@ -57,6 +68,8 @@ export class FakeLinuxSystem implements System {
           case 'start':
             this.active.add(`${user} ${unit}`);
             return ok();
+          case 'show':
+            return ok(this.shown.get(unit) ?? `Id=${unit}\nNames=${unit}\nExecStart=\n`);
           case 'daemon-reload':
           case 'restart':
           case 'try-restart':

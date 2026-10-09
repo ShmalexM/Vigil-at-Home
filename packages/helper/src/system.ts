@@ -65,6 +65,8 @@ export interface System {
   /** uid of the user logged in at the screen, if any. */
   consoleUid(): number | undefined;
   now(): number;
+  /** The helper's own pid, which it never stops or kills. */
+  selfPid(): number;
   /** Which OS the commands target. Absent means macOS, which is what every fake assumed. */
   readonly platform?: Platform;
   /**
@@ -111,6 +113,7 @@ export function realSystem(
 ): System {
   return {
     platform,
+    selfPid: () => process.pid,
     run(bin, args, opts = {}) {
       const file = binaries[bin];
       if (!file) {

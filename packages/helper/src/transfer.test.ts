@@ -733,8 +733,17 @@ describe('startup items are read as the path’s user', () => {
     const rec = await disablePersistence(sys, plist, 'p1', opts(), /LaunchAgents$/);
     expect(rec.label).toBe('com.evil.agent');
     const plutil = sys.runs.filter((r) => r.bin === 'plutil');
-    expect(plutil.map((r) => r.args)).toEqual([['-extract', 'Label', 'raw', '-o', '-', '-']]);
-    expect(Buffer.from(plutil[0]!.input ?? '').toString()).toBe('<plist/>');
+    expect(plutil.map((r) => r.args)).toEqual(
+      ['Label', 'Program', 'ProgramArguments.0'].map((key) => [
+        '-extract',
+        key,
+        'raw',
+        '-o',
+        '-',
+        '-',
+      ]),
+    );
+    for (const r of plutil) expect(Buffer.from(r.input ?? '').toString()).toBe('<plist/>');
   });
 
   it('refuses a link or a FIFO in place of the plist, promptly', async () => {

@@ -6,7 +6,9 @@ import { lstatSync, realpathSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { actorFor, readAs, rootOnly } from './transfer.js';
 import type { System } from '../system.js';
+import { PROTECTED_LABEL_PREFIXES } from '../config.js';
 import { ActionError } from './errors.js';
+import { runsProtectedProgram } from './protectedSet.js';
 import {
   quarantine,
   resolveTarget,
@@ -40,6 +42,20 @@ export function launchdDomain(
   }
   return `gui/${ownerUid}`;
 }
+
+/**
+ * Launch items of Vigil itself and of the tools it relies on. They are never
+ * unloaded, whatever folder they sit in or whatever they are named on disk.
+ */
+export { PROTECTED_LABEL_PREFIXES };
+
+function isProtectedLabel(name: string): boolean {
+  const lower = name.toLowerCase();
+  return PROTECTED_LABEL_PREFIXES.some((p) => lower.startsWith(p));
+}
+
+const isTheirs = (what: string) =>
+  new ActionError('refused', `${what} belongs to Vigil or its sensors`);
 
 /** The user's home folder `dir` is in, as written (…/home/<name>, …/Users/<name>, /root). */
 export function homeOf(dir: string): string | undefined {
@@ -120,14 +136,27 @@ export function checkOwnItem(path: string, ownerUid: number, consoleUid: number 
     throw new ActionError('not-your-item', `${path} belongs to another user`);
 }
 
+/** One key of a plist, read from its bytes on stdin: plutil never opens a path here. */
+async function plistValue(sys: System, plist: Buffer, key: string): Promise<string | undefined> {
+  const r = await sys.run('plutil', ['-extract', key, 'raw', '-o', '-', '-'], { input: plist });
+  const value = r.stdout.trim();
+  return r.code === 0 && value ? value : undefined;
+}
+
 async function readLabel(sys: System, plist: Buffer): Promise<string | undefined> {
-  // From stdin: plutil never opens a path here.
-  const r = await sys.run('plutil', ['-extract', 'Label', 'raw', '-o', '-', '-'], {
-    input: plist,
-  });
-  const label = r.stdout.trim();
+  const label = await plistValue(sys, plist, 'Label');
   // Labels are reverse-DNS style; refuse anything that could confuse launchctl.
-  return r.code === 0 && /^[A-Za-z0-9._-]{1,255}$/.test(label) ? label : undefined;
+  return label && /^[A-Za-z0-9._-]{1,255}$/.test(label) ? label : undefined;
+}
+
+/** The program a launch item runs: Program, else the first of ProgramArguments. */
+async function readPrograms(sys: System, plist: Buffer): Promise<string[]> {
+  const out: string[] = [];
+  for (const key of ['Program', 'ProgramArguments.0']) {
+    const value = await plistValue(sys, plist, key);
+    if (value) out.push(value);
+  }
+  return out;
 }
 
 export async function disablePersistence(
@@ -143,8 +172,10 @@ export async function disablePersistence(
       'only plists directly inside a LaunchAgents or LaunchDaemons folder can be disabled',
     );
   }
+  if (isProtectedLabel(basename(path))) throw isTheirs(basename(path));
   // Vetted before launchd is touched, so a protected file is never even unloaded.
   const real = await startupTarget(sys, path, opts);
+  if (isProtectedLabel(basename(real))) throw isTheirs(basename(real));
   // Read as whoever controls the path (commands/transfer.ts), never by root through it.
   const file = await readAs(await (opts.actorFor ?? actorFor)(sys, real), real);
   // Anywhere but the two system folders, an agent is a user's own.
@@ -152,6 +183,15 @@ export async function disablePersistence(
     checkOwnItem(real, file.uid, sys.consoleUid());
 
   const label = await readLabel(sys, file.data);
+  if (label && isProtectedLabel(label)) throw isTheirs(label);
+  // Whatever it is called, an item that runs Vigil or a sensor is theirs.
+  for (const program of await readPrograms(sys, file.data)) {
+    if (runsProtectedProgram(program, opts))
+      throw new ActionError(
+        'refused',
+        `${basename(path)} runs ${program}, part of Vigil or its sensors`,
+      );
+  }
   const domain = launchdDomain(real, file.uid, sys.consoleUid());
   let wasLoaded = false;
   if (label) {

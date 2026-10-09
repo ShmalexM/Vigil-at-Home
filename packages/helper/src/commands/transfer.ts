@@ -335,6 +335,8 @@ function start(req: FsRequest): Run {
 export interface TransferOptions {
   /** place: make missing parent folders. */
   parents?: boolean;
+  /** place: the mode of the item's own folder when it is made. */
+  parentMode?: number;
   /** place: the top entry's mode. */
   topMode?: number;
   /** place, as root: keep the archived owners. */
@@ -383,6 +385,7 @@ async function transferOnce(
     ...to.actor,
     ...caps,
     ...(opts.parents ? { parents: true } : {}),
+    ...(opts.parentMode !== undefined ? { parentMode: opts.parentMode } : {}),
     ...(opts.topMode !== undefined ? { topMode: opts.topMode } : {}),
     ...(opts.owners ? { owners: true } : {}),
   });
