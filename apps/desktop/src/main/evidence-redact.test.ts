@@ -362,4 +362,42 @@ describe("the shared redaction's secret scan in copied evidence", () => {
       '/Users/<user>/Documents',
     ]);
   });
+
+  it('withholds a url or argv the shared redaction would cut a secret out of', () => {
+    // An encoded name: the shared field rules cut the value out precisely.
+    const url = 'https://example.test/?%74%6f%6b%65%6e=hunter2';
+    expect((redactEvidence({ url }, names) as { url: string }).url).toBe(WITHHELD);
+    expect(argv(['curl', url])).toEqual([WITHHELD]);
+  });
+
+  it('scans file labels, and withholds one named like a withheld path', () => {
+    const fake = 'whsec_' + 'a'.repeat(24);
+    const out = redactEvidence(
+      { subject: { kind: 'file', label: `${fake}.txt`, path: `/tmp/${fake}.txt` } },
+      names,
+    ) as { subject: { label: string; path: string } };
+    expect(out.subject).toEqual({ kind: 'file', label: WITHHELD, path: WITHHELD });
+    // A label with no secret of its own is withheld when it is a withheld path's name.
+    const named = redactEvidence(
+      { subject: { kind: 'file', label: 'notes.txt', path: '/tmp/PGPASSWORD=x/notes.txt' } },
+      names,
+    ) as { subject: { label: string } };
+    expect(named.subject.label).toBe(WITHHELD);
+    // Rule titles stay readable.
+    expect(redactEvidence({ title: 'Credentials file read' }, names)).toEqual({
+      title: 'Credentials file read',
+    });
+  });
+
+  // The shared redaction doesn't scan JSON object keys yet; Security review is
+  // fixing that in @vigil/ai/redact. Drop `.fails` once it is on main.
+  it.fails('withholds a note whose JSON keys hold a secret, encoded once or twice', () => {
+    const once = JSON.stringify({ ['whsec_' + 'a'.repeat(24)]: 'ok' });
+    for (const note of [once, JSON.stringify(once)]) {
+      const out = redactEvidence({ alert: { decision: { note } } }, names) as {
+        alert: { decision: { note: string } };
+      };
+      expect(out.alert.decision.note, note).toBe(WITHHELD);
+    }
+  });
 });

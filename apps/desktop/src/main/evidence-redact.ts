@@ -1,4 +1,9 @@
-import { redactArgv, redactField, WITHHELD as SHARED_WITHHELD } from '@vigil/ai/redact';
+import {
+  redactArgv,
+  redactField,
+  REDACTED as SHARED_REDACTED,
+  WITHHELD as SHARED_WITHHELD,
+} from '@vigil/ai/redact';
 
 /**
  * Redaction for copied evidence. Command lines get no piecemeal redaction:
@@ -8,10 +13,10 @@ import { redactArgv, redactField, WITHHELD as SHARED_WITHHELD } from '@vigil/ai/
  * withheld whole, and otherwise only this computer's user and host names are
  * replaced. Every other string, a decision note or an error included, is
  * treated the same way, since any of them can quote a command. Only titles
- * and subject labels, which are rule text or names, skip the scan. The
+ * are rule text and skip the scan. The
  * shared redaction (@vigil/ai/redact) only adds to the scan: a string it
- * finds a secret in is withheld too (see `sharedFindsSecret`). Its output is
- * never copied, since its home-path rule can eat text after a path
+ * finds a secret in, or would cut a secret out of, is withheld too (see
+ * `sharedFindsSecret`). Its output is never copied, since its home-path rule can eat text after a path
  * (`/Users/al;curl` loses `;curl`), and it is given no names, so a user or
  * host name alone never makes it withhold anything.
  *
@@ -35,15 +40,20 @@ export const WITHHELD = '[withheld: may contain a secret]';
  * a summary can quote one as easily as `args` can. Argv lists (a process's
  * `args`, a persistence item's `programArgs`) are withheld as one list. URLs
  * (`url`, `originUrl`) can carry `user:password@` and are also withheld when
- * they hold a newline or other control character. Titles and subject labels
- * are rule text or names: they are not scanned (a rule titled "Credentials
- * file read" stays readable) and are withheld only when they repeat a
- * withheld command (see `redactEvidence`).
+ * they hold a newline or other control character. Titles are rule text: they
+ * are not scanned (a rule titled "Credentials file read" stays readable) and
+ * are withheld only when they repeat a withheld command (see
+ * `redactEvidence`). Subject labels are names that whoever made the thing
+ * chose (a file's name, a launchd label), so they are scanned like any other
+ * string, and withheld as well when they repeat a withheld command or the
+ * last part of a withheld path.
  */
 const COMMAND_LISTS = new Set(['args', 'programArgs']);
 const URL_FIELDS = new Set(['url', 'originUrl']);
-/** Rule text and names: only the names change, unless they repeat a withheld command. */
-const FIXED_TEXT = new Set(['title', 'label']);
+/** Rule text: only the names change, unless it repeats a withheld command. */
+const FIXED_TEXT = new Set(['title']);
+/** Text withheld when it repeats a withheld command: rule text and subject labels. */
+const REPEATS = new Set(['title', 'label']);
 
 /** A name that may label a secret, as in `PGPASSWORD`, `api_key` or `x-auth`. */
 const SECRET_NAME =
@@ -76,15 +86,19 @@ const SECRET_HINTS: readonly RegExp[] = [
 ];
 
 /**
- * Whether the shared redaction finds a secret in the text. Read as a
- * one-word argv, any secret it finds (one it would cut out exactly, too)
- * withholds the list; read as a field, its own field rules (URLs, JSON) can
- * withhold it as well. It is given no names, so only secrets count: a home
- * folder or email address changes its output but withholds nothing.
+ * Whether the shared redaction finds a secret in the text: read as a one-word
+ * argv or as a field, it withholds the text or cuts a secret out of it (one
+ * more {@link SHARED_REDACTED} than the text had). It is given no names, so
+ * only secrets count: a home folder or email address changes its output but
+ * never adds a secret marker.
  */
 function sharedFindsSecret(text: string): boolean {
   if (text === SHARED_WITHHELD) return false;
-  return redactArgv([text])[0] === SHARED_WITHHELD || redactField(text) === SHARED_WITHHELD;
+  const markers = (t: string) => t.split(SHARED_REDACTED).length;
+  const before = markers(text);
+  return [redactArgv([text])[0] ?? SHARED_WITHHELD, redactField(text)].some(
+    (out) => out === SHARED_WITHHELD || markers(out) > before,
+  );
 }
 
 /** Whether a command line might hold a secret, by this file's scan or the shared redaction's. */
@@ -169,15 +183,24 @@ function walk(value: unknown, names: EvidenceNames, withheld: Withheld, key?: st
   return value;
 }
 
-/** Whether a line of alert text repeats something withheld: a whole command, or one of its args. */
+/**
+ * Whether a line of alert text repeats something withheld: a whole command,
+ * one of its args, or the last part of a withheld path (a file's label is
+ * its name).
+ */
 function carries(text: unknown, withheld: Withheld): boolean {
-  return typeof text === 'string' && withheld.some((w) => w.length >= 4 && text.includes(w));
+  if (typeof text !== 'string') return false;
+  return withheld.some((w) => {
+    const last = w.slice(w.lastIndexOf('/') + 1);
+    return (w.length >= 4 && text.includes(w)) || (last.length >= 4 && text.includes(last));
+  });
 }
 
 /**
  * Evidence ready to copy. Keys are kept. When any command line in it was
  * withheld, so is the alert's summary, which rules fill from the command,
- * and any title or label, anywhere, that repeats the command or one of its args.
+ * and any title or label, anywhere, that repeats the command, one of its args
+ * or the last part of a withheld path.
  */
 export function redactEvidence(value: unknown, names: EvidenceNames): unknown {
   const withheld: Withheld = [];
@@ -196,7 +219,7 @@ function withholdRepeats(value: unknown, out: unknown, withheld: Withheld): void
     value.forEach((v, i) => withholdRepeats(v, out[i], withheld));
   } else if (isRecord(value) && isRecord(out)) {
     for (const [k, v] of Object.entries(value)) {
-      if (FIXED_TEXT.has(k) && carries(v, withheld)) out[k] = WITHHELD;
+      if (REPEATS.has(k) && carries(v, withheld)) out[k] = WITHHELD;
       else withholdRepeats(v, out[k], withheld);
     }
   }
