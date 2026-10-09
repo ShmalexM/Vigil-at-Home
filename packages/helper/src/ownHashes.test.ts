@@ -12,12 +12,13 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DetectionEngine, macosCoreRules, memoryStores } from '@vigil/detection';
-import { fastPathRules } from '@vigil/detection/fastpath';
+import { fastPathRules, listDigest } from '@vigil/detection/fastpath';
 import { RuleStore, SantaSyncServer } from '@vigil/sensors';
 import { Approvals } from './approval.js';
 import { ownProgramRoots } from './config.js';
 import { Executor } from './executor.js';
 import { FastPath } from './fastpath.js';
+import type { ActionOutcome } from './executor.js';
 import { Journal } from './journal.js';
 import { OwnHashes } from './ownHashes.js';
 import type { DetectionSync } from './protocol.js';
@@ -301,6 +302,51 @@ describe('blocks naming those programs', () => {
     const reloaded = fastPath((id) => own.owner(id));
     reloaded.load();
     expect(reloaded.status().rules).toBe(1);
+  });
+
+  it('never holds up a kill while a block by hash waits for the hashes', async () => {
+    const sys = new FakeSystem();
+    sys.processes.set(4242, { path: '/tmp/payload', started: 'T' });
+    // The first pass never finishes: the hash block waits its full minute.
+    const never = { ready: () => new Promise<void>(() => undefined), owner: () => undefined };
+    const ex = executor(sys, never);
+    const fp = new FastPath({
+      file: join(dir, 'helper-rules.json'),
+      moveWaitMs: 50,
+      run: async (action) => {
+        const out = await ex.execute(action);
+        if (out.kind !== 'done') throw new Error('needs the admin password');
+        return out.result as ActionOutcome;
+      },
+    });
+    // The core rule that kills a known-bad program, then blocks its hash.
+    const set = fastPathRules(new DetectionEngine(macosCoreRules, memoryStores()).listRules());
+    const known = set.rules.find((r) => r.id === 'known-bad-hash')!;
+    const bad = 'b'.repeat(64);
+    fp.sync({
+      kind: 'detection.sync',
+      rules: [known],
+      exceptions: [],
+      lists: { known_bad_sha256: listDigest([bad]) },
+      entries: { known_bad_sha256: [bad] },
+    });
+    const started = performance.now();
+    const { ran, moves } = await fp.start({
+      id: 'e1',
+      ts: Date.now(),
+      source: 'santa',
+      kind: 'process.exec',
+      process: { pid: 4242, path: '/tmp/payload', sha256: bad, signing: 'unsigned' },
+    });
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(ran.map((r) => [r.action.kind, r.error])).toEqual([['process.kill', undefined]]);
+    expect(sys.signals).toEqual([{ pid: 4242, signal: 'SIGKILL' }]);
+    // The block is reported as still going, worded as no move.
+    const later = await moves;
+    expect(later).toHaveLength(1);
+    expect(later[0]).toMatchObject({ action: { kind: 'santa.rule.set' } });
+    expect(later[0]!.error).toMatch(/goes on/);
+    expect(later[0]!.errorCode).toBeUndefined();
   });
 
   describe('Santa sync', () => {

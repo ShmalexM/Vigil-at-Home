@@ -68,6 +68,13 @@ export interface HelperRan {
 
 /** Actions that move an item, which can take a while; everything else is quick containment. */
 const MOVES = new Set<Action['kind']>(['file.quarantine', 'persistence.disable']);
+/**
+ * Blocks by hash, which wait for the helper to hash its own programs at
+ * startup (ownHashes.ts) and for Santa to sync. They stop a program from
+ * starting again, so they run after the pauses and kills, beside the next
+ * events, like the moves (and before them).
+ */
+const HASH_BLOCKS = new Set<Action['kind']>(['santa.rule.set']);
 
 /** How long the next event waits on a move before it is looked at anyway. */
 export const MOVE_WAIT_MS = 15_000;
@@ -477,12 +484,14 @@ export class FastPath {
   }
 
   /**
-   * The same in two parts. `ran` is every pause, kill and block the rules
-   * ask for, all done before this resolves and before any move starts.
-   * `moves` is the quarantines and startup items they ask for, started
-   * then, each waited on for a while only (one still running after that
-   * goes on by itself; transfer.ts bounds it). The daemon waits on `ran`
-   * alone before the next event, so a stuck move never holds up a block.
+   * The same in two parts. `ran` is every pause, kill and network block the
+   * rules ask for, all done before this resolves and before anything else
+   * starts. `moves` is the blocks by hash, then the quarantines and startup
+   * items they ask for, started then, each waited on for a while only (one
+   * still running after that goes on by itself; transfer.ts bounds a move).
+   * The daemon waits on `ran` alone before the next event, so neither a
+   * stuck move nor a block by hash waiting for the helper's own hashes
+   * (Executor.ownProgram) ever holds up a pause or kill.
    */
   async start(e: SensorEvent): Promise<{ ran: HelperRan[]; moves: Promise<HelperRan[]> }> {
     const none = { ran: [], moves: Promise.resolve([]) };
@@ -495,6 +504,7 @@ export class FastPath {
       return none;
     }
     const ran: HelperRan[] = [];
+    const hashBlocks: { ruleId: string; action: Action; parsed: HelperAction }[] = [];
     const moves: { ruleId: string; action: Action; parsed: HelperAction }[] = [];
     for (const d of detections) {
       if (d.mode !== 'block') continue;
@@ -502,6 +512,10 @@ export class FastPath {
         const parsed = HelperAction.safeParse(action);
         // Containment only. Rules never carry releases, but the helper checks.
         if (!parsed.success || isRelease(action)) continue;
+        if (HASH_BLOCKS.has(action.kind)) {
+          hashBlocks.push({ ruleId: d.match.ruleId, action, parsed: parsed.data });
+          continue;
+        }
         if (MOVES.has(action.kind)) {
           moves.push({ ruleId: d.match.ruleId, action, parsed: parsed.data });
           continue;
@@ -509,7 +523,7 @@ export class FastPath {
         ran.push(await this.runOne(d.match.ruleId, action, this.opts.run(parsed.data)));
       }
     }
-    return { ran, moves: this.runMoves(moves) };
+    return { ran, moves: this.runMoves([...hashBlocks, ...moves]) };
   }
 
   private async runMoves(
@@ -534,13 +548,22 @@ export class FastPath {
       if (first === 'stalled') {
         run.catch((err: Error) => this.opts.log?.(`fast path: ${m.action.kind}: ${err.message}`));
         this.opts.log?.(`fast path: ${m.action.kind} is taking long; not waiting on it`);
-        ran.push({
-          ruleId: m.ruleId,
-          action: m.action,
-          at: Date.now(),
-          error: 'Not moved in time; what was stopped or blocked stays that way',
-          errorCode: 'move-stalled',
-        });
+        ran.push(
+          MOVES.has(m.action.kind)
+            ? {
+                ruleId: m.ruleId,
+                action: m.action,
+                at: Date.now(),
+                error: 'Not moved in time; what was stopped or blocked stays that way',
+                errorCode: 'move-stalled',
+              }
+            : {
+                ruleId: m.ruleId,
+                action: m.action,
+                at: Date.now(),
+                error: 'Not done in time; it goes on, and what was stopped stays that way',
+              },
+        );
       } else {
         ran.push(await this.runOne(m.ruleId, m.action, run));
       }
