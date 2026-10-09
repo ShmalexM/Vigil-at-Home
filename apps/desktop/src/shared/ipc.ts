@@ -369,6 +369,8 @@ export interface StatusView {
   helperInstallable: boolean;
   /** True when the installed helper is older than (or not) the one this build ships. */
   helperOutdated: boolean;
+  /** Background jobs whose latest run was given up on and none has finished since. */
+  stuckJobs: string[];
   /** Why the AI can't work because of its switches, for one quiet line on Home. */
   aiOff?: string;
 }

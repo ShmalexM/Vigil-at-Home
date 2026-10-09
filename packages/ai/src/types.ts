@@ -24,7 +24,8 @@ export interface ReadTool<Shape extends z.ZodRawShape = z.ZodRawShape> {
   readonly name: string;
   readonly description: string;
   readonly input: Shape;
-  run(args: z.infer<z.ZodObject<Shape>>): Promise<unknown>;
+  /** `run.signal` aborts when the run that called the tool reaches its deadline. */
+  run(args: z.infer<z.ZodObject<Shape>>, run?: { signal: AbortSignal }): Promise<unknown>;
 }
 
 export interface RunRequest<T> {
@@ -39,6 +40,8 @@ export interface RunRequest<T> {
   /** Optional read-only tools. None by default. */
   readonly tools?: readonly ReadTool[];
   readonly deadlineMs: number;
+  /** Ends the run early too: a run made for another run ends with it. */
+  readonly signal?: AbortSignal;
   /** Only these providers, in the usual order. Default: all the settings allow. */
   readonly providers?: readonly ProviderId[];
   /**

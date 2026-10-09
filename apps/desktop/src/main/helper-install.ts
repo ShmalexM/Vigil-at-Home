@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFileWithin } from '@vigil/ai';
 import { createHash } from 'node:crypto';
 import {
   closeSync,
@@ -412,19 +412,17 @@ export type RunFile = (
   args: string[],
 ) => Promise<{ code: number; stdout: string; stderr: string; missing?: true }>;
 
-const runFile: RunFile = (file, args) =>
-  new Promise((resolve) =>
-    // An empty environment: macOS's admin dialog hands it to root's shell.
-    execFile(file, args, { timeout: 3 * 60_000, env: { PATH: ROOT_PATH } }, (err, stdout, stderr) =>
-      resolve({
-        code: err ? (typeof err.code === 'number' ? err.code : 1) : 0,
-        stdout: String(stdout),
-        stderr: String(stderr),
-        // The program itself isn't on this computer (no pkexec, say).
-        ...(err?.code === 'ENOENT' ? { missing: true as const } : {}),
-      }),
-    ),
-  );
+const runFile: RunFile = async (file, args) => {
+  // An empty environment: macOS's admin dialog hands it to root's shell.
+  const r = await execFileWithin(file, args, 3 * 60_000, { env: { PATH: ROOT_PATH } });
+  return {
+    code: r.code ?? 1,
+    stdout: r.stdout,
+    stderr: r.stderr,
+    // The program itself isn't on this computer (no pkexec, say).
+    ...(r.missing ? { missing: true as const } : {}),
+  };
+};
 
 export const PKEXEC = '/usr/bin/pkexec';
 

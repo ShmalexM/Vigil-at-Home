@@ -111,12 +111,18 @@ doesn't: the app only answers a line on a local socket. See
 5. **Optional work checks `power.isBusy()`.** On battery, when the Mac is hot,
    asleep or already loaded (load above 0.8 per core), the classifier, AI rule
    reviews and anything else that can wait holds off. Routine scheduler jobs
-   run 4× less often on battery and pause when the Mac is hot or asleep.
+   run 4× less often on battery and pause when the Mac is hot or asleep. If
+   macOS never says the Mac woke up, Vigil checks every two minutes and
+   counts it awake once someone uses it or it has run ten minutes without a
+   check firing late (a late check means it slept: dark wakes don't count).
    Battery, heat and sleep always hold the classifier. Load alone (common on
    a Mac running coding agents all day) holds it for at most 30 minutes:
    then one batch goes anyway, inside the same hourly batch and CPU budgets,
    so a Mac that is always busy is labelled slowly rather than never
-   (`power.busyReason()`, `maxBusyWaitMs` in packages/ai).
+   (`power.busyReason()`, `maxBusyWaitMs` in packages/ai). Every call a
+   scheduled task makes to the outside world (AI providers, connectors,
+   child processes) has its own time limit, so tasks always finish; one still
+   running after 30 minutes shows as stuck in the status until it does.
 6. **Renderers only while visible.** Each window's page is its own process
    (30–80 MB on macOS). The main window's goes when it closes and a hidden
    popup's after a minute. The popover is the one kept loaded, because

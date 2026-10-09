@@ -1,6 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
+/** How long a server told to stop gets before it is killed outright. */
+const KILL_GRACE_MS = 2_000;
+
 type Json = unknown;
 
 interface RpcMessage {
@@ -37,6 +40,9 @@ export class JsonRpcStdio {
       if (this.stderr.length < 200) this.stderr.push(chunk.toString());
     });
     this.child.on('error', (error) => this.fail(error));
+    // A server that died leaves its stdin to fail on the next write (EPIPE);
+    // without a listener that would crash the app.
+    this.child.stdin.on('error', (error) => this.fail(error));
     this.child.on('exit', (code, signal) => this.fail(new Error(`exited (${code ?? signal})`)));
     createInterface({ input: this.child.stdout }).on('line', (line) => this.onLine(line));
   }
@@ -84,21 +90,19 @@ export class JsonRpcStdio {
   }
 
   /**
-   * With `timeoutMs`, a server that hasn't answered by then is stopped (the
-   * child is killed) and the request fails, so a hung server never lingers.
+   * Send a request. A server that hasn't answered within `timeoutMs` is
+   * stopped (the child is killed) and the request fails, so a hung server
+   * never lingers.
    */
-  request<T = Json>(method: string, params: Json, timeoutMs?: number): Promise<T> {
+  request<T = Json>(method: string, params: Json, timeoutMs: number): Promise<T> {
     if (this.closedError) return Promise.reject(this.closedError);
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      const timer =
-        timeoutMs === undefined
-          ? undefined
-          : setTimeout(() => {
-              this.fail(new Error(`${method} did not answer in time`));
-              this.close();
-            }, timeoutMs);
-      timer?.unref?.();
+      const timer = setTimeout(() => {
+        this.fail(new Error(`${method} did not answer in time`));
+        this.close();
+      }, timeoutMs);
+      timer.unref?.();
       this.pending.set(id, {
         resolve: (v: Json) => (clearTimeout(timer), resolve(v as T)),
         reject: (e: Error) => (clearTimeout(timer), reject(e)),
@@ -111,8 +115,14 @@ export class JsonRpcStdio {
     this.send(params === undefined ? { method } : { method, params });
   }
 
+  /** Stop the server. Waiting requests fail at once, whether or not it exits promptly. */
   close(): void {
+    this.fail(new Error('closed'));
     this.child.stdin.end();
     this.child.kill();
+    const child = this.child;
+    setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    }, KILL_GRACE_MS).unref();
   }
 }

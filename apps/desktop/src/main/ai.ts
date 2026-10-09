@@ -233,6 +233,8 @@ export class AiBridge extends EventEmitter<{
   private queuedBackground = 0;
   /** Events waiting for a label, oldest first. */
   private labelQueue: SensorEvent[] = [];
+  /** Events a run gave back to the queue (see labelBatch); the cap keeps them. */
+  private readonly retrying = new Set<string>();
   private worthALook: WorthALook | undefined;
   private cachedPrefs: AiPrefs | undefined;
   /** When each program or destination was last queued, so repeats aren't sent again. */
@@ -806,25 +808,41 @@ export class AiBridge extends EventEmitter<{
     if (this.lastQueued.size > MAX_REMEMBERED)
       this.lastQueued.delete(this.lastQueued.keys().next().value!);
     this.labelQueue.push(event);
-    if (this.labelQueue.length > MAX_LABEL_QUEUE) this.labelQueue.shift();
+    this.trimLabelQueue();
   }
 
-  /** Sends one batch to the classifier and stores what comes back. */
+  /**
+   * Sends one batch to the classifier and stores what comes back. If the
+   * classifier fails, the batch goes back to the front of the queue; the
+   * queue's cap drops newer events to make room for it, never the other way
+   * round. (The classifier's own deadline bounds the wait.)
+   */
   async labelBatch(store: Pick<Store, 'setEventLabels'>): Promise<number> {
     if (this.labelQueue.length === 0) return 0;
     const classifier = this.ai().classifier;
     if (!classifier) {
       this.labelQueue = [];
+      this.retrying.clear();
       return 0;
     }
     const batch = this.labelQueue;
     this.labelQueue = [];
-    const result = await this.busyWhile('labeller', () => classifier.classify(batch));
-    // Whatever wasn't labelled goes back ahead of newer events, within the cap.
+    this.retrying.clear();
+    const giveBack = (events: readonly SensorEvent[]): void => {
+      for (const e of events) this.retrying.add(e.id);
+      this.labelQueue = [...events, ...this.labelQueue];
+      this.trimLabelQueue();
+    };
+    let result: Awaited<ReturnType<typeof classifier.classify>>;
+    try {
+      result = await this.busyWhile('labeller', () => classifier.classify(batch));
+    } catch (err) {
+      giveBack(batch);
+      throw err;
+    }
+    // Whatever wasn't labelled goes back ahead of newer events.
     const deferred = new Set(result.deferred);
-    this.labelQueue = [...batch.filter((e) => deferred.has(e.id)), ...this.labelQueue].slice(
-      -MAX_LABEL_QUEUE,
-    );
+    giveBack(batch.filter((e) => deferred.has(e.id)));
     if (!result.ok) {
       // A batch over the hourly budget isn't held back: the labeller ran recently.
       if (result.reason === 'busy') this.hold('labeller', MAC_BUSY);
@@ -858,6 +876,19 @@ export class AiBridge extends EventEmitter<{
       }
     }
     return result.labels.length;
+  }
+
+  /**
+   * Keep the label queue within its cap by dropping the newest events, never
+   * ones a run gave back: those already waited longest.
+   */
+  private trimLabelQueue(): void {
+    for (
+      let i = this.labelQueue.length - 1;
+      this.labelQueue.length > MAX_LABEL_QUEUE && i >= 0;
+      i--
+    )
+      if (!this.retrying.has(this.labelQueue[i]!.id)) this.labelQueue.splice(i, 1);
   }
 
   private async busyWhile<T>(helper: HelperId, work: () => Promise<T>): Promise<T> {

@@ -409,7 +409,13 @@ try {
       const resumed = await waitUntil(() => !procState(pid).startsWith('T'), 20000);
       s.allowToReleaseMs = Date.now() - t1;
       check('stealer: holding Resume app resumed the process', resumed, procState(pid));
-      const after = await detail(alert.id);
+      // The helper resumes the process before the app hears back and records
+      // the verdict, so give that write a moment rather than read too early.
+      const after =
+        (await waitUntil(async () => {
+          const d = await detail(alert.id);
+          return d?.alert.decision?.verdict === 'benign' ? d : undefined;
+        }, 5000)) ?? (await detail(alert.id));
       check('stealer: alert resolved as fine', after?.alert.decision?.verdict === 'benign');
       check(
         'stealer: resume ran through the helper',

@@ -445,6 +445,9 @@ function start(): void {
         await syncHelperRules();
       },
       true,
+      // Each helper call has its own time limit, and a big list sync can
+      // take a while chunk by chunk; past ten minutes, something is wrong.
+      { stuckAfterMs: 10 * 60_000 },
     );
   }
 

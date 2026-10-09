@@ -43,10 +43,23 @@ import { TEST_RULE } from './test-alert.js';
 import { WORTH_A_LOOK_RULE } from './worth-a-look.js';
 import { UsageService } from './usage.js';
 
+/** Scheduled jobs as people know them, for a stuck-work note in the status. */
+const JOB_NAMES: Record<string, string> = {
+  'pack-dogs': 'pack dogs',
+  'label-events': 'AI labels',
+  'rule-review': 'rule reviews',
+  'threat-feeds': 'threat feeds',
+  'prune-events': 'clean-up',
+  'cap-disk': 'clean-up',
+  'sensor-health': 'sensor checks',
+  'agent-discovery': 'finding AI agents',
+};
+
 /** How long staleAlerts' answer stands while no open alert changes. */
 const STALE_TTL_MS = 60_000;
 /** Open alerts looked at for staleAlerts, newest first. */
 const STALE_SCAN_LIMIT = 2000;
+
 /** How long the Activity strip's counts are reused (see eventStats). */
 export const EVENT_STATS_TTL_MS = 5_000;
 /** How long its distinct-programs number is reused: it reads every launch of the hour. */
@@ -389,9 +402,18 @@ export class VigilCore {
     const s = { ...computeStatus([], this.sensors.list()), ...this.store.openAlertCounts() };
     const today = startOfDay(this.now());
     const alertView = this.alertView();
+    const stuck = this.scheduler
+      .status()
+      .filter((j) => j.stuck)
+      .map((j) => JOB_NAMES[j.name] ?? j.name);
     const aiOff = this.aiNotice?.();
     return {
       ...s,
+      // Work that stopped is said plainly; it doesn't lower the level.
+      reasons: stuck.length
+        ? [...s.reasons, `Background work stuck: ${stuck.join(', ')}`]
+        : s.reasons,
+      stuckJobs: stuck,
       alertView,
       badge: s.needsYou + (alertView === 'more' ? s.noticed : 0),
       watch: {
