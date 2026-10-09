@@ -423,9 +423,7 @@ describe("the shared redaction's secret scan in copied evidence", () => {
     expect(out.alert.subject.label).toBe('null.example.com');
   });
 
-  // The shared redaction doesn't scan JSON object keys yet; Security review is
-  // fixing that in @vigil/ai/redact. Drop `.fails` once it is on main.
-  it.fails('withholds a note whose JSON keys hold a secret, encoded once or twice', () => {
+  it('withholds a note whose JSON keys hold a secret, encoded once or twice', () => {
     const once = JSON.stringify({ ['whsec_' + 'a'.repeat(24)]: 'ok' });
     for (const note of [once, JSON.stringify(once)]) {
       const out = redactEvidence({ alert: { decision: { note } } }, names) as {
