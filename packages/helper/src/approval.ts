@@ -36,6 +36,9 @@ export interface ApprovalOptions {
   now?: () => number;
 }
 
+/** Approvals waiting for the password at once; past this the oldest is dropped. */
+export const MAX_PENDING = 64;
+
 export class Approvals {
   private readonly pending = new Map<string, Pending>();
   private readonly now: () => number;
@@ -51,9 +54,22 @@ export class Approvals {
   /** Start an approval for this command. Returns the nonce the app passes to `approve`. */
   request(cmd: HelperCommand): string {
     this.sweep();
+    while (this.pending.size >= MAX_PENDING) this.pending.delete(this.pending.keys().next().value!);
     const nonce = randomBytes(16).toString('hex');
     this.pending.set(nonce, { hash: commandHash(cmd), expiresAt: this.now() + APPROVAL_TTL_MS });
     return nonce;
+  }
+
+  /** Whether `nonce` is waiting, issued for exactly this command. */
+  issuedFor(nonce: string, cmd: HelperCommand): boolean {
+    this.sweep();
+    return this.pending.get(nonce)?.hash === commandHash(cmd);
+  }
+
+  /** Drop a waiting approval (a newer one replaced it). */
+  cancel(nonce: string): void {
+    this.pending.delete(nonce);
+    if (/^[a-f0-9]{32}$/.test(nonce)) rmSync(join(this.opts.dir, nonce), { force: true });
   }
 
   /** Called by `vigil-helper approve <nonce>`, which only runs as root after the password dialog. */
@@ -65,14 +81,16 @@ export class Approvals {
 
   /**
    * True if `nonce` was issued for exactly this command, has not expired, and
-   * a root-owned approval file exists for it. Single use either way.
+   * a root-owned approval file exists for it. Single use either way, once
+   * the command matches: a nonce offered with another command is left as
+   * it is, so knowing a nonce is not enough to cancel it.
    */
   consume(nonce: string, cmd: HelperCommand): boolean {
     this.sweep();
     const p = this.pending.get(nonce);
+    if (!p || p.hash !== commandHash(cmd)) return false;
     const file = join(this.opts.dir, nonce);
     try {
-      if (!p || p.hash !== commandHash(cmd)) return false;
       const st = lstatSync(file);
       if (!st.isFile() || st.uid !== this.owner || (st.mode & 0o022) !== 0) return false;
       if (this.now() - st.mtimeMs > APPROVAL_TTL_MS) return false;

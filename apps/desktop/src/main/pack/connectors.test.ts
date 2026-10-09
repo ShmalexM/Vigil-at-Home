@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { WITHHELD } from '@vigil/ai/redact';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Connectors, type ConnectorRecord } from './connectors.js';
 
@@ -116,7 +117,7 @@ describe('connectors', () => {
     expect(c.view()[0]).toMatchObject({ state: 'connected', tools: 2 });
     // The server got its token through the environment.
     expect(await c.call(id, 'create_issue', { repo: 'a/b', title: 'Hi' })).toBe(
-      'created a/b#2 "Hi" token=set',
+      'created a/b#2 "Hi" (token set)',
     );
 
     // The tracker hears the server's pid once, and again when it is closed.
@@ -130,6 +131,70 @@ describe('connectors', () => {
       [pid, false],
     ]);
   }, 20_000);
+
+  it('hides secrets in what a connector returns before any model sees it', async () => {
+    const reply = [
+      'api_key=sk-ant-abcdefghijklmnopqrstuvwxyz0123',
+      'Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345',
+      'owner: someone@example.com',
+      'file: /Users/alex/notes.txt',
+    ].join('\n');
+    const { c } = hub({
+      connect: async () =>
+        ({
+          callTool: async () => ({ content: [{ type: 'text', text: reply }] }),
+          close: async () => undefined,
+        }) as never,
+    });
+    open.push(c);
+    const { id } = c.add({ kind: 'http', name: 'Leaky', url: 'https://mcp.example.test/mcp' });
+    const out = await c.call(id, 'read', {});
+    expect(out).not.toMatch(/sk-ant-|abcdefghijklmnop|someone@|alex/);
+    // A secret that can't be cut out exactly withholds the whole field.
+    expect(out).toBe(WITHHELD);
+  });
+
+  /** A hub whose one connector answers `result` to every call. */
+  const answering = (result: unknown) => {
+    const { c } = hub({
+      connect: async () =>
+        ({ callTool: async () => result, close: async () => undefined }) as never,
+    });
+    open.push(c);
+    const { id } = c.add({ kind: 'http', name: 'Leaky', url: 'https://mcp.example.test/mcp' });
+    return { call: (tool: string, args: Record<string, unknown>) => c.call(id, tool, args) };
+  };
+  /** Joined at run time so code scanning doesn't take the sample for a real key. */
+  const KEY = ['sk', 'ant', 'Abc123Def456Ghi789Jkl012Mno'].join('-');
+
+  it('redacts structured content as data before writing it out', async () => {
+    const out = await answering({ content: [], structuredContent: { rows: [{ key: KEY }] } }).call(
+      'read',
+      {},
+    );
+    expect(out).not.toContain(KEY);
+    expect(out).toMatch(/^\{"rows":\[\{"key":/);
+  });
+
+  it('withholds a {"token"} value in a reply, as text or structured', async () => {
+    const token = ['tok', 'Plain', 'Value9'].join('');
+    const asText = await answering({
+      content: [{ type: 'text', text: JSON.stringify({ token }) }],
+    }).call('read', {});
+    const structured = await answering({ content: [], structuredContent: { token } }).call(
+      'read',
+      {},
+    );
+    expect(asText).not.toContain(token);
+    expect(structured).not.toContain(token);
+  });
+
+  it('reads a text part that is JSON encoded twice as data', async () => {
+    const secrets = [['Tr0ub4', 'dor&3'].join(''), ['hunter2', 'xyzQ'].join('')];
+    const text = JSON.stringify(JSON.stringify({ password: secrets[0], api_token: secrets[1] }));
+    const out = await answering({ content: [{ type: 'text', text }] }).call('read', {});
+    for (const secret of secrets) expect(out).not.toContain(secret);
+  });
 
   it('refuses a command inside Vigil’s own app, even through a link', () => {
     const { c, dir } = hub({ selfPaths: [process.execPath] });

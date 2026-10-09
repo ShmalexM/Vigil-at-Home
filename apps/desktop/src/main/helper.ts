@@ -181,6 +181,34 @@ export class HelperLink
       if (!(err instanceof HelperCallError) || /connection closed/.test(err.message)) {
         this.dropped(client, err);
       }
+      if (err instanceof HelperCallError && err.code === 'installer-owned') {
+        return {
+          at: Date.now(),
+          error: 'Not done: it belongs to an installer or the system',
+          errorCode: 'installer-owned',
+        };
+      }
+      if (err instanceof HelperCallError && err.code === 'owner-cannot-write') {
+        return {
+          at: Date.now(),
+          error: 'Not done: its owner can’t write there',
+          errorCode: 'owner-cannot-write',
+        };
+      }
+      if (err instanceof HelperCallError && err.code === 'startup-folder-linked') {
+        return {
+          at: Date.now(),
+          error: 'Not done: its folder is a link to somewhere else',
+          errorCode: 'startup-folder-linked',
+        };
+      }
+      if (err instanceof HelperCallError && err.code === 'not-your-item') {
+        return {
+          at: Date.now(),
+          error: 'Not done: it belongs to another user',
+          errorCode: 'not-your-item',
+        };
+      }
       const error =
         err instanceof HelperCallError && err.code === 'refused'
           ? `Not done: ${err.message}`
@@ -392,7 +420,11 @@ export class HelperLink
             simulated: false,
             ...(r.outcome.quarantineId ? { quarantineId: r.outcome.quarantineId } : {}),
           }
-        : { at, error: r.error ?? 'The Vigil helper could not do this' };
+        : {
+            at,
+            error: r.error ?? 'The Vigil helper could not do this',
+            ...(r.errorCode ? { errorCode: r.errorCode } : {}),
+          };
       const key = JSON.stringify(r.action);
       const entry = this.helperRan.get(key);
       if (entry) entry.results.push(result);

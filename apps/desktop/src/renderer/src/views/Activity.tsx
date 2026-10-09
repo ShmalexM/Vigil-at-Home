@@ -26,6 +26,7 @@ import { Button, Card, Chip, Segmented, StatusMark } from '../components/ui';
 import { realProcess } from '../evidence';
 import { actorLabel, clock, describeAction, describeEvent, timeAgo, timeOfDay } from '../format';
 import { matchText } from '../rule-modes';
+import { actionErrorText, sameAlert } from '../decision';
 import { parseActivityParam, VIGIL_CONNECTOR, VIGIL_SELF } from './agents-format';
 import { appendOlder } from './activity-rows';
 import { PageHead } from './AppShell';
@@ -677,7 +678,9 @@ function ActionLog({ go }: { go?: ((route: string) => void) | undefined }) {
             <span className="ellipsis">{describeAction(r.action)}</span>
             <span className="t-small ellipsis">
               {r.reason}
-              {r.result?.error ? ` · ${r.result.error}` : ''}
+              {actionErrorText(r, sameAlert(actions ?? [], r))
+                ? ` · ${actionErrorText(r, sameAlert(actions ?? [], r))}`
+                : ''}
             </span>
           </div>
           {r.alertId && go && (

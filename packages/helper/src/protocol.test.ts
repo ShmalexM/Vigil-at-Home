@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { macosCoreRules } from '@vigil/detection';
-import { needsApproval, parseRequest, type HelperCommand } from './protocol.js';
+import {
+  HelperAction,
+  HelperQuery,
+  needsApproval,
+  parseRequest,
+  type HelperCommand,
+} from './protocol.js';
 
 const req = (command: unknown, extra: object = {}) =>
   parseRequest(JSON.stringify({ id: 'r1', command, ...extra }));
@@ -123,5 +129,21 @@ describe('request validation', () => {
     ];
     for (const c of yes) expect(needsApproval(c)).toBe(true);
     for (const c of no) expect(needsApproval(c)).toBe(false);
+  });
+});
+
+describe('what the socket takes', () => {
+  it('has no command that touches the pin; pin-app and pin-remove are root command lines only', () => {
+    const kinds = [
+      ...HelperAction.options.map((o) => o.shape.kind.value),
+      ...HelperQuery.options.map((o) => o.shape.kind.value),
+      'detection.sync',
+      'detection.list.set',
+      'self.grant',
+    ];
+    expect(kinds.filter((k) => /pin/i.test(k))).toEqual([]);
+    for (const kind of ['pin-remove', 'pin.remove', 'pin-app', 'pin.app', 'app.pin.remove']) {
+      expect(parseRequest(JSON.stringify({ id: 'r', command: { kind } }))).toHaveProperty('error');
+    }
   });
 });

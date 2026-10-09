@@ -55,6 +55,22 @@ export interface HealthProbe {
   platform?: NodeJS.Platform;
 }
 
+/**
+ * The helper's sensor report, from its helper.status answer. No answer
+ * because there is no connection (it dropped and is reconnecting) means
+ * the helper can't be vouched for, so it throws and the check says down; an
+ * older helper's answer without sensors is just no report.
+ */
+export function helperSensorsFrom(
+  query: () => Promise<{ sensors?: HelperSensors } | null>,
+): () => Promise<HelperSensors | null> {
+  return async () => {
+    const status = await query();
+    if (status === null) throw new Error('The helper is not connected');
+    return status.sensors ?? null;
+  };
+}
+
 export function macProbe(
   lastEventAt: HealthProbe['lastEventAt'],
   helper: HealthProbe['helper'],
@@ -81,9 +97,16 @@ const minutes = (ms: number) => Math.max(1, Math.round(ms / 60_000));
  * here needs root.
  */
 export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
-  const helperState = p.helper();
   const fromHelper =
-    helperState === 'connected' ? await p.helperSensors?.().catch(() => null) : null;
+    p.helper() === 'connected' && p.helperSensors
+      ? await p.helperSensors().catch(() => 'failed' as const)
+      : null;
+  // Read the state after the query: the helper can drop while it runs, and a
+  // helper that can't answer its own status isn't working.
+  const now = p.helper();
+  const helperState: HelperState =
+    fromHelper === 'failed' && now === 'connected' ? 'not_running' : now;
+  const reportedSensors = fromHelper === 'failed' ? null : fromHelper;
   const helper: SensorHealth = {
     id: 'helper',
     name: 'Vigil helper',
@@ -103,7 +126,7 @@ export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
     processes: string[],
   ): Promise<SensorHealth> => {
     const base = { id, name, detail };
-    const reported = fromHelper?.[id];
+    const reported = reportedSensors?.[id];
     const installed = reported?.installed || paths.some((path) => p.exists(path));
     if (!installed) return { ...base, state: 'not_installed' };
     const running = await Promise.all(processes.map((name) => p.running(name)));
@@ -205,8 +228,16 @@ export function reportFeedHealth(
 }
 
 /** Re-check and report every layer. */
+const latestCheck = new WeakMap<SensorRegistry, number>();
+
 export async function reportHealth(registry: SensorRegistry, probe: HealthProbe): Promise<void> {
-  for (const h of await checkHealth(probe)) {
+  // Checks overlap (a timer and a helper reconnect), and an older one can
+  // finish last; only the latest-started check may report.
+  const seq = (latestCheck.get(registry) ?? 0) + 1;
+  latestCheck.set(registry, seq);
+  const health = await checkHealth(probe);
+  if (latestCheck.get(registry) !== seq) return;
+  for (const h of health) {
     const prev = registry.get(h.id);
     if (prev?.state !== h.state || prev?.note !== h.note) registry.report(h);
   }
