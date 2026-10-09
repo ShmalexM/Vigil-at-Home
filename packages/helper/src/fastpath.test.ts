@@ -453,10 +453,20 @@ describe('blocking rules in the helper', () => {
     approve = false;
   }
 
-  it('needs the password when a sync claims a built-in rule is yours and an older pattern', async () => {
+  /** The rule as the root-owned file holds it, and the file's older patterns. */
+  const savedRule = (id: string) => {
+    const saved = JSON.parse(readFileSync(rulesFile, 'utf8')) as {
+      rules: DetectionRule[];
+      legacyUses: Record<string, unknown>;
+    };
+    return { rule: saved.rules.find((r) => r.id === id), legacyUses: saved.legacyUses };
+  };
+
+  it('keeps a built-in rule as Vigil’s when a sync calls it yours and an older pattern', async () => {
     const rule = shippedLookahead();
     const cmd = await inForce(rule);
-    const rev = fast.status().rev;
+    const before = savedRule(rule.id);
+    expect(before.rule?.origin).toBe('builtin');
     simulateLinearEngine(false);
     try {
       const claimed = {
@@ -464,18 +474,20 @@ describe('blocking rules in the helper', () => {
         rules: cmd.rules.map((r) => (r.id === rule.id ? { ...r, origin: 'user' as const } : r)),
         legacy: [rule.id],
       };
-      expect(fast.loosening(claimed)).toEqual([`change what “${rule.name}” blocks`]);
-      await expect(client.call(claimed)).rejects.toMatchObject({ code: 'refused' });
-      expect(prompts).toHaveLength(1);
-      expect(fast.status().rev).toBe(rev);
+      // What the helper enforces would not change, so nothing is loosened.
+      expect(fast.loosening(claimed)).toEqual([]);
+      await client.call(claimed);
+      expect(prompts).toEqual([]);
+      // Never dropped or weakened: the same rule, still Vigil's, its regexes trusted.
       expect(fast.status().rules).toBe(cmd.rules.length);
+      expect(savedRule(rule.id)).toEqual(before);
     } finally {
       simulateLinearEngine(undefined);
       await restore();
     }
   });
 
-  it('needs the password when a sync claims your edit of a built-in rule is yours', async () => {
+  it('keeps your edit of a built-in rule as Vigil’s when a sync calls it yours', async () => {
     // Edited, still with the regexes Vigil ships, which only the usual engine runs.
     const shipped = shippedLookahead();
     const edited = DetectionRule.parse({
@@ -485,21 +497,50 @@ describe('blocking rules in the helper', () => {
       exclusions: [...shipped.exclusions, { field: 'process.path', op: 'eq', value: '/x' }],
     });
     const cmd = await inForce(edited);
-    const rev = fast.status().rev;
+    const before = savedRule(edited.id);
+    expect(before.rule?.origin).toBe('builtin');
     try {
       const claimed = {
         ...cmd,
         rules: cmd.rules.map((r) => (r.id === edited.id ? { ...r, origin: 'user' as const } : r)),
         legacy: [edited.id],
       };
-      expect(fast.loosening(claimed)).toEqual([`change what “${edited.name}” blocks`]);
-      await expect(client.call(claimed)).rejects.toMatchObject({ code: 'refused' });
-      expect(fast.status().rev).toBe(rev);
-      expect(fast.status().rules).toBe(cmd.rules.length);
-      // Even with the password, the helper keeps the rule, as Vigil's.
-      approve = true;
+      expect(fast.loosening(claimed)).toEqual([]);
       await client.call(claimed);
+      expect(prompts).toEqual([]);
       expect(fast.status().rules).toBe(cmd.rules.length);
+      expect(savedRule(edited.id)).toEqual(before);
+      // Weakening it still needs the password, and without it nothing changes.
+      const weaker = {
+        ...claimed,
+        rules: claimed.rules.filter((r) => r.id !== edited.id),
+      };
+      await expect(client.call(weaker)).rejects.toMatchObject({ code: 'refused' });
+      expect(savedRule(edited.id)).toEqual(before);
+    } finally {
+      await restore();
+    }
+  });
+
+  it('never asks again for a built-in rule a newer app ships and this helper does not', async () => {
+    const base = appSet({ known_bad_sha256: [BAD] }).sync.rules[0]!;
+    const newer = DetectionRule.parse({ ...base, id: 'shipped-by-a-newer-app', origin: 'builtin' });
+    const cmd = await inForce(newer);
+    try {
+      expect(savedRule(newer.id).rule?.origin).toBe('user');
+      for (let i = 0; i < 5; i++) {
+        if (i === 3) {
+          // The helper restarts from its saved policy.
+          fast = makeFastPath(executor);
+          fast.load();
+        }
+        expect(fast.loosening(cmd)).toEqual([]);
+        await client.call(cmd);
+        expect(fast.status().rules).toBe(cmd.rules.length);
+      }
+      expect(prompts).toEqual([]);
+      sys.processes.set(7100, { path: '/tmp/payload', started: 'T' });
+      expect((await fast.check(exec(7100, BAD))).map((r) => r.ruleId)).toContain(newer.id);
     } finally {
       await restore();
     }

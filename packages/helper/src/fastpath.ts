@@ -238,9 +238,9 @@ export class FastPath {
       // sync() refuses it and nothing changes.
       next = new Map(this.running);
     }
-    // The origin a sync claims is never used (ownOrigin), but one that differs
-    // from the rule's own asks to change how its patterns are trusted.
-    const claimed = new Map(cmd.rules.map((r) => [r.id, r.origin]));
+    // Origins are the helper's own (ownOrigin) on both sides: what the app
+    // claims never counts by itself, and an id this helper does not ship is
+    // the user's however often the app calls it built-in.
     for (const r of this.state.rules) {
       const n = next.get(r.id);
       const now = this.running.get(r.id);
@@ -248,7 +248,7 @@ export class FastPath {
       else if (
         enforced(n.rule) !== enforced(r) ||
         n.how !== now?.how ||
-        claimed.get(r.id) !== r.origin
+        n.rule.origin !== ownOrigin(r).origin
       )
         out.push(`change what “${r.name}” blocks`);
     }
