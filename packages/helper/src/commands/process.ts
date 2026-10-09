@@ -24,10 +24,12 @@ export interface ProcessIdentity {
  *
  * exec keeps the pid and start time, so a process that execs another
  * program is still "the same process" here, now running that program. For
- * the app pin that is accepted (see appPin.ts runsPinnedApp): a process that
- * execs the pinned app's code is the app from then on, and only a process
- * whose code is already someone's choosing can do it, so nothing the real
- * app depends on changes.
+ * the app pin that is accepted in both directions (see appPin.ts
+ * runsPinnedApp): a process that execs into the pinned app's code is the
+ * app from then on, and one that execs away from it, to other code at the
+ * same path, can still be spared on the cdhash read just before. Only a
+ * process whose code is already someone's choosing can do either, so
+ * nothing the real app depends on changes.
  */
 export async function identifyProcess(
   sys: System,
