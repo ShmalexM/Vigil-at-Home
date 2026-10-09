@@ -34,6 +34,7 @@ import {
   type EventHistory,
   type FeedImporterOptions,
   type AnalyzeRunner,
+  type CheckOptions,
   type FeedStatus,
   type FlaggedEvent,
   type Proposal,
@@ -47,8 +48,9 @@ import { appBlockingRules, fastPathRules, isAppOnlyField } from '@vigil/detectio
 import { userOrigin } from '@vigil/detection/user';
 import type { EventOutcome } from '../shared/ipc.js';
 import type { AlertService } from './alerts.js';
-import type { Store } from './db/store.js';
+import type { EventBodyRow, Store } from './db/store.js';
 import type { HelperRuleSet } from './helper.js';
+import type { HelperSelf } from './self-path.js';
 
 const KEY_REVIEW = 'detection.review';
 
@@ -114,6 +116,8 @@ export interface DetectorOptions {
   installedAt: number;
   /** Vigil's own executable, which the safety floor never touches. */
   selfPaths: string[];
+  /** What the helper is told instead, when it differs (an AppImage's mount changes every launch). */
+  helperSelf?: HelperSelf;
   feeds?: FeedImporterOptions;
   now?: () => number;
   /** Vigil's own pid: its process tree is tagged `vigil-self` (its AI helpers). */
@@ -152,7 +156,8 @@ export class Detector {
   private reviewer: RuleReviewer | undefined;
   private checkedByKind = new Map<string, number>();
   private readonly now: () => number;
-  private readonly selfPaths: string[];
+  /** What is Vigil's own, as the helper's safety floor sees it. */
+  private readonly helperSelf: HelperSelf;
   /** Set by the app: sends the helper its copy after rules, modes or exceptions change. */
   syncHelper: HelperSync | undefined;
   /** User changes one at a time, so one waiting on the password can't mix with another. */
@@ -166,7 +171,7 @@ export class Detector {
     opts: DetectorOptions,
   ) {
     this.now = opts.now ?? Date.now;
-    this.selfPaths = opts.selfPaths;
+    this.helperSelf = opts.helperSelf ?? { paths: opts.selfPaths, images: [], hashes: [] };
     // Detection keeps its state in det_* tables in the same database. Replay
     // history reads the app's own event table rather than keeping a second copy.
     this.stores = { ...sqliteStores(db), history: appHistory(store) };
@@ -282,14 +287,14 @@ export class Detector {
   private *flagged(from: number, to: number): Iterable<FlaggedEvent> {
     const rows = this.db
       .prepare(
-        `SELECT body, label FROM events
+        `SELECT body, args, label FROM events
          WHERE ts >= ? AND ts <= ? AND matched = 0 AND label IS NOT NULL
            AND json_extract(label, '$.label') IN ('unusual', 'suspicious')
          ORDER BY ts DESC LIMIT 2000`,
       )
-      .iterate(from, to) as Iterable<{ body: string; label: string }>;
+      .iterate(from, to) as Iterable<EventBodyRow & { label: string }>;
     for (const r of rows) {
-      const e = JSON.parse(r.body) as SensorEvent;
+      const e = this.store.event(r);
       const l = JSON.parse(r.label) as { label: 'unusual' | 'suspicious'; reason?: string };
       const f: FlaggedEvent = { kind: e.kind, subject: flaggedSubject(e), label: l.label };
       if (l.reason) f.reason = l.reason;
@@ -316,7 +321,7 @@ export class Detector {
    * free: the tracker only says which agent session asked (attribution), and
    * `engine.check` leaves no trace. Rules decide deny, ask or nothing; never allow.
    */
-  preflight(req: PreflightRequest): PreflightResult {
+  preflight(req: PreflightRequest, opts?: CheckOptions): PreflightResult {
     const ts = this.now();
     const found = req.ppid !== undefined ? this.tracker.lookup(req.ppid) : undefined;
     const event = toolRequestEvent(req, {
@@ -324,7 +329,7 @@ export class Detector {
       ts,
       ...(found?.tag ? { tag: found.tag } : {}),
     });
-    const detections = this.engine.check(event);
+    const detections = this.engine.check(event, opts);
     const reply = decide(detections, (id) => this.engine.getRule(id)?.name ?? id);
     return { reply, event, detections };
   }
@@ -457,9 +462,20 @@ export class Detector {
         rules.map((r) => r.id),
       ),
       exceptions,
-      selfPaths: this.selfPaths,
+      selfPaths: this.helperSelf.paths,
+      selfImages: this.helperSelf.images,
+      selfHashes: this.helperSelf.hashes,
       lists: Object.fromEntries(lists.map((l) => [l, this.stores.lists.entries(l)])),
     };
+  }
+
+  /**
+   * The sha256 of the programs inside Vigil's AppImage, hashed after
+   * start-up: no rule here or in the helper may block one of them.
+   */
+  setSelfHashes(hashes: readonly string[]): void {
+    this.helperSelf.hashes = [...hashes];
+    this.engine.setSelfHashes(hashes);
   }
 
   hasRule(id: string): boolean {

@@ -192,6 +192,21 @@ interface Node {
   parentTag?: AgentTag | undefined;
   /** This process was that agent before it exec'd into something else. */
   wasAgent?: string;
+  /**
+   * This PID exec'd into a different program image. A code signature belongs
+   * to the image, not the PID, so a tag this node still carries from its old
+   * image must not lend its signature any more (see resolve/stripSignature).
+   */
+  reExeced?: true;
+  /**
+   * A shell the signed agent started as `sh -c <one plain command>`: that
+   * command's words, until its first child is seen (see bareShellCommand).
+   */
+  bareCmd?: string[];
+  /** Its first child has been seen, so it hands the signature to nobody else. */
+  bareUsed?: true;
+  /** Started by such a shell as exactly its command, so it keeps the signature. */
+  viaBareShell?: true;
   /** Its program matches an identity (any status), so it is never a candidate. */
   known?: boolean;
   tag?: AgentTag | undefined;
@@ -225,11 +240,93 @@ function mergeAncestors(
 }
 
 function childOf(t: AgentTag | undefined): AgentTag | undefined {
-  return t && { id: t.id, session: t.session, depth: Math.min(t.depth + 1, MAX_DEPTH) };
+  return t && { ...t, depth: Math.min(t.depth + 1, MAX_DEPTH) };
 }
 
 function sameTag(a: AgentTag | undefined, b: AgentTag | undefined): boolean {
-  return a === b || (!!a && !!b && a.id === b.id && a.session === b.session && a.depth === b.depth);
+  return (
+    a === b ||
+    (!!a &&
+      !!b &&
+      a.id === b.id &&
+      a.session === b.session &&
+      a.depth === b.depth &&
+      a.teamId === b.teamId &&
+      a.signingId === b.signingId)
+  );
+}
+
+/** The tag without the agent root's signature (attribution id/session/depth stay). */
+function stripSignature(t: AgentTag): AgentTag {
+  if (t.teamId === undefined && t.signingId === undefined) return t;
+  const { teamId: _t, signingId: _s, ...rest } = t;
+  return rest;
+}
+
+/** The root's signature on a session's first tag, when its launch reported one. */
+function rootTag(id: string, session: string, n: Node): AgentTag {
+  const t: AgentTag = { id, session, depth: 0 };
+  if (n.teamId !== undefined) t.teamId = n.teamId;
+  if (n.signingId !== undefined) t.signingId = n.signingId;
+  return t;
+}
+
+/**
+ * The tag `n` hands its children (one level down once childOf adds it). The
+ * root's signature goes on only while `n` itself has it: the root, or a copy
+ * of the same signed program it started. A shell or any other program in
+ * between, or a re-exec into something else, drops it, so a child's
+ * `teamId` always means its parent is the signed agent program.
+ */
+/** Longest bare command a shell is remembered for. */
+const MAX_BARE_CMD = 1024;
+
+/**
+ * The words of `cmd` when it is one plain command: no separators, pipes,
+ * redirects, substitution, globs, escapes or comments, quotes only as plain
+ * word quoting. Undefined otherwise.
+ */
+export function bareShellCommand(cmd: string): string[] | undefined {
+  if (cmd.length > MAX_BARE_CMD || /[;&|`$()<>\n\r\\*?[\]{}~#!]/.test(cmd)) return undefined;
+  const words: string[] = [];
+  let word: string | undefined;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (c === ' ' || c === '\t') {
+      if (word !== undefined) words.push(word);
+      word = undefined;
+    } else if (c === "'" || c === '"') {
+      const end = cmd.indexOf(c, i + 1);
+      if (end === -1) return undefined;
+      word = (word ?? '') + cmd.slice(i + 1, end);
+      i = end;
+    } else word = (word ?? '') + c;
+  }
+  if (word !== undefined) words.push(word);
+  return words.length ? words : undefined;
+}
+
+/** The program and its arguments are exactly those words (the program by name). */
+function runsWords(words: readonly string[], p: AgentProc): boolean {
+  const args = p.args;
+  if (!args || args.length !== words.length) return false;
+  const prog = basename(words[0]!);
+  if (basename(p.path) !== prog || basename(args[0]!) !== prog) return false;
+  for (let i = 1; i < args.length; i++) if (args[i] !== words[i]) return false;
+  return true;
+}
+
+/** The tag `parent` hands `child`: a bare shell's one command keeps the signature, else passOn. */
+function inheritFor(child: Node, parent: Node | undefined): AgentTag | undefined {
+  return child.viaBareShell && parent ? parent.tag : passOn(parent);
+}
+
+function passOn(n: Node | undefined): AgentTag | undefined {
+  const t = n?.tag;
+  if (!t || (t.teamId === undefined && t.signingId === undefined)) return t;
+  if (n.teamId === t.teamId && n.signingId === t.signingId) return t;
+  const { teamId: _t, signingId: _s, ...rest } = t;
+  return rest;
 }
 
 /** `sh -c`, `zsh -lc` and the like: how agents run a command. */
@@ -306,7 +403,7 @@ export class AgentTracker {
       const parent = p.ppid !== undefined && p.ppid > 0 ? this.get(p.ppid) : undefined;
       if (parent) {
         const anc = [parent.name, ...(parent.ancestors ?? [])].slice(0, MAX_ANCESTORS);
-        return this.withTree(e, childOf(parent.tag), anc);
+        return this.withTree(e, childOf(passOn(parent)), anc);
       }
     }
     // Reading ps again helps a process Vigil doesn't know, or a reused pid (a new
@@ -395,8 +492,9 @@ export class AgentTracker {
       let inherited: AgentTag | undefined;
       if (parent && parent !== n && !visiting.has(parent) && hops < MAX_DEPTH) {
         visiting.add(n);
-        inherited = visit(parent, hops + 1);
+        visit(parent, hops + 1);
         visiting.delete(n);
+        inherited = inheritFor(n, parent);
         n.parentTag = inherited;
       } else {
         // The parent is gone (or the chain loops): trust what it was, while that agent is still watched.
@@ -466,6 +564,7 @@ export class AgentTracker {
       // The same process running a new program (a shell's exec, a wrapper script).
       // It keeps its tag unless the new program is itself an agent.
       n = prev;
+      if (n.path !== p.path) n.reExeced = true;
       if (n.tag && n.tag.depth === 0 && n.tag.id !== VIGIL_SELF && n.tag.id !== VIGIL_CONNECTOR)
         n.wasAgent = n.tag.id;
       this.setProgram(n, p, m);
@@ -475,6 +574,7 @@ export class AgentTracker {
       this.insert(n);
       const tag = this.resolve(n, identity, n.tag);
       if (!sameTag(tag, n.tag)) n.tag = tag;
+      this.setBareCmd(n, p.args);
     } else {
       // A new process, or a reused pid (its parent differs): start over.
       n = {
@@ -489,8 +589,16 @@ export class AgentTracker {
       this.setProgram(n, p, m);
       this.insert(n);
       this.setAncestors(n);
-      n.parentTag = parent?.tag;
-      n.tag = this.resolve(n, identity, childOf(parent?.tag));
+      if (parent?.bareCmd) {
+        // A bare `sh -c <command>` hands the signature to its first child, and
+        // only when that child is the command itself.
+        if (runsWords(parent.bareCmd, p)) n.viaBareShell = true;
+        delete parent.bareCmd;
+        parent.bareUsed = true;
+      }
+      n.parentTag = inheritFor(n, parent);
+      n.tag = this.resolve(n, identity, childOf(n.parentTag));
+      this.setBareCmd(n, p.args);
     }
 
     // What the sensor hub knows of the chain is what its children will carry too.
@@ -514,6 +622,9 @@ export class AgentTracker {
     identity: AgentIdentity | undefined,
     base: AgentTag | undefined,
   ): AgentTag | undefined {
+    // A code signature belongs to the program image. When this PID exec'd into a
+    // different image, the tag it still carries must not lend that signature on.
+    if (n.reExeced && base !== undefined) base = stripSignature(base);
     // A connector Vigil started runs the user's program: a session of its own.
     // Once tagged it stays a connector, even after Vigil stops tracking the pid.
     if (base?.id === VIGIL_SELF && n.tag?.id === VIGIL_CONNECTOR && n.tag.depth === 0) return n.tag;
@@ -533,13 +644,31 @@ export class AgentTracker {
       return { id: VIGIL_CONNECTOR, session, depth: 0 };
     }
     // Vigil's own tree stays Vigil's: the claude and codex it runs are its helpers.
-    if (base?.id === VIGIL_SELF) return base;
+    // A signed agent program running inside it lends its signature to the tree,
+    // so that agent's own sign-in read can be verified like any other agent's.
+    if (base?.id === VIGIL_SELF) {
+      if (
+        !n.reExeced &&
+        identity?.watch &&
+        identity.status === 'active' &&
+        (n.teamId !== undefined || n.signingId !== undefined)
+      ) {
+        const t: AgentTag = { ...base };
+        if (n.teamId !== undefined) t.teamId = n.teamId;
+        else delete t.teamId;
+        if (n.signingId !== undefined) t.signingId = n.signingId;
+        else delete t.signingId;
+        return sameTag(t, base) ? base : t;
+      }
+      return base;
+    }
     // A connector's tree stays the connector's, whatever it runs.
     if (base?.id === VIGIL_CONNECTOR) return base;
     if (!identity?.watch || identity.status !== 'active' || identity.id === base?.id) return base;
     if (n.seeded) this.reuseStart(n, identity.id);
     const session = sessionId(identity.id, n.pid, n.startedAt);
-    if (n.tag?.depth === 0 && n.tag.session === session) return n.tag;
+    const tag = rootTag(identity.id, session, n);
+    if (n.tag?.depth === 0 && n.tag.session === session) return sameTag(tag, n.tag) ? n.tag : tag;
     const s: SessionStart = {
       id: session,
       agentId: identity.id,
@@ -550,7 +679,7 @@ export class AgentTracker {
     };
     if (base) s.parentSession = base.session;
     this.announce(s);
-    return { id: identity.id, session, depth: 0 };
+    return tag;
   }
 
   private identityOf(n: Node, m: CompiledAgentMatcher): AgentIdentity | undefined {
@@ -561,6 +690,21 @@ export class AgentTracker {
       signingId: n.signingId,
     };
     return m.match(proc) ?? (n.wasAgent !== undefined ? m.byId(n.wasAgent) : undefined);
+  }
+
+  /**
+   * Remember a shell's bare command when the signed agent started it directly
+   * as exactly `sh -c <command>` (see bareShellCommand). macOS's sh re-runs
+   * itself as bash with the same arguments, so this runs on each exec.
+   */
+  private setBareCmd(n: Node, args: readonly string[] | undefined): void {
+    delete n.bareCmd;
+    const t = n.tag;
+    if (n.bareUsed || n.viaBareShell || !t || (t.teamId === undefined && t.signingId === undefined))
+      return;
+    if (!COMMAND_SHELLS.has(n.name) || args?.length !== 3 || args[1] !== '-c') return;
+    const words = bareShellCommand(args[2]!);
+    if (words) n.bareCmd = words.map(ownString);
   }
 
   private stillWatched(t: AgentTag | undefined, m: CompiledAgentMatcher): AgentTag | undefined {
@@ -592,9 +736,15 @@ export class AgentTracker {
     const before = this.identityOf(n, m);
     // ps matched it by argv[0] (an npm Claude Code's process title, say): it stays that agent.
     if (before && n.tag?.depth === 0 && n.tag.id === before.id) n.wasAgent = before.id;
+    const signed = [n.teamId, n.signingId];
     this.setProgram(n, { path: p.path, args: n.args, teamId: p.teamId, signingId: p.signingId }, m);
     delete n.psPath;
-    if (this.identityOf(n, m)?.id !== before?.id) this.retag();
+    // A changed signature changes what the tag hands down (see passOn) too.
+    if (
+      this.identityOf(n, m)?.id !== before?.id ||
+      (n.tag && (signed[0] !== n.teamId || signed[1] !== n.signingId))
+    )
+      this.retag();
   }
 
   /**

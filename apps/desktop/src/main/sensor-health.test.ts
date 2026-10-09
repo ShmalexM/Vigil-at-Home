@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { checkHealth, QUIET_AFTER_MS, type HealthProbe } from './sensor-health.js';
+import {
+  checkHealth,
+  feedHealth,
+  QUIET_AFTER_MS,
+  reportFeedHealth,
+  type HealthProbe,
+} from './sensor-health.js';
+import { SensorRegistry } from './sensors.js';
+import { computeStatus } from './status.js';
 
 function probe(over: Partial<HealthProbe> & { installed?: string[]; procs?: string[] } = {}) {
   const installed = new Set(over.installed ?? []);
@@ -113,5 +121,42 @@ describe('checkHealth', () => {
       });
       expect(ok['fapolicyd']?.state).toBe('ok');
     });
+  });
+});
+
+describe('feedHealth', () => {
+  it('adds one quiet line while a feed is held back, and takes it away after', () => {
+    const registry = new SensorRegistry();
+    let changes = 0;
+    registry.on('changed', () => changes++);
+    const before = computeStatus([], registry.list());
+
+    reportFeedHealth(registry, [{ name: 'Feodo Tracker' }, { name: 'URLhaus' }]);
+    expect(registry.get('threat-feeds')).toBeUndefined();
+    expect(changes).toBe(0);
+
+    reportFeedHealth(registry, [{ name: 'Feodo Tracker', heldBack: true }, { name: 'URLhaus' }]);
+    const line = registry.get('threat-feeds');
+    expect(line).toMatchObject({ state: 'ok' });
+    expect(line?.note).toMatch(/^Stale: Feodo Tracker kept its last list/);
+    // Neither the level nor the reasons change, so nothing badges or pops up.
+    expect(computeStatus([], registry.list())).toEqual(before);
+
+    // Reporting the same thing again is not a change.
+    reportFeedHealth(registry, [{ name: 'Feodo Tracker', heldBack: true }]);
+    expect(changes).toBe(1);
+
+    reportFeedHealth(registry, [{ name: 'Feodo Tracker' }]);
+    expect(registry.get('threat-feeds')).toBeUndefined();
+    expect(changes).toBe(2);
+  });
+
+  it('names every held-back feed in the one line', () => {
+    expect(
+      feedHealth([
+        { name: 'A', heldBack: true },
+        { name: 'B', heldBack: true },
+      ])?.note,
+    ).toMatch(/^Stale: A, B kept their last list/);
   });
 });

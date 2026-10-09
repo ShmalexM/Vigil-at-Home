@@ -326,6 +326,30 @@ try {
     link.connect = (s) => Client.connect(s, approver);
   }, HELPER);
 
+  // The app runs from a temporary folder here, not /Applications, so naming
+  // it as Vigil's own needs the password. That self grant goes to the helper
+  // apart from the rules, and may have opened the real dialog before the
+  // approver above, which nobody can answer on a runner: close it and ask
+  // again through the approver. The rules never wait on that dialog.
+  const closeDialog = () => {
+    try {
+      execFileSync('pkill', ['-x', 'osascript'], { stdio: 'ignore' });
+    } catch {
+      // No dialog open.
+    }
+  };
+  closeDialog();
+  const closing = setInterval(closeDialog, 500);
+  const synced = await main(async () => {
+    const { helperSync, core } = globalThis.vigil;
+    // As on a new connection: the grant starts over, through the approver.
+    helperSync.connected();
+    const rules = await core.detector.syncHelper();
+    await helperSync.grant();
+    return rules;
+  }).finally(() => clearInterval(closing));
+  check("the helper took the app's rules", synced === 'applied', { synced });
+
   // Record when the popup is placed on screen, from the main process.
   await main(() => {
     const w = globalThis.vigil.windows;

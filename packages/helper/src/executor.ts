@@ -19,7 +19,7 @@ import { needsApproval } from './protocol.js';
 import { Journal, type JournalEntry } from './journal.js';
 import type { Approvals } from './approval.js';
 import type { System } from './system.js';
-import { PolicyRefused, type FastPath } from './fastpath.js';
+import { PolicyRefused, type FastPath, type SelfSet } from './fastpath.js';
 import type { PreexecSync } from './preexec.js';
 import { ActionError } from './commands/errors.js';
 import {
@@ -69,6 +69,8 @@ export interface ExecutorDeps {
   fapolicyd?: FapolicydBlocks;
   /** The clock a sync's `notAfter` is held to; Date.now by default. */
   now?: () => number;
+  /** What is Vigil's own: never paused, stopped or blocked. Defaults to fastPath.self(). */
+  self?: () => SelfSet;
 }
 
 export type ExecOutcome =
@@ -103,6 +105,10 @@ export class Executor {
     this.firewall = d.sys.platform === 'linux' ? new NftFirewall(d.sys) : new Firewall(d.sys);
   }
 
+  private self(): SelfSet {
+    return this.d.self?.() ?? this.d.fastPath?.self() ?? { paths: [], images: [], hashes: [] };
+  }
+
   /** Quarantine settings with the protected folders of the OS the helper acts on. */
   private get quarantineOpts(): QuarantineOptions {
     return this.d.sys.platform === 'linux'
@@ -129,10 +135,27 @@ export class Executor {
           result: { applied: false, needLists: need, preexec: null },
         };
       // Whether a sync weakens anything depends on the policy in force.
-      const weakens = this.d.fastPath?.loosening(cmd) ?? [];
+      let weakens: string[];
+      try {
+        weakens = this.d.fastPath?.loosening(cmd) ?? [];
+      } catch (err) {
+        throw policyError(err);
+      }
       if (weakens.length && (!approval || !this.d.approvals.consume(approval, cmd))) {
         const nonce = this.d.approvals.request(cmd);
         return { kind: 'needs_approval', nonce, prompt: syncPrompt(weakens) };
+      }
+    } else if (cmd.kind === 'self.grant') {
+      // Whether it names anything new depends on what was granted before.
+      let grants: string[];
+      try {
+        grants = this.d.fastPath?.selfLoosening(cmd) ?? [];
+      } catch (err) {
+        throw policyError(err);
+      }
+      if (grants.length && (!approval || !this.d.approvals.consume(approval, cmd))) {
+        const nonce = this.d.approvals.request(cmd);
+        return { kind: 'needs_approval', nonce, prompt: selfPrompt(grants) };
       }
     } else if (needsApproval(cmd)) {
       // Check the release can actually happen before bothering the user.
@@ -236,10 +259,16 @@ export class Executor {
 
   private async run(cmd: HelperCommand): Promise<unknown> {
     const { sys, journal } = this.d;
+    if (
+      cmd.kind === 'santa.rule.set' &&
+      cmd.policy !== 'allow' &&
+      this.self().hashes.includes(cmd.identifier.toLowerCase())
+    )
+      throw new ActionError('refused', 'that program is part of Vigil');
     if (sys.platform === 'linux' && cmd.kind.startsWith('santa.')) return this.runLinuxBlock(cmd);
     switch (cmd.kind) {
       case 'process.suspend': {
-        const id = await suspendProcess(sys, cmd.pid, target(cmd));
+        const id = await suspendProcess(sys, cmd.pid, { ...target(cmd), self: this.self() });
         return this.record(cmd, `paused ${id.path} (pid ${id.pid})`, { process: id });
       }
       case 'process.resume': {
@@ -257,7 +286,7 @@ export class Executor {
         );
       }
       case 'process.kill': {
-        const id = await killProcess(sys, cmd.pid, target(cmd));
+        const id = await killProcess(sys, cmd.pid, { ...target(cmd), self: this.self() });
         for (const e of journal.active()) {
           if (e.kind === 'process.suspend' && (e.undo?.process as ProcessIdentity).pid === id.pid)
             journal.markUndone(e.id);
@@ -291,7 +320,7 @@ export class Executor {
       case 'file.restore': {
         const entry = this.findContainment(cmd)!;
         const rec = entry.undo?.quarantine as QuarantineRecord;
-        restore(rec);
+        restore(rec, this.quarantineOpts);
         return this.release(entry, cmd, `restored ${rec.originalPath}`);
       }
       case 'persistence.disable': {
@@ -316,8 +345,8 @@ export class Executor {
       case 'persistence.enable': {
         const entry = this.findContainment(cmd)!;
         const rec = entry.undo?.persistence as PersistenceRecord;
-        if (sys.platform === 'linux') await restoreLinuxPersistence(sys, rec);
-        else await restorePersistence(sys, rec);
+        if (sys.platform === 'linux') await restoreLinuxPersistence(sys, rec, this.quarantineOpts);
+        else await restorePersistence(sys, rec, this.d.quarantine);
         return this.release(
           entry,
           cmd,
@@ -398,6 +427,14 @@ export class Executor {
           syncId: this.d.fastPath?.syncId() ?? null,
           preexec: this.preexecState,
         };
+      case 'self.grant': {
+        if (!this.d.fastPath) throw new ActionError('failed', 'helper rules are not set up');
+        try {
+          return this.d.fastPath.grantSelf(cmd);
+        } catch (err) {
+          throw policyError(err);
+        }
+      }
       case 'detection.list.set': {
         if (!this.d.fastPath) throw new ActionError('failed', 'helper rules are not set up');
         try {
@@ -508,6 +545,13 @@ export function syncPrompt(weakens: string[]): string {
   const shown = weakens.slice(0, 3).join('; ');
   const more = weakens.length > 3 ? ` and ${weakens.length - 3} more` : '';
   return `Vigil wants to loosen its blocking rules: ${shown}${more}.`;
+}
+
+/** The password prompt for naming more of Vigil's own programs, which no rule then blocks. */
+export function selfPrompt(grants: string[]): string {
+  const shown = grants.slice(0, 3).join('; ');
+  const more = grants.length > 3 ? ` and ${grants.length - 3} more` : '';
+  return `Vigil wants to keep its blocking rules off its own programs: ${shown}${more}.`;
 }
 
 /** The Santa commands Linux can carry out: blocking or unblocking a program by hash. */

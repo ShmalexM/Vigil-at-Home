@@ -2,10 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { buildSystemPrompt, buildUserPrompt } from './prompt.js';
 import { QuotaTracker } from './quota.js';
+import { allowedByMode, switchedOn } from './reach.js';
 import { redactAndSerialize, redactValue } from './redact.js';
 import type { AiSettings } from './settings.js';
 import { spendingDays, spendingLimits, spendingPlans, type SpendingSnapshot } from './spending.js';
-import { LOCAL_PROVIDERS, mayUsePlan } from './types.js';
+import { MONTHLY_CAP_HELD, PLAN_LIMITS_HELD, mayUsePlan } from './types.js';
 import type {
   AdapterRunOutput,
   PromptLog,
@@ -23,6 +24,8 @@ import type {
 } from './types.js';
 
 const STATUS_TTL_MS = 5 * 60_000;
+/** A probe that timed out is asked again this soon. */
+const TIMED_OUT_STATUS_TTL_MS = 30_000;
 const PLAN_USAGE_TTL_MS = 5 * 60_000;
 const DAY_MS = 24 * 60 * 60_000;
 
@@ -64,22 +67,33 @@ export function jsonSchemaFor(output: z.ZodType): Record<string, unknown> {
   return schema;
 }
 
-/** Whether the user's local, cloud or both choice lets this provider run at all. */
-export function allowedByMode(settings: AiSettings, id: ProviderId): boolean {
-  const local = LOCAL_PROVIDERS.includes(id);
-  return settings.mode === 'both' || (settings.mode === 'local') === local;
-}
+export { allowedByMode };
 
 function enabled(settings: AiSettings, id: ProviderId): boolean {
-  if (settings.pausedByVigil.includes(id)) return false;
-  return allowedByMode(settings, id) && settings[id].enabled;
+  return switchedOn(settings, id) === undefined;
+}
+
+/** Longest a provider's probe, usage read or key lookup may take before it counts as not ready. */
+export const PROBE_DEADLINE_MS = 30_000;
+
+/** `p`, or `fallback` once `ms` passed (or p failed). Never leaves a caller waiting forever. */
+function settleWithin<T, F>(p: Promise<T>, ms: number, fallback: F): Promise<T | F> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(fallback), ms);
+    t.unref?.();
+    p.then(
+      (v) => (clearTimeout(t), resolve(v)),
+      () => (clearTimeout(t), resolve(fallback)),
+    );
+  });
 }
 
 export function createAiRunner(deps: AiRunnerDeps): AiRunner {
   const now = deps.now ?? Date.now;
   const quota = deps.quota ?? new QuotaTracker(deps.settings.quota.backgroundSharePercent, now);
   const adapters = new Map(deps.adapters.map((a) => [a.id, a]));
-  const statusCache = new Map<ProviderId, { status: ProviderStatus; at: number }>();
+  const statusCache = new Map<ProviderId, { status: ProviderStatus; at: number; ttl?: number }>();
+  const probing = new Map<ProviderId, Promise<ProviderStatus>>();
   const redaction = deps.settings.redaction;
   const planNames = new Map<ProviderId, string>();
   let planUsageAt = -Infinity;
@@ -92,7 +106,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
         const adapter = adapters.get(id);
         if (!adapter?.readUsage || !enabled(deps.settings, id)) return;
         if ((await statusOf(adapter)).state !== 'ready') return;
-        const usage = await adapter.readUsage();
+        const usage = await settleWithin(adapter.readUsage(), PROBE_DEADLINE_MS, undefined);
         if (!usage) return;
         if (usage.plan) planNames.set(id, usage.plan);
         usage.windows.forEach((w) => quota.observe(w));
@@ -139,10 +153,42 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
 
   async function statusOf(adapter: ProviderAdapter, fresh = false): Promise<ProviderStatus> {
     const cached = statusCache.get(adapter.id);
-    if (!fresh && cached && now() - cached.at < STATUS_TTL_MS) return cached.status;
-    const status = await adapter.probe();
-    statusCache.set(adapter.id, { status, at: now() });
-    return status;
+    if (!fresh && cached && now() - cached.at < (cached.ttl ?? STATUS_TTL_MS)) return cached.status;
+    // One probe at a time per provider: a slow one is waited on again, not started twice.
+    let probe = probing.get(adapter.id);
+    if (!probe) {
+      probe = adapter.probe().then(
+        (status) => {
+          // A late answer still counts, for the next run.
+          statusCache.set(adapter.id, { status, at: now() });
+          return status;
+        },
+        (error: unknown): ProviderStatus => ({
+          provider: adapter.id,
+          state: 'error',
+          detail: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      const settled = probe.finally(() => probing.delete(adapter.id));
+      probing.set(adapter.id, settled);
+      probe = settled;
+    }
+    // A probe that never answers (a CLI that hangs) must not hold the run, or
+    // the app's scheduler slot it runs in, forever. It counts as not ready
+    // only briefly, so a slow subscription CLI isn't passed over for long.
+    const late = Symbol('late');
+    const status = await settleWithin(probe, PROBE_DEADLINE_MS, late);
+    if (status !== late) {
+      statusCache.set(adapter.id, { status, at: now() });
+      return status;
+    }
+    const timedOut: ProviderStatus = {
+      provider: adapter.id,
+      state: 'error',
+      detail: 'It did not answer in time.',
+    };
+    statusCache.set(adapter.id, { status: timedOut, at: now(), ttl: TIMED_OUT_STATUS_TTL_MS });
+    return timedOut;
   }
 
   /** Tool results go through the same redaction as the data before the model sees them. */
@@ -257,19 +303,28 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
       const planOk = mayUsePlan(request);
       let lastReason: RunFailureReason = 'no_provider';
       let lastDetail: string | undefined;
+      /** Why a ready provider was passed over without a call, when that is all that happened. */
+      let held: string | undefined;
 
       for (const id of deps.settings.order) {
         const adapter = adapters.get(id);
         if (!adapter || !enabled(deps.settings, id)) continue;
         if (request.providers && !request.providers.includes(id)) continue;
-        if (adapter.canServe && !(await adapter.canServe(planOk))) continue;
+        if (
+          adapter.canServe &&
+          !(await settleWithin(adapter.canServe(planOk), PROBE_DEADLINE_MS, false))
+        )
+          continue;
         const status = await statusOf(adapter);
         if (status.state !== 'ready') continue;
-        const allowed =
-          (request.urgency === 'now' ? quota.allowNow(id) : quota.allowBackground(id)) &&
-          !(await overMonthlyCap(id, planOk));
-        if (!allowed) {
+        if (!(request.urgency === 'now' ? quota.allowNow(id) : quota.allowBackground(id))) {
           lastReason = 'quota';
+          held ??= PLAN_LIMITS_HELD;
+          continue;
+        }
+        if (await overMonthlyCap(id, planOk)) {
+          lastReason = 'quota';
+          held = MONTHLY_CAP_HELD;
           continue;
         }
 
@@ -333,7 +388,11 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
         }
       }
 
+      // A run that reached no AI still leaves one entry, so it is never silent:
+      // nothing was set up, or every ready AI was held back (the monthly cap
+      // on the user's keys, or their plans' limits).
       if (lastReason === 'no_provider') record(null, 'no_provider');
+      else if (entries === 0 && lastReason === 'quota') record(null, 'quota', undefined, held);
       return {
         ok: false,
         reason: lastReason,

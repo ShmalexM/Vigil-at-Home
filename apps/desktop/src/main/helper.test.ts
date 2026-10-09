@@ -159,6 +159,8 @@ describe('HelperLink', () => {
     }[];
     expect(syncs).toHaveLength(1);
     expect(syncs[0]!.syncId).toBe('abc');
+    // Vigil's own programs go in a self grant of their own.
+    expect(syncs[0]).not.toHaveProperty('selfPaths');
     expect(Object.keys(syncs[0]!.entries).sort()).toEqual(['big', 'small']);
     expect(syncs[0]!.entries['big']).toHaveLength(2500);
     expect(fake.sent.filter((c) => c.kind === 'detection.list.set')).toEqual([]);

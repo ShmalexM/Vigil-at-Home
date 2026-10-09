@@ -116,15 +116,9 @@ export function PackPage() {
   const [editing, setEditing] = useState<PackDog | 'new' | undefined>();
   if (!pack) return <div className="page pack" />;
   const mode = MODES.find((m) => m.id === pack.mode)!;
-  const waiting =
-    pack.approvals.length +
-    pack.chat.reduce(
-      (n, m) =>
-        n +
-        (m.actions?.filter((a) => a.status === 'pending').length ?? 0) +
-        (m.memory?.filter((c) => c.status === 'pending').length ?? 0),
-      0,
-    );
+  // Tool calls waiting on the person. A change the Lead dog asked for is a
+  // card inline in its chat, on this same tab, and adds nothing here.
+  const waiting = pack.approvals.length;
 
   return (
     <div className="page pack">

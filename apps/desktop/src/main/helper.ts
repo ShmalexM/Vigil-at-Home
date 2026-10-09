@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { isRelease, type Action, type ActionResult, type SensorEvent } from '@vigil/core';
+import type { SelfImage } from '@vigil/core/self';
 import {
   LIST_PART_MAX,
   defaultPaths,
@@ -35,7 +36,35 @@ export interface HelperRuleSet {
   appRules: AppBlockingRule[];
   exceptions: z.infer<typeof RuleExceptionSchema>[];
   selfPaths: string[];
+  /** Linux AppImage: the image by device and inode, and its programs' sha256. */
+  selfImages?: SelfImage[];
+  selfHashes?: string[];
   lists: Record<string, string[]>;
+}
+
+/** What is Vigil's own, as the helper takes it in a self grant. */
+export type HelperSelfSet = Pick<HelperRuleSet, 'selfPaths' | 'selfImages' | 'selfHashes'>;
+
+/** The self set within a rule set. */
+export function selfOf(set: HelperSelfSet): HelperSelfSet {
+  return {
+    selfPaths: set.selfPaths,
+    ...(set.selfImages?.length ? { selfImages: set.selfImages } : {}),
+    ...(set.selfHashes?.length ? { selfHashes: set.selfHashes } : {}),
+  };
+}
+
+/**
+ * Whether `err` is a helper from before self.grant refusing a command it
+ * doesn't know: self.grant itself (`kind`), or rules sent without the self
+ * set it still requires (`selfPaths`).
+ */
+export function fromOlderHelper(err: unknown, field: 'kind' | 'selfPaths'): boolean {
+  return (
+    err instanceof HelperCallError &&
+    err.code === 'invalid' &&
+    err.message.startsWith(`bad command: ${field} `)
+  );
 }
 
 export interface HelperRulesOutcome {
@@ -184,13 +213,25 @@ export class HelperLink
    * the admin password first; a cancelled dialog throws a HelperCallError
    * with code refused and leaves the helper's rules as they were. With
    * `hold`, that password is asked for by the next dialog instead (a
-   * release's) or by approveHeld(). `syncId` names the sync, so
-   * rulesState() can tell whether it went in after the app stopped waiting.
+   * release's) or by approveHeld(). With `ask: false` no dialog is shown:
+   * a sync that needs the password resolves 'needs_password' and changes
+   * nothing. `syncId` names the sync, so rulesState() can tell whether it
+   * went in after the app stopped waiting.
+   *
+   * Vigil's own programs go to the helper apart from the rules (grantSelf).
+   * `withSelf` sends them with the rules instead, for a helper from before
+   * self.grant.
    */
   async syncRules(
     set: HelperRuleSet,
-    opts: { hold?: boolean; onHeld?: () => void; syncId?: string } = {},
-  ): Promise<HelperRulesOutcome | null> {
+    opts: {
+      hold?: boolean;
+      onHeld?: () => void;
+      ask?: boolean;
+      withSelf?: boolean;
+      syncId?: string;
+    } = {},
+  ): Promise<HelperRulesOutcome | 'needs_password' | null> {
     const client = this.client;
     if (!client) return null;
     if (client !== this.confirmedFor) {
@@ -207,7 +248,7 @@ export class HelperLink
         rules: set.rules,
         appRules: set.appRules,
         exceptions: set.exceptions,
-        selfPaths: set.selfPaths,
+        self: opts.withSelf ? selfOf(set) : null,
         lists: Object.keys(digests).sort(),
       });
       if (rulesKey === this.confirmedRules && !opts.hold) {
@@ -219,16 +260,19 @@ export class HelperLink
         rules: set.rules,
         appRules: set.appRules,
         exceptions: set.exceptions,
-        selfPaths: set.selfPaths,
+        // Only an AppImage names images and hashes; a helper from before them refuses unknown fields.
+        ...(opts.withSelf ? selfOf(set) : {}),
         lists: digests,
         ...(opts.syncId ? { syncId: opts.syncId } : {}),
       };
       let carry = changed;
+      // Without a dialog the helper answers at once; with one it waits on the password.
+      const wait = opts.ask === false ? ACTION_TIMEOUT_MS : RELEASE_TIMEOUT_MS;
       for (let attempt = 0; attempt < 2; attempt++) {
         // The helper refuses this sync once the app has stopped waiting for
         // it, so a password typed after the timeout can't put it in force
         // after rulesState() said it wasn't.
-        const notAfter = Date.now() + RELEASE_TIMEOUT_MS - SYNC_DEADLINE_MARGIN_MS;
+        const notAfter = Date.now() + wait - SYNC_DEADLINE_MARGIN_MS;
         const sync = {
           ...base,
           notAfter,
@@ -240,13 +284,20 @@ export class HelperLink
               }
             : {}),
         };
-        const out = await withTimeout(
+        let out: HelperRulesOutcome;
+        if (opts.ask === false) {
+          const tried = await withTimeout(client.attempt<HelperRulesOutcome>(sync), wait);
+          if (tried === 'needsApproval') return 'needs_password';
+          out = tried.result;
+        } else {
+          out = await withTimeout(
           opts.hold
             ? client.hold<HelperRulesOutcome>(sync, opts.onHeld)
             : client.call<HelperRulesOutcome>(sync),
           // A sync that loosens the rules waits on the admin password, like a release.
           RELEASE_TIMEOUT_MS,
         );
+        }
         if (out.applied) {
           this.confirmedRules = rulesKey;
           this.confirmedLists = new Map(Object.entries(digests));
@@ -297,6 +348,26 @@ export class HelperLink
       return await this.query<{ syncId: string | null }>('detection.status');
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Tell the helper what is Vigil's own, so its rules never pause, kill or
+   * block it. Anything new needs the admin password, so this can wait on the
+   * dialog for as long as it stays open; nothing else waits on it. Resolves
+   * 'unsupported' from a helper from before self.grant, null while unconnected.
+   */
+  async grantSelf(set: HelperSelfSet): Promise<'applied' | 'declined' | 'unsupported' | null> {
+    const client = this.client;
+    if (!client) return null;
+    try {
+      // No timeout: the dialog may stay open, and a lost connection settles it.
+      await client.call({ kind: 'self.grant', ...selfOf(set) });
+      return 'applied';
+    } catch (err) {
+      if (fromOlderHelper(err, 'kind')) return 'unsupported';
+      if (err instanceof HelperCallError && err.code === 'refused') return 'declined';
+      throw err;
     }
   }
 

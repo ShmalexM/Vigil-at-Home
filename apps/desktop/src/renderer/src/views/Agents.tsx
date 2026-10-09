@@ -1133,6 +1133,11 @@ function Helpers({ go }: { go: (route: string) => void }) {
               <dt>Last 7 days</dt>
               <dd>{plural(h.runs7d, 'run')}</dd>
             </dl>
+            {h.held && (
+              <span className="t-small" role="status">
+                {h.held.why}, so it hasn’t reached an AI since {clock(h.held.since)}.
+              </span>
+            )}
           </Card>
         ))}
       </div>

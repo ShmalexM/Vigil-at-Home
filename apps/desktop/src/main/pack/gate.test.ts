@@ -20,6 +20,22 @@ describe('the pack tool gate', () => {
       expect(gateTool({ ...base, mode, readOnly: true })).toEqual({ kind: 'run' });
   });
 
+  it('asks before every call that can change things once a run read a tainted report', () => {
+    for (const mode of ['ask', 'auto', 'full'] as const)
+      for (const choice of ['auto', 'ask', 'allow'] as const) {
+        expect(gateTool({ ...base, mode, choice, outsideText: true })).toEqual({
+          kind: 'ask',
+          why: 'outside-text',
+        });
+        // Vigil's own tools only read, so they still go ahead.
+        if (choice !== 'ask')
+          expect(gateTool({ ...base, mode, choice, readOnly: true, outsideText: true })).toEqual({
+            kind: 'run',
+          });
+      }
+    expect(gateTool({ ...base, choice: 'off', outsideText: true })).toMatchObject({ kind: 'deny' });
+  });
+
   it('puts Vigil’s rules above every mode and every choice', () => {
     const deny = { decision: 'deny' as const, reason: 'Sends keys off the Mac' };
     const ask = { decision: 'ask' as const, reason: 'Force push' };
@@ -60,7 +76,9 @@ describe('the pack tool gate', () => {
   it('gates the Lead dog’s changes to the pack by mode', () => {
     expect(gateAction('ask', 'run', false, false)).toBe('ask');
     expect(gateAction('full', 'retire', false, false)).toBe('apply');
-    expect(gateAction('full', 'create', true, false)).toBe('ask');
+    expect(gateAction('full', 'create', true, false)).toBe('apply');
+    expect(gateAction('full', 'create', true, true)).toBe('ask');
+    expect(gateAction('ask', 'create', true, false)).toBe('ask');
     expect(gateAction('full', 'run', false, true)).toBe('ask');
     expect(gateAction('auto', 'create', false, false)).toBe('apply');
     expect(gateAction('auto', 'update', false, true)).toBe('ask');

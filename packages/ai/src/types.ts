@@ -64,6 +64,11 @@ export function mayUsePlan(
   );
 }
 
+/** The `detail` of a run that reached no AI because the monthly cap on the user's keys is spent. */
+export const MONTHLY_CAP_HELD = 'monthly cap reached';
+/** The `detail` of a run that reached no AI because the user's plans are near their limits. */
+export const PLAN_LIMITS_HELD = 'plan limits';
+
 export type RunFailureReason = 'quota' | 'timeout' | 'invalid_output' | 'no_provider' | 'error';
 
 export type RunResult<T> =

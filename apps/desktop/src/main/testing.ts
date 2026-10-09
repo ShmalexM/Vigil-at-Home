@@ -67,7 +67,7 @@ export function helperPolicy(detector: Detector) {
       rules: set.rules,
       appRules: set.appRules,
       exceptions: set.exceptions,
-      selfPaths: set.selfPaths,
+      // Vigil's own programs go to the helper in a self grant of their own.
       lists: Object.fromEntries(Object.entries(set.lists).map(([l, e]) => [l, listDigest(e)])),
     };
     if (helper.refuse) {

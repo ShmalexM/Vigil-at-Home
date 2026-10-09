@@ -2,9 +2,18 @@ export * from './types.js';
 export { lintRule, isAnchored, type LintResult, type LintOptions } from './rules/lint.js';
 export { globProblem, globToRegExp, regexProblem, renderTemplate } from './rules/compile.js';
 export { KNOWN_FIELDS, COMPUTED_FIELDS } from './rules/fields.js';
-export { DetectionEngine, compileRule, RuleCompileError, type EngineConfig } from './engine.js';
+export {
+  DetectionEngine,
+  compileRule,
+  RuleCompileError,
+  type CheckOptions,
+  type EngineConfig,
+} from './engine.js';
 export {
   SafetyFloor,
+  selfKey,
+  selfRoots,
+  underSelfRoot,
   DEFAULT_PROTECTED_PATH_GLOBS,
   DEFAULT_NEVER_BLOCK_NETWORKS,
   type SafetyConfig,
