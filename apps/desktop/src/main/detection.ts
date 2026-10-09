@@ -47,7 +47,7 @@ import { fastPathRules, isAppOnlyField } from '@vigil/detection/fastpath';
 import { userOrigin } from '@vigil/detection/user';
 import type { EventOutcome } from '../shared/ipc.js';
 import type { AlertService } from './alerts.js';
-import type { Store } from './db/store.js';
+import type { EventBodyRow, Store } from './db/store.js';
 import type { HelperRuleSet } from './helper.js';
 import type { HelperSelf } from './self-path.js';
 
@@ -257,14 +257,14 @@ export class Detector {
   private *flagged(from: number, to: number): Iterable<FlaggedEvent> {
     const rows = this.db
       .prepare(
-        `SELECT body, label FROM events
+        `SELECT body, args, label FROM events
          WHERE ts >= ? AND ts <= ? AND matched = 0 AND label IS NOT NULL
            AND json_extract(label, '$.label') IN ('unusual', 'suspicious')
          ORDER BY ts DESC LIMIT 2000`,
       )
-      .iterate(from, to) as Iterable<{ body: string; label: string }>;
+      .iterate(from, to) as Iterable<EventBodyRow & { label: string }>;
     for (const r of rows) {
-      const e = JSON.parse(r.body) as SensorEvent;
+      const e = this.store.event(r);
       const l = JSON.parse(r.label) as { label: 'unusual' | 'suspicious'; reason?: string };
       const f: FlaggedEvent = { kind: e.kind, subject: flaggedSubject(e), label: l.label };
       if (l.reason) f.reason = l.reason;
