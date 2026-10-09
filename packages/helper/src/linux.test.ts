@@ -5,11 +5,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { RuleStore } from '@vigil/sensors';
@@ -314,7 +316,7 @@ describe('Linux startup items', () => {
       return;
     }
     const rec = await disable();
-    expect(rec.quarantine.originalPath).toBe(join(auto, 'updater.desktop'));
+    expect(rec.quarantine.originalPath).toBe(join(realpathSync(auto), 'updater.desktop'));
     expect(existsSync(path)).toBe(false);
     await restoreLinuxPersistence(sys, rec, qopts());
     expect(existsSync(path)).toBe(true);
@@ -335,6 +337,40 @@ describe('Linux startup items', () => {
     symlinkSync(join(os, 'var', 'home', 'alex'), join(os, 'home', 'alex'));
     await expect(disable()).rejects.toMatchObject({ code: 'startup-folder-linked' });
     expect(existsSync(join(auto, 'updater.desktop'))).toBe(true);
+  });
+
+  it('follows a root link outside any home, like /var -> private/var on macOS', async () => {
+    const os = join(root, 'mac');
+    const units = join(os, 'private', 'var', 'units');
+    mkdirSync(units, { recursive: true });
+    symlinkSync('private/var', join(os, 'var'));
+    const written = join(os, 'var', 'units');
+    const path = join(written, 'miner.service');
+    writeFileSync(join(units, 'miner.service'), '[Service]\n');
+    sys.console = statSync(join(units, 'miner.service')).uid;
+    const startup = new RegExp(`^${written.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
+    const disable = (id: string) =>
+      disableLinuxPersistence(sys, path, id, qopts(), startup, () => PASSWD);
+    if (process.getuid!() !== 0) {
+      // Not root: the link is a user's, so it is not followed.
+      await expect(disable('v0')).rejects.toMatchObject({ code: 'startup-folder-linked' });
+      expect(existsSync(path)).toBe(true);
+      return;
+    }
+    const rec = await disable('v1');
+    expect(rec.quarantine.originalPath).toBe(join(realpathSync(units), 'miner.service'));
+    await restoreLinuxPersistence(sys, rec, qopts());
+    expect(existsSync(path)).toBe(true);
+    // The same link in a folder others can write to (they could replace it): refused.
+    chmodSync(os, 0o777);
+    await expect(disable('v2')).rejects.toMatchObject({ code: 'startup-folder-linked' });
+    chmodSync(os, 0o755);
+    // A link someone else owns: refused.
+    rmSync(join(os, 'var'));
+    symlinkSync('private/var', join(os, 'var'));
+    spawnSync('chown', ['-h', '65534', join(os, 'var')]);
+    await expect(disable('v3')).rejects.toMatchObject({ code: 'startup-folder-linked' });
+    expect(existsSync(join(units, 'miner.service'))).toBe(true);
   });
 
   it('refuses files outside startup folders and the wrong kind of file', async () => {

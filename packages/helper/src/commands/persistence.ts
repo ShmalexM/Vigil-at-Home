@@ -55,13 +55,14 @@ const linked = (dir: string) =>
 
 /**
  * The real location of a startup item at `path`. The folder is taken as
- * written, with one exception: a link above the user's home that only root
- * could have made, like /home -> var/home on ostree systems. Such a link
- * must be root's, in a folder that is root's alone, and lead to a folder
- * that is root's alone too (rootOnly). Every other link on the way (at or
- * under the home, like a startup folder a dotfile manager links in) is
- * refused, so the folder checked is the one acted on. Vetted like any
- * quarantine.
+ * written, with one exception: a link only root could have made, above the
+ * user's home (or anywhere, in a path with no home in it), like
+ * /home -> var/home on ostree systems or /var -> private/var on macOS.
+ * Such a link must be root's, in a folder that is root's alone, and lead to
+ * a folder that is root's alone too (rootOnly). Every other link on the way
+ * (one a user made or could replace, or one at or under the home, like a
+ * startup folder a dotfile manager links in) is refused, so the folder
+ * checked is the one acted on. Vetted like any quarantine.
  */
 export async function startupTarget(
   sys: System,
@@ -86,7 +87,7 @@ export async function startupTarget(
       resolved = join(resolved, name);
       continue;
     }
-    const aboveHome = home !== undefined && home.startsWith(written + '/');
+    const aboveHome = home === undefined || home.startsWith(written + '/');
     let target: string;
     try {
       target = realpathSync(written);

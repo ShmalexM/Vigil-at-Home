@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   readlinkSync,
   renameSync,
   rmSync,
@@ -175,15 +176,15 @@ describe('who acts on a path', () => {
   const linux = new FakeLinuxSystem();
   it('is root only when every folder above is root’s alone', async () => {
     expect(await rootOnly(linux, '/')).toBe(true);
-    expect(await rootOnly(linux, tmpdir())).toBe(false); // writable by everyone, and the last folder
+    expect(await rootOnly(linux, realpathSync(tmpdir()))).toBe(false); // writable by everyone, and the last folder
     if (isRoot) {
       // /tmp is sticky: a root-owned folder in it is root's alone.
-      expect(await rootOnly(linux, root)).toBe(true);
+      expect(await rootOnly(linux, realpathSync(root))).toBe(true);
       // A POSIX ACL granting a named user write shows as group write (its mask).
       chmodSync(root, 0o770);
-      expect(await rootOnly(linux, root)).toBe(false);
+      expect(await rootOnly(linux, realpathSync(root))).toBe(false);
       chmodSync(root, 0o777);
-      expect(await rootOnly(linux, root)).toBe(false);
+      expect(await rootOnly(linux, realpathSync(root))).toBe(false);
     }
   });
 

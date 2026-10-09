@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -384,7 +385,8 @@ describe('helper install', () => {
 
   it('pins the AppImage on Linux, and nothing for the installer’s own folder', () => {
     const { dir } = bundle();
-    const root = mkdtempSync(join(tmpdir(), 'root-'));
+    // Real path: the pin target is resolved (tmpdir is a link on macOS).
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'root-')));
     const image = join(root, 'Vigil.AppImage');
     writeFileSync(image, 'image');
     const app = { execPath: '/tmp/.mount_X/vigil-at-home', env: { APPIMAGE: image } };

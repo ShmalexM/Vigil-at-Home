@@ -144,11 +144,12 @@ an event while working fine; Santa logs every program launch.
   are done first, and its moves go on beside the next events. Events still reach the
   app in the order they happened, each once its moves end, or after 15 seconds, when the
   app shows the item was not moved in time.
-- **Startup items.** One is turned off only in the startup folder as written. The one
-  link followed is one above the user's home that only root could have made (like
-  `/home -> var/home` on ostree systems): root's, in a folder that is root's alone, and
-  leading to one too. Any other link on the way, such as a startup folder a dotfile
-  manager links in, is refused with its own code, and the app says so in one line. An
+- **Startup items.** One is turned off only in the startup folder as written. The only
+  links followed are ones only root could have made, above the user's home (or anywhere
+  in a path with no home), like `/home -> var/home` on ostree systems or
+  `/var -> private/var` on macOS: root's, in a folder that is root's alone, and leading
+  to one too. Any other link on the way, such as a startup folder a dotfile manager
+  links in, is refused with its own code, and the app says so in one line. An
   item in a user's folder must be that user's, and that user must be the one asking
   (the console user, who owns the socket): Vigil is a single-user personal tool.
 - **App grants.** The app named in a self grant is hashed off the event loop (up to
