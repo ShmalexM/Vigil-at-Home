@@ -362,9 +362,23 @@ export function place(req: FsRequest, input: FdReader): void {
   const dirs: { path: string; mode: number; mtime: string }[] = [];
   const asRoot = process.getuid?.() === 0;
   /** Owners to give once everything is written, in the order things were made. */
-  const owners: { path: string; uid: number; gid: number; kind: 'd' | 'f' | 'l' }[] = [];
-  const chown = (path: string, frame: { uid: number; gid: number; t: 'd' | 'f' | 'l' }) => {
-    if (req.owners && asRoot) owners.push({ path, uid: frame.uid, gid: frame.gid, kind: frame.t });
+  const owners: Owner[] = [];
+  // Root gives the archived owner when asked. A user keeps each entry's
+  // archived group when it is one of theirs; where the system says no, the
+  // entry keeps the user's own group.
+  const groups = asRoot ? [] : (process.getgroups?.() ?? []);
+  const myGid = process.getegid?.();
+  const chown = (
+    path: string,
+    frame: { uid: number; gid: number; t: 'd' | 'f' | 'l' },
+    mode?: number,
+  ) => {
+    const kind = frame.t;
+    if (asRoot) {
+      if (req.owners) owners.push({ path, uid: frame.uid, gid: frame.gid, kind, mode });
+    } else if (frame.gid !== myGid && groups.includes(frame.gid)) {
+      owners.push({ path, uid: -1, gid: frame.gid, kind, mode, mayRefuse: true });
+    }
   };
   try {
     if (req.parents) makeParents(req.path, created);
@@ -410,7 +424,7 @@ export function place(req: FsRequest, input: FdReader): void {
             writeAll(fd, chunk);
             left -= chunk.length;
           }
-          chown(path, frame);
+          chown(path, frame, mode);
           fchmodSync(fd, mode);
           const t = nsToDate(frame.mtime);
           futimesSync(fd, t, t);
@@ -438,17 +452,33 @@ export function place(req: FsRequest, input: FdReader): void {
   }
 }
 
+interface Owner {
+  path: string;
+  /** -1 leaves the owner as it is. */
+  uid: number;
+  gid: number;
+  kind: 'd' | 'f' | 'l';
+  /** A file's mode, set again after the change of owner (which clears setuid and setgid). */
+  mode?: number | undefined;
+  /** A user's group change: when the system refuses it, the entry keeps the user's group. */
+  mayRefuse?: boolean;
+}
+
 /** Give `o` its owner, through a descriptor (by name for a link), only while it is what this run made. */
-function giveOwner(
-  o: { path: string; uid: number; gid: number; kind: 'd' | 'f' | 'l' },
-  created: Created[],
-): void {
+function giveOwner(o: Owner, created: Created[]): void {
   const c = created.find((x) => x.path === o.path);
   if (!c) throw new Refusal(`${o.path} was not made here`);
+  const own = (fn: () => void) => {
+    try {
+      fn();
+    } catch (err) {
+      if (!(o.mayRefuse && (err as NodeJS.ErrnoException).code === 'EPERM')) throw err;
+    }
+  };
   if (o.kind === 'l') {
     if (idOf(lstatSync(o.path, { bigint: true })) !== c.id)
       throw new Refusal(`${o.path} changed while it was placed`);
-    lchownSync(o.path, o.uid, o.gid);
+    own(() => lchownSync(o.path, o.uid, o.gid));
     return;
   }
   const flags =
@@ -460,7 +490,8 @@ function giveOwner(
   try {
     if (idOf(fstatSync(fd, { bigint: true })) !== c.id)
       throw new Refusal(`${o.path} changed while it was placed`);
-    fchownSync(fd, o.uid, o.gid);
+    own(() => fchownSync(fd, o.uid, o.gid));
+    if (o.mode !== undefined) fchmodSync(fd, o.mode);
   } finally {
     closeSync(fd);
   }

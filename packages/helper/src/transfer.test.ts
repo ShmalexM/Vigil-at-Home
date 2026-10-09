@@ -198,6 +198,10 @@ describe('who acts on a path', () => {
       ' 0: user:alex inherited allow list,add_subdirectory\n',
       ' 0: group:everyone deny delete\n 1: user:Some Name allow delete_child\n',
       ' 0: group:admin allow writesecurity\n',
+      // An entry line in a shape the parser doesn't know is not taken as harmless.
+      ' 0: group:everyone deny delete\n 1: user:alex allow\n',
+      ' 0: user:root allow add_file\n 1: user:alex permit add_file\n',
+      ' 0: group:everyone deny delete\n 1:\n',
     ])
       expect(macAclLetsOthersWrite(ls('/x', acl)), acl).toBe(true);
     // Through rootOnly: one component with such an ACL, or one whose ACL can't be read.
@@ -462,8 +466,10 @@ describe('restoring what a user owns', () => {
       mkdirSync(stored);
       writeFileSync(join(stored, 'x.plist'), 'x');
       spawnSync('chown', ['-R', `${NOBODY}:${NOBODY}`, stored]);
+      // Where it goes back is another user's folder, which its owner can't write to.
       const sysDir = join(root, 'etc');
       mkdirSync(sysDir);
+      chownSync(sysDir, NOBODY - 1, NOBODY - 1);
       const rec = {
         originalPath: join(sysDir, 'agent'),
         storedPath: stored,
@@ -486,6 +492,41 @@ describe('restoring what a user owns', () => {
     },
   );
 
+  it.skipIf(!isRoot)(
+    'puts a user’s item back into a folder only root can change, as root, with its owners',
+    async () => {
+      const sys = realSystem(undefined, 'linux');
+      chmodSync(root, 0o755);
+      // A user's plist in a root-only folder (like /Library/LaunchDaemons).
+      const daemons = join(root, 'LaunchDaemons');
+      mkdirSync(daemons, { mode: 0o755 });
+      const plist = join(daemons, 'com.example.agent.plist');
+      writeFileSync(plist, 'x', { mode: 0o644 });
+      chownSync(plist, NOBODY, NOBODY - 1);
+      const opts: QuarantineOptions = {
+        quarantineDir: join(root, 'Quarantine'),
+        platform: 'linux',
+        protectedPrefixes: [],
+      };
+      const rec = await quarantine(sys, plist, 'ld1', opts);
+      await restore(sys, rec, opts);
+      const st = statSync(plist);
+      expect([st.uid, st.gid, st.mode & 0o777]).toEqual([NOBODY, NOBODY - 1, 0o644]);
+      // A folder holding more than one user's things goes back whole, each with its owner.
+      const tool = join(daemons, 'tool');
+      mkdirSync(join(tool, 'bin'), { recursive: true, mode: 0o755 });
+      writeFileSync(join(tool, 'bin', 'run'), 'x');
+      chownSync(join(tool, 'bin', 'run'), NOBODY - 1, NOBODY - 1);
+      chmodSync(join(tool, 'bin', 'run'), 0o4755);
+      const rec2 = await quarantine(sys, tool, 'ld2', opts);
+      await restore(sys, rec2, opts);
+      expect(statSync(tool).uid).toBe(0);
+      const run = statSync(join(tool, 'bin', 'run'));
+      // The change of owner clears setuid; the placer sets the mode again after it.
+      expect([run.uid, run.gid, run.mode & 0o7777]).toEqual([NOBODY - 1, NOBODY - 1, 0o4755]);
+    },
+  );
+
   it('gives owners last, once nothing more is written beneath them', () => {
     // Run as the tests' own user, the placer gives no owners at all; as root it gives them at the end.
     const dest = join(root, 'placed');
@@ -500,6 +541,55 @@ describe('restoring what a user owns', () => {
     expect(r.err).toBe('');
     expect(statSync(dest).uid).toBe(uid);
     expect(statSync(join(dest, 'f')).uid).toBe(uid);
+  });
+});
+
+describe('groups when placing as a user', () => {
+  // A group of the user's other than their own, when they have one (CI's runner does).
+  const other = isRoot
+    ? undefined
+    : process.getgroups!().find((g) => g !== process.getegid!() && g !== 0);
+  const FOREIGN = 4242;
+
+  it('keeps each entry’s group when it is one of the user’s, and the user’s own otherwise', () => {
+    // As root the placer acts as NOBODY, whose only group is its own.
+    const actor = isRoot ? { uid: NOBODY, gid: NOBODY } : me;
+    if (isRoot) {
+      chmodSync(root, 0o755);
+      mkdirSync(join(root, 'home'));
+      chownSync(join(root, 'home'), NOBODY, NOBODY);
+    }
+    const dest = join(root, isRoot ? 'home' : '', 'placed');
+    const entries: (object | Buffer)[] = [
+      { ...dir(''), uid: actor.uid, gid: other ?? FOREIGN },
+      {
+        t: 'f',
+        rel: 'mine',
+        mode: 0o2755,
+        uid: actor.uid,
+        gid: other ?? FOREIGN,
+        mtime: '0',
+        size: 1,
+      },
+      Buffer.from('x'),
+      { t: 'f', rel: 'foreign', mode: 0o640, uid: actor.uid, gid: FOREIGN, mtime: '0', size: 1 },
+      Buffer.from('y'),
+      { t: 'l', rel: 'link', target: 'mine', uid: actor.uid, gid: other ?? FOREIGN },
+      { t: 'end' },
+    ];
+    const r = child({ op: 'place', path: dest, ...actor }, archive(entries));
+    expect(r.err).toBe('');
+    expect(r.code).toBe(0);
+    const want = other ?? actor.gid;
+    expect(statSync(dest).gid).toBe(want);
+    expect(lstatSync(join(dest, 'link')).gid).toBe(want);
+    const mine = statSync(join(dest, 'mine'));
+    expect(mine.gid).toBe(want);
+    // Setgid survives the change of group, which would otherwise clear it.
+    expect(mine.mode & 0o7777).toBe(0o2755);
+    // Not a group of the user's: the system would refuse, so it keeps the user's group.
+    const foreign = statSync(join(dest, 'foreign'));
+    expect([foreign.gid, foreign.mode & 0o777]).toEqual([actor.gid, 0o640]);
   });
 });
 

@@ -23,7 +23,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { Approvals } from './approval.js';
 import { pinFor } from './appPin.js';
-import { AppPinStore } from './pinStore.js';
+import { AppPinStore, removePinStore } from './pinStore.js';
 import { runFsChild } from './commands/fsChild.js';
 import { daemonAnswers } from './socketProbe.js';
 import { defaultPaths, installedSelf, SANTA_SYNC_PORT } from './config.js';
@@ -115,10 +115,23 @@ async function main(argv: string[]): Promise<number> {
       if (pin) await store.write(pin);
       return 0;
     }
+    case 'pin-remove': {
+      if (process.getuid?.() !== 0) {
+        console.error('pin-remove must run as root (uninstall.sh runs it)');
+        return 1;
+      }
+      const paths = defaultPaths();
+      if (await daemonAnswers(paths.socket)) {
+        console.error('the helper is running; stop it before pin-remove (uninstall.sh does)');
+        return 1;
+      }
+      await removePinStore(realSystem(), paths.appPinDir, paths.appPin);
+      return 0;
+    }
     default:
       console.error(
         'usage: vigil-helper daemon | approve <nonce>… | santa-profile | osquery-config | ' +
-          'osquery-flags | osquery-setup | osquery-remove | pin-app <path>',
+          'osquery-flags | osquery-setup | osquery-remove | pin-app <path> | pin-remove',
       );
       return 2;
   }

@@ -395,10 +395,29 @@ export class AppPinStore {
 
   /** Set or clear the immutable flag; a filesystem without it is left as it is. */
   private async flag(path: string, on: boolean): Promise<void> {
-    const r =
-      this.sys.platform === 'linux'
-        ? await this.sys.run('chattr', [on ? '+i' : '-i', path])
-        : await this.sys.run('chflags', [on ? 'uchg' : 'nouchg', path]);
+    const r = await setImmutable(this.sys, path, on);
     if (r.code !== 0 && on) this.opts.log?.(`could not make ${path} immutable: ${r.stderr.trim()}`);
+  }
+}
+
+function setImmutable(sys: System, path: string, on: boolean) {
+  return sys.platform === 'linux'
+    ? sys.run('chattr', [on ? '+i' : '-i', path])
+    : sys.run('chflags', [on ? 'uchg' : 'nouchg', path]);
+}
+
+/**
+ * Remove the pin folder and the readable copy (uninstall, `vigil-helper
+ * pin-remove`): clear the immutable flag on each file in it, then remove it.
+ */
+export async function removePinStore(sys: System, dir: string, publicFile?: string): Promise<void> {
+  for (const name of ['app-pin.json', 'app-pin.key']) {
+    const path = join(dir, name);
+    if (lstatId(path) !== undefined) await setImmutable(sys, path, false);
+  }
+  rmSync(dir, { recursive: true, force: true });
+  if (publicFile) {
+    rmSync(publicFile, { force: true });
+    rmSync(`${publicFile}.tmp`, { force: true });
   }
 }

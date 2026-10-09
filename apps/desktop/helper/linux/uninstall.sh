@@ -13,6 +13,9 @@ fi
 # Stop Vigil's osquery setup and put back any osquery settings from before Vigil.
 /usr/libexec/vigil-helper osquery-remove 2>/dev/null || true
 systemctl disable --now vigil-helper.service 2>/dev/null || true
+# Remove the pin and its key once the helper has stopped. Older helpers lack
+# the command; the lines below cover them.
+/usr/libexec/vigil-helper pin-remove 2>/dev/null || true
 rm -f /etc/systemd/system/vigil-helper.service
 systemctl daemon-reload 2>/dev/null || true
 rm -f /usr/share/polkit-1/actions/com.vigilathome.helper.policy

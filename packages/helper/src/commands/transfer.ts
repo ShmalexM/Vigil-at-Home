@@ -72,12 +72,17 @@ const ACL_WRITE = new Set([
 /**
  * macOS: whether `ls -led` output gives anyone but root a way to change the
  * folder. Each ACL line reads "<n>: <kind>:<name> [inherited] allow|deny
- * <perm>,<perm>...". Deny entries take nothing away from this answer.
+ * <perm>,<perm>...". Deny entries take nothing away from this answer, and an
+ * entry line in any other shape counts as letting others write.
  */
 export function macAclLetsOthersWrite(lsOutput: string): boolean {
   for (const line of lsOutput.split('\n').slice(1)) {
     const m = /^\s*\d+:\s+(.+?)\s+(?:inherited\s+)?(allow|deny)\s+(\S+)\s*$/.exec(line);
-    if (!m) continue;
+    if (!m) {
+      // An ACL entry that doesn't read as expected counts as letting others write.
+      if (/^\s*\d+:/.test(line)) return true;
+      continue;
+    }
     if (m[2] !== 'allow' || m[1] === 'user:root') continue;
     if (m[3]!.split(',').some((p) => ACL_WRITE.has(p))) return true;
   }

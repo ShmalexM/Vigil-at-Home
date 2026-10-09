@@ -281,6 +281,7 @@ describe('moving across disks', () => {
     try {
       mkdirSync(join(a, 'app'));
       writeFileSync(join(a, 'app', 'run'), 'x', { mode: 0o755 });
+      const appMode = statSync(join(a, 'app')).mode & 0o7777;
       const opts = {
         quarantineDir: join(b, 'q'),
         platform: 'linux' as const,
@@ -289,8 +290,11 @@ describe('moving across disks', () => {
       const sys = new FakeLinuxSystem();
       const rec = await quarantine(sys, join(a, 'app'), 'x1', opts);
       expect(existsSync(join(a, 'app'))).toBe(false);
-      expect(statSync(join(rec.storedPath, 'run')).mode & 0o777).toBe(0o755);
+      // The stored copy is locked (root reads it anyway); its mode is in the record.
+      expect(statSync(rec.storedPath).mode & 0o777).toBe(0);
+      expect(rec.mode).toBe(appMode);
       await restore(sys, rec, opts);
+      expect(statSync(join(a, 'app')).mode & 0o7777).toBe(appMode);
       expect(statSync(join(a, 'app', 'run')).mode & 0o777).toBe(0o755);
       expect(existsSync(join(b, 'q', 'x1'))).toBe(false);
     } finally {

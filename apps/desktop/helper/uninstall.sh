@@ -15,6 +15,9 @@ LABEL=com.vigilathome.helper
 # Older helpers don't have this command, so a failure here doesn't stop the removal.
 /Library/PrivilegedHelperTools/vigil-helper osquery-remove 2>/dev/null || true
 launchctl bootout "system/$LABEL" 2>/dev/null || true
+# Remove the pin and its key once the helper has stopped. Older helpers lack
+# the command; the lines below cover them.
+/Library/PrivilegedHelperTools/vigil-helper pin-remove 2>/dev/null || true
 rm -f "/Library/LaunchDaemons/$LABEL.plist"
 rm -f /Library/PrivilegedHelperTools/vigil-helper
 rm -rf /Library/PrivilegedHelperTools/vigil-helper.d

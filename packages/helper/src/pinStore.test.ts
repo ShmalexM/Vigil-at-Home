@@ -9,6 +9,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -16,8 +17,14 @@ import { join } from 'node:path';
 import { createHmac } from 'node:crypto';
 import type { AppPin } from './appPin.js';
 import { quarantine, type QuarantineOptions } from './commands/quarantine.js';
-import { AppPinStore } from './pinStore.js';
-import type { BinaryName, RunResult, System } from './system.js';
+import { AppPinStore, removePinStore } from './pinStore.js';
+import {
+  LINUX_BINARIES,
+  realSystem,
+  type BinaryName,
+  type RunResult,
+  type System,
+} from './system.js';
 import type { Platform } from './platform.js';
 import { FakeLinuxSystem } from './testing/fakeLinuxSystem.js';
 
@@ -204,6 +211,28 @@ describe('one queue for the pin', () => {
     expect((await open()).current()).toEqual(PIN);
   });
 
+  it('repairs over an older signed pin put back, whatever its file times say', async () => {
+    const sys = new Flags('linux');
+    const daemon = await open(sys);
+    await daemon.write(OTHER);
+    linkSync(file, join(root, 'old-link'));
+    // A later write signs a higher generation, even when the clock stands still.
+    await daemon.write(PIN);
+    const gens = () => (JSON.parse(readFileSync(file, 'utf8')) as { gen: number }).gen;
+    const current = gens();
+    // The very inode the helper signed before, with its own signature and file
+    // binding intact, back in place and made to look newest by its times.
+    renameSync(join(root, 'old-link'), file);
+    const future = new Date(Date.now() + 86_400_000);
+    utimesSync(file, future, future);
+    expect(gens()).toBeLessThan(current);
+    await daemon.repair();
+    expect(daemon.current()).toEqual(PIN);
+    // The old file is replaced by the pin in force, signed with a higher generation still.
+    expect(gens()).toBeGreaterThan(current);
+    expect((await open()).current()).toEqual(PIN);
+  });
+
   it('ends with the new pin when a repair races a write', async () => {
     const sys = new Flags('linux');
     const store = await open(sys);
@@ -254,6 +283,39 @@ describe('one queue for the pin', () => {
     writeFileSync(publicFile, JSON.stringify(OTHER));
     expect(store.current()).toEqual(PIN);
   });
+});
+
+describe('removing the pin', () => {
+  it('clears the immutable flag on both files before removing the folder and the copy', async () => {
+    const sys = new Flags('linux');
+    const publicFile = join(root, 'app-pin.json');
+    const store = new AppPinStore(sys as unknown as System, {
+      dir: state,
+      publicFile,
+      ownerUid: process.getuid!(),
+    });
+    await store.load();
+    await store.write(PIN);
+    expect([...sys.immutable].sort()).toEqual([file, keyFile]);
+    await removePinStore(sys as unknown as System, state, publicFile);
+    expect(sys.immutable.size).toBe(0);
+    expect(existsSync(state)).toBe(false);
+    expect(existsSync(publicFile)).toBe(false);
+    // Nothing there is fine too.
+    await removePinStore(sys as unknown as System, state, publicFile);
+  });
+
+  it.skipIf(process.platform !== 'linux' || process.getuid?.() !== 0)(
+    'removes files the real flag made immutable (root only)',
+    async () => {
+      const sys = realSystem(LINUX_BINARIES, 'linux');
+      const store = new AppPinStore(sys, { dir: state, ownerUid: 0 });
+      await store.load();
+      await store.write(PIN);
+      await removePinStore(sys, state);
+      expect(existsSync(state)).toBe(false);
+    },
+  );
 });
 
 describe('the tripwire on moves', () => {

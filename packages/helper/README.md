@@ -132,8 +132,10 @@ an event while working fine; Santa logs every program launch.
   macOS; on Linux a POSIX ACL's mask shows in the group bits). Files are created with
   `O_EXCL|O_NOFOLLOW`, the original is removed only after the copy is complete, and a
   failed copy removes only what it created. A root-owned item in a folder others can
-  write to (like a package-installed app in `/Applications`) is refused. Anything a
-  user owns is restored as that user; when they can't write where it goes back, the
+  write to (like a package-installed app in `/Applications`) is refused. An item goes
+  back into a folder that is root's alone as root, with each entry's owner given last;
+  anywhere else, anything a user owns is restored as that user, keeping each entry's
+  group when it is one of theirs, and when they can't write where it goes back, the
   restore is refused. Startup items are read the same way before they are turned off.
 - **One pin writer.** `pin-app` refuses to run while the daemon answers on its socket,
   and the daemon re-reads the signed pin before repairing it, adopting a newer one.
