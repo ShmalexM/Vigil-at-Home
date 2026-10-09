@@ -321,6 +321,11 @@ export interface WorkloadResult {
   /** The agent-watch and pre-flight rules alone, per day after the learning week. */
   agentRules: { alerts: number; asks: number };
   /**
+   * Shadow matches per rule, per day after the learning week: what a rule
+   * that only records would have flagged. They raise nothing.
+   */
+  shadowPerDay: Record<string, number>;
+  /**
    * What the event log keeps per event, in bytes (the slimmed JSON body plus
    * the agent_session column): without the process tracker, and with it.
    */
@@ -362,6 +367,7 @@ export function runWorkload(
   const asks: Array<{ day: number; ruleId: string; lookalike: string | null }> = [];
   const denies: number[] = [];
   const blocks: Array<{ day: number; ruleId: string }> = [];
+  const shadow: Record<string, number> = {};
   const timings: number[] = [];
   let events = 0;
   let evalMs = 0;
@@ -415,6 +421,8 @@ export function runWorkload(
           }
           if (d.mode === 'block' && d.execute.length > 0)
             blocks.push({ day, ruleId: d.match.ruleId });
+          if (d.mode === 'shadow' && day >= LEARNING_DAYS)
+            shadow[d.match.ruleId] = (shadow[d.match.ruleId] ?? 0) + 1;
         }
       }
     }
@@ -491,6 +499,11 @@ export function runWorkload(
       blocks: blocks.filter((b) => b.day === day).length,
     })),
     agentRules: { alerts: agent(measured), asks: agent(measuredAsks) },
+    shadowPerDay: Object.fromEntries(
+      Object.entries(shadow)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([id, n]) => [id, n / measuredDays]),
+    ),
     storedBytesPerEvent: { plain, withAgents, delta: withAgents - plain },
     rates: workdayRates(profile),
     latencyUs: {
