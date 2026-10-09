@@ -7,6 +7,7 @@
 # Everything it installs is root-owned, so nothing running as you can change
 # what runs as root. uninstall.sh (next to this file) reverses it.
 set -eu
+umask 022
 
 if [ "$(id -u)" != 0 ]; then
   echo "Run this with sudo." >&2
@@ -19,34 +20,59 @@ DEST=$TOOLS/vigil-helper.d
 LABEL=com.vigilathome.helper
 PLIST=/Library/LaunchDaemons/$LABEL.plist
 SOCKET=/var/run/vigil-helper.sock
+VH_GROUP=wheel
 
-for f in node helper.mjs vigil-helper "$LABEL.plist"; do
+for f in node helper.mjs vigil-helper "$LABEL.plist" lib.sh; do
   [ -f "$SRC/$f" ] || { echo "Missing $f next to install.sh" >&2; exit 1; }
 done
+# Run as root, this sources lib.sh from beside itself, so it must not sit in
+# a folder the user can write. The app runs it from a root-owned, checked
+# copy (ELEVATED_ENTRY in helper-install.ts).
+# shellcheck source=SCRIPTDIR/lib.sh
+. "$SRC/lib.sh"
 
-# Copy the new files first, then stop the running copy, if any, and swap them
-# in, so an update leaves the helper stopped for as short a time as possible.
-# Santa keeps enforcing the rules it already has while the helper restarts.
 install -d -o root -g wheel -m 755 "$TOOLS"
-rm -rf "$DEST.new"
-install -d -o root -g wheel -m 755 "$DEST.new"
-install -o root -g wheel -m 755 "$SRC/node" "$DEST.new/node"
-install -o root -g wheel -m 644 "$SRC/helper.mjs" "$DEST.new/helper.mjs"
+# Stop the running helper before changing anything. An older helper doesn't
+# know every file this script writes, so it could quarantine one halfway
+# through; stopped, it can't. Santa keeps enforcing the rules it already has
+# until the new helper starts.
 launchctl bootout "system/$LABEL" 2>/dev/null || true
-rm -rf "$DEST"
-mv "$DEST.new" "$DEST"
-install -o root -g wheel -m 755 "$SRC/vigil-helper" "$TOOLS/vigil-helper"
-install -o root -g wheel -m 644 "$SRC/$LABEL.plist" "$PLIST"
-install -d -o root -g wheel -m 755 /Library/Logs/Vigil
-# A downloaded app's files carry the quarantine flag; the copies don't need it.
-xattr -cr "$DEST" "$TOOLS/vigil-helper" "$PLIST" 2>/dev/null || true
 
-# Point osquery at Vigil's queries, keeping any config it had before.
+# Each install adds a complete new version, DEST/versions/<id>, under a name
+# of its own, and then points DEST/current at it in one rename. No version
+# changes once written, so installs that overlap need no lock: the last
+# switch wins, and each one switches only to a complete version.
+vh_prepare
+vh_build "$SRC/node" "$SRC/helper.mjs"
+# A downloaded app's files carry the quarantine flag; the copies don't need it.
+xattr -cr "$DEST/versions/$VH_VERSION" 2>/dev/null || true
+# Nothing uses DEST/current before the new launcher, so a first install, or
+# one over the layout from before versions, can point it at the new version now.
+vh_current
+[ -n "$VH_CURRENT" ] || vh_switch "$VH_VERSION"
+
+# The launcher and launchd job run the helper through DEST/current, the same
+# for every version. Write them first, so the switch is the one step that
+# changes which helper runs.
+vh_put 755 "$SRC/vigil-helper" "$TOOLS/vigil-helper"
+vh_put 644 "$SRC/$LABEL.plist" "$PLIST"
+xattr -c "$TOOLS/vigil-helper" "$PLIST" 2>/dev/null || true
+vh_switch "$VH_VERSION"
+
+install -d -o root -g wheel -m 755 /Library/Logs/Vigil
+
+# Point osquery at Vigil's queries, keeping any config it had before. Known
+# limit: an install overlapping an uninstall can lose the original config;
+# that takes two password-approved operations at once, so it isn't guarded.
 if [ -d /var/osquery ]; then
   for f in conf flags; do
     target=/var/osquery/osquery.$f
-    if [ -f "$target" ] && [ ! -f "$target.before-vigil" ]; then
-      cp -p "$target" "$target.before-vigil"
+    if [ -f "$target" ] && [ ! -e "$target.before-vigil" ]; then
+      # ln makes the backup only if no other install running now has, so the
+      # first copy, taken before any install rewrote the file, is the one kept.
+      cp -p "$target" "$target.before-vigil.tmp.$$"
+      ln "$target.before-vigil.tmp.$$" "$target.before-vigil" 2>/dev/null || true
+      rm -f "$target.before-vigil.tmp.$$"
     fi
   done
   "$TOOLS/vigil-helper" osquery-config >/var/osquery/osquery.conf
@@ -61,7 +87,11 @@ if [ -n "${1:-}" ]; then
   "$TOOLS/vigil-helper" pin-app "$1" || echo "Could not pin the app; the helper runs without it." >&2
 fi
 
-launchctl bootstrap system "$PLIST"
+# Another install running at the same time may have started the job already;
+# then restart it, so it runs whatever DEST/current names now.
+if ! started=$(launchctl bootstrap system "$PLIST" 2>&1); then
+  launchctl kickstart -k "system/$LABEL" || vh_die "The helper did not start: $started"
+fi
 
 i=0
 while [ ! -S "$SOCKET" ] && [ "$i" -lt 40 ]; do
@@ -72,4 +102,7 @@ if [ ! -S "$SOCKET" ]; then
   echo "The helper did not start. See /Library/Logs/Vigil/helper.log" >&2
   exit 1
 fi
+# Now the old files can go: those from before versions, and old versions
+# nothing uses (see vh_finish in lib.sh).
+vh_finish
 echo "Vigil helper installed and running."

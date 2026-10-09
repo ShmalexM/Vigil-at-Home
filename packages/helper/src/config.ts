@@ -110,7 +110,8 @@ export const PROTECTED_PREFIXES = [
   '/Library/Application Support/Vigil/',
   '/Applications/Santa.app',
   '/Library/PrivilegedHelperTools/vigil-helper',
-  // The helper's Node runtime and code, and the app itself.
+  // The helper's Node runtime and code (versions/<id> and the current link to
+  // one), and the app itself.
   '/Library/PrivilegedHelperTools/vigil-helper.d/',
   '/Applications/Vigil at Home.app/',
   // The helper's own state: rules, journal, Santa sync keys and the quarantine.

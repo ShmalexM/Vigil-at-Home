@@ -7,7 +7,6 @@
 
 import {
   chmodSync,
-  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -28,6 +27,7 @@ import {
   parseOsqueryJson,
   type OsqueryConfigOptions,
 } from '@vigil/sensors';
+import { backUpOnce } from './backup.js';
 import type { System } from './system.js';
 
 export const OSQUERY_LABEL = 'io.osquery.agent';
@@ -95,10 +95,6 @@ function put(path: string, content: string): boolean {
   return true;
 }
 
-function backUpOnce(path: string): void {
-  if (existsSync(path) && !existsSync(path + BACKUP)) copyFileSync(path, path + BACKUP);
-}
-
 /** Unload a job and wait for launchd to finish tearing it down (bootout can return first). */
 async function unload(sys: System, target: string): Promise<void> {
   await sys.run('launchctl', ['bootout', target]);
@@ -145,12 +141,12 @@ export async function ensureOsquery(
 
   // Keep a config and flags Vigil didn't write, once, before replacing them.
   if (!read(p.config)?.includes(QUERY_NAMES.networkConnections)) {
-    backUpOnce(p.config);
-    backUpOnce(p.flags);
+    backUpOnce(p.config, p.config + BACKUP);
+    backUpOnce(p.flags, p.flags + BACKUP);
   }
   const plist = osqueryLaunchDaemon(p);
   const current = read(p.plist);
-  if (current !== undefined && !current.includes(MARKER)) backUpOnce(p.plist);
+  if (current !== undefined && !current.includes(MARKER)) backUpOnce(p.plist, p.plist + BACKUP);
 
   let changed = put(p.config, osqueryConfig(config));
   changed = put(p.flags, osqueryFlags()) || changed;

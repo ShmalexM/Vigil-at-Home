@@ -1,5 +1,13 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readdirSync,
+  readlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -50,8 +58,19 @@ describe.skipIf(!enabled)('Linux helper install', () => {
       writeFileSync(join(newer, 'helper.mjs'), '// a newer helper\n', { flag: 'a' });
       expect(helperMatch(newer, 'linux').installed).toBe('outdated');
 
-      // Installing again replaces the running copy.
+      // The helper runs through `current`, a link to one complete version.
+      const d = '/usr/libexec/vigil-helper.d';
+      expect(lstatSync(`${d}/current`).isSymbolicLink()).toBe(true);
+      expect(existsSync(`${d}/node`)).toBe(false);
+
+      // Installing again replaces the running copy. Versions from the last hour
+      // are kept, since another install could still be using them.
       expect(sh('install.sh').status).toBe(0);
+      expect(readdirSync(`${d}/versions`)).toHaveLength(2);
+      expect(sh('install.sh').status).toBe(0);
+      expect(readdirSync(`${d}/versions`)).toHaveLength(3);
+      const target = readlinkSync(`${d}/current`).replace(/^versions\//, '');
+      expect(readdirSync(`${d}/versions`)).toContain(target);
       expect(spawnSync('systemctl', ['is-active', '--quiet', 'vigil-helper.service']).status).toBe(
         0,
       );

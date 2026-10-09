@@ -1,6 +1,28 @@
 #!/bin/sh
-# The Vigil helper: Node and the bundled helper, both root-owned. It starts
-# with an empty environment so nothing from the user's session (NODE_OPTIONS
-# and the like) carries into Node running as root.
-exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
-  /usr/libexec/vigil-helper.d/node /usr/libexec/vigil-helper.d/helper.mjs "$@"
+# The Vigil helper: Node and the bundled helper, both root-owned. linux/install.sh
+# keeps each version in vigil-helper.d/versions/<id> and points
+# vigil-helper.d/current at one. Read the link once, so node and helper.mjs
+# always come from the same version. Node starts with an empty environment so
+# nothing from the user's session (NODE_OPTIONS and the like) carries into Node
+# running as root.
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+D=/usr/libexec/vigil-helper.d
+V=$(readlink "$D/current" && echo /) || { echo "The Vigil helper isn't installed: $D/current is missing." >&2; exit 1; }
+# The / keeps a newline at the end of the link from being dropped.
+V=${V%?/}
+# One plain version name (what install.sh makes), nothing else.
+N=${V#versions/}
+case $V in versions/*) ;; *) N= ;; esac
+case $N in
+  '' | .* | *[!A-Za-z0-9._-]*) echo "Unexpected $D/current: $V" >&2; exit 1 ;;
+esac
+# And that name is the folder the link points to, however readlink printed it
+# (the / keeps a newline at the end of either path from being dropped).
+T=$(cd -P "$D/current" 2>/dev/null && pwd -P && echo /) || T=
+W=$(cd -P "$D/versions/$N" 2>/dev/null && pwd -P && echo /) || W=
+if [ -z "$T" ] || [ "$T" != "$W" ]; then
+  echo "Unexpected $D/current: $V" >&2
+  exit 1
+fi
+exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "$D/versions/$N/node" "$D/versions/$N/helper.mjs" "$@"
