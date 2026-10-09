@@ -2,9 +2,9 @@ import type { PinStore } from './executable.js';
 import { createClaudeAdapter } from './providers/claude.js';
 import { createCodexAdapter } from './providers/codex.js';
 import {
+  classifierModelChoice,
   classifierRuntime,
   createEventClassifier,
-  pickClassifierModel,
   recommendedClassifierModel,
   type EventClassifier,
 } from './classifier.js';
@@ -85,6 +85,7 @@ export {
 } from './providers/jev.js';
 export {
   CLASSIFIER_MODELS,
+  classifierModelChoice,
   classifierRuntime,
   createEventClassifier,
   eventLine,
@@ -192,7 +193,7 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
                 ...(settings.classifier.model
                   ? { model: settings.classifier.model }
                   : {
-                      pickModel: (installed) => pickClassifierModel(installed),
+                      pickModel: (installed) => classifierModelChoice(installed),
                       suggestedModel: recommendedClassifierModel(),
                     }),
                 runtime,

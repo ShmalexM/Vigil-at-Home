@@ -67,7 +67,7 @@ export class KeyStore {
     }
     if (def?.needsBaseUrl && !input.baseUrl) throw new Error('Add the gateway’s address too');
     if (input.baseUrl && !isSafeBaseUrl(input.baseUrl)) {
-      throw new Error('Use https, or http only for a gateway on this Mac');
+      throw new Error('Use https, or http only for a gateway on this computer');
     }
     if (!this.cipher.available()) throw new Error('The macOS Keychain isn’t available');
     const file = this.read();

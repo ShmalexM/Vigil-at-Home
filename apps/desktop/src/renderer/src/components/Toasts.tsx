@@ -1,10 +1,12 @@
 import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from 'react';
-import { CircleCheck } from 'lucide-react';
+import { CircleCheck, TriangleAlert } from 'lucide-react';
 
 interface Toast {
   id: number;
   text: string;
   undo?: (() => void) | undefined;
+  /** A failure gets a warning mark, never the green check that means it worked. */
+  tone?: 'error' | undefined;
   ms: number;
 }
 
@@ -18,7 +20,8 @@ export function Toaster({ children }: { children: ReactNode }) {
   const push = useCallback(
     (t: Omit<Toast, 'id' | 'ms'> & { ms?: number }) => {
       const id = next.current++;
-      const ms = t.ms ?? 6000;
+      // Failures stay up longer: they usually say what to do next.
+      const ms = t.ms ?? (t.tone === 'error' ? 9000 : 6000);
       setToasts((ts) => [...ts.slice(-2), { ...t, id, ms }]);
       setTimeout(() => dismiss(id), ms);
     },
@@ -29,8 +32,12 @@ export function Toaster({ children }: { children: ReactNode }) {
       {children}
       <div className="toasts" role="status" aria-live="polite">
         {toasts.map((t) => (
-          <div key={t.id} className="toast">
-            <CircleCheck size={16} color="var(--good)" aria-hidden />
+          <div key={t.id} className={t.tone === 'error' ? 'toast error' : 'toast'}>
+            {t.tone === 'error' ? (
+              <TriangleAlert size={16} color="var(--poor)" aria-hidden />
+            ) : (
+              <CircleCheck size={16} color="var(--good)" aria-hidden />
+            )}
             <span className="grow">{t.text}</span>
             {t.undo && (
               <button

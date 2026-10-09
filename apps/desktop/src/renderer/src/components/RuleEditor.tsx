@@ -13,6 +13,7 @@ import { draftIsToolRule, replayLine, replaySampleRow } from '../rule-modes';
 import { HoldButton } from './HoldButton';
 import { useToast } from './Toasts';
 import { Button, Chip, IconButton } from './ui';
+import { computer } from '../platform';
 
 /** Fields people usually exclude on, shown first in the picker. */
 const COMMON_FIELDS = [
@@ -180,7 +181,7 @@ function Exclusions({ view, reload }: { view: RuleEditorView; reload: () => void
         <input
           className="field"
           aria-label="Value"
-          placeholder="/Applications/Docker.app/Contents/MacOS/com.docker.backend"
+          placeholder="e.g. /Applications/Docker.app/…"
           value={draft.value}
           onChange={(e) => setDraft({ ...draft, value: e.target.value })}
           onKeyDown={(e) => {
@@ -241,7 +242,8 @@ function JsonEditor({
       <div className="col" style={{ gap: 2 }}>
         <span className="t-h3">{view ? 'Rule' : 'New rule'}</span>
         <span className="t-small">
-          The whole rule as JSON. Check it first: Vigil replays it over the last 14 days on this Mac
+          The whole rule as JSON. Check it first: Vigil replays it over the last 14 days on this{' '}
+          {computer}
           so you can see how often it would have fired before you save.
         </span>
       </div>

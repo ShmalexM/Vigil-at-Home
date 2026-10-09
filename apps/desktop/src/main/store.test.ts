@@ -168,6 +168,31 @@ describe('Store', () => {
     expect(s.ruleMatchCounts(15).get('r')).toBe(2);
   });
 
+  it('counts every alert by status, past the newest page listAlerts returns', () => {
+    const s = memoryStore();
+    for (let i = 0; i < 205; i++) {
+      s.saveAlert({
+        id: `a-${i}`,
+        createdAt: i,
+        updatedAt: i,
+        ruleId: 'test.rule',
+        ruleVersion: 1,
+        title: 't',
+        summary: 's',
+        severity: 'high',
+        fidelity: 'high',
+        notify: 'popup',
+        status: i < 3 ? 'resolved' : 'open',
+        containment: 'none',
+        eventIds: ['e'],
+        actionIds: [],
+      });
+    }
+    expect(s.listAlerts({ status: 'open' })).toHaveLength(200);
+    expect(s.countAlerts('open')).toBe(202);
+    expect(s.countAlerts('resolved')).toBe(3);
+  });
+
   it('keeps the database under a size cap by dropping the oldest events', () => {
     const s = memoryStore();
     const kept = makeExec();
@@ -224,6 +249,15 @@ describe('Store', () => {
     expect(s.listEventViews().map((v) => v.event.ts)).toEqual([3000, 2000, 1000]);
     expect(s.listEventViews({ group: 'network' })).toHaveLength(1);
     expect(s.listEventViews({ matchedOnly: true }).map((v) => v.event.id)).toEqual([b.id]);
+    // One rule's matches, for an alert's "its matches in Activity".
+    expect(s.listEventViews({ rule: 'r1' }).map((v) => v.event.id)).toEqual([b.id]);
+    expect(s.listEventViews({ rule: 'r2' })).toHaveLength(0);
+    const { sql } = eventViewsQuery({ rule: 'r1' }, 10_000);
+    const db = (s as unknown as { db: DatabaseSync }).db;
+    const steps = (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all('r1', 200) as { detail: string }[])
+      .map((r) => r.detail)
+      .join('\n');
+    expect(steps).toContain('events_matched_ts');
     expect(s.listEventViews({ text: 'safari' }, 5000).map((v) => v.event.id)).toEqual([a.id]);
     // % and _ are literal, not wildcards.
     expect(s.listEventViews({ text: '100%_' }, 5000).map((v) => v.event.id)).toEqual([b.id]);

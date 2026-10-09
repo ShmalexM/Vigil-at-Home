@@ -50,6 +50,14 @@ export function isKeyBilled(run: {
   billed?: boolean | undefined;
 }): boolean {
   if (run.costUsd === null) return false;
+  return chargedToKey(run);
+}
+
+/** Whether this run went to one of the user's keys, priced or not. */
+export function chargedToKey(run: {
+  provider: UsageProvider;
+  billed?: boolean | undefined;
+}): boolean {
   if (run.billed !== undefined) return run.billed;
   // Runs logged before `billed` existed.
   if (run.provider === 'codex') return true;
@@ -92,6 +100,13 @@ export interface UsageTotals {
   billedUsd: number;
   /** Runs with no price at all (Codex on a ChatGPT plan). Local runs are free, not unpriced. */
   unpricedRuns: number;
+  /** Of those, runs charged to one of the user's keys: billed, but at a price Vigil doesn't know. */
+  billedUnpricedRuns: number;
+  /**
+   * The part of `costUsd` from Claude Code's own login when Vigil can't tell
+   * whether that login is a plan or pays per token (billed unknown).
+   */
+  loginUsd: number;
 }
 
 export interface ProviderTotals extends UsageTotals {
