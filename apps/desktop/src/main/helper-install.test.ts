@@ -545,8 +545,10 @@ describe('helper launcher', () => {
     const d = join(root, 'vigil-helper.d');
     const version = '20261009T000000Z.1.abc';
     mkdirSync(join(d, 'versions', version), { recursive: true });
-    // Present, so only the link check refuses `versions/a` plus a newline.
+    // Both present, so only the link check refuses `versions/a` plus a newline
+    // where readlink's output loses the newline.
     mkdirSync(join(d, 'versions', 'a'));
+    mkdirSync(join(d, 'versions', 'a\n'));
     for (const rel of ['vigil-helper', 'linux/vigil-helper']) {
       const src = readFileSync(join(import.meta.dirname, '..', '..', 'helper', rel), 'utf8');
       const launcher = join(root, 'vigil-helper');
