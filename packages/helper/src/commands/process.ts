@@ -3,7 +3,7 @@
 // expected executable path or start time, and suspend records the identity
 // so resume can check it again.
 
-import { selfRoots, underSelfRoot } from '@vigil/core/self';
+import { insideInstalledRoot, selfRoots, underSelfRoot } from '@vigil/core/self';
 import type { System } from '../system.js';
 import type { Platform } from '../platform.js';
 import { protectionFor } from '../config.js';
@@ -21,6 +21,15 @@ export interface ProcessIdentity {
  * Identify a running process from kernel data: the executable path from its
  * text mapping (lsof "txt" on macOS, /proc/<pid>/exe on Linux, neither of
  * which argv tricks can fake) and its start time.
+ *
+ * exec keeps the pid and start time, so a process that execs another
+ * program is still "the same process" here, now running that program. For
+ * the app pin that is accepted in both directions (see appPin.ts
+ * runsPinnedApp): a process that execs into the pinned app's code is the
+ * app from then on, and one that execs away from it, to other code at the
+ * same path, can still be spared on the cdhash read just before. Only a
+ * process whose code is already someone's choosing can do either, so
+ * nothing the real app depends on changes.
  */
 export async function identifyProcess(
   sys: System,
@@ -42,8 +51,11 @@ export async function identifyProcess(
 }
 
 export function isProtectedProcess(path: string, platform: Platform = 'darwin'): boolean {
-  return protectionFor(platform).processPrefixes.some(
-    (p) => path === p.replace(/\/$/, '') || path.startsWith(p),
+  return (
+    insideInstalledRoot(path, platform) ||
+    protectionFor(platform).processPrefixes.some(
+      (p) => path === p.replace(/\/$/, '') || path.startsWith(p),
+    )
   );
 }
 
@@ -52,6 +64,11 @@ export interface ProcessTarget {
   path?: string;
   /** Linux: what is Vigil's own (FastPath.self()), never paused or stopped. */
   self?: { paths: readonly string[]; images: readonly string[] };
+  /**
+   * Whether the process runs the app pinned at install (appPin.ts
+   * runsPinnedApp); 'changed' when it was replaced while being checked.
+   */
+  isPinnedApp?: (id: ProcessIdentity) => Promise<boolean | 'changed'>;
   /** Expected start time, ms since epoch. ps reports whole seconds, so it matches within a second. */
   startTime?: number;
 }
@@ -101,6 +118,11 @@ async function checkTarget(
       'refused',
       `${id.path} is part of ${sys.platform === 'linux' ? 'the system' : 'macOS'} or Vigil`,
     );
+  // Last, so a program already protected by path costs no codesign.
+  const pinned = await expect.isPinnedApp?.(id);
+  if (pinned === 'changed')
+    throw new ActionError('refused', `process ${pid} changed while it was being checked`);
+  if (pinned) throw new ActionError('refused', `${id.path} is Vigil`);
   return id;
 }
 

@@ -86,6 +86,20 @@ Santa / osquery ─► SensorHub ─► FastPath (same engine as the app) ─►
   new ones have fully arrived.
 - `helper-rules.json` is root-owned in a root-owned folder, and `helper.status` reports its
   revision (`helperRules.rev`), which goes up with every change.
+- The app pinned at install is spared (`appPin.ts`): `install.sh` runs `vigil-helper
+pin-app` as root, which records the cdhash and sha256 of the app's main executable on
+  macOS, or the AppImage's device, inode and sha256 on Linux. The pin is signed with a
+  root-only key and kept in a root-only folder (`pin/`, 0700), held in memory and flagged
+  immutable (`pinStore.ts`); `app-pin.json` beside it is a readable copy for the app. Before
+  pausing or stopping a process, the helper checks the target against the pin (codesign on
+  the pid on macOS, with the process identified again afterwards so a reused pid counts for
+  nothing; the AppImage's mount on Linux), and it refuses a hash block naming the pinned
+  hashes. No pin, or one for another app, spares nothing. Only an app outside the
+  installer's folder is pinned: one in `/Applications/Vigil at Home.app` or
+  `/opt/Vigil at Home` is protected by path already, has no pin, runs no extra codesign
+  and asks for nothing when updated in place. An app outside it is re-pinned by the next
+  self grant the password approves that covers it, or else by the helper update the app
+  offers when its pin is stale.
 
 Anything running as the user can reach the socket and send fewer rules. That only moves
 those blocks back to the app's engine, as before, so this needs no password.
@@ -108,16 +122,59 @@ an event while working fine; Santa logs every program launch.
   `/sbin`, plus Santa and Vigil, is never paused or killed.
 - **Protected paths.** macOS system folders, top-level folders, home folders, and the
   files of Vigil, Santa and osquery (helper, launch items, units, socket, data) are never
-  quarantined, nor is a folder that holds one. Paths are checked by name first and then by
+  quarantined, nor is a folder that holds one, nor Vigil's own app as pinned or as the
+  app names it (an AppImage by its identity). Paths are checked by name first and then by
   identity (device and inode), so another spelling of a protected path, or a hard link to a
   protected file, is refused too. Files with more than one hard link are refused.
-- **No redirected moves.** The item is held open while it is checked and locked through
-  that handle. The folder on the far side of a move is pinned (an open handle on Linux,
-  the working folder on macOS) and checked through the pin, so a folder swapped for a
-  link after the checks is noticed rather than followed. Restore never overwrites
-  something new, and recreates missing folders for their original owner.
-- **Startup items.** Launch items and units of Vigil and its sensors are refused by name,
-  by label, by the names systemd knows them by, and by the program they run.
+  Symlinked parent folders are resolved and checked again. Restore never overwrites
+  something new, and makes a missing folder again with the mode it had (when root makes
+  it, never writable by others).
+- **No root writes through your folders.** Quarantine and restore copy an item between
+  its folder and the helper's own in two small processes (`commands/fsChild.ts`): the
+  side in your folders runs as you (the folder's owner), with your groups, so a folder
+  swapped for a link mid-move leads only where you could already go. Root acts directly
+  only where every folder on the path is root's alone: root-owned, not writable by
+  group or others, and with no ACL letting anyone else write (read with `ls -le` on
+  macOS; on Linux a POSIX ACL's mask shows in the group bits). Files are created with
+  `O_EXCL|O_NOFOLLOW`, the original is removed only after the copy is complete, and a
+  failed copy removes only what it created. The process that reads the item refuses
+  anything but the file the helper checked (same device and inode, no other hard links)
+  and never crosses into another mounted disk; the one that writes refuses any folder
+  but the one checked. A root-owned item in a folder others can
+  write to (like a package-installed app in `/Applications`) is refused. An item goes
+  back into a folder that is root's alone as root, with each entry's owner given last;
+  anywhere else, anything a user owns is restored as that user, keeping each entry's
+  group when it is one of theirs, and when they can't write where it goes back, the
+  restore is refused. Startup items are read the same way before they are turned off.
+- **Bounded moves.** A move (or read) still running after two minutes is stopped: its
+  reading process is killed, and its writing process removes what it made and is killed
+  too. An item may hold at most 200,000 entries and 8 GiB, and at most four moves run at
+  once. The helper's own rules never wait on a move: each event's pauses, kills and blocks
+  are done first, and its moves go on beside the next events. Events still reach the
+  app in the order they happened, each once its moves end, or after 15 seconds, when the
+  app shows the item was not moved in time.
+- **Startup items.** Launch items and units of Vigil and its sensors are refused by name
+  (as written and where they really are), by label, by the names systemd knows them by,
+  and by the program they run. One is turned off only in the startup folder as written. The only
+  links followed are ones only root could have made, above the user's home (or anywhere
+  in a path with no home), like `/home -> var/home` on ostree systems or
+  `/var -> private/var` on macOS: root's, in a folder that is root's alone, and leading
+  to one too. Any other link on the way, such as a startup folder a dotfile manager
+  links in, is refused with its own code, and the app says so in one line. An
+  item in a user's folder must be that user's, and that user must be the one asking
+  (the console user, who owns the socket): Vigil is a single-user personal tool.
+- **App grants.** The app named in a self grant is hashed off the event loop (up to
+  1 GiB), one grant at a time; a newer grant replaces one still waiting for the
+  password. At most 64 approvals wait at once, and a nonce offered with a command it
+  was not issued for is left as it is.
+- **One pin writer.** `pin-app` refuses to run while the daemon answers on its socket,
+  and the daemon re-reads the signed pin before repairing it, adopting a newer one. The
+  highest generation signed is kept in a signed counter (`pin/app-pin.gen`), so an
+  older pin put back while the helper was stopped is refused at start, and pins are
+  checked only with the key loaded at start. `vigil-helper pin-remove`, which the
+  uninstallers run once the helper has stopped, clears the immutable flag and removes
+  the pin folder. Like `pin-app` it is a root command line only (not a socket command),
+  and it refuses while the daemon answers.
 - **Network blocks.** Loopback, link-local and multicast addresses are refused, and so
   are ranges wider than /8 (IPv4) or /24 (IPv6). Single ports are not supported yet.
   pf forgets its tables at reboot, so the helper re-applies active blocks from its

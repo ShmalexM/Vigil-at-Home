@@ -3,8 +3,10 @@ import {
   AwakeClock,
   checkHealth,
   feedHealth,
+  helperSensorsFrom,
   QUIET_AFTER_MS,
   reportFeedHealth,
+  reportHealth,
   type HealthProbe,
 } from './sensor-health.js';
 import { SensorRegistry } from './sensors.js';
@@ -27,6 +29,66 @@ const byId = async (p: HealthProbe) =>
   Object.fromEntries((await checkHealth(p)).map((h) => [h.id, h]));
 
 describe('checkHealth', () => {
+  it('says the helper is down when it drops or fails during the check', async () => {
+    let state: 'connected' | 'not_running' = 'connected';
+    const dropped = await byId(
+      probe({
+        helper: () => state,
+        helperSensors: async () => {
+          state = 'not_running';
+          return null;
+        },
+      }),
+    );
+    expect(dropped['helper']?.state).toBe('down');
+    const failed = await byId(
+      probe({
+        helper: () => 'connected' as const,
+        helperSensors: () => Promise.reject(new Error('socket closed')),
+      }),
+    );
+    expect(failed['helper']?.state).toBe('down');
+  });
+
+  it('says the helper is down while it reconnects with no connection', async () => {
+    const h = await byId(
+      probe({
+        helper: () => 'connected' as const,
+        helperSensors: helperSensorsFrom(async () => null),
+      }),
+    );
+    expect(h['helper']?.state).toBe('down');
+    // An older helper that answers without sensors is still up.
+    const old = await byId(
+      probe({
+        helper: () => 'connected' as const,
+        helperSensors: helperSensorsFrom(async () => ({})),
+      }),
+    );
+    expect(old['helper']?.state).toBe('ok');
+  });
+
+  it('lets only the latest check report when checks overlap', async () => {
+    const registry = new SensorRegistry();
+    let state: 'connected' | 'not_running' = 'connected';
+    let answer!: () => void;
+    const p = probe({
+      helper: () => state,
+      helperSensors: () =>
+        new Promise((resolve) => {
+          answer = () => resolve(null);
+        }),
+    });
+    const older = reportHealth(registry, p);
+    state = 'not_running';
+    await reportHealth(registry, p);
+    expect(registry.get('helper')?.state).toBe('down');
+    state = 'connected'; // even if the older check's own read says connected
+    answer();
+    await older;
+    expect(registry.get('helper')?.state).toBe('down');
+  });
+
   it('reports nothing installed on a fresh Mac', async () => {
     const h = await byId(probe());
     expect(h['santa']?.state).toBe('not_installed');
