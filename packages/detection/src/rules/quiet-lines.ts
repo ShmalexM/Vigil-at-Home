@@ -56,15 +56,23 @@ function pattern(line: string): string {
     .join('');
 }
 
+/**
+ * The two exact wrappers Claude Code's harness puts a command in, as anchored
+ * regex sources around `quoted` (a pattern for the command with each ' written
+ * '\''). The download-then-run rule unwraps these same shapes.
+ */
+export function harnessWrappers(quoted: string): string[] {
+  return [
+    `^eval '${quoted}'$`,
+    `^source ${SNAPSHOT} && eval '${quoted}' < /dev/null && pwd -P >\\| ${CWD_FILE}$`,
+  ];
+}
+
 const TEMPLATES: RegExp[] = LINES.flatMap((line) => {
   const raw = pattern(line);
   // Inside the harness's single quotes each ' is written '\''.
   const quoted = pattern(line.replace(/'/g, `'\\''`));
-  return [
-    `^${raw}$`,
-    `^eval '${quoted}'$`,
-    `^source ${SNAPSHOT} && eval '${quoted}' < /dev/null && pwd -P >\\| ${CWD_FILE}$`,
-  ].map((src) => new RegExp(src));
+  return [`^${raw}$`, ...harnessWrappers(quoted)].map((src) => new RegExp(src));
 });
 
 /**
