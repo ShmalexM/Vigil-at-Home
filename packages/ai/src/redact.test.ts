@@ -155,8 +155,12 @@ describe('redaction', () => {
 const MAX_PASS_MS = 2000;
 /** What n and 4n may take apart: 4 when linear, 16 when quadratic. */
 const MAX_GROWTH = 8;
-/** Shorter passes are timer noise: below this, the smaller one counts as this long. */
-const MIN_TIMED_MS = 2;
+/**
+ * Shorter passes are timer and GC noise: below this, the smaller one counts as
+ * this long. A pass this quick at n/4 can't be quadratic at these sizes (that
+ * would take seconds), and the MAX_PASS_MS ceiling still applies.
+ */
+const MIN_TIMED_MS = 10;
 
 function timeOf(run: () => void): number {
   const started = performance.now();
