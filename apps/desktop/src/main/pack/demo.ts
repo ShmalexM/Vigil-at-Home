@@ -12,10 +12,11 @@ export function seedPackDemo(
   now = Date.now(),
 ): void {
   // A stand-in issue tracker (fixtures/demo-mcp.mjs) so the connector UI has tools to show.
-  if (!connectors.list().some((c) => c.id === 'github')) {
-    connectors.add({ kind: 'stdio', name: 'GitHub', command: 'node', args: [fixture] });
-  }
-  void pack.refreshConnector('github').catch(() => undefined);
+  // Connector ids are new for each connector, so the demo finds its own by name.
+  const github =
+    connectors.list().find((c) => c.name === 'GitHub')?.id ??
+    connectors.add({ kind: 'stdio', name: 'GitHub', command: 'node', args: [fixture] }).id;
+  void pack.refreshConnector(github).catch(() => undefined);
   if (pack.notes({ limit: 1 }).length === 0) demoNotes(pack);
   if (pack.dogs().some((d) => d.role === 'pack')) {
     pack.demoMoods();
@@ -61,7 +62,7 @@ export function seedPackDemo(
     },
     'you',
   );
-  pack.demoChat(now, { bolt: bolt.id, pip: pip.id, noodle: noodle.id });
+  pack.demoChat(now, { bolt: bolt.id, pip: pip.id, noodle: noodle.id, github });
   pack.demoMoods();
 }
 

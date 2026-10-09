@@ -39,6 +39,7 @@ import {
   PREFLIGHT_SOCKET_TOOL,
   compileAgentMatchers,
   type AgentRecord,
+  type CheckOptions,
   type Detection,
   type PsRow,
   type SessionStart,
@@ -623,8 +624,8 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
    * watched agent's hook: deny, ask or none. Nothing is recorded, and the
    * answer can only make the gate stricter.
    */
-  packPreflight(req: PreflightRequest): PreflightReply {
-    return this.o.detector.preflight(req).reply;
+  packPreflight(req: PreflightRequest, opts?: CheckOptions): PreflightReply {
+    return this.o.detector.preflight(req, opts).reply;
   }
 
   /**

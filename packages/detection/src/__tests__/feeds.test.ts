@@ -87,17 +87,25 @@ describe('cleanEntries', () => {
 });
 
 function fakeFetch(
-  bodies: Record<string, () => { status?: number; body?: string; etag?: string }>,
+  bodies: Record<
+    string,
+    () => { status?: number; body?: string; etag?: string; location?: string }
+  >,
 ) {
-  const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+  const calls: Array<{ url: string; headers: Record<string, string>; redirect?: string }> = [];
   const fetch: FetchLike = async (url, init) => {
-    calls.push({ url, headers: init.headers });
+    calls.push({
+      url,
+      headers: init.headers,
+      ...(init.redirect ? { redirect: init.redirect } : {}),
+    });
     const r = bodies[url];
     if (!r) throw new Error('network down');
-    const { status = 200, body = '', etag } = r();
+    const { status = 200, body = '', etag, location } = r();
+    const hdrs: Record<string, string | undefined> = { etag, location };
     return {
       status,
-      headers: { get: (n: string) => (n.toLowerCase() === 'etag' ? (etag ?? null) : null) },
+      headers: { get: (n: string) => hdrs[n.toLowerCase()] ?? null },
       text: async () => body,
     };
   };
@@ -198,6 +206,213 @@ describe('FeedImporter', () => {
     expect(r[0]!.status).toBe('failed');
     expect(r[0]!.error).toMatch(/shrank from 100 to 0/);
     expect(stores.lists.size('known_bad_ips')).toBe(100);
+  });
+
+  it("sends the user's key to a feed that needs one", async () => {
+    const { fetch, calls } = fakeFetch({ 'https://k.test/ips': () => ({ body: '45.9.1.2' }) });
+    const stores = memoryStores();
+    const imp = new FeedImporter(
+      [src({ id: 'k', url: 'https://k.test/ips', auth: { key: 'abusech', header: 'Auth-Key' } })],
+      stores.lists,
+      new MemoryFeedStateStore(),
+      { fetch, keys: (name) => (name === 'abusech' ? 'user-key-0123456789' : undefined) },
+    );
+    expect((await imp.run())[0]).toMatchObject({ status: 'updated', entries: 1 });
+    expect(calls[0]!.headers['Auth-Key']).toBe('user-key-0123456789');
+    expect(imp.status()[0]!.needsKey).toBeUndefined();
+  });
+
+  describe('redirects of a request carrying the key', () => {
+    const keyed = (url: string, fetch: FetchLike) =>
+      new FeedImporter(
+        [src({ id: 'k', url, auth: { key: 'abusech', header: 'Auth-Key' } })],
+        memoryStores().lists,
+        new MemoryFeedStateStore(),
+        { fetch, keys: () => 'user-key-0123456789' },
+      );
+
+    it('follows a same-origin https redirect and sends the key on each hop', async () => {
+      const { fetch, calls } = fakeFetch({
+        'https://k.test/ips': () => ({ status: 302, location: '/v2/ips' }),
+        'https://k.test/v2/ips': () => ({ body: '45.9.1.2' }),
+      });
+      const r = await keyed('https://k.test/ips', fetch).run();
+      expect(r[0]).toMatchObject({ status: 'updated', entries: 1 });
+      expect(calls.map((c) => c.url)).toEqual(['https://k.test/ips', 'https://k.test/v2/ips']);
+      for (const c of calls) {
+        expect(c.redirect).toBe('manual');
+        expect(c.headers['Auth-Key']).toBe('user-key-0123456789');
+      }
+    });
+
+    it('refuses a redirect to another origin without requesting it', async () => {
+      for (const location of [
+        'https://elsewhere.test/ips',
+        'https://k.test:8443/ips',
+        'https://sub.k.test/ips',
+      ]) {
+        const { fetch, calls } = fakeFetch({
+          'https://k.test/ips': () => ({ status: 301, location }),
+          [location]: () => ({ body: '45.9.1.2' }),
+        });
+        const r = await keyed('https://k.test/ips', fetch).run();
+        expect(r[0]).toMatchObject({ status: 'failed' });
+        expect(r[0]!.error).toMatch(/another site/);
+        expect(calls.map((c) => c.url)).toEqual(['https://k.test/ips']);
+      }
+    });
+
+    it('refuses a redirect down to http', async () => {
+      const { fetch, calls } = fakeFetch({
+        'https://k.test/ips': () => ({ status: 307, location: 'http://k.test/ips' }),
+        'http://k.test/ips': () => ({ body: '45.9.1.2' }),
+      });
+      const r = await keyed('https://k.test/ips', fetch).run();
+      expect(r[0]).toMatchObject({ status: 'failed' });
+      expect(calls.map((c) => c.url)).toEqual(['https://k.test/ips']);
+    });
+
+    it('stops after a few same-origin redirects', async () => {
+      const { fetch, calls } = fakeFetch({
+        'https://k.test/ips': () => ({ status: 302, location: '/ips' }),
+      });
+      const r = await keyed('https://k.test/ips', fetch).run();
+      expect(r[0]!.error).toMatch(/too many/);
+      expect(calls.length).toBeLessThanOrEqual(4);
+    });
+
+    it('leaves redirects to fetch when no key is sent', async () => {
+      const { fetch, calls } = fakeFetch({ 'https://k.test/ips': () => ({ body: '45.9.1.2' }) });
+      const imp = new FeedImporter(
+        [src({ id: 'k', url: 'https://k.test/ips', auth: { key: 'abusech', header: 'Auth-Key' } })],
+        memoryStores().lists,
+        new MemoryFeedStateStore(),
+        { fetch, keys: () => undefined },
+      );
+      await imp.run();
+      expect(calls[0]!.redirect).toBeUndefined();
+    });
+  });
+
+  it('fetches a keyed feed without a header when no key is saved', async () => {
+    const { fetch, calls } = fakeFetch({ 'https://k.test/ips': () => ({ body: '45.9.1.2' }) });
+    const imp = new FeedImporter(
+      [src({ id: 'k', url: 'https://k.test/ips', auth: { key: 'abusech', header: 'Auth-Key' } })],
+      memoryStores().lists,
+      new MemoryFeedStateStore(),
+      { fetch, keys: () => undefined },
+    );
+    expect((await imp.run())[0]).toMatchObject({ status: 'updated', entries: 1 });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.headers).not.toHaveProperty('Auth-Key');
+    expect(imp.status()[0]).toMatchObject({ stale: false });
+    expect(imp.status()[0]!.needsKey).toBeUndefined();
+  });
+
+  for (const refused of [401, 403]) {
+    it(`treats a keyless HTTP ${refused} as needs_key and keeps what it already listed`, async () => {
+      const big = Array.from({ length: 100 }, (_, i) => `45.9.${i}.1`).join('\n');
+      let status = 200;
+      const { fetch, calls } = fakeFetch({
+        'https://k.test/ips': () => ({ status, body: status === 200 ? big : 'auth required' }),
+        'https://open.test/ips': () => ({ body: '45.8.1.1' }),
+      });
+      let key: string | undefined = undefined;
+      let now = T0;
+      const stores = memoryStores();
+      const state = new MemoryFeedStateStore();
+      const imp = new FeedImporter(
+        [
+          src({ id: 'k', url: 'https://k.test/ips', auth: { key: 'abusech', header: 'Auth-Key' } }),
+          src({ id: 'open', url: 'https://open.test/ips' }),
+        ],
+        stores.lists,
+        state,
+        { fetch, keys: () => key, now: () => now },
+      );
+      await imp.run();
+      expect(stores.lists.size('known_bad_ips')).toBe(101);
+      expect(imp.status()[0]!.needsKey).toBeUndefined();
+
+      // abuse.ch starts requiring a key, long after the last fetch.
+      status = refused;
+      now += 30 * HOUR;
+      const before = state.get('k')!;
+      const r = await imp.run({ force: true });
+      expect(r.map((x) => x.status)).toEqual(['needs_key', 'updated']);
+      expect(r[0]).toMatchObject({ entries: 100 });
+      expect(r[0]!.error).toBeUndefined();
+      expect(calls.at(-2)!.headers).not.toHaveProperty('Auth-Key');
+      // No failure recorded, entries kept, and the other feed's rebuild keeps them in the list.
+      expect(state.get('k')).toMatchObject({
+        entries: before.entries,
+        fetchedAt: before.fetchedAt,
+        needsKey: true,
+      });
+      expect(state.get('k')!.lastError).toBeUndefined();
+      expect(stores.lists.size('known_bad_ips')).toBe(101);
+      expect(imp.status()[0]).toMatchObject({ needsKey: true, stale: false, entries: 100 });
+      expect(imp.status()[0]!.lastError).toBeUndefined();
+
+      // Adding a key makes it due at once and sends the header; success clears needs_key.
+      status = 200;
+      key = 'user-key-0123456789';
+      expect(imp.status()[0]!.needsKey).toBeUndefined();
+      expect((await imp.run())[0]).toMatchObject({ status: 'updated' });
+      expect(calls.at(-1)!.headers['Auth-Key']).toBe('user-key-0123456789');
+      expect(state.get('k')!.needsKey).toBeUndefined();
+    });
+  }
+
+  it('fails as usual on other errors, and on a refusal when a key was sent', async () => {
+    let status = 500;
+    const { fetch } = fakeFetch({ 'https://k.test/ips': () => ({ status }) });
+    let key: string | undefined = undefined;
+    const imp = new FeedImporter(
+      [src({ id: 'k', url: 'https://k.test/ips', auth: { key: 'abusech', header: 'Auth-Key' } })],
+      memoryStores().lists,
+      new MemoryFeedStateStore(),
+      { fetch, keys: () => key },
+    );
+    expect((await imp.run({ force: true }))[0]).toMatchObject({
+      status: 'failed',
+      error: 'HTTP 500',
+    });
+    expect(imp.status()[0]!.needsKey).toBeUndefined();
+    status = 401;
+    key = 'wrong-key-0123456789';
+    expect((await imp.run({ force: true }))[0]).toMatchObject({
+      status: 'failed',
+      error: 'HTTP 401',
+    });
+    expect(imp.status()[0]).toMatchObject({ lastError: 'HTTP 401' });
+    expect(imp.status()[0]!.needsKey).toBeUndefined();
+  });
+
+  it('fetches the default keyed feeds without a key', async () => {
+    const { fetch, calls } = fakeFetch({});
+    const imp = new FeedImporter(
+      DEFAULT_FEEDS.filter((f) => f.auth),
+      memoryStores().lists,
+      new MemoryFeedStateStore(),
+      { fetch },
+    );
+    await imp.run({ force: true });
+    expect(calls.map((c) => c.url)).toEqual(DEFAULT_FEEDS.filter((f) => f.auth).map((f) => f.url));
+    for (const c of calls) expect(c.headers).not.toHaveProperty('Auth-Key');
+  });
+
+  it('runs once when asked again while a run is in progress', async () => {
+    const { fetch, calls } = fakeFetch({ 'https://a.test/ips': () => ({ body: '45.9.1.2' }) });
+    const imp = new FeedImporter(
+      [src({ id: 'a', url: 'https://a.test/ips' })],
+      memoryStores().lists,
+      new MemoryFeedStateStore(),
+      { fetch },
+    );
+    const [a, b] = await Promise.all([imp.run({ force: true }), imp.run({ force: true })]);
+    expect(a).toBe(b);
+    expect(calls).toHaveLength(1);
   });
 
   describe('shrink guard', () => {
@@ -363,5 +578,11 @@ describe('FeedImporter', () => {
     expect(new Set(DEFAULT_FEEDS.map((f) => f.list))).toEqual(
       new Set(['known_bad_ips', 'known_bad_domains', 'known_bad_sha256']),
     );
+    // URLhaus and MalwareBazaar take the user's own abuse.ch key if they add one; none is shipped.
+    expect(DEFAULT_FEEDS.filter((f) => f.auth).map((f) => f.id)).toEqual([
+      'urlhaus-hosts',
+      'malwarebazaar-recent',
+    ]);
+    for (const f of DEFAULT_FEEDS) expect(f.headers).toBeUndefined();
   });
 });
