@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   compileCondition,
+  globProblem,
   globToRegExp,
+  MAX_SUBJECT_LENGTH,
   regexProblem,
   renderTemplate,
   resolveTemplateValue,
@@ -34,7 +36,55 @@ describe('globToRegExp', () => {
     expect(globToRegExp('/a/(b)+.c').test('/a/(b)+.c')).toBe(true);
     expect(globToRegExp('/a/(b)+.c').test('/a/bb.c')).toBe(false);
   });
+  it('merges runs of wildcards without changing what they match', () => {
+    expect(globToRegExp('/a/***/b').source).toBe(globToRegExp('/a/**/b').source);
+    expect(globToRegExp('/a/**/**/b').source).toBe(globToRegExp('/a/**/b').source);
+    expect(globToRegExp('/a/**/**').source).toBe(globToRegExp('/a/**').source);
+    const r = globToRegExp('/a/*?*?');
+    expect(r.test('/a/xy')).toBe(true);
+    expect(r.test('/a/x')).toBe(false);
+    expect(r.test('/a/x/y')).toBe(false);
+  });
 });
+
+describe('globProblem', () => {
+  it('accepts every glob the built-in rules use', () => {
+    for (const g of [
+      '/private/var/folders/**/AppTranslocation/*/d/Claude.app/**',
+      '/Users/*/Library/Application Support/Google/Chrome/*/Local Extension Settings/**',
+      '~/Library/Application Support/Google/Chrome/**/Local Extension Settings/**',
+      '**/.claude/settings*.json',
+      '~/.ssh/id_*',
+    ])
+      expect(globProblem(g), g).toBeUndefined();
+  });
+  it('refuses globs that can take too long to match', () => {
+    expect(globProblem('**a**a**a**a**a**a!')).toMatch(/more than 4/);
+    expect(globProblem('/*/*/*/*/*')).toMatch(/more than 4/);
+    expect(globProblem('**a**a**a!')).toMatch(/can stop anywhere/);
+    expect(globProblem('*a*a*a!')).toMatch(/can stop anywhere/);
+    expect(globProblem('**/x/**/*.js')).toMatch(/can stop anywhere/);
+  });
+  it('lets the slowest glob it accepts fail on a long path in well under a second', () => {
+    const subjects = [
+      'a'.repeat(MAX_SUBJECT_LENGTH - 1) + '!',
+      '/a'.repeat(MAX_SUBJECT_LENGTH / 2 - 1) + '!!',
+    ];
+    for (const g of ['*a**/a/', '*a**a', '/*a*a', '**a**/', '/**/a/*a?/*a']) {
+      expect(globProblem(g), g).toBeUndefined();
+      const r = globToRegExp(g);
+      for (const s of subjects) {
+        const t0 = performance.now();
+        expect(r.test(s)).toBe(false);
+        expect(performance.now() - t0, g).toBeLessThan(250);
+      }
+    }
+  });
+});
+
+// Known-bad patterns, joined at run time so code scanning doesn't mistake
+// these test inputs for regexes the app runs.
+const bad = (...parts: string[]) => parts.join('');
 
 describe('regexProblem', () => {
   it('rejects catastrophic patterns and backreferences', () => {
@@ -45,9 +95,28 @@ describe('regexProblem', () => {
     expect(regexProblem('x'.repeat(300))).toMatch(/longer/);
     expect(regexProblem('([')).toMatch(/compile/);
   });
+  it('rejects nested quantifiers through any depth of groups', () => {
+    expect(regexProblem(bad('((a', '+))+$'))).toMatch(/nested/);
+    expect(regexProblem('(?:x(?:y+)z)*$')).toMatch(/nested/);
+    expect(regexProblem('(?:a{2,})+b')).toMatch(/nested/);
+  });
+  it('rejects repeated groups with alternatives', () => {
+    expect(regexProblem(bad('(a|', 'a)*$'))).toMatch(/alternatives/);
+    expect(regexProblem(bad('(?:x|', 'x)+y'))).toMatch(/alternatives/);
+    expect(regexProblem('(?:(a|b)c){2,}d')).toMatch(/alternatives/);
+  });
+  it('rejects more than three open-ended wildcards', () => {
+    expect(regexProblem('.*a.*b.*c.*d')).toMatch(/open-ended/);
+    expect(regexProblem('[^x]*a[^y]+b.*c(?:[^z])*d')).toMatch(/open-ended/);
+    // A lookaround is matched on its own, so it counts on its own.
+    expect(regexProblem('^(?=.*a.*b)(?=.*c.*d)')).toBeUndefined();
+  });
   it('accepts ordinary patterns, including optional groups', () => {
     expect(regexProblem('(curl|wget)\\s[^|]*\\|\\s*(ba|z)?sh\\b')).toBeUndefined();
     expect(regexProblem('\\|\\s*(sudo\\s+)?sh')).toBeUndefined();
+    // A tempered token: the alternatives in the lookahead never backtrack.
+    expect(regexProblem('(?:(?!a|b)[^;])*c')).toBeUndefined();
+    expect(regexProblem('(sudo\\s+-\\S+)?(a|b){2}')).toBeUndefined();
   });
 });
 

@@ -1,4 +1,5 @@
 import type { DetectionEvent } from '../types.js';
+import { runsQuietLine } from './quiet-lines.js';
 
 export type FieldValue = string | number | boolean | string[] | undefined;
 export type FieldGetter = (e: DetectionEvent) => FieldValue;
@@ -23,6 +24,12 @@ const COMPUTED: Record<string, FieldGetter> = {
   'process.parentName': (e) =>
     'process' in e ? (basename(e.process?.parentPath) ?? e.process?.ancestors?.[0]) : undefined,
   'process.commandLine': (e) => ('process' in e ? e.process?.args?.join(' ') : undefined),
+  /**
+   * A shell running exactly one of Claude Code's real local-service reads
+   * (see rules/quiet-lines.ts). The download-run rule stays quiet on these.
+   */
+  'process.quietDownloadLine': (e) =>
+    'process' in e ? runsQuietLine(e.process?.path, e.process?.args, e.process?.user) : undefined,
   /**
    * The download a process comes from: the nearest downloaded ancestor, or the
    * process itself when it carries the quarantine flag. Chain rules key on it.
@@ -93,6 +100,9 @@ const PROCESS_FIELDS = [
   'agent.id',
   'agent.session',
   'agent.depth',
+  // The agent root's signature, while the parent has it too (see AgentTag).
+  'agent.teamId',
+  'agent.signingId',
 ].map((f) => `process.${f}`);
 
 /** Every path a rule may reference, for the linter and the AI's rule guide. */

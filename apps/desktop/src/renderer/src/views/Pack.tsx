@@ -18,7 +18,7 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import type {
   Breed,
   ChatContext,
@@ -34,11 +34,13 @@ import type {
 } from '../../../shared/pack';
 import { vigil } from '../api';
 import { useDialogFocus } from '../components/dialog-focus';
+import { HoldButton } from '../components/HoldButton';
 import { ApprovalStack } from '../components/ApprovalStack';
 import { NotebookSheet } from '../components/Notebook';
 import { StreamingText } from '../components/StreamingText';
 import { Thinking } from '../components/Thinking';
 import { MemoryChangeCard, MemorySheet } from '../components/PackMemory';
+import { onRovingKeyDown, rovingKeyDown, rovingTabIndex } from '../components/roving';
 import { BREEDS, Dog, breedName } from '../components/Dog';
 import { useToast } from '../components/Toasts';
 import { STARTERS, contextStarter, leadChat, useLeadChat } from '../lead-chat';
@@ -74,6 +76,13 @@ export function usePack({ settings = true }: { settings?: boolean } = {}): [
   }, [reload, settings]);
   return [pack, reload];
 }
+
+/**
+ * Arrows only move focus between the modes; Space, Enter or a click picks one.
+ * Picking saves at once, so one arrow press must never land on Full access,
+ * and the arrows stop at the ends instead of wrapping round to it.
+ */
+const onModeKeyDown = rovingKeyDown({ select: false, wrap: false });
 
 const MODES: { id: PermissionMode; label: string; icon: ReactNode; says: string }[] = [
   {
@@ -115,16 +124,23 @@ export function PackPage() {
         purpose="Vigil’s own AI agents. Talk to your Lead dog: it answers from Vigil’s data and builds the pack for the jobs you describe. No dog can block, allow or change a rule."
       />
       <div className="pack-mode">
-        <div className="seg pack-mode-seg" role="radiogroup" aria-label="Permission mode">
-          {MODES.map((m) => (
+        <div
+          className="seg pack-mode-seg"
+          role="radiogroup"
+          aria-label="Permission mode"
+          onKeyDown={onModeKeyDown}
+        >
+          {MODES.map((m, i) => (
             <button
               key={m.id}
               type="button"
               role="radio"
               aria-checked={pack.mode === m.id}
-              aria-selected={pack.mode === m.id}
+              tabIndex={rovingTabIndex(pack.mode === m.id, i, true)}
               className={`mode-${m.id}`}
-              onClick={() => void vigil.setPackMode(m.id).then(reload)}
+              onClick={() => {
+                if (m.id !== pack.mode) void vigil.setPackMode(m.id).then(reload);
+              }}
             >
               {m.icon}
               {m.label}
@@ -133,27 +149,29 @@ export function PackPage() {
         </div>
         <span className="t-small pack-mode-says">
           {mode.says}
-          {pack.mode === 'auto' && <> {pack.judge.detail}.</>}
+          {pack.mode === 'auto' && <> {pack.judge.detail}.</>} Vigil’s rules apply in every mode.
         </span>
       </div>
-      <div className="tabs" role="tablist">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'pack'}
-          onClick={() => setTab('pack')}
-        >
-          The pack
-          {waiting > 0 && <span className="count hot">{waiting}</span>}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'tools'}
-          onClick={() => setTab('tools')}
-        >
-          Tools and connectors
-        </button>
+      <div className="pack-tabs">
+        <div className="tabs" role="tablist" onKeyDown={onRovingKeyDown}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'pack'}
+            onClick={() => setTab('pack')}
+          >
+            The pack
+            {waiting > 0 && <span className="count hot">{waiting}</span>}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'tools'}
+            onClick={() => setTab('tools')}
+          >
+            Tools and connectors
+          </button>
+        </div>
         <label
           className="pack-voice t-small"
           title="Turns off the dog talk in the pack’s status lines and the Lead dog’s replies. The dogs stay."
@@ -205,9 +223,11 @@ export function LeadPanel({
   onEdit?: () => void;
 }) {
   const lead = pack.dogs.find((d) => d.role === 'lead')!;
+  const head = useRef<HTMLDivElement>(null);
+  useFitToWindow(head);
   return (
     <Card className="lead-panel">
-      <div className="lead-head">
+      <div className="lead-head" ref={head}>
         <Dog breed={lead.breed} mood={lead.mood} size={140} className="lead-dog" />
         <div className="col" style={{ gap: 4, minWidth: 0 }}>
           <span className="row" style={{ gap: 8 }}>
@@ -217,10 +237,13 @@ export function LeadPanel({
             </span>
           </span>
           <span className="t-small">{breedName(lead.breed)}</span>
-          <MoodLine dog={lead} fallback="Ready when you are" />
+          <MoodLine
+            dog={lead}
+            fallback={pack.noAi ? 'Needs an AI to talk' : 'Ready when you are'}
+          />
           <span className="row lead-actions">
             {onEdit && (
-              <Button size="sm" kind="ghost" icon={<Dice5 size={13} />} onClick={onEdit}>
+              <Button size="sm" kind="ghost" icon={<Pencil size={13} />} onClick={onEdit}>
                 Change Lead dog
               </Button>
             )}
@@ -235,6 +258,40 @@ export function LeadPanel({
 }
 
 /**
+ * Keeps the Lead panel's bottom inside the window wherever the page is
+ * scrolled, so the message box is always on screen and the log scrolls
+ * instead. Before the panel sticks it starts lower down, which the CSS
+ * max-height alone can't see.
+ */
+function useFitToWindow(head: RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const panel = head.current?.parentElement;
+    if (!panel) return;
+    const fit = () => {
+      const box = panel.getBoundingClientRect();
+      // Client pixels to CSS pixels, for the text-size zoom.
+      const zoom = panel.offsetHeight ? box.height / panel.offsetHeight : 1;
+      const room = (innerHeight - Math.max(box.top, 0) - 16) / zoom;
+      // The floor keeps the panel usable before it sticks, but never taller
+      // than the window itself, or the message box falls off the bottom when
+      // zoomed in.
+      const floor = Math.min(320, (innerHeight - 32) / zoom);
+      panel.style.maxHeight = `${Math.max(0, Math.floor(Math.max(floor, room)))}px`;
+    };
+    fit();
+    const page = new ResizeObserver(fit);
+    page.observe(panel.closest('.page') ?? panel);
+    addEventListener('resize', fit);
+    addEventListener('scroll', fit, true);
+    return () => {
+      page.disconnect();
+      removeEventListener('resize', fit);
+      removeEventListener('scroll', fit, true);
+    };
+  }, [head]);
+}
+
+/**
  * The chat with the Lead dog: its log, any approvals, and the message box.
  * The same conversation shows on the Pack page and in the Ask drawer.
  */
@@ -243,12 +300,15 @@ export function LeadConversation({
   reload,
   context,
   autoFocus,
+  openSettings = () => (location.hash = 'settings'),
 }: {
   pack: PackView;
   reload: () => void;
   /** Where the person is, so "what's this?" has an answer. */
   context?: ChatContext;
   autoFocus?: boolean;
+  /** Opens Settings; the Ask drawer passes one that also closes itself. */
+  openSettings?: () => void;
 }) {
   const lead = pack.dogs.find((d) => d.role === 'lead')!;
   const { draft, sending, error } = useLeadChat();
@@ -296,6 +356,7 @@ export function LeadConversation({
             key={m.id}
             m={m}
             fresh={m.at > openedAt}
+            plain={pack.voice === 'plain'}
             lead={lead}
             dogs={names}
             tools={pack.tools}
@@ -305,14 +366,21 @@ export function LeadConversation({
         {sending && (
           <div className="msg lead">
             <Dog breed={lead.breed} mood="thinking" size={48} className="msg-dog" />
-            <Thinking working active={`${lead.name} is sniffing around`} done="" />
+            <Thinking
+              working
+              active={pack.voice === 'plain' ? 'Working on it' : `${lead.name} is sniffing around`}
+              done=""
+            />
           </div>
         )}
         <ApprovalStack approvals={pack.approvals} dogs={names} reload={reload} />
       </div>
       {pack.noAi && (
         <span className="t-small no-ai">
-          Set up an AI in Settings › AI so {lead.name} can talk.
+          <button type="button" className="link" onClick={() => openSettings()}>
+            Set up an AI in Settings
+          </button>{' '}
+          so {lead.name} can talk.
         </span>
       )}
       {error && (
@@ -350,7 +418,7 @@ export function LeadConversation({
       <span className="t-small muted lead-foot">
         {pack.leadMayUsePlan
           ? 'Your messages may use your Claude plan. Pack jobs never do.'
-          : 'Chats and pack jobs use the AI set up in Settings › AI.'}
+          : 'Chats and pack jobs use the AI you set up in Settings.'}
         {pack.chat.length > 0 && (
           <button
             type="button"
@@ -368,6 +436,7 @@ export function LeadConversation({
 function Message({
   m,
   fresh,
+  plain,
   lead,
   dogs,
   tools,
@@ -375,6 +444,7 @@ function Message({
 }: {
   m: ChatMessage;
   fresh: boolean;
+  plain: boolean;
   lead: PackDog;
   dogs: Map<string, PackDog>;
   tools: ToolView[];
@@ -402,7 +472,7 @@ function Message({
           <Thinking
             working={false}
             active=""
-            done={`Sniffed ${used.length === 1 ? '1 thing' : `${used.length} things`}`}
+            done={`${plain ? 'Looked at' : 'Sniffed'} ${used.length === 1 ? '1 thing' : `${used.length} things`}`}
             rows={used.map((t) => ({ primary: toolLabel(t) }))}
           />
         )}
@@ -553,6 +623,7 @@ function PackGrid({
             key={d.id}
             dog={d}
             lead={pack.dogs[0]!}
+            noAi={pack.noAi}
             onEdit={() => onEdit(d)}
             reload={reload}
           />
@@ -573,6 +644,7 @@ function PackGrid({
             key={d.id}
             dog={d}
             lead={pack.dogs[0]!}
+            noAi={pack.noAi}
             onEdit={() => onEdit(d)}
             reload={reload}
           />
@@ -585,11 +657,14 @@ function PackGrid({
 function DogCard({
   dog,
   lead,
+  noAi,
   onEdit,
   reload,
 }: {
   dog: PackDog;
   lead: PackDog;
+  /** Helpers can't do their jobs without an AI, so they don't claim to be on duty. */
+  noAi: boolean;
   onEdit: () => void;
   reload: () => void;
 }) {
@@ -611,7 +686,12 @@ function DogCard({
           <span className="t-h3 ellipsis">{dog.name}</span>
           <span className="t-small muted ellipsis">{breedName(dog.breed)}</span>
         </span>
-        <MoodLine dog={dog} fallback={dog.role === 'helper' ? 'On duty' : idleLine(dog)} />
+        <MoodLine
+          dog={dog}
+          fallback={
+            dog.role !== 'helper' ? idleLine(dog) : noAi ? 'Off until an AI is set up' : 'On duty'
+          }
+        />
       </div>
       <span className="t-small clamp-3 dog-job">{dog.job}</span>
       {dog.role === 'pack' && (
@@ -921,14 +1001,13 @@ function DogEditor({
         )}
         <div className="row spread">
           {dog?.role === 'pack' ? (
-            <Button
+            <HoldButton
               size="sm"
-              kind="ghost"
               icon={<Trash2 size={14} />}
-              onClick={() => void vigil.retireDog(dog.id).then(() => (reload(), onClose()))}
-            >
-              Retire {dog.name}
-            </Button>
+              label={`Retire ${dog.name}`}
+              doneLabel="Retired"
+              onConfirm={() => void vigil.retireDog(dog.id).then(() => (reload(), onClose()))}
+            />
           ) : (
             <span />
           )}
@@ -1120,14 +1199,13 @@ function ConnectorBlock({
           >
             {c.enabled ? 'Turn off' : 'Turn on'}
           </Button>
-          <Button
+          <HoldButton
             size="sm"
-            kind="ghost"
             icon={<Trash2 size={13} />}
-            onClick={() => void vigil.removeConnector(c.id).then(reload)}
-          >
-            Remove
-          </Button>
+            label="Remove"
+            doneLabel="Removed"
+            onConfirm={() => void vigil.removeConnector(c.id).then(reload)}
+          />
         </span>
       </div>
       {tools.map((t) => (

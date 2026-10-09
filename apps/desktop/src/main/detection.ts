@@ -22,6 +22,7 @@ import {
   RulePipeline,
   RuleReviewer,
   builtinRulesFor,
+  compileRule,
   decide,
   mergeRules,
   sqliteStores,
@@ -159,7 +160,17 @@ export class Detector {
     // An agent added, edited or switched off changes the tags of what is running now.
     this.registry.onChange(() => this.tracker.retag());
     const builtins = builtinRulesFor(opts.platform ?? process.platform);
-    this.engine = new DetectionEngine(mergeRules(builtins, this.stores.rules.list()), this.stores, {
+    // A saved rule that no longer compiles (a newer release checks regexes and
+    // globs more strictly) is left out, rather than keeping every rule from loading.
+    const saved = this.stores.rules.list().filter((r) => {
+      try {
+        compileRule(r);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    this.engine = new DetectionEngine(mergeRules(builtins, saved), this.stores, {
       learningUntil: opts.installedAt + LEARNING_DAYS * DAY,
       safety: { selfPaths: opts.selfPaths },
       recordHistory: false,

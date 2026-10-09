@@ -344,6 +344,11 @@ export class AiBridge extends EventEmitter<{
     if (provider === 'jev') return { ok: false, error: 'Jev uses a saved key' };
     try {
       const flow = await this.ai().signIn(provider);
+      // Only ever hand the browser a web page, never a file or app link.
+      if (!isHttps(flow.url)) {
+        flow.cancel();
+        throw new Error('The sign-in link was not a secure web address');
+      }
       await this.o.openExternal(flow.url);
       void flow.completed.then(() => this.emit('changed'));
       return { ok: true };
@@ -815,4 +820,12 @@ function explainData(d: AlertDetail) {
     })),
     events: d.events.slice(0, MAX_EVENTS),
   };
+}
+
+function isHttps(url: string): boolean {
+  try {
+    return new URL(url).protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
