@@ -1,6 +1,8 @@
 // The helper must never let a containment action move, lock or unload Vigil,
 // Santa or osquery: not by another spelling, not through a hard link, and not
-// by swapping a file or folder between the checks and the move.
+// by swapping a file or folder between the checks and the move. Each side of
+// a move runs as the user who controls it (transfer.ts), so what is swapped
+// in late is only ever copied as that user could copy it.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -11,6 +13,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -32,18 +35,27 @@ import {
 import { protectedPaths } from './commands/protectedSet.js';
 import { disablePersistence } from './commands/persistence.js';
 import { disableLinuxPersistence, parseShow, startCommands } from './commands/linuxPersistence.js';
+import { actorFor, self } from './commands/transfer.js';
+import { realSystem } from './system.js';
 import { FakeSystem } from './testing/fakeSystem.js';
 import { FakeLinuxSystem } from './testing/fakeLinuxSystem.js';
 
 const isRoot = process.getuid?.() === 0;
+const NOBODY = 65534;
 const modeOf = (p: string) => statSync(p).mode & 0o7777;
-const PINNINGS = existsSync('/proc/self/fd') ? (['proc', 'cwd'] as const) : (['cwd'] as const);
+const sys = new FakeSystem();
 
 let root: string;
 beforeEach(() => {
   root = realpathSync(mkdtempSync(join(tmpdir(), 'vigil-self-')));
 });
-afterEach(() => rmSync(root, { recursive: true, force: true }));
+afterEach(() => {
+  // The store locks what it keeps; open it up so it can be cleaned away.
+  const q = join(root, 'Quarantine');
+  if (existsSync(q)) chmodSync(q, 0o700);
+  for (const slot of existsSync(q) ? readdirSync(q) : []) chmodSync(join(q, slot), 0o700);
+  rmSync(root, { recursive: true, force: true });
+});
 
 /** A stand-in for Vigil's own files, protected through selfPaths, and a user's Downloads. */
 function setup(extra: Partial<QuarantineOptions> = {}) {
@@ -56,37 +68,39 @@ function setup(extra: Partial<QuarantineOptions> = {}) {
   const opts: QuarantineOptions = {
     quarantineDir: join(root, 'Quarantine'),
     selfPaths: [helper],
+    // Moves run as the tests' own user.
+    actorFor: async () => self(),
     ...extra,
   };
   return { helper, runtime, downloads, opts };
 }
 
 describe('protection by identity, not spelling (item 1)', () => {
-  it('refuses a protected folder reached by a spelling the name checks do not know', () => {
+  it('refuses a protected folder reached by a spelling the name checks do not know', async () => {
     const { helper, opts } = setup();
     // Protected under another name: only its identity links the two.
     const alias = join(root, 'alias');
     symlinkSync(helper, alias);
     const o = { ...opts, selfPaths: [alias] };
     expect(() => vetPath(join(helper, 'node'), o)).not.toThrow();
-    expect(() => quarantine(join(helper, 'node'), 'a', o)).toThrow(
-      expect.objectContaining({ code: 'refused' }),
-    );
-    expect(() => quarantine(helper, 'b', o)).toThrow(expect.objectContaining({ code: 'refused' }));
+    await expect(quarantine(sys, join(helper, 'node'), 'a', o)).rejects.toMatchObject({
+      code: 'refused',
+    });
+    await expect(quarantine(sys, helper, 'b', o)).rejects.toMatchObject({ code: 'refused' });
     expect(statSync(join(helper, 'node')).mode & 0o777).toBe(0o755);
   });
 
-  it('refuses a folder that holds a protected path', () => {
+  it('refuses a folder that holds a protected path', async () => {
     const { helper, opts } = setup();
     const outer = join(root, 'outer');
     mkdirSync(outer);
     renameSync(helper, join(outer, 'helper.d'));
     const o = { ...opts, selfPaths: [join(outer, 'helper.d')] };
-    expect(() => quarantine(outer, 'a', o)).toThrow(expect.objectContaining({ code: 'refused' }));
+    await expect(quarantine(sys, outer, 'a', o)).rejects.toMatchObject({ code: 'refused' });
     expect(existsSync(join(outer, 'helper.d', 'node'))).toBe(true);
   });
 
-  it('keeps the name checks: .., macOS case, and a stable symlinked parent', () => {
+  it('keeps the name checks: .., macOS case, and a stable symlinked parent', async () => {
     const { downloads, opts } = setup();
     expect(() => vetPath('/Users/you/../../Library/x', opts)).toThrow(
       expect.objectContaining({ code: 'invalid' }),
@@ -97,9 +111,9 @@ describe('protection by identity, not spelling (item 1)', () => {
     writeFileSync(join(downloads, 'stuff', 'evil'), 'x');
     const link = join(root, 'dl');
     symlinkSync(downloads, link);
-    const rec = quarantine(join(link, 'stuff', 'evil'), 'a', opts);
+    const rec = await quarantine(sys, join(link, 'stuff', 'evil'), 'a', opts);
     expect(rec.originalPath).toBe(join(downloads, 'stuff', 'evil'));
-    restore(rec, opts);
+    await restore(sys, rec, opts);
     expect(readFileSync(join(downloads, 'stuff', 'evil'), 'utf8')).toBe('x');
   });
 });
@@ -154,164 +168,104 @@ describe("Vigil's and the sensors' files are protected from quarantine (item 2)"
     );
   });
 
-  it("refuses the quarantine itself and anything holding the helper's files, by identity", () => {
+  it("refuses the quarantine itself and anything holding the helper's files, by identity", async () => {
     const { helper, opts } = setup();
     expect(() => resolveTarget(helper, opts)).toThrow(expect.objectContaining({ code: 'refused' }));
     mkdirSync(opts.quarantineDir);
     const other = join(root, 'q-alias');
     symlinkSync(opts.quarantineDir, other);
-    expect(() => quarantine(join(other, 'x'), 'a', { ...opts })).toThrow(
-      expect.objectContaining({ code: 'refused' }),
-    );
+    await expect(quarantine(sys, join(other, 'x'), 'a', { ...opts })).rejects.toMatchObject({
+      code: 'refused',
+    });
   });
 });
 
-describe.each(PINNINGS)('moves that cannot be redirected (%s)', (pinning) => {
-  const opts = (base: QuarantineOptions): QuarantineOptions => ({ ...base, pinning });
+/** The checks are done once the helper has picked who acts: swap things then. */
+function afterChecks(swap: () => void): NonNullable<QuarantineOptions['actorFor']> {
+  return async (s, path) => {
+    const actor = isRoot ? await actorFor(s, path) : self();
+    swap();
+    return actor;
+  };
+}
 
-  it('never changes a protected file swapped in for the target after the checks (item 3)', () => {
-    const { runtime, downloads, opts: base } = setup();
+describe('moves made after the checks (item 3)', () => {
+  it('never changes a protected file swapped in for the target', async () => {
+    const { runtime, downloads, opts } = setup();
     const target = join(downloads, 'stuff', 'evil');
     writeFileSync(target, 'x', { mode: 0o644 });
-    const o = opts({
-      ...base,
-      beforeMove: () => {
+    const o: QuarantineOptions = {
+      ...opts,
+      actorFor: afterChecks(() => {
         renameSync(target, join(downloads, 'stuff', 'moved'));
         symlinkSync(runtime, target);
-      },
-    });
-    expect(() => quarantine(target, 'a', o)).toThrow(expect.objectContaining({ code: 'refused' }));
+      }),
+    };
+    // The child moving it sees it is not what was checked, and refuses.
+    await expect(quarantine(sys, target, 'a', o)).rejects.toThrow(/changed after it was checked/);
     expect(modeOf(runtime)).toBe(0o755);
     expect(readFileSync(runtime, 'utf8')).toBe('runtime');
     expect(lstatSync(target).isSymbolicLink()).toBe(true);
-    expect(existsSync(join(base.quarantineDir, 'a'))).toBe(false);
+    expect(existsSync(join(opts.quarantineDir, 'a'))).toBe(false);
   });
 
-  it('never takes a file from a folder swapped for a link after the checks (item 3)', () => {
-    const { downloads, opts: base } = setup();
-    const dir = join(downloads, 'stuff');
-    writeFileSync(join(dir, 'evil'), 'x');
-    const system = join(root, 'system');
-    mkdirSync(system);
-    writeFileSync(join(system, 'evil'), 'keep', { mode: 0o644 });
-    const cwd = process.cwd();
-    const o = opts({
-      ...base,
-      beforeMove: () => {
-        renameSync(dir, join(downloads, 'old'));
-        symlinkSync(system, dir);
-      },
-    });
-    expect(() => quarantine(join(dir, 'evil'), 'a', o)).toThrow(
-      expect.objectContaining({ code: 'refused' }),
-    );
-    expect(readFileSync(join(system, 'evil'), 'utf8')).toBe('keep');
-    expect(modeOf(join(system, 'evil'))).toBe(0o644);
-    expect(readFileSync(join(downloads, 'old', 'evil'), 'utf8')).toBe('x');
-    expect(process.cwd()).toBe(cwd);
-  });
-
-  it('locks the file through its handle, so a link is never followed (item 3)', () => {
-    const { downloads, opts: base } = setup();
+  it('locks the stored copy and gives the mode back on restore', async () => {
+    const { downloads, opts } = setup();
     const target = join(downloads, 'stuff', 'evil');
     writeFileSync(target, 'x', { mode: 0o755 });
-    const rec = quarantine(target, 'a', opts(base));
+    const rec = await quarantine(sys, target, 'a', opts);
     expect(modeOf(rec.storedPath)).toBe(0);
-    restore(rec, opts(base));
+    await restore(sys, rec, opts);
     expect(modeOf(target)).toBe(0o755);
   });
 
-  it('refuses FIFOs and other special files without waiting on them (item 3)', () => {
-    const { downloads, opts: base } = setup();
+  it('refuses FIFOs and other special files without waiting on them', async () => {
+    const { downloads, opts } = setup();
     const fifo = join(downloads, 'stuff', 'pipe');
     execFileSync('mkfifo', [fifo]);
-    expect(() => quarantine(fifo, 'a', opts(base))).toThrow(
-      expect.objectContaining({ code: 'refused' }),
-    );
+    await expect(quarantine(sys, fifo, 'a', opts)).rejects.toMatchObject({ code: 'refused' });
   });
+});
 
-  it('refuses hard links, to protected files or not, and one swapped in late (item 4)', () => {
-    const { runtime, downloads, opts: base } = setup();
+describe('hard links (item 4)', () => {
+  it('refuses hard links, to protected files or not, and leaves one swapped in late as it was', async () => {
+    const { runtime, downloads, opts } = setup();
     const link = join(downloads, 'stuff', 'evil');
     linkSync(runtime, link);
-    expect(() => quarantine(link, 'a', opts(base))).toThrow(
-      expect.objectContaining({ code: 'refused' }),
-    );
+    await expect(quarantine(sys, link, 'a', opts)).rejects.toMatchObject({ code: 'refused' });
     rmSync(link);
     // Not protected, but locking it would lock its other name too.
     const plain = join(downloads, 'plain');
     writeFileSync(plain, 'x');
     linkSync(plain, link);
-    expect(() => quarantine(link, 'b', opts(base))).toThrow(/hard links/);
+    await expect(quarantine(sys, link, 'b', opts)).rejects.toThrow(/hard links/);
     rmSync(link);
     rmSync(plain);
 
     writeFileSync(link, 'x', { mode: 0o644 });
-    const late = opts({
-      ...base,
-      beforeMove: () => {
+    const late: QuarantineOptions = {
+      ...opts,
+      actorFor: afterChecks(() => {
         rmSync(link);
         linkSync(runtime, link);
-      },
-    });
-    expect(() => quarantine(link, 'c', late)).toThrow(expect.objectContaining({ code: 'refused' }));
+      }),
+    };
+    await expect(quarantine(sys, link, 'c', late)).rejects.toThrow(/changed after it was checked/);
+    // The protected file is never locked or changed, and its other name stays.
     expect(modeOf(runtime)).toBe(0o755);
-    expect(statSync(runtime).ino).toBe(statSync(link).ino);
+    expect(readFileSync(runtime, 'utf8')).toBe('runtime');
+    expect(statSync(link).ino).toBe(statSync(runtime).ino);
+    expect(existsSync(join(opts.quarantineDir, 'c'))).toBe(false);
   });
 });
 
-describe.each(PINNINGS)('restore through a pinned folder (%s)', (pinning) => {
-  const opts = (base: QuarantineOptions): QuarantineOptions => ({ ...base, pinning });
-
-  it('never restores into a folder swapped for a link to another folder (item 5)', () => {
+describe('recreating missing folders (item 6)', () => {
+  it('makes them for the item’s owner, the inner one with the recorded mode', async () => {
+    const owner = isRoot ? NOBODY : process.getuid!();
     const { downloads, opts: base } = setup();
-    const dir = join(downloads, 'stuff');
-    writeFileSync(join(dir, 'evil'), 'x', { mode: 0o644 });
-    const rec = quarantine(join(dir, 'evil'), 'a', opts(base));
-    const system = join(root, 'LaunchDaemons');
-    mkdirSync(system);
-    const swap = opts({
-      ...base,
-      beforeMove: (step) => {
-        if (step !== 'restore') return;
-        renameSync(dir, join(downloads, 'old'));
-        symlinkSync(system, dir);
-      },
-    });
-    expect(() => restore(rec, swap)).toThrow(expect.objectContaining({ code: 'refused' }));
-    expect(existsSync(join(system, 'evil'))).toBe(false);
-    expect(existsSync(join(downloads, 'old', 'evil'))).toBe(false);
-    // Back in the store, locked again.
-    expect(modeOf(rec.storedPath)).toBe(0);
-  });
-
-  it('never recreates a missing folder through a swapped parent (item 5)', () => {
-    const { downloads, opts: base } = setup();
-    const dir = join(downloads, 'stuff');
-    writeFileSync(join(dir, 'evil'), 'x');
-    const rec = quarantine(join(dir, 'evil'), 'a', opts(base));
-    rmSync(dir, { recursive: true });
-    const system = join(root, 'system');
-    mkdirSync(system);
-    const swap = opts({
-      ...base,
-      beforeMove: (step) => {
-        if (step !== 'mkdir' || lstatSync(downloads).isSymbolicLink()) return;
-        renameSync(downloads, join(root, 'old'));
-        symlinkSync(system, downloads);
-      },
-    });
-    expect(() => restore(rec, swap)).toThrow(expect.objectContaining({ code: 'refused' }));
-    expect(existsSync(join(system, 'stuff'))).toBe(false);
-    expect(modeOf(rec.storedPath)).toBe(0);
-  });
-});
-
-describe.each(PINNINGS)('recreating missing folders (%s, item 6)', (pinning) => {
-  it('makes them for the folder owner, with the recorded mode', () => {
-    const { downloads, opts: base } = setup();
-    const o: QuarantineOptions = { ...base, pinning };
-    const owner = isRoot ? 1000 : process.getuid!();
+    const o: QuarantineOptions = isRoot ? { quarantineDir: base.quarantineDir } : base;
+    const s = isRoot ? realSystem() : sys;
+    if (isRoot) chmodSync(root, 0o755);
     const stuff = join(downloads, 'stuff');
     const inner = join(stuff, 'inner');
     mkdirSync(inner, { mode: 0o750 });
@@ -319,15 +273,10 @@ describe.each(PINNINGS)('recreating missing folders (%s, item 6)', (pinning) => 
     if (isRoot) for (const d of [downloads, stuff, inner]) chownSync(d, owner, owner);
     writeFileSync(join(inner, 'evil'), 'x');
     if (isRoot) chownSync(join(inner, 'evil'), owner, owner);
-    const rec = quarantine(join(inner, 'evil'), 'a', o);
+    const rec = await quarantine(s, join(inner, 'evil'), 'a', o);
     expect(rec.parent).toMatchObject({ uid: owner, mode: 0o750 });
     rmSync(stuff, { recursive: true });
-    const umask = process.umask(0o077);
-    try {
-      restore(rec, o);
-    } finally {
-      process.umask(umask);
-    }
+    await restore(s, rec, o);
     expect(readFileSync(join(inner, 'evil'), 'utf8')).toBe('x');
     expect(modeOf(inner)).toBe(0o750);
     expect(modeOf(stuff)).toBe(0o755);
@@ -343,6 +292,7 @@ describe('startup items that run Vigil or a sensor under another name (item 7)',
     mkdirSync(launchDir);
     const re = new RegExp('^' + launchDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$');
     const sys = new FakeSystem();
+    sys.console = process.getuid!();
     const { helper, opts } = setup();
     for (const [i, program] of [
       '/opt/osquery/lib/osquery.app/Contents/MacOS/osqueryd',
@@ -351,7 +301,8 @@ describe('startup items that run Vigil or a sensor under another name (item 7)',
       'osqueryd',
     ].entries()) {
       const path = join(launchDir, `com.example.item${i}.plist`);
-      writeFileSync(path, '<plist/>');
+      // Each its own bytes: plutil reads them from stdin.
+      writeFileSync(path, `<plist><!-- ${i} --></plist>`);
       sys.labels.set(path, `com.example.item${i}`);
       sys.programs.set(path, program);
       sys.loaded.add(`system/com.example.item${i}`);
@@ -363,7 +314,7 @@ describe('startup items that run Vigil or a sensor under another name (item 7)',
     const link = join(root, 'innocent-binary');
     symlinkSync(join(helper, 'node'), link);
     const path = join(launchDir, 'com.example.link.plist');
-    writeFileSync(path, '<plist/>');
+    writeFileSync(path, '<plist><!-- link --></plist>');
     sys.programs.set(path, link);
     await expect(disablePersistence(sys, path, 'p', opts, re)).rejects.toMatchObject({
       code: 'refused',
@@ -382,8 +333,12 @@ describe('startup items that run Vigil or a sensor under another name (item 7)',
         ')$',
     );
     const sys = new FakeLinuxSystem();
+    sys.console = process.getuid!();
     const passwd = () => `alex:x:${process.getuid!()}:0::/home/alex:/bin/bash\n`;
-    const q = { quarantineDir: join(root, 'quarantine') };
+    const q: QuarantineOptions = {
+      quarantineDir: join(root, 'quarantine'),
+      actorFor: async () => self(),
+    };
 
     const alias = join(unitDir, 'innocent.service');
     writeFileSync(alias, '[Service]\nExecStart=/home/alex/x\n');
@@ -423,5 +378,65 @@ describe('startup items that run Vigil or a sensor under another name (item 7)',
     expect(startCommands('[Service]\nExecStart=@/usr/bin/osqueryd osqueryd\n', false)).toEqual([
       '/usr/bin/osqueryd',
     ]);
+  });
+});
+
+describe("turning off Vigil's own startup item", () => {
+  const escape = (d: string) => d.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  it('macOS: refuses its plist at the real path and as written in any folder', async () => {
+    const sys = new FakeSystem();
+    sys.console = process.getuid!();
+    const { opts } = setup();
+    // Where the installer puts it, checked against the real launch folders.
+    await expect(
+      disablePersistence(sys, '/Library/LaunchDaemons/com.vigilathome.helper.plist', 'p', opts),
+    ).rejects.toMatchObject({ code: 'refused' });
+    // As written: a copy in a launch folder, in any case, and reached through a linked folder.
+    const launchDir = join(root, 'LaunchDaemons');
+    mkdirSync(launchDir);
+    const linked = join(root, 'linked');
+    symlinkSync(launchDir, linked);
+    const re = new RegExp(`^(${escape(launchDir)}|${escape(linked)})$`);
+    for (const name of ['com.vigilathome.helper.plist', 'COM.VigilAtHome.Helper.plist']) {
+      const plist = join(launchDir, name);
+      writeFileSync(plist, `<plist><!-- ${name} --></plist>`);
+      sys.labels.set(plist, 'com.vigilathome.helper');
+      sys.loaded.add('system/com.vigilathome.helper');
+      for (const path of [plist, join(linked, name)])
+        await expect(disablePersistence(sys, path, 'p', opts, re), path).rejects.toMatchObject({
+          code: 'refused',
+        });
+      expect(existsSync(plist)).toBe(true);
+      rmSync(plist);
+    }
+    expect(sys.runs.filter((r) => r.bin === 'launchctl')).toEqual([]);
+    expect(sys.loaded.has('system/com.vigilathome.helper')).toBe(true);
+  });
+
+  it('Linux: refuses its unit at the real path and as written in any folder', async () => {
+    const sys = new FakeLinuxSystem();
+    sys.console = process.getuid!();
+    const q: QuarantineOptions = {
+      quarantineDir: join(root, 'quarantine'),
+      actorFor: async () => self(),
+    };
+    await expect(
+      disableLinuxPersistence(sys, '/etc/systemd/system/vigil-helper.service', 'a', q),
+    ).rejects.toMatchObject({ code: 'refused' });
+    const unitDir = join(root, 'etc', 'systemd', 'system');
+    mkdirSync(unitDir, { recursive: true });
+    const linked = join(root, 'linked');
+    symlinkSync(unitDir, linked);
+    const re = new RegExp(`^(${escape(unitDir)}|${escape(linked)})$`);
+    const unit = join(unitDir, 'vigil-helper.service');
+    writeFileSync(unit, '[Service]\nExecStart=/usr/libexec/vigil-helper daemon\n');
+    sys.active.add('system vigil-helper.service');
+    for (const path of [unit, join(linked, 'vigil-helper.service')])
+      await expect(disableLinuxPersistence(sys, path, 'a', q, re), path).rejects.toMatchObject({
+        code: 'refused',
+      });
+    expect(existsSync(unit)).toBe(true);
+    expect(sys.runs.filter((r) => r.args.includes('stop'))).toEqual([]);
   });
 });

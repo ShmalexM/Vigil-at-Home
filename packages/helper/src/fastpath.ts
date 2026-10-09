@@ -21,8 +21,9 @@
 // Vigil's own (a path, an AppImage, a program hash): the app sends that
 // apart from the rules (self.grant, selfLoosening()), so the rules never wait
 // on that password. Until that grant is approved, an app running from
-// outside the installer's folder is not Vigil's own to these rules, so a rule
-// that matches it may act on it like any other program. Indicator lists change every day as
+// outside the installer's folder is not Vigil's own to these rules, except
+// that the executor won't pause, stop or hash-block the app pinned at
+// install (appPin.ts), checked against each target. Indicator lists change every day as
 // feeds age entries out, so an entry a list drops keeps blocking for
 // RETIRE_MS instead, and a list cannot drop more than RETIRED_MAX entries in
 // that time. The saved policy and its revision live in a root-owned file the
@@ -42,7 +43,10 @@ import {
 import { listDigest } from '@vigil/detection/fastpath';
 import { z } from 'zod';
 import type { ActionOutcome } from './executor.js';
+import { ActionError } from './commands/errors.js';
 import {
+  APP_WORDED_CODES,
+  type AppWordedCode,
   HelperAction,
   RuleExceptionSchema,
   type DetectionListSet,
@@ -58,7 +62,15 @@ export interface HelperRan {
   at: number;
   outcome?: ActionOutcome;
   error?: string;
+  /** Why it was not done, when the app words that itself (core ActionRecord result errorCode). */
+  errorCode?: 'move-stalled' | AppWordedCode;
 }
+
+/** Actions that move an item, which can take a while; everything else is quick containment. */
+const MOVES = new Set<Action['kind']>(['file.quarantine', 'persistence.disable']);
+
+/** How long the next event waits on a move before it is looked at anyway. */
+export const MOVE_WAIT_MS = 15_000;
 
 export interface FastPathOptions {
   /** Where the synced rules are kept between restarts. */
@@ -69,6 +81,8 @@ export interface FastPathOptions {
   now?: () => number;
   /** For tests: a smaller RETIRED_MAX. */
   retiredMax?: number;
+  /** For tests: a shorter MOVE_WAIT_MS. */
+  moveWaitMs?: number;
   /** A file's device and inode (`fileId`), to check an AppImage the app names is that file. */
   fileId?: (path: string) => string | undefined;
   /**
@@ -412,39 +426,106 @@ export class FastPath {
   }
 
   /**
-   * Run the rules on one event and carry out what block-mode rules ask for.
-   * Never throws: a failed action is reported to the app like any other.
+   * Run the rules on one event and carry out what block-mode rules ask for,
+   * moves included (see start). Never throws: a failed action is reported
+   * to the app like any other.
    */
   async check(e: SensorEvent): Promise<HelperRan[]> {
-    if (!this.engine) return [];
+    const { ran, moves } = await this.start(e);
+    return [...ran, ...(await moves)];
+  }
+
+  /**
+   * The same in two parts. `ran` is every pause, kill and block the rules
+   * ask for, all done before this resolves and before any move starts.
+   * `moves` is the quarantines and startup items they ask for, started
+   * then, each waited on for a while only (one still running after that
+   * goes on by itself; transfer.ts bounds it). The daemon waits on `ran`
+   * alone before the next event, so a stuck move never holds up a block.
+   */
+  async start(e: SensorEvent): Promise<{ ran: HelperRan[]; moves: Promise<HelperRan[]> }> {
+    const none = { ran: [], moves: Promise.resolve([]) };
+    if (!this.engine) return none;
     let detections;
     try {
       detections = this.engine.evaluate(e as Parameters<DetectionEngine['evaluate']>[0]);
     } catch (err) {
       this.opts.log?.(`fast path: ${(err as Error).message}`);
-      return [];
+      return none;
     }
     const ran: HelperRan[] = [];
+    const moves: { ruleId: string; action: Action; parsed: HelperAction }[] = [];
     for (const d of detections) {
       if (d.mode !== 'block') continue;
       for (const action of d.execute) {
         const parsed = HelperAction.safeParse(action);
         // Containment only. Rules never carry releases, but the helper checks.
         if (!parsed.success || isRelease(action)) continue;
-        try {
-          const outcome = await this.opts.run(parsed.data);
-          ran.push({ ruleId: d.match.ruleId, action, at: Date.now(), outcome });
-        } catch (err) {
-          ran.push({
-            ruleId: d.match.ruleId,
-            action,
-            at: Date.now(),
-            error: (err as Error).message,
-          });
+        if (MOVES.has(action.kind)) {
+          moves.push({ ruleId: d.match.ruleId, action, parsed: parsed.data });
+          continue;
         }
+        ran.push(await this.runOne(d.match.ruleId, action, this.opts.run(parsed.data)));
+      }
+    }
+    return { ran, moves: this.runMoves(moves) };
+  }
+
+  private async runMoves(
+    moves: { ruleId: string; action: Action; parsed: HelperAction }[],
+  ): Promise<HelperRan[]> {
+    const wait = this.opts.moveWaitMs ?? MOVE_WAIT_MS;
+    const ran: HelperRan[] = [];
+    for (const m of moves) {
+      const run = this.opts.run(m.parsed);
+      let timer: NodeJS.Timeout | undefined;
+      const stalled = new Promise<'stalled'>((resolve) => {
+        timer = setTimeout(() => resolve('stalled'), wait);
+      });
+      const first = await Promise.race([
+        run.then(
+          () => 'done' as const,
+          () => 'done' as const,
+        ),
+        stalled,
+      ]);
+      clearTimeout(timer);
+      if (first === 'stalled') {
+        run.catch((err: Error) => this.opts.log?.(`fast path: ${m.action.kind}: ${err.message}`));
+        this.opts.log?.(`fast path: ${m.action.kind} is taking long; not waiting on it`);
+        ran.push({
+          ruleId: m.ruleId,
+          action: m.action,
+          at: Date.now(),
+          error: 'Not moved in time; what was stopped or blocked stays that way',
+          errorCode: 'move-stalled',
+        });
+      } else {
+        ran.push(await this.runOne(m.ruleId, m.action, run));
       }
     }
     return ran;
+  }
+
+  private async runOne(
+    ruleId: string,
+    action: Action,
+    run: Promise<ActionOutcome>,
+  ): Promise<HelperRan> {
+    try {
+      return { ruleId, action, at: Date.now(), outcome: await run };
+    } catch (err) {
+      const code = err instanceof ActionError ? err.code : undefined;
+      return {
+        ruleId,
+        action,
+        at: Date.now(),
+        error: (err as Error).message,
+        ...(code && (APP_WORDED_CODES as readonly string[]).includes(code)
+          ? { errorCode: code as AppWordedCode }
+          : {}),
+      };
+    }
   }
 
   /**
@@ -554,4 +635,34 @@ function safeJson(raw: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * How the daemon hands sensor events to the rules and on to the app. Each
+ * event is contained (its pauses, kills and blocks, `contain`) one at a
+ * time, in order, and the next event is contained without waiting on the
+ * moves before it. Events reach the app (`publish`) in that same order,
+ * each with everything done about it: one whose moves are still running
+ * holds back the reports after it, never the blocks. The app's rules (chain
+ * rules, first-seen) see events in the order they happened.
+ */
+export function eventPipeline<E>(
+  contain: (e: E) => Promise<{ ran: HelperRan[]; moves: Promise<HelperRan[]> }>,
+  publish: (e: E, ran: HelperRan[]) => void,
+): (e: E) => void {
+  let contained = Promise.resolve();
+  let published = Promise.resolve();
+  return (e) => {
+    const done = contained.then(() => contain(e));
+    contained = done.then(
+      () => undefined,
+      () => undefined,
+    );
+    published = published
+      .then(async () => {
+        const { ran, moves } = await done;
+        publish(e, [...ran, ...(await moves)]);
+      })
+      .catch(() => undefined);
+  };
 }

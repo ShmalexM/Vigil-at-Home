@@ -47,8 +47,23 @@ const PIPE = /^pipe:\[\d+\]$/;
 
 /** Whether `pid` is Vigil running from one of the approved AppImages (by file id). */
 export function runsFromSelfImage(sys: System, pid: number, images: readonly string[]): boolean {
-  if (sys.platform !== 'linux' || images.length === 0) return false;
-  if (!sys.procExe || !sys.procPids || !sys.procFds || !sys.procStart || !sys.fileId) return false;
+  return selfImageOf(sys, pid, images) !== undefined;
+}
+
+/**
+ * What {@link runsFromSelfImage} matched: a /proc path that names the
+ * approved image file itself (`/proc/<pid>/exe` of the process or of its
+ * mount server), never one on a FUSE mount. Reading it reads the image the
+ * process runs now, whatever its name. Undefined when there is no match.
+ */
+export function selfImageOf(
+  sys: System,
+  pid: number,
+  images: readonly string[],
+): string | undefined {
+  if (sys.platform !== 'linux' || images.length === 0) return undefined;
+  if (!sys.procExe || !sys.procPids || !sys.procFds || !sys.procStart || !sys.fileId)
+    return undefined;
   const approved = new Set(images);
   const mounts = parseMountInfo(sys.mountInfo?.() ?? '');
   // The file id behind a /proc link, never asked of a FUSE mount: its server
@@ -62,11 +77,11 @@ export function runsFromSelfImage(sys: System, pid: number, images: readonly str
 
   // The runtime itself, and the mount server.
   const own = exeId(pid);
-  if (own && approved.has(own)) return true;
+  if (own && approved.has(own)) return `/proc/${pid}/exe`;
 
   const exe = sys.procExe(pid);
   const mount = exe ? mountContaining(mounts, exe) : undefined;
-  if (!isImageMount(mount) || mount.mountPoint === '/') return false;
+  if (!isImageMount(mount) || mount.mountPoint === '/') return undefined;
 
   const pids = sys.procPids();
   const fds = new Map<number, [number, string][]>();
@@ -85,10 +100,11 @@ export function runsFromSelfImage(sys: System, pid: number, images: readonly str
     for (const [, link] of open) {
       if (!PIPE.test(link)) continue;
       const first = firstHolder(sys, pids, fdsOf, server, link);
-      if (first !== undefined && servesFrom(sys, mounts, first, mount)) return true;
+      if (first !== undefined && servesFrom(sys, mounts, first, mount))
+        return `/proc/${server}/exe`;
     }
   }
-  return false;
+  return undefined;
 }
 
 /** The earliest-started process other than `server` that has `pipe` open. */

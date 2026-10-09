@@ -34,6 +34,7 @@ import type {
   ToolChoice,
   ToolView,
 } from '../../../shared/pack';
+import { nextRunAt, nextRunWords } from '../../../shared/pack';
 import { useLive, vigil } from '../api';
 import { useDialogFocus } from '../components/dialog-focus';
 import { HoldButton } from '../components/HoldButton';
@@ -747,6 +748,9 @@ function DogCard({
   const toast = useToast();
   const [open, setOpen] = useState(false);
   const busy = ['thinking', 'sniffing', 'fetching', 'waiting'].includes(dog.mood);
+  // The scheduler's own rule; with no AI set up, a scheduled run can't happen.
+  const now = Date.now();
+  const next = dog.role === 'pack' && !noAi && !busy ? nextRunAt(dog, now) : undefined;
   const run = async () => {
     const r = await vigil.runDog(dog.id);
     if (!r.ok) toast({ text: r.error ?? 'It couldn’t run' });
@@ -777,6 +781,11 @@ function DogCard({
             {dog.tools.length} {dog.tools.length === 1 ? 'tool' : 'tools'}
           </Chip>
           {dog.createdBy === 'lead' && <Chip tone="ai">Added by {lead.name}</Chip>}
+        </span>
+      )}
+      {next !== undefined && (
+        <span className="t-small muted">
+          Next run: {nextRunWords(next, now, dog.schedule === 'nightly')}
         </span>
       )}
       {dog.lastReport && (

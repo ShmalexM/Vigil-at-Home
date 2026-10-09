@@ -99,7 +99,7 @@ Vigil's rules come first in every mode, Full access included. Connector calls ar
 The Pack page sits under Advanced. Two parts of it reach the rest of the app:
 
 - **Scout on Home.** The Lead dog sits next to Home's status line and acts it out: relaxed when nothing needs you, ears up (the waiting pose) when something needs your decision (the Needs you count) or a protection layer has stopped, and busy while a dog's AI job runs. The status words don't change; the dog only shows them. Clicking it opens Ask.
-- **Today the pack.** Under the status line, one line per dog that did something since midnight ("Biscuit sniffed through new events 5 times"), counted from the notebooks. The wording is fixed, never written by an AI; runs that didn't finish are counted separately, and background runs that never reached an AI aren't noted. Each line opens that dog's notebook.
+- **Today the pack.** Under the status line, one line per dog that did something since midnight ("The labeller sniffed through new events 5 times"), counted from the notebooks. The wording is fixed, never written by an AI, and names each dog by its role, never by its name, since the Lead dog can name dogs; runs that didn't finish are counted separately, and background runs that never reached an AI aren't noted. When a pack dog's latest run today found something of medium or high severity, one more line says so ("A pack dog found 2 things worth a look"); info and low findings add nothing. That line is not an alert: no notification, nothing in Needs you. Each line opens that dog's notebook.
 - **Scout on a pile.** When Needs you holds a pile of three or more alerts (the alerts' own grouping: same rule, same agent run or program), the biggest one shows as Scout's card instead of a row: who set it off, how many times, and one button to look at them all, where "That was me, all N" and "Looks fine, all N" decide them together. Scout adds no grouping of its own and the wording is fixed.
 - **Ask.** A bar at the bottom of every page (except Pack and setup) opens a chat drawer with the Lead dog. It is closed until you open it (click the bar or press ⌘K; Esc closes it). It is the same conversation as the Pack page, sent as your own chat, so the same rules apply: a Claude plan only if you turned it on, and no dog blocks, allows or changes a rule. The drawer tells the Lead dog which page you're on and what you have selected there (an alert, a rule, an agent or one of its sessions, or Activity's filter to one agent or session), so "what's this?" works; the Lead dog's reading path reads the details with its read-only tools. Its tools are the ones listed in [agents.md](agents.md#the-tools): status, alerts, events (by agent, rule matches or Biscuit's labels), rules, what Vigil did, and agents. When you ask it to stop an alert repeating, it suggests a change that waits under Suggested changes (see [Quieting a noisy alert](#quieting-a-noisy-alert)); it can't change a rule itself.
 
@@ -157,8 +157,39 @@ flowchart LR
   `thinking` field is filled only from a reasoning summary an official API
   returns, and today none of the runners return one, so it stays empty.
 - Notes stay on the Mac in Vigil's database, in a table the notebook creates
-  itself (no migration), for 30 days and at most 2,000 notes per dog.
+  itself (no migration), for 30 days and at most 2,000 notes per dog. Each
+  write trims that dog's notes and every start trims them all, so a dog that
+  went quiet doesn't keep old ones. Retiring a dog deletes its notebook; the
+  Lead dog's and the helpers' are never touched by that. A run or risk check
+  that finishes after its dog was retired writes nothing, and every start
+  drops any notes left from a dog that no longer exists, whatever their age.
 - Nothing reads notes back to decide anything. They are for the person.
+
+**Details**, closed until you open it, is for digging deeper. It lists each
+tool call the run made: the tool, its arguments, whether it ran, didn't run
+(and why: the gate, you, or the run ending)
+or failed, and the first 800 characters of what it returned. Every field of
+a note (what was asked, the answer, reasons, tool titles, error text, and the
+arguments and results as data, before they are written out as text) goes
+through Vigil's redactor before it is stored, and is cut to size only after
+that. The whole note is then redacted again as the text that is stored,
+object keys included (the shared redactor keeps keys, so the pack redacts
+each one too, and reads a result that is JSON text as data; the redactor
+reads JSON encoded twice as its decoded content). A secret split across fields, such as a command in the
+question and its password in the answer, fails closed: that note's free
+text is withheld and its shape is kept. Notes are
+redacted the same way each time they are read for the page, so older notes
+get the same treatment. It also shows the model and, from the Usage page's ledger, the tokens
+and estimated cost of the attempt that answered. Notes from before this was
+added simply have no Details.
+
+**Copy as Markdown** and **Copy JSON** at the bottom of the sheet copy up to
+the 200 newest notes in it to the clipboard, for an issue or a file. The app
+renders the export and redacts the finished Markdown or JSON as a whole, so
+the heading, the sheet's title and dog names are covered too; where the whole
+Markdown would be withheld, each note's section, then each line, is redacted
+on its own instead, and a section whose secret spans lines keeps only its
+heading.
 
 ## Memory
 
@@ -219,6 +250,11 @@ Each connector tool gets the same four choices as Vigil's own: Follow mode, Alwa
 Each connector gets an id of its own when you add it: its name as a slug and a part that is new every time, so an id is never given twice, even to a connector you remove and add again under the same name. Tool grants, tool choices and held cards go by that id, so none carry over to a new connector. Connectors added before keep the ids they have. Vigil's rules check a connector call twice, as `mcp__<connector id>__<tool>` and as `mcp__<name slug>__<tool>` (the form rules written before used, like `mcp__github__create_issue`), and the stricter answer wins. Rules only add friction (stop or ask, never allow), so a match by name can only make a call wait. What lifts a rule binds to the id alone: an exception or exclusion on the tool or its server, written for the name, does not apply to a connector with an id of its own.
 
 Connections close after five idle minutes.
+
+What a connector returns is redacted before anything else sees it (the
+notebook, the risk judge, a cloud model): keys, tokens, passwords, email
+addresses and home folder names are replaced, as in the data Vigil sends any
+model. The AI runner redacts tool results again on their way out.
 
 A connector runs your program, not Vigil's. Vigil tells Agent watch the server's process id as soon as it starts, so the server and everything it runs are tagged `vigil-connector` in a session of their own (shown as "A pack connector" in Activity), and every Agent watch rule applies to them. They never share the `vigil-self` tag of Vigil's own AI helpers. A command inside Vigil's own app is refused, because Vigil never blocks its own binaries.
 

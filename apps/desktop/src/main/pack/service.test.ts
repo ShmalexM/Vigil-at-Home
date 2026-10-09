@@ -90,9 +90,16 @@ function setup(
     /** Vigil's own tools; push to it to add one later. */
     vigil?: string[];
     hour?: number;
+    /** What every connector call answers. */
+    connectorReply?: string;
+    /** Every connector call throws this instead. */
+    connectorError?: string;
+    /** The connector's tools, in place of REMOTE. */
+    remote?: RemoteTool[];
+    /** What Vigil's own tools answer. */
+    vigilResult?: unknown;
     /** Vigil's rules, in place of a fixed answer. */
     rules?: PackDepsPreflight;
-    remote?: RemoteTool[];
     now?: () => number;
     /** Which AI answers every run. */
     provider?: 'codex' | 'claude';
@@ -126,7 +133,8 @@ function setup(
     knownTools: () => listed,
     call: async (id, tool, args) => {
       connectorCalls.push([id, tool, args]);
-      return 'ok';
+      if (opts.connectorError) throw new Error(opts.connectorError);
+      return opts.connectorReply ?? 'ok';
     },
   };
   const pack = new PackService({
@@ -148,6 +156,12 @@ function setup(
         };
       },
       modelOf: () => 'gpt-5.5',
+      usageOf: () => ({
+        inputTokens: 1200,
+        cachedInputTokens: 200,
+        outputTokens: 300,
+        costUsd: 0.004,
+      }),
       status: async () => ({
         anyReady: true,
         judge: { ready: true, detail: 'Codex checks risky calls' },
@@ -159,7 +173,7 @@ function setup(
       list: () => vigil.map(LISTING),
       call: (name) => {
         vigilCalls.push(name);
-        return { v: 1, ok: true, result: { rows: [] } };
+        return { v: 1, ok: true, result: opts.vigilResult ?? { rows: [] } };
       },
     },
     preflight:
@@ -192,6 +206,11 @@ const tool = (req: RunRequest<unknown>, name: string) => {
   if (!t) throw new Error(`no tool ${name}`);
   return t;
 };
+
+/** Joined at run time so code scanning doesn't take the samples for real keys. */
+const KEY = ['sk', 'ant', 'Abc123Def456Ghi789Jkl012Mno'].join('-');
+const PASSWORD = ['hunter2', 'Plain', 'Word'].join('');
+const TOKEN = ['tok', 'Plain', 'Value9'].join('');
 
 const CREATE = {
   kind: 'create',
@@ -1097,6 +1116,273 @@ describe('the pack', () => {
         reasons: ['files one issue, easy to close'],
         subject: { kind: 'tool', id: 'github.create_issue' },
       });
+    });
+
+    it('keeps each tool call with redacted arguments, its outcome and a short result', async () => {
+      const { pack, handlers } = setup({
+        connectorReply: `issue opened by someone@example.com ${'x'.repeat(2000)}`,
+      });
+      pack.setToolChoice('github.list_issues', 'allow');
+      const dog = pack.adopt({
+        ...CREATE,
+        tools: ['vigil.search_events', 'github.list_issues', 'github.create_issue'],
+      } as never);
+      handlers.push(async (req) => {
+        await tool(req, 'search_events').run({ limit: 5 });
+        await tool(req, 'tool_1').run({ q: 'token=hunter2-secret' });
+        // This one waits for the person, who says no.
+        const asked = tool(req, 'tool_2').run({ title: 'x' });
+        await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+        pack.decideTool((await pack.view()).approvals[0]!.id, 'deny');
+        await asked;
+        return { summary: 'ok', findings: [] };
+      });
+      await pack.runDog(dog.id, 'background');
+      const [note] = pack.notes({ dog: dog.id });
+      expect(note!.calls).toEqual([
+        {
+          tool: 'vigil.search_events',
+          title: 'Vigil › search events',
+          args: '{"limit":5}',
+          outcome: 'ran',
+          result: '{"rows":[]}',
+        },
+        expect.objectContaining({ tool: 'github.list_issues', outcome: 'ran' }),
+        expect.objectContaining({
+          tool: 'github.create_issue',
+          outcome: 'not-run',
+          reason: expect.stringContaining('you said no'),
+        }),
+      ]);
+      const listed = note!.calls![1]!;
+      expect(listed.args).not.toContain('hunter2');
+      expect(listed.result).toMatch(/^issue opened by <email> x+…$/);
+      expect(listed.result!.length).toBeLessThanOrEqual(801);
+      // What the run cost, from the Usage ledger.
+      expect(note).toMatchObject({
+        model: 'gpt-5.5',
+        usage: { inputTokens: 1200, cachedInputTokens: 200, outputTokens: 300, costUsd: 0.004 },
+      });
+    });
+
+    it('notes a tool that failed, and keeps calls from a chat too', async () => {
+      const { pack, handlers } = setup();
+      // The acting path calls no tools; the reading path it asks for does.
+      handlers.push(() => ({ reply: '', actions: [], read: { question: 'New?', refs: [] } }));
+      handlers.push(async (req) => {
+        await tool(req, 'list_alerts').run({});
+        return { answer: 'Nothing new.' };
+      });
+      await pack.say('anything new?');
+      expect(pack.notes({ dog: 'lead' })[0]!.calls).toEqual([
+        expect.objectContaining({ tool: 'vigil.list_alerts', outcome: 'ran' }),
+      ]);
+    });
+
+    it('throws a retired dog’s notebook away, and leaves the others', async () => {
+      const { pack, handlers } = setup();
+      const dog = pack.adopt(CREATE as never);
+      handlers.push(() => ({ summary: 'ok', findings: [] }));
+      await pack.runDog(dog.id);
+      handlers.push(() => ({ reply: 'Hi', actions: [] }));
+      await pack.say('hi');
+      pack.helperNote('explainer', { kind: 'explain', ok: true, ask: 'Explain', answer: 'Fine' });
+      expect(pack.notes({ dog: dog.id })).toHaveLength(1);
+      pack.retire(dog.id);
+      expect(pack.notes({ dog: dog.id })).toHaveLength(0);
+      expect(
+        pack
+          .notes()
+          .map((n) => n.kind)
+          .sort(),
+      ).toEqual(['chat', 'explain']);
+    });
+
+    it('keeps API keys out of Details and both Copy outputs: arguments, results, titles, errors, prompt', async () => {
+      const remote = REMOTE.map((t) => ({ ...t, title: `${t.title} ${KEY}` }));
+      const { pack, handlers } = setup({ remote, connectorError: `401: bad key ${KEY}` });
+      pack.setToolChoice('github.list_issues', 'allow');
+      const dog = pack.adopt({
+        ...CREATE,
+        tools: ['vigil.search_events', 'github.list_issues'],
+      } as never);
+      handlers.push(async (req) => {
+        await tool(req, 'search_events').run({ query: `files with ${KEY}` });
+        await tool(req, 'tool_1').run({ q: KEY });
+        return { summary: 'ok', findings: [] };
+      });
+      await pack.runDog(dog.id);
+      handlers.push(() => ({ reply: `You pasted ${KEY}.`, actions: [], why: [`saw ${KEY}`] }));
+      await pack.say(`Is this key still good? ${KEY}`);
+
+      const [job] = pack.notes({ dog: dog.id });
+      expect(job!.calls!.map((c) => c.outcome)).toEqual(['ran', 'failed']);
+      const [chat] = pack.notes({ dog: 'lead' });
+      expect(chat!.ask).toMatch(/^Is this key still good\?|withheld/);
+      for (const id of [dog.id, 'lead']) {
+        for (const text of [
+          JSON.stringify(pack.notes({ dog: id })),
+          pack.exportNotes({ dog: id }, 'md', 'Notebook'),
+          pack.exportNotes({ dog: id }, 'json', 'Notebook'),
+          pack.exportNotes({}, 'md', 'All notes'),
+        ]) {
+          expect(text).not.toContain(KEY);
+          expect(text).not.toContain('sk-ant');
+        }
+      }
+    });
+
+    it('keeps a {"password"} argument and a {"token"} result out of Details and both Copy outputs', async () => {
+      const { pack, handlers } = setup({
+        vigilResult: { token: TOKEN, rows: [] },
+        connectorReply: JSON.stringify({ token: TOKEN }),
+      });
+      pack.setToolChoice('github.list_issues', 'allow');
+      const dog = pack.adopt({
+        ...CREATE,
+        tools: ['vigil.search_events', 'github.list_issues'],
+      } as never);
+      handlers.push(async (req) => {
+        await tool(req, 'search_events').run({ password: PASSWORD, limit: 5 });
+        await tool(req, 'tool_1').run({ password: PASSWORD });
+        return { summary: 'ok', findings: [] };
+      });
+      await pack.runDog(dog.id);
+      const notes = pack.notes({ dog: dog.id });
+      expect(notes[0]!.calls).toHaveLength(2);
+      for (const text of [
+        JSON.stringify(notes),
+        pack.exportNotes({ dog: dog.id }, 'md', 'Notebook'),
+        pack.exportNotes({ dog: dog.id }, 'json', 'Notebook'),
+      ]) {
+        expect(text).not.toContain(PASSWORD);
+        expect(text).not.toContain(TOKEN);
+      }
+    });
+
+    it('keeps a token used as an object key out of Details and both Copy outputs', async () => {
+      const { pack, handlers } = setup({ vigilResult: { [KEY]: 'found', rows: [] } });
+      const dog = pack.adopt({ ...CREATE, tools: ['vigil.search_events'] } as never);
+      handlers.push(async (req) => {
+        await tool(req, 'search_events').run({ [KEY]: 1 });
+        return { summary: 'ok', findings: [] };
+      });
+      await pack.runDog(dog.id);
+      const notes = pack.notes({ dog: dog.id });
+      expect(notes[0]!.calls).toHaveLength(1);
+      // The rest of the result stays readable.
+      expect(notes[0]!.calls![0]!.result).toContain('"rows":[]');
+      for (const text of [
+        JSON.stringify(notes),
+        pack.exportNotes({ dog: dog.id }, 'md', 'Notebook'),
+        pack.exportNotes({ dog: dog.id }, 'json', 'Notebook'),
+      ]) {
+        expect(text).not.toContain(KEY);
+        expect(text).not.toContain('sk-ant');
+      }
+    });
+
+    it('keeps a dog named with a token out of the Markdown heading and the JSON export', async () => {
+      const { pack, handlers } = setup();
+      // Dog names are at most 32 characters.
+      const NAME = ['sk', 'ant', 'Abc123Def456Ghi789Jk'].join('-');
+      const dog = pack.adopt({ ...CREATE, name: NAME } as never);
+      expect(pack.dogs().find((d) => d.id === dog.id)!.name).toBe(NAME);
+      handlers.push(() => ({ summary: 'ok', findings: [] }));
+      await pack.runDog(dog.id);
+      // The sheet's title is the dog's name, as the page passes it.
+      const md = pack.exportNotes({ dog: dog.id }, 'md', `${NAME}’s notebook`);
+      const all = pack.exportNotes({}, 'md', 'Every note');
+      const json = pack.exportNotes({ dog: dog.id }, 'json', `${NAME}’s notebook`);
+      for (const text of [md, all, json]) {
+        expect(text).not.toContain(NAME);
+        expect(text).not.toContain('sk-ant');
+      }
+      expect(md.split('\n')[0]).toMatch(/^# /);
+      expect(md).toContain('Asked:');
+      expect(JSON.parse(json).notes).toHaveLength(1);
+    });
+
+    it('keeps JSON encoded twice and split secrets out of the approval card and both Copy outputs', async () => {
+      const secrets = [['Tr0ub4', 'dor&3'].join(''), ['hunter2', 'xyzQ'].join('')];
+      const double = JSON.stringify(
+        JSON.stringify({ password: secrets[0], api_token: secrets[1] }),
+      );
+      const { pack, handlers } = setup({ vigilResult: { data: double } });
+      const dog = pack.adopt({
+        ...CREATE,
+        tools: ['vigil.search_events', 'github.create_issue'],
+      } as never);
+      let card = '';
+      handlers.push(async (req) => {
+        await tool(req, 'search_events').run({ data: double });
+        const asked = tool(req, 'tool_1').run({ title: double });
+        await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+        card = JSON.stringify((await pack.view()).approvals);
+        pack.decideTool((await pack.view()).approvals[0]!.id, 'deny');
+        await asked;
+        return { summary: double, findings: [] };
+      });
+      await pack.runDog(dog.id);
+      // A command in the question, its password in the answer.
+      handlers.push(() => ({
+        reply: `Sure, run it with -u admin:${secrets[1]}`,
+        actions: [],
+      }));
+      await pack.say('curl the billing api for me');
+      expect(card).toContain('create');
+      for (const id of [dog.id, 'lead']) {
+        for (const text of [
+          card,
+          JSON.stringify(pack.notes({ dog: id })),
+          pack.exportNotes({ dog: id }, 'md', 'Notebook'),
+          pack.exportNotes({ dog: id }, 'json', 'Notebook'),
+        ])
+          for (const secret of secrets) expect(text).not.toContain(secret);
+      }
+      // The chat note keeps its shape.
+      expect(pack.notes({ dog: 'lead' })[0]).toMatchObject({ kind: 'chat', dog: 'lead' });
+    });
+
+    it('writes no risk check for a dog retired while the AI was rating its call', async () => {
+      const { pack, handlers, notebook } = setup();
+      pack.setMode('auto');
+      const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+      let judged: (v: unknown) => void = () => undefined;
+      handlers.push(async (req) => {
+        const call = tool(req, 'tool_1').run({ title: 'x' });
+        await rating;
+        pack.retire(dog.id);
+        judged({ risk: 'low', reason: 'files one issue' });
+        await call;
+        return { summary: 'done', findings: [] };
+      });
+      // The judge's run starts while the job waits on it.
+      const rating = new Promise<void>((started) =>
+        handlers.push(
+          () =>
+            new Promise((r) => {
+              judged = r;
+              started();
+            }),
+        ),
+      );
+      await pack.runDog(dog.id);
+      expect(pack.dogs().some((d) => d.id === dog.id)).toBe(false);
+      expect(notebook.list({ dog: dog.id })).toEqual([]);
+      expect(notebook.countsSince(0)).not.toHaveProperty(dog.id);
+    });
+
+    it('drops notes left by a dog that no longer exists when it starts, and keeps the rest', () => {
+      const { pack, notebook } = setup();
+      const dog = pack.adopt(CREATE as never);
+      const sunny = pack.dogs().find((d) => d.helper === 'explainer')!;
+      for (const id of ['lead', sunny.id, dog.id, 'retired-long-ago'])
+        notebook.write({ dog: id, kind: 'job', ok: true, ask: 'a', answer: 'b' });
+      pack.start();
+      expect(Object.keys(notebook.countsSince(0)).sort()).toEqual(
+        ['lead', sunny.id, dog.id].sort(),
+      );
     });
 
     it('files a built-in helper’s note under that helper', () => {

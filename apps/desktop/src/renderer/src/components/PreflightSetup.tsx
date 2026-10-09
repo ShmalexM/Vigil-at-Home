@@ -6,6 +6,7 @@ import { timeAgo } from '../format';
 import { plural } from '../views/agents-format';
 import { useToast } from './Toasts';
 import { Button, Segmented, StatusMark, type MarkState } from './ui';
+import { computer } from '../platform';
 
 type HookState = 'off' | 'error' | 'connected' | 'waiting';
 
@@ -105,12 +106,16 @@ export function PreflightSetup({ compact }: { compact?: boolean }) {
           <div className="col" style={{ gap: 8 }}>
             <ol className="preflight-steps">
               <li>
-                Add these hooks to your Claude Code settings: <code>~/.claude/settings.json</code>{' '}
-                for every project, or a project’s <code>.claude/settings.local.json</code>, which
-                stays out of git, since the hooks hold paths on this Mac. If the file already has
-                settings, add the <code>hooks</code> section to them. If it already has hooks, add
-                the <code>PreToolUse</code> and <code>SessionStart</code> entries next to yours.
-                Vigil never opens that file.
+                Copy these hooks into <code>~/.claude/settings.json</code>, Claude Code’s settings
+                for every project. Vigil never opens that file.
+                <details className="preflight-more">
+                  <summary>The file already has settings or hooks?</summary>
+                  Add the <code>hooks</code> section next to your other settings. If you already
+                  have hooks, add the <code>PreToolUse</code> and <code>SessionStart</code> entries
+                  next to yours. For one project only, use its{' '}
+                  <code>.claude/settings.local.json</code>, which stays out of git (the hooks hold
+                  paths on this {computer}).
+                </details>
               </li>
               <li>Restart your Claude Code sessions so they load the hooks.</li>
               <li>Vigil shows Connected once a session says hello.</li>
@@ -160,8 +165,8 @@ export function PreflightSetup({ compact }: { compact?: boolean }) {
 
       {!prefs.preflightEnabled && last > 0 && (
         <span className="t-small warn-text">
-          If the hooks are still in Claude Code, it treats every step as “Vigil can’t answer” while
-          this is off. Remove them, or turn this back on.
+          Claude Code may still have Vigil’s hooks. While this is off, each step counts as “Vigil
+          can’t answer”. Turn this on, or remove the hooks.
         </span>
       )}
 

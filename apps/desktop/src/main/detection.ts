@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import {
@@ -68,6 +69,11 @@ export const FEED_CHECK_MS = 30 * 60 * 1000;
  * made here and the helper gets it on the next sync.
  */
 export type HelperSyncOutcome = 'applied' | 'declined' | 'failed' | 'unavailable';
+
+/** A checked mode change: done (with the override it replaced) or refused in this mode. */
+export type QuietOutcome =
+  { ok: true; prior: RuleMode | null; token: string } | { ok: false; mode: RuleMode };
+export type UndoQuietOutcome = { ok: true } | { ok: false; mode: RuleMode };
 
 /**
  * How to send the helper its rules. `hold`: let the next password dialog ask
@@ -162,6 +168,11 @@ export class Detector {
   syncHelper: HelperSync | undefined;
   /** User changes one at a time, so one waiting on the password can't mix with another. */
   private changing: Promise<unknown> = Promise.resolve();
+  /** The last quiet of each rule: what undoing it puts back, and the state it left. */
+  private readonly quieted = new Map<
+    string,
+    { token: string; stamp: string; prior: RuleMode | null }
+  >();
 
   constructor(
     private readonly db: DatabaseSync,
@@ -430,12 +441,23 @@ export class Detector {
     return { ...value, helper };
   }
 
+  /** One rule the engine runs, with the mode it actually applies (the user's choice included). */
+  rule(id: string): Rule | undefined {
+    const r = this.engine.getRule(id);
+    return r ? { ...coreRule(r), mode: this.engine.modeOf(r) } : undefined;
+  }
+
   /** Every rule the engine runs, with the mode it actually applies. */
-  rules(): Array<{ rule: Rule; mode: RuleMode }> {
-    return this.engine.listRules().map(({ effectiveMode, ...r }) => ({
-      rule: coreRule(r as DetectionRule),
-      mode: effectiveMode,
-    }));
+  rules(): Array<{ rule: Rule; mode: RuleMode; learningUntil?: number }> {
+    const now = this.now();
+    return this.engine.listRules().map(({ effectiveMode, ...r }) => {
+      const learningUntil = this.engine.learningEnds(r.id, now);
+      return {
+        rule: coreRule(r as DetectionRule),
+        mode: effectiveMode,
+        ...(learningUntil !== undefined ? { learningUntil } : {}),
+      };
+    });
   }
 
   /**
@@ -504,6 +526,64 @@ export class Detector {
   }
 
   /**
+   * "Only log this rule" from an alert: Alert to Shadow, checked against the
+   * mode in force when the change applies (after any change still waiting on
+   * the password), not the one the screen showed. Any other mode is refused
+   * unchanged, so this never turns a blocking rule down. On success it gives
+   * the override the rule had before (null: none) and a token for `undoQuiet`,
+   * which keeps that override here rather than taking it back from the screen.
+   */
+  async quiet(id: string): Promise<ChangeResult<QuietOutcome>> {
+    let done: { token: string; prior: RuleMode | null } | undefined;
+    return this.change(
+      (): QuietOutcome => {
+        const rule = this.engine.getRule(id);
+        if (!rule) throw new Error(`No rule ${id}`);
+        const mode = this.engine.modeOf(rule);
+        if (mode !== 'alert') return { ok: false, mode };
+        const prior = this.engine.modeOverride(id) ?? null;
+        this.feedback.setMode(id, 'shadow', userOrigin('alert'));
+        // Bound to this rule and this one quiet, so it undoes nothing else.
+        done = { token: `${id}:${randomUUID()}`, prior };
+        return { ok: true, prior, token: done.token };
+      },
+      {},
+      undefined,
+      // Stamped once the change is in force: holding it back for the
+      // helper's answer counts as changes to the rule too.
+      () => {
+        if (done) this.quieted.set(id, { ...done, stamp: this.stamp(id) });
+      },
+    );
+  }
+
+  /**
+   * Undo `quiet`: put back exactly the override it replaced, or none. Only
+   * while nothing about the rule has changed since, not even a change and
+   * back or a new version: otherwise refused, so it can't overwrite (or
+   * weaken) a newer choice.
+   */
+  async undoQuiet(id: string, token: string): Promise<ChangeResult<UndoQuietOutcome>> {
+    return this.change((): UndoQuietOutcome => {
+      const rule = this.engine.getRule(id);
+      if (!rule) throw new Error(`No rule ${id}`);
+      const done = this.quieted.get(id);
+      if (!done || done.token !== token || done.stamp !== this.stamp(id)) {
+        return { ok: false, mode: this.engine.modeOf(rule) };
+      }
+      this.quieted.delete(id);
+      if (done.prior === null) this.feedback.clearMode(id, userOrigin('alert'));
+      else this.feedback.setMode(id, done.prior, userOrigin('alert'));
+      return { ok: true };
+    });
+  }
+
+  /** Which state of a rule a quiet left: its revision in the engine and its version. */
+  private stamp(id: string): string {
+    return `${this.engine.revision(id)}:${this.engine.getRule(id)?.version ?? 'gone'}`;
+  }
+
+  /**
    * Make a user change only once the helper takes it. The change is worked
    * out, the helper is sent the rules as they would be, and the app goes on
    * running the rules as they were until it answers. A change that loosens
@@ -522,6 +602,7 @@ export class Detector {
     fn: () => T,
     opts: HelperSyncOptions = {},
     recheck?: () => string | undefined,
+    committed?: () => void,
   ): Promise<ChangeResult<T>> {
     const run = async (): Promise<ChangeResult<T>> => {
       const before = this.snapshot();
@@ -531,6 +612,7 @@ export class Detector {
         // No helper link at all (tests, or a platform without the helper):
         // the app is the only thing enforcing, so there is nobody to ask.
         this.recount(false);
+        committed?.();
         return { value, helper: 'unavailable' };
       }
       const after = this.snapshot();
@@ -564,6 +646,7 @@ export class Detector {
         // when it connects, and asks then.
         this.applyDelta(before, after);
         this.recount(false);
+        committed?.();
       };
       const helper = await this.syncHelper({
         ...opts,
@@ -614,12 +697,12 @@ export class Detector {
       if (r) this.engine.upsertRule(r);
       else this.engine.removeRule(id);
     }
+    // Through the engine, so its revision counts each step as a change.
     for (const id of ids(from.modes, to.modes)) {
       const mode = to.modes.get(id);
       if (from.modes.get(id) === mode) continue;
-      const st = this.stores.ruleState.get(id);
-      const { mode: _m, ...rest } = st ?? { ruleId: id, fired: 0 };
-      this.stores.ruleState.put(mode === undefined ? rest : { ...rest, mode });
+      if (mode === undefined) this.engine._clearMode(id);
+      else this.engine._setMode(id, mode);
     }
     const ts = this.now();
     for (const id of ids(from.saved, to.saved)) {

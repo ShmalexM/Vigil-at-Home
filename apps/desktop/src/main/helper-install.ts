@@ -1,8 +1,22 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import {
+  closeSync,
+  constants,
+  cpSync,
+  existsSync,
+  fstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileId, insideInstalledRoot, looksLikeAppImage } from '@vigil/core/self';
 import type { HelperInstallResult } from '../shared/ipc.js';
 
 const hasHelper = (dir: string) =>
@@ -87,6 +101,115 @@ export function installedHelperFiles(
   ];
 }
 
+/** The running app, as install.sh pins it (packages/helper/src/appPin.ts). */
+export interface AppIdentity {
+  execPath: string;
+  env: NodeJS.ProcessEnv;
+}
+
+const thisApp = (): AppIdentity => ({ execPath: process.execPath, env: process.env });
+
+/**
+ * What install.sh pins as the app: the main executable on macOS, the
+ * AppImage on Linux (its real path, as the kernel names it). install.sh
+ * pins nothing for an app inside the installer's folder, which it recognises
+ * from the same path.
+ */
+export function appPinTarget(
+  platform: NodeJS.Platform = process.platform,
+  app: AppIdentity = thisApp(),
+): string {
+  const image = platform === 'linux' ? app.env['APPIMAGE'] : undefined;
+  if (!image) return app.execPath;
+  try {
+    return realpathSync(image);
+  } catch {
+    return image;
+  }
+}
+
+/** The readable copy of the helper's pin (the signed pin itself is root-only); root-owned. */
+export function appPinFile(platform: NodeJS.Platform = process.platform, root = ''): string {
+  return join(
+    root,
+    platform === 'linux' ? '/var/lib/vigil' : '/Library/Application Support/Vigil',
+    'app-pin.json',
+  );
+}
+
+/**
+ * Whether the app is inside the installer's own folder (config
+ * installedSelf), which the helper protects by path: such an app is never
+ * pinned, so an update in place never asks for a helper update.
+ */
+export function inInstallerFolder(
+  platform: NodeJS.Platform = process.platform,
+  app: AppIdentity = thisApp(),
+): boolean {
+  const target = appPinTarget(platform, app);
+  return insideInstalledRoot(target, platform, { appImage: isAppImage(platform, app, target) });
+}
+
+/**
+ * Linux: whether the app runs from an AppImage, which is never inside the
+ * installer's folder (insideInstalledRoot), so one copied into /opt is still
+ * pinned. The AppImage runtime sets APPIMAGE; the file's name or first bytes
+ * tell otherwise.
+ */
+function isAppImage(platform: NodeJS.Platform, app: AppIdentity, target: string): boolean {
+  if (platform !== 'linux') return false;
+  if (app.env['APPIMAGE'] || looksLikeAppImage(target)) return true;
+  let fd: number | undefined;
+  try {
+    fd = openSync(target, constants.O_RDONLY | constants.O_NONBLOCK);
+    if (!fstatSync(fd).isFile()) return false;
+    const head = Buffer.alloc(16);
+    const n = readSync(fd, head, 0, head.length, 0);
+    return looksLikeAppImage(target, head.subarray(0, n));
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/**
+ * This app's identity in the terms of the pin: on macOS its executable's
+ * sha256, on Linux its AppImage's device and inode. Undefined when nothing
+ * needs pinning.
+ */
+function appIdentity(platform: NodeJS.Platform, app: AppIdentity): string | undefined {
+  if (inInstallerFolder(platform, app)) return undefined;
+  const target = appPinTarget(platform, app);
+  if (platform === 'linux') {
+    const st = statSync(target, { bigint: true });
+    return fileId(st.dev, st.ino);
+  }
+  return fileSha256(target);
+}
+
+/**
+ * Whether the helper's pin names this app. After an update that replaced
+ * the app it names the old one, and the helper update pins this one.
+ */
+export function appPinned(
+  platform: NodeJS.Platform = process.platform,
+  app: AppIdentity = thisApp(),
+  root = '',
+): boolean {
+  const want = appIdentity(platform, app);
+  if (want === undefined) return true;
+  try {
+    const pin = JSON.parse(readFileSync(appPinFile(platform, root), 'utf8')) as {
+      image?: unknown;
+      sha256?: unknown;
+    };
+    return (platform === 'linux' ? pin.image : pin.sha256) === want;
+  } catch {
+    return false;
+  }
+}
+
 export interface HelperMatch {
   /** current: the installed helper is the one this app ships; outdated: it isn't. */
   installed: 'none' | 'current' | 'outdated';
@@ -98,11 +221,19 @@ export interface HelperMatch {
  * Compares the installed helper with the one this app carries. After the app
  * is updated by replacing it, the old helper keeps running until install.sh
  * runs again. Every installed file is root-owned but readable.
+ *
+ * Given `app` outside the installer's folder, a helper pinned to another
+ * app (appPinned) is outdated too, and the bundle names this app as well, so
+ * each new such app asks once to be pinned even when the helper's own files
+ * didn't change. An app inside the installer's folder is never pinned and
+ * changes neither. The self grant's password re-pins as well, so the app
+ * checks again before asking (see index.ts).
  */
 export function helperMatch(
   dir: string,
   platform: NodeJS.Platform = process.platform,
   root = '',
+  app?: AppIdentity,
 ): HelperMatch {
   const files = installedHelperFiles(dir, platform, root);
   const fingerprint = (path: string, by: 'content' | 'size') =>
@@ -110,8 +241,18 @@ export function helperMatch(
       ? String(statSync(path).size)
       : createHash('sha256').update(readFileSync(path)).digest('hex');
   const shipped = files.filter((f) => existsSync(f.bundled));
+  let identity: string | undefined;
+  try {
+    identity = app && appIdentity(platform, app);
+  } catch {
+    identity = undefined; // the app's own file is unreadable: nothing to compare
+  }
   const bundle = createHash('sha256')
-    .update(shipped.map((f) => fingerprint(f.bundled, f.by)).join('\n'))
+    .update(
+      [...shipped.map((f) => fingerprint(f.bundled, f.by)), ...(identity ? [identity] : [])].join(
+        '\n',
+      ),
+    )
     .digest('hex')
     .slice(0, 16);
   if (!existsSync(files[0]!.installed)) return { installed: 'none', bundle };
@@ -122,7 +263,8 @@ export function helperMatch(
       return false;
     }
   });
-  return { installed: same ? 'current' : 'outdated', bundle };
+  const pinned = !identity || !app || appPinned(platform, app, root);
+  return { installed: same && pinned ? 'current' : 'outdated', bundle };
 }
 
 /** The files each script reads, the script first, relative to the helper folder. */
@@ -175,7 +317,8 @@ export function helperDigest(dir: string, files: readonly string[]): string {
  * runs the script where it finds it: it copies the listed files into a fresh
  * folder only root can write, checks them against the digest the app computed
  * from its own copy, and runs the script from there. Arguments: the folder to
- * copy from, the script, the digest, then the files.
+ * copy from, the script, the digest, the app to pin (appPinTarget), then the
+ * files.
  */
 export function rootStageScript(platform: NodeJS.Platform = process.platform): string {
   const hash = platform === 'linux' ? 'sha256sum' : '/usr/bin/shasum -a 256';
@@ -183,7 +326,8 @@ export function rootStageScript(platform: NodeJS.Platform = process.platform): s
   const copy = platform === 'linux' ? 'cp -P' : 'cp -P -X';
   return [
     'set -eu',
-    'src=$1; run=$2; want=$3; shift 3',
+    // app: what install.sh pins as the app it installs the helper for; may be empty.
+    'src=$1; run=$2; want=$3; app=$4; shift 4',
     // A fixed root-owned, sticky parent: a folder made in the user's own
     // TMPDIR could be renamed away and replaced by its owner.
     't=$(mktemp -d /tmp/vigil-helper.XXXXXXXX)',
@@ -192,7 +336,7 @@ export function rootStageScript(platform: NodeJS.Platform = process.platform): s
     `for f; do [ -f "$src/$f" ] && [ ! -h "$src/$f" ] || { echo "Missing $f" >&2; exit 1; }; case $f in */*) mkdir -p "$t/\${f%/*}";; esac; ${copy} "$src/$f" "$t/$f"; [ -f "$t/$f" ] && [ ! -h "$t/$f" ] || exit 1; done`,
     `got=$(for f; do ${hash} < "$t/$f"; done | ${hash})`,
     '[ "${got%% *}" = "$want" ] || { echo "The helper files changed while installing, so nothing was changed." >&2; exit 1; }',
-    'sh "$t/$run"',
+    'sh "$t/$run" "$app"',
   ].join('; ');
 }
 
@@ -213,7 +357,8 @@ function stageArgs(
   platform: NodeJS.Platform,
 ): string[] {
   const files = helperScriptFiles(kind, platform);
-  return ['vigil-helper-setup', from, files[0]!, helperDigest(dir, files), ...files];
+  const app = kind === 'install' ? appPinTarget(platform) : '';
+  return ['vigil-helper-setup', from, files[0]!, helperDigest(dir, files), app, ...files];
 }
 
 /** The Terminal command that installs the helper, for the setup wizard. */
@@ -265,7 +410,7 @@ export function adminScriptArgs(command: string, kind: keyof typeof PROMPTS): st
 export type RunFile = (
   file: string,
   args: string[],
-) => Promise<{ code: number; stdout: string; stderr: string }>;
+) => Promise<{ code: number; stdout: string; stderr: string; missing?: true }>;
 
 const runFile: RunFile = (file, args) =>
   new Promise((resolve) =>
@@ -275,11 +420,18 @@ const runFile: RunFile = (file, args) =>
         code: err ? (typeof err.code === 'number' ? err.code : 1) : 0,
         stdout: String(stdout),
         stderr: String(stderr),
+        // The program itself isn't on this computer (no pkexec, say).
+        ...(err?.code === 'ENOENT' ? { missing: true as const } : {}),
       }),
     ),
   );
 
 export const PKEXEC = '/usr/bin/pkexec';
+
+const FROM_TERMINAL = {
+  install: 'Copy the install command and run it in a terminal instead.',
+  uninstall: 'Run linux/uninstall.sh from Vigil’s helper folder with sudo instead.',
+} as const;
 
 /**
  * Linux: run the script as root through pkexec, which shows the desktop's own
@@ -304,9 +456,24 @@ async function runWithPkexec(
   try {
     const out = await run(PKEXEC, [...ROOT_SHELL, rootStageScript('linux'), ...digested]);
     if (out.code === 0) return { ok: true };
-    // pkexec exits 126 when the password dialog is closed, 127 when not allowed.
+    if (out.missing) {
+      return {
+        ok: false,
+        error: `This computer has no pkexec, so Vigil can’t ask for your password. ${FROM_TERMINAL[kind]}`,
+      };
+    }
+    // pkexec exits 126 when the password dialog is closed, 127 when not allowed
+    // or when no polkit agent is running to show the dialog.
     if (out.code === 126) return { ok: false, error: 'cancelled' };
-    if (out.code === 127) return { ok: false, error: 'Your account isn’t allowed to do this' };
+    if (out.code === 127 && /authentication agent/i.test(out.stderr)) {
+      return {
+        ok: false,
+        error: `No password dialog could open: nothing on this desktop answers polkit. ${FROM_TERMINAL[kind]}`,
+      };
+    }
+    if (out.code === 127 && (/not authorized/i.test(out.stderr) || !out.stderr.trim())) {
+      return { ok: false, error: 'Your account isn’t allowed to do this' };
+    }
     const msg = out.stderr.trim().split('\n').at(-1)?.trim();
     return { ok: false, error: msg || `The ${kind} script failed` };
   } finally {
@@ -314,36 +481,102 @@ async function runWithPkexec(
   }
 }
 
+let running: { kind: string; done: Promise<HelperInstallResult> } | undefined;
+
+/** Is an install, update or removal running now (its password dialog may be open)? */
+export function helperScriptRunning(): boolean {
+  return running !== undefined;
+}
+
 /**
  * Install or remove the helper through the system's admin password dialog.
  * An update runs install.sh too, with a dialog that says why it is asking.
+ * One runs at a time, whichever window asked: a second ask for the same thing
+ * waits for the first, and a different one is refused until it finishes.
  */
-export async function runHelperScript(
+export function runHelperScript(
   kind: 'install' | 'update' | 'uninstall',
   dir = helperBundleDir(),
   run: RunFile = runFile,
   platform: NodeJS.Platform = process.platform,
+): Promise<HelperInstallResult> {
+  if (running) {
+    const same = (running.kind === 'uninstall') === (kind === 'uninstall');
+    return same
+      ? running.done
+      : Promise.resolve({
+          ok: false,
+          error:
+            running.kind === 'uninstall'
+              ? 'The helper is being removed; try again once that finishes'
+              : 'The helper is being installed; try again once that finishes',
+        });
+  }
+  const done = runHelperScriptNow(kind, dir, run, platform).finally(() => {
+    running = undefined;
+  });
+  running = { kind, done };
+  return done;
+}
+
+async function runHelperScriptNow(
+  kind: 'install' | 'update' | 'uninstall',
+  dir: string | null | undefined,
+  run: RunFile,
+  platform: NodeJS.Platform,
 ): Promise<HelperInstallResult> {
   if (platform !== 'darwin' && platform !== 'linux') {
     return { ok: false, error: 'The helper only runs on macOS and Linux' };
   }
   if (!dir) return { ok: false, error: 'This build of Vigil does not include the helper' };
   const script = kind === 'uninstall' ? 'uninstall' : 'install';
-  if (platform === 'linux') return runWithPkexec(script, dir, run);
+  const r =
+    platform === 'linux'
+      ? await runWithPkexec(script, dir, run)
+      : await viaOsascript(kind, dir, run);
+  // When the password-dialog route fails, the same install works from a terminal.
+  const command = script === 'install' ? helperInstallCommand(dir, platform) : undefined;
+  return !r.ok && r.error !== 'cancelled' && command ? { ...r, command } : r;
+}
+
+/**
+ * macOS: run the script as root through osascript's administrator dialog.
+ * Root runs only its own checked copy of the scripts (see rootStageScript).
+ */
+async function viaOsascript(
+  kind: 'install' | 'update' | 'uninstall',
+  dir: string,
+  run: RunFile,
+): Promise<HelperInstallResult> {
+  const script = kind === 'uninstall' ? 'uninstall' : 'install';
   let command: string;
   try {
-    const args = stageArgs(dir, dir, script, platform).map(shellQuote).join(' ');
-    command = `${ROOT_SHELL.join(' ')} ${shellQuote(rootStageScript(platform))} ${args}`;
+    const args = stageArgs(dir, dir, script, 'darwin').map(shellQuote).join(' ');
+    command = `${ROOT_SHELL.join(' ')} ${shellQuote(rootStageScript('darwin'))} ${args}`;
   } catch {
     return { ok: false, error: 'This build of Vigil is missing some of the helper’s files' };
   }
   const out = await run('/usr/bin/osascript', adminScriptArgs(command, kind));
   if (out.code === 0) return { ok: true };
-  // osascript reports a closed password dialog as error -128.
-  if (/-128/.test(out.stderr)) return { ok: false, error: 'cancelled' };
+  // osascript reports a closed password dialog as "User canceled. (-128)" at
+  // the end of its error; a path with -128 in it is not a cancel.
+  if (/\(-128\)\s*$/.test(out.stderr)) return { ok: false, error: 'cancelled' };
   const msg = out.stderr
     .replace(/^\d+:\d+: execution error: /, '')
     .replace(/ \(-?\d+\)\s*$/, '')
     .trim();
   return { ok: false, error: msg || `The ${script} script failed` };
+}
+
+/**
+ * The demo (VIGIL_DEMO) shows made-up data on a real computer: its helper
+ * buttons must never run the real install or uninstall script as root.
+ */
+export function unlessDemo(
+  demo: boolean,
+  run: () => Promise<HelperInstallResult>,
+): () => Promise<HelperInstallResult> {
+  return demo
+    ? async () => ({ ok: false, error: 'The demo doesn’t install or remove the helper' })
+    : run;
 }

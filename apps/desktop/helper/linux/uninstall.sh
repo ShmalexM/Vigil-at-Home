@@ -13,10 +13,17 @@ fi
 # Stop Vigil's osquery setup and put back any osquery settings from before Vigil.
 /usr/libexec/vigil-helper osquery-remove 2>/dev/null || true
 systemctl disable --now vigil-helper.service 2>/dev/null || true
+# Remove the pin and its key once the helper has stopped. Older helpers lack
+# the command; the lines below cover them.
+/usr/libexec/vigil-helper pin-remove 2>/dev/null || true
 rm -f /etc/systemd/system/vigil-helper.service
 systemctl daemon-reload 2>/dev/null || true
 rm -f /usr/share/polkit-1/actions/com.vigilathome.helper.policy
 rm -f /usr/libexec/vigil-helper
 rm -rf /usr/libexec/vigil-helper.d
+# The pin and its key are kept immutable by the helper; clear that before removing them.
+chattr -i "/var/lib/vigil/pin/app-pin.json" "/var/lib/vigil/pin/app-pin.key" "/var/lib/vigil/pin/app-pin.gen" 2>/dev/null || true
+rm -rf "/var/lib/vigil/pin"
+rm -f "/var/lib/vigil/app-pin.json" "/var/lib/vigil/app-pin.json.tmp"
 rm -f /run/vigil-helper.sock
 echo "Vigil helper removed. Quarantined files are still in /var/lib/vigil."

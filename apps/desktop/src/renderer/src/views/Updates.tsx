@@ -1,10 +1,13 @@
-import { Download, RefreshCw } from 'lucide-react';
+import { Download, ExternalLink, RefreshCw } from 'lucide-react';
 import { useLive, vigil } from '../api';
 import { Button, Segmented } from '../components/ui';
+import { computer } from '../platform';
+import { checkedAt } from './updates-format';
 
 /**
  * Settings › About › Updates. Vigil isn't signed yet, so it can't install
- * updates itself: it checks GitHub for a newer release and offers the DMG.
+ * updates itself: it checks GitHub for a newer release and offers the
+ * installer (or, without one for this computer, the release page).
  */
 export function UpdatesRow() {
   const [u, reload] = useLive(() => vigil.getUpdates());
@@ -14,13 +17,15 @@ export function UpdatesRow() {
     : u.error
       ? u.error
       : u.available
-        ? `Version ${u.available.version} is available`
+        ? `Version ${u.available.version} is available. You have ${u.current}.`
         : u.lastCheckedAt
-          ? `Up to date, checked ${new Date(u.lastCheckedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
-          : 'Not checked yet';
+          ? `Up to date, checked ${checkedAt(u.lastCheckedAt)}`
+          : u.auto
+            ? 'Not checked yet. Vigil checks a minute after it starts, then every 6 hours.'
+            : 'Not checked yet. Press Check now.';
   return (
     <div className="col" style={{ gap: 8 }}>
-      <span>{status}</span>
+      <span role="status">{status}</span>
       <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
         {u.available && (
           <Button
@@ -29,7 +34,19 @@ export function UpdatesRow() {
             icon={<Download size={14} />}
             onClick={() => void vigil.downloadUpdate()}
           >
-            Download {u.available.version}
+            {u.available.downloadUrl
+              ? `Download ${u.available.version}`
+              : `Get ${u.available.version} on GitHub`}
+          </Button>
+        )}
+        {u.available?.downloadUrl && (
+          <Button
+            size="sm"
+            kind="ghost"
+            icon={<ExternalLink size={14} />}
+            onClick={() => void vigil.openUpdateNotes()}
+          >
+            What’s new
           </Button>
         )}
         <Button
@@ -57,8 +74,9 @@ export function UpdatesRow() {
         />
       </div>
       <span className="small muted">
-        Vigil downloads the installer for your Mac from GitHub; you open it to update. Automatic
-        installs come once Vigil is signed by Apple.
+        Vigil only looks at GitHub’s public list of releases and sends nothing about you. You
+        download the installer for your {computer} and open it to update; automatic installs come
+        once Vigil is signed.
       </span>
     </div>
   );

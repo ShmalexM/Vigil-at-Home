@@ -196,7 +196,30 @@ export const ActionRecord = z.object({
     .object({
       at: Timestamp,
       error: z.string().optional(),
+      /**
+       * Why it failed, when the app words that itself: an item an installer
+       * or the system owns, one its owner can't put back, a move the
+       * helper's own rules didn't wait on, or a startup item Vigil won't
+       * turn off (its folder is a link elsewhere, or it is another user's).
+       */
+      errorCode: z
+        .enum([
+          'installer-owned',
+          'owner-cannot-write',
+          'move-stalled',
+          'startup-folder-linked',
+          'not-your-item',
+        ])
+        .optional(),
       quarantineId: Id.optional(),
+      /**
+       * True when nothing was changed: the helper wasn't connected when this
+       * ran, so it was only logged; false when the helper did it. Recorded per
+       * action, so what the app says later follows what happened then, not
+       * whether the helper is connected now. Missing on rows from older
+       * builds, which didn't say: those read as unknown, never as real.
+       */
+      simulated: z.boolean().optional(),
     })
     .optional(),
   /** Set when this record undoes an earlier one. */

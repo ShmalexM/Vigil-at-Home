@@ -206,6 +206,7 @@ function notifyFor(rule: DetectionRule, mode: RuleMode): NotifyLevel {
 export class DetectionEngine {
   private byKind = new Map<DetectionEventKind, CompiledRule[]>();
   private byId = new Map<string, CompiledRule>();
+  private readonly revisions = new Map<string, number>();
   /** Baseline scopes to learn per event kind. */
   private learnByKind = new Map<DetectionEventKind, FirstSeenSpec[]>();
   private readonly safety: SafetyFloor;
@@ -251,18 +252,35 @@ export class DetectionEngine {
     }
     this.byId = new Map(compiled.map((c) => [c.rule.id, c]));
     this.reindex();
+    for (const id of ids) this.bump(id);
   }
 
   upsertRule(rule: DetectionRuleInput | DetectionRule): DetectionRule {
     const c = compileRule(rule, this.defaultDedupeWindowSec);
     this.byId.set(c.rule.id, c);
     this.reindex();
+    this.bump(c.rule.id);
     return c.rule;
   }
 
   removeRule(ruleId: string): void {
     this.byId.delete(ruleId);
     this.reindex();
+    this.bump(ruleId);
+  }
+
+  /**
+   * How many times a rule or its mode has changed in this engine: any save,
+   * removal, mode change or cleared override counts, even one to the same
+   * value. An undo compares it to tell "nothing changed since" from "changed
+   * and changed back".
+   */
+  revision(ruleId: string): number {
+    return this.revisions.get(ruleId) ?? 0;
+  }
+
+  private bump(ruleId: string): void {
+    this.revisions.set(ruleId, this.revision(ruleId) + 1);
   }
 
   getRule(ruleId: string): DetectionRule | undefined {
@@ -278,6 +296,16 @@ export class DetectionEngine {
     return [...this.byId.values()].map((c) => ({ ...c.rule, effectiveMode: this.modeOf(c.rule) }));
   }
 
+  /**
+   * Until when a rule only records, whatever its mode, because it compares
+   * against a baseline Vigil is still learning. Undefined once learned, or for
+   * a rule that has no baseline.
+   */
+  learningEnds(ruleId: string, now: number): number | undefined {
+    const c = this.byId.get(ruleId);
+    return c?.usesBaseline && now < this.learningUntil ? this.learningUntil : undefined;
+  }
+
   modeOf(rule: DetectionRule): RuleMode {
     return this.stores.ruleState.get(rule.id)?.mode ?? rule.mode;
   }
@@ -290,6 +318,24 @@ export class DetectionEngine {
   _setMode(ruleId: string, mode: RuleMode): void {
     const prev = this.stores.ruleState.get(ruleId) ?? { ruleId, fired: 0 };
     this.stores.ruleState.put({ ...prev, mode });
+    this.bump(ruleId);
+  }
+
+  /** The user's override of a rule's mode, or undefined when it runs in its own mode. */
+  modeOverride(ruleId: string): RuleMode | undefined {
+    return this.stores.ruleState.get(ruleId)?.mode;
+  }
+
+  /**
+   * Drop a rule's override, so it runs in its own mode again (and follows a
+   * pack update to it). Package-internal, like `_setMode`.
+   */
+  _clearMode(ruleId: string): void {
+    const prev = this.stores.ruleState.get(ruleId);
+    if (prev?.mode === undefined) return;
+    const { mode: _mode, ...rest } = prev;
+    this.stores.ruleState.put(rest);
+    this.bump(ruleId);
   }
 
   private reindex(): void {
@@ -344,6 +390,21 @@ export class DetectionEngine {
       if (d) out.push(d);
     }
     return out;
+  }
+
+  /**
+   * Whether this rule, as it is now, lets the event off: its condition still
+   * fits, but one of its exclusions or the user's exceptions covers it. For
+   * an open alert raised before an exclusion existed. Only an exclusion
+   * counts, never a condition that no longer fits: a chain or a threshold
+   * can't be replayed from one event, so "doesn't match" would be a guess.
+   * Touches no state.
+   */
+  excuses(ruleId: string, e: DetectionEvent): boolean {
+    const c = this.byId.get(ruleId);
+    if (!c || !c.rule.eventKinds.includes(e.kind)) return false;
+    if (!c.condition.test(e, this.state)) return false;
+    return c.exclusions.some((x) => x.test(e, this.state)) || this.isExcepted(ruleId, e);
   }
 
   /** Resolve the rule's response templates, dropping any the safety floor refuses. */

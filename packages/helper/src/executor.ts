@@ -14,13 +14,15 @@ import {
   type RuleType,
   type SantaRule,
 } from '@vigil/sensors';
-import type { DetectionSync, HelperAction, HelperCommand } from './protocol.js';
+import type { DetectionSync, HelperAction, HelperCommand, SelfGrant } from './protocol.js';
 import { needsApproval } from './protocol.js';
 import { Journal, type JournalEntry } from './journal.js';
-import type { Approvals } from './approval.js';
 import type { System } from './system.js';
 import { PolicyRefused, type FastPath, type SelfSet } from './fastpath.js';
 import type { PreexecSync } from './preexec.js';
+import { APPROVAL_TTL_MS, type Approvals } from './approval.js';
+import { pinnedHashes, runsPinnedApp, type PinCandidate } from './appPin.js';
+import type { AppPinStore } from './pinStore.js';
 import { ActionError } from './commands/errors.js';
 import {
   identifyProcess,
@@ -35,6 +37,7 @@ import {
   quarantine,
   realParentPath,
   restore,
+  touchesHelperState,
   type QuarantineOptions,
   type QuarantineRecord,
 } from './commands/quarantine.js';
@@ -71,6 +74,18 @@ export interface ExecutorDeps {
   now?: () => number;
   /** What is Vigil's own: never paused, stopped or blocked. Defaults to fastPath.self(). */
   self?: () => SelfSet;
+  /**
+   * The app pinned at install (appPin.ts): a process running it is never
+   * paused or stopped, and its program never blocked by hash.
+   */
+  appPin?: AppPinStore;
+  /** Re-pins the app a self grant covers, with the grant's password (appPin.ts). */
+  repin?: {
+    /** Before the password is asked for: the app the grant would pin (pinCandidate). */
+    candidate: (grant: SelfGrant) => Promise<PinCandidate | undefined>;
+    /** After it was given: pin that app if its code is still the same (repinFromGrant). */
+    commit: (bound: PinCandidate) => Promise<void>;
+  };
 }
 
 export type ExecOutcome =
@@ -109,14 +124,76 @@ export class Executor {
     return this.d.self?.() ?? this.d.fastPath?.self() ?? { paths: [], images: [], hashes: [] };
   }
 
-  /** Quarantine settings with the protected folders of the OS the helper acts on. */
+  /** Whether blocking this hash would block Vigil's own program. */
+  private isOwnHash(identifier: string): boolean {
+    const id = identifier.toLowerCase();
+    if (this.self().hashes.includes(id)) return true;
+    return pinnedHashes(this.d.appPin?.current()).includes(id);
+  }
+
+  /** The pin check for a process about to be paused or stopped; absent without a pin store. */
+  private pinCheck(): { isPinnedApp?: (id: ProcessIdentity) => Promise<boolean | 'changed'> } {
+    const store = this.d.appPin;
+    if (!store) return {};
+    const sys = this.d.sys;
+    return {
+      isPinnedApp: (id) =>
+        runsPinnedApp(sys, store.current(), id, () => identifyProcess(sys, id.pid)),
+    };
+  }
+
+  /** No file command moves, deletes or restores anything into the helper's own folders. */
+  private refuseHelperState(path: string): void {
+    if (touchesHelperState(path, this.quarantineOpts))
+      throw new ActionError('refused', `${path} is protected`);
+  }
+
+  /**
+   * Quarantine settings with the protected folders of the OS the helper acts
+   * on, and the tripwire over the files the helper keeps (pinStore.ts).
+   */
   private get quarantineOpts(): QuarantineOptions {
-    return this.d.sys.platform === 'linux'
-      ? { platform: 'linux', ...this.d.quarantine }
-      : this.d.quarantine;
+    const store = this.d.appPin;
+    // Vigil's own app as pinned and as the app named it (its AppImages by
+    // identity), so no rule moves it or turns off what starts it.
+    const own = this.self();
+    const pinned = store?.current()?.path;
+    const selfPaths = [
+      ...(this.d.quarantine.selfPaths ?? []),
+      ...own.paths,
+      ...(pinned ? [pinned] : []),
+    ];
+    const selfIds = [...(this.d.quarantine.selfIds ?? []), ...own.images];
+    const base: QuarantineOptions = { ...this.d.quarantine, selfPaths, selfIds };
+    const opts: QuarantineOptions = store ? { guard: () => store.intact(), ...base } : base;
+    return this.d.sys.platform === 'linux' ? { platform: 'linux', ...opts } : opts;
+  }
+
+  /** Whether a self grant's app is being read now. */
+  private grantReading = false;
+  /** The self grant waiting for the password, if any. */
+  private grantWaiting: string | undefined;
+
+  /** The app each pending self-grant approval re-pins (appPin.ts pinCandidate), by nonce. */
+  private readonly pinBindings = new Map<string, { bound: PinCandidate; expiresAt: number }>();
+
+  /** Bind the code `bound` names to approval `nonce`; drops bindings past their approval's life. */
+  private bindPin(nonce: string, bound: PinCandidate): void {
+    const now = this.d.sys.now();
+    for (const [n, b] of this.pinBindings) if (b.expiresAt < now) this.pinBindings.delete(n);
+    this.pinBindings.set(nonce, { bound, expiresAt: now + APPROVAL_TTL_MS });
+  }
+
+  /** The code bound to `nonce`, once: an approval is single use. */
+  private takePin(nonce: string | undefined): PinCandidate | undefined {
+    if (!nonce) return undefined;
+    const b = this.pinBindings.get(nonce);
+    this.pinBindings.delete(nonce);
+    return b?.bound;
   }
 
   async execute(cmd: HelperCommand, approval?: string): Promise<ExecOutcome> {
+    let bound: PinCandidate | undefined;
     // Refuse what Linux can't do before asking for a password for it.
     if (this.d.sys.platform === 'linux') checkLinuxBlock(cmd);
     if (cmd.kind === 'detection.sync') {
@@ -153,10 +230,37 @@ export class Executor {
       } catch (err) {
         throw policyError(err);
       }
+      // Only the approval issued for this very grant releases its binding.
+      const ours = !!approval && this.d.approvals.issuedFor(approval, cmd);
       if (grants.length && (!approval || !this.d.approvals.consume(approval, cmd))) {
+        if (ours) this.takePin(approval);
+        // One grant at a time: its app is read (and hashed) once, and a newer
+        // grant replaces the one still waiting for the password.
+        if (this.grantReading)
+          throw new ActionError(
+            'refused',
+            'Vigil is still checking its app; try again in a moment',
+          );
+        this.grantReading = true;
+        let candidate: PinCandidate | undefined;
+        try {
+          // Before the dialog: the app this grant would re-pin, as its code is
+          // on disk now. The approval re-pins that code and nothing else.
+          candidate = await this.d.repin?.candidate(cmd).catch(() => undefined);
+        } finally {
+          this.grantReading = false;
+        }
+        if (this.grantWaiting) {
+          this.d.approvals.cancel(this.grantWaiting);
+          this.takePin(this.grantWaiting);
+        }
         const nonce = this.d.approvals.request(cmd);
+        this.grantWaiting = nonce;
+        if (candidate) this.bindPin(nonce, candidate);
         return { kind: 'needs_approval', nonce, prompt: selfPrompt(grants) };
       }
+      if (approval === this.grantWaiting) this.grantWaiting = undefined;
+      if (grants.length) bound = this.takePin(approval);
     } else if (needsApproval(cmd)) {
       // Check the release can actually happen before bothering the user.
       this.findContainment(cmd as HelperAction);
@@ -165,7 +269,11 @@ export class Executor {
         return { kind: 'needs_approval', nonce, prompt: this.approvalPrompt(cmd as HelperAction) };
       }
     }
-    return { kind: 'done', result: await this.run(cmd) };
+    const result = await this.run(cmd);
+    // Only a grant the password approved re-pins, never one that named nothing
+    // new, and only the code bound to that approval.
+    if (bound && this.d.repin) await this.d.repin.commit(bound).catch(() => undefined);
+    return { kind: 'done', result };
   }
 
   private approvalPrompt(cmd: HelperAction): string {
@@ -205,20 +313,27 @@ export class Executor {
           `network block for ${cmd.address}`,
         );
       }
-      case 'file.restore':
-        return pick(
+      case 'file.restore': {
+        const found = pick(
           (e) => e.kind === 'file.quarantine' && e.id === cmd.quarantineId,
           'quarantine with that id',
         );
+        this.refuseHelperState((found.undo?.quarantine as QuarantineRecord).originalPath);
+        return found;
+      }
       case 'persistence.enable': {
         // The journal holds the resolved path (see resolveTarget).
         const paths = new Set([cmd.path, realParentPath(cmd.path)]);
-        return pick(
+        const found = pick(
           (e) =>
             e.kind === 'persistence.disable' &&
             paths.has((e.undo?.persistence as PersistenceRecord).quarantine.originalPath),
           `disabled startup item at ${cmd.path}`,
         );
+        this.refuseHelperState(
+          (found.undo?.persistence as PersistenceRecord).quarantine.originalPath,
+        );
+        return found;
       }
       default:
         return undefined;
@@ -259,16 +374,16 @@ export class Executor {
 
   private async run(cmd: HelperCommand): Promise<unknown> {
     const { sys, journal } = this.d;
-    if (
-      cmd.kind === 'santa.rule.set' &&
-      cmd.policy !== 'allow' &&
-      this.self().hashes.includes(cmd.identifier.toLowerCase())
-    )
+    if (cmd.kind === 'santa.rule.set' && cmd.policy !== 'allow' && this.isOwnHash(cmd.identifier))
       throw new ActionError('refused', 'that program is part of Vigil');
     if (sys.platform === 'linux' && cmd.kind.startsWith('santa.')) return this.runLinuxBlock(cmd);
     switch (cmd.kind) {
       case 'process.suspend': {
-        const id = await suspendProcess(sys, cmd.pid, { ...target(cmd), self: this.self() });
+        const id = await suspendProcess(sys, cmd.pid, {
+          ...target(cmd),
+          self: this.self(),
+          ...this.pinCheck(),
+        });
         return this.record(cmd, `paused ${id.path} (pid ${id.pid})`, { process: id });
       }
       case 'process.resume': {
@@ -286,7 +401,11 @@ export class Executor {
         );
       }
       case 'process.kill': {
-        const id = await killProcess(sys, cmd.pid, { ...target(cmd), self: this.self() });
+        const id = await killProcess(sys, cmd.pid, {
+          ...target(cmd),
+          self: this.self(),
+          ...this.pinCheck(),
+        });
         for (const e of journal.active()) {
           if (e.kind === 'process.suspend' && (e.undo?.process as ProcessIdentity).pid === id.pid)
             journal.markUndone(e.id);
@@ -314,13 +433,13 @@ export class Executor {
       }
       case 'file.quarantine': {
         const id = Journal.newId();
-        const rec = quarantine(cmd.path, id, this.quarantineOpts);
+        const rec = await quarantine(sys, cmd.path, id, this.quarantineOpts);
         return this.record(cmd, `quarantined ${rec.originalPath}`, { quarantine: rec }, id);
       }
       case 'file.restore': {
         const entry = this.findContainment(cmd)!;
         const rec = entry.undo?.quarantine as QuarantineRecord;
-        restore(rec, this.quarantineOpts);
+        await restore(sys, rec, this.quarantineOpts);
         return this.release(entry, cmd, `restored ${rec.originalPath}`);
       }
       case 'persistence.disable': {
@@ -334,7 +453,7 @@ export class Executor {
                 this.quarantineOpts,
                 this.d.launchDirs,
               )
-            : await disablePersistence(sys, cmd.path, id, this.d.quarantine, this.d.launchDirs);
+            : await disablePersistence(sys, cmd.path, id, this.quarantineOpts, this.d.launchDirs);
         return this.record(
           cmd,
           `disabled startup item ${rec.label ?? rec.quarantine.originalPath}`,
@@ -346,7 +465,7 @@ export class Executor {
         const entry = this.findContainment(cmd)!;
         const rec = entry.undo?.persistence as PersistenceRecord;
         if (sys.platform === 'linux') await restoreLinuxPersistence(sys, rec, this.quarantineOpts);
-        else await restorePersistence(sys, rec, this.d.quarantine);
+        else await restorePersistence(sys, rec, this.quarantineOpts);
         return this.release(
           entry,
           cmd,
@@ -400,6 +519,7 @@ export class Executor {
             syncedRev: this.d.rules.syncedRev,
           },
           firewall: await this.firewall.list(),
+          ...(this.d.appPin ? { appPin: this.d.appPin.status() } : {}),
           ...this.d.statusExtra?.(),
         };
       case 'helper.journal':

@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createConnection } from 'node:net';
 import { join } from 'node:path';
@@ -9,10 +9,11 @@ import { RuleStore, type SensorEvent } from '@vigil/sensors';
 import { Approvals } from './approval.js';
 import { HelperClient } from './client.js';
 import { Executor, type ActionOutcome } from './executor.js';
-import { FastPath, PolicyRefused, RETIRE_MS, type HelperRan } from './fastpath.js';
+import { eventPipeline, FastPath, PolicyRefused, RETIRE_MS, type HelperRan } from './fastpath.js';
 import { Journal } from './journal.js';
 import { LIST_PART_MAX, type DetectionSync, type SelfGrant } from './protocol.js';
 import { HelperServer } from './server.js';
+import { transferLimits } from './commands/transfer.js';
 import { FakeSystem } from './testing/fakeSystem.js';
 
 const BAD = 'b'.repeat(64);
@@ -155,6 +156,14 @@ async function holdNow(command: DetectionSync): Promise<{ result: Promise<unknow
   });
   return { result };
 }
+
+describe('the socket', () => {
+  it('refuses a request to remove the pin as a command it does not have', async () => {
+    await expect(
+      client.call({ kind: 'pin-remove' } as unknown as Parameters<HelperClient['call']>[0]),
+    ).rejects.toMatchObject({ code: 'invalid' });
+  });
+});
 
 describe('blocking rules in the helper', () => {
   it('takes rules from the app, asks only for lists it lacks, and blocks known malware', async () => {
@@ -1001,5 +1010,185 @@ describe('Vigil’s own programs, granted apart from the rules', () => {
     expect(fast.selfLoosening(grant([]))).toEqual([]);
     await client.call({ ...sync, selfPaths: [] });
     expect(fast.selfLoosening(grant([SELF]))).toEqual([`never block ${SELF}`]);
+  });
+});
+
+describe('a move that stalls', () => {
+  const saved = { ...transferLimits };
+  let dir: string;
+  let stopped: { kill(sig: NodeJS.Signals): boolean }[];
+  afterEach(() => {
+    Object.assign(transferLimits, saved);
+    for (const c of stopped) c.kill('SIGKILL');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** The known-malware rule, with a move listed before the kill and the block; every move's reader stopped. */
+  function setup(moveWaitMs?: number) {
+    dir = mkdtempSync(join(tmpdir(), 'vigil-fastpath-move-'));
+    stopped = [];
+    const fake = new FakeSystem();
+    const rules = new RuleStore(join(dir, 'rules.json'));
+    const ex = new Executor({
+      sys: fake,
+      journal: new Journal(join(dir, 'journal.json')),
+      approvals: new Approvals({
+        dir: join(dir, 'approvals'),
+        requiredOwnerUid: process.getuid!(),
+      }),
+      rules,
+      quarantine: { quarantineDir: join(dir, 'Quarantine'), protectedPrefixes: [] },
+      syncPort: 47821,
+    });
+    const { sync } = appSet({});
+    const known = sync.rules.find((r) => r.id === 'known-bad-hash')!;
+    const withMove = {
+      ...known,
+      response: [{ kind: 'file.quarantine' as const, path: '{{process.path}}' }, ...known.response],
+    };
+    const file = join(dir, 'helper-rules.json');
+    writeFileSync(
+      file,
+      JSON.stringify({
+        ...sync,
+        rules: [withMove],
+        lists: { known_bad_sha256: [BAD] },
+        retired: {},
+      }),
+    );
+    const fp = new FastPath({
+      file,
+      ...(moveWaitMs !== undefined ? { moveWaitMs } : {}),
+      run: async (action) => {
+        const out = await ex.execute(action);
+        if (out.kind !== 'done') throw new Error('needs the admin password');
+        return out.result as ActionOutcome;
+      },
+    });
+    fp.load();
+    // Each move is given up after a while.
+    transferLimits.deadlineMs = 2_000;
+    transferLimits.graceMs = 200;
+    transferLimits.onSpawn = (c, op) => {
+      if (op === 'pack') {
+        c.kill('SIGSTOP');
+        stopped.push(c);
+      }
+    };
+    const payload = (pid: number) => {
+      const path = join(dir, `payload-${pid}`);
+      writeFileSync(path, 'bad');
+      fake.processes.set(pid, { path, started: 'T' });
+      return path;
+    };
+    const blocked = () =>
+      rules.active().some((r) => r.rule.identifier === BAD && r.rule.policy === 'BLOCKLIST');
+    return { fp, fake, payload, blocked };
+  }
+
+  it('blocks before any move, and reports a move it stopped waiting on', async () => {
+    const { fp, fake, payload, blocked } = setup(300);
+    const first = payload(5001);
+    const second = payload(5002);
+    const t0 = Date.now();
+    const ran = await fp.check(exec(5001, BAD, first));
+    expect(ran.map((r) => r.action.kind)).toEqual([
+      'process.kill',
+      'santa.rule.set',
+      'file.quarantine',
+    ]);
+    expect(ran[2]).toMatchObject({ errorCode: 'move-stalled' });
+    expect(fake.signals).toEqual([{ pid: 5001, signal: 'SIGKILL' }]);
+    expect(blocked()).toBe(true);
+    const ran2 = await fp.check(exec(5002, BAD, second));
+    expect(Date.now() - t0).toBeLessThan(1_800);
+    expect(ran2[0]).toMatchObject({ action: { kind: 'process.kill' }, outcome: expect.anything() });
+    // Once the stopped moves are given up, the files are where they were and the block is in force.
+    await new Promise((r) => setTimeout(r, 3_000));
+    expect(existsSync(first) && existsSync(second)).toBe(true);
+    expect(blocked()).toBe(true);
+  }, 15_000);
+
+  it('never delays a later event’s block, on the daemon’s one-at-a-time chain', async () => {
+    // The real wait on a move (15 s): only the event's report waits on it, never the chain.
+    const { fp, fake, payload, blocked } = setup();
+    const first = payload(6001);
+    const second = payload(6002);
+    let chain = Promise.resolve();
+    const reported: string[] = [];
+    const deliver = (pid: number, path: string) => {
+      chain = chain.then(async () => {
+        const { moves } = await fp.start(exec(pid, BAD, path));
+        void moves.then(() => reported.push(path));
+      });
+    };
+    deliver(6001, first);
+    // Event A's kill and block are done, and its move's reader is stopped.
+    await chain;
+    while (stopped.length < 1) await new Promise((r) => setTimeout(r, 5));
+    expect(fake.signals).toEqual([{ pid: 6001, signal: 'SIGKILL' }]);
+    const t0 = Date.now();
+    deliver(6002, second);
+    await chain;
+    expect(Date.now() - t0).toBeLessThan(500);
+    expect(fake.signals).toEqual([
+      { pid: 6001, signal: 'SIGKILL' },
+      { pid: 6002, signal: 'SIGKILL' },
+    ]);
+    expect(blocked()).toBe(true);
+    expect(reported).toEqual([]);
+    // The stopped moves end at their deadline; each event is reported then, the block in force.
+    while (reported.length < 2) await new Promise((r) => setTimeout(r, 50));
+    expect(existsSync(first) && existsSync(second)).toBe(true);
+    expect(blocked()).toBe(true);
+  }, 15_000);
+});
+
+describe('the order events reach the app', () => {
+  it('contains each event without waiting on earlier moves, and reports them in order', async () => {
+    const contained: string[] = [];
+    const published: string[] = [];
+    const moves = new Map<string, () => void>();
+    const deliver = eventPipeline<string>(
+      async (e) => {
+        contained.push(e);
+        const ran: HelperRan[] = [];
+        return {
+          ran,
+          moves: new Promise<HelperRan[]>((resolve) => moves.set(e, () => resolve([]))),
+        };
+      },
+      (e) => published.push(e),
+    );
+    const tick = () => new Promise((r) => setTimeout(r, 10));
+    deliver('A');
+    deliver('B');
+    deliver('C');
+    await tick();
+    // A's move is still running: B and C are contained all the same, but nothing is reported out of order.
+    expect(contained).toEqual(['A', 'B', 'C']);
+    expect(published).toEqual([]);
+    moves.get('B')!();
+    moves.get('C')!();
+    await tick();
+    expect(published).toEqual([]);
+    moves.get('A')!();
+    await tick();
+    expect(published).toEqual(['A', 'B', 'C']);
+  });
+
+  it('goes on after an event whose handling failed', async () => {
+    const published: string[] = [];
+    const deliver = eventPipeline<string>(
+      async (e) => {
+        if (e === 'bad') throw new Error('no');
+        return { ran: [], moves: Promise.resolve([]) };
+      },
+      (e) => published.push(e),
+    );
+    deliver('bad');
+    deliver('next');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(published).toEqual(['next']);
   });
 });

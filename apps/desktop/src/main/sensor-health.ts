@@ -45,8 +45,30 @@ export interface HealthProbe {
   /** The helper's own view; it can see files and logs the app can't. */
   helperSensors?(): Promise<HelperSensors | null>;
   now(): number;
+  /**
+   * How long, since `since`, Vigil has been running with the computer awake.
+   * A sensor can't send anything while the app is closed or the computer
+   * sleeps, so only that time counts towards a sensor being quiet.
+   */
+  awakeMs?(since: number): number;
   /** Which OS's layers to check; defaults to macOS. */
   platform?: NodeJS.Platform;
+}
+
+/**
+ * The helper's sensor report, from its helper.status answer. No answer
+ * because there is no connection (it dropped and is reconnecting) means
+ * the helper can't be vouched for, so it throws and the check says down; an
+ * older helper's answer without sensors is just no report.
+ */
+export function helperSensorsFrom(
+  query: () => Promise<{ sensors?: HelperSensors } | null>,
+): () => Promise<HelperSensors | null> {
+  return async () => {
+    const status = await query();
+    if (status === null) throw new Error('The helper is not connected');
+    return status.sensors ?? null;
+  };
 }
 
 export function macProbe(
@@ -75,9 +97,16 @@ const minutes = (ms: number) => Math.max(1, Math.round(ms / 60_000));
  * here needs root.
  */
 export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
-  const helperState = p.helper();
   const fromHelper =
-    helperState === 'connected' ? await p.helperSensors?.().catch(() => null) : null;
+    p.helper() === 'connected' && p.helperSensors
+      ? await p.helperSensors().catch(() => 'failed' as const)
+      : null;
+  // Read the state after the query: the helper can drop while it runs, and a
+  // helper that can't answer its own status isn't working.
+  const now = p.helper();
+  const helperState: HelperState =
+    fromHelper === 'failed' && now === 'connected' ? 'not_running' : now;
+  const reportedSensors = fromHelper === 'failed' ? null : fromHelper;
   const helper: SensorHealth = {
     id: 'helper',
     name: 'Vigil helper',
@@ -97,7 +126,7 @@ export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
     processes: string[],
   ): Promise<SensorHealth> => {
     const base = { id, name, detail };
-    const reported = fromHelper?.[id];
+    const reported = reportedSensors?.[id];
     const installed = reported?.installed || paths.some((path) => p.exists(path));
     if (!installed) return { ...base, state: 'not_installed' };
     const running = await Promise.all(processes.map((name) => p.running(name)));
@@ -118,9 +147,14 @@ export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
     );
     const last = times.length ? Math.max(...times) : null;
     if (last === null) return { ...base, state: 'ok', note: 'Starting; no events yet' };
-    const quiet = p.now() - last;
-    if (quiet > QUIET_AFTER_MS[id]) {
-      return { ...base, state: 'degraded', note: `No events for ${minutes(quiet)} minutes` };
+    const awake = p.awakeMs?.(last) ?? p.now() - last;
+    if (awake > QUIET_AFTER_MS[id]) {
+      // The note says how long it really has been.
+      return {
+        ...base,
+        state: 'degraded',
+        note: `No events for ${minutes(p.now() - last)} minutes`,
+      };
     }
     return { ...base, state: 'ok' };
   };
@@ -194,9 +228,56 @@ export function reportFeedHealth(
 }
 
 /** Re-check and report every layer. */
+const latestCheck = new WeakMap<SensorRegistry, number>();
+
 export async function reportHealth(registry: SensorRegistry, probe: HealthProbe): Promise<void> {
-  for (const h of await checkHealth(probe)) {
+  // Checks overlap (a timer and a helper reconnect), and an older one can
+  // finish last; only the latest-started check may report.
+  const seq = (latestCheck.get(registry) ?? 0) + 1;
+  latestCheck.set(registry, seq);
+  const health = await checkHealth(probe);
+  if (latestCheck.get(registry) !== seq) return;
+  for (const h of health) {
     const prev = registry.get(h.id);
     if (prev?.state !== h.state || prev?.note !== h.note) registry.report(h);
+  }
+}
+
+/**
+ * The time Vigil has been running with the computer awake, from its start and
+ * the sleeps the power monitor reports. Keeps the last day of sleeps.
+ */
+export class AwakeClock {
+  private readonly sleeps: { from: number; to: number }[] = [];
+  private asleepAt: number | undefined;
+
+  constructor(
+    private readonly startedAt: number,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  suspend(at = this.now()): void {
+    this.asleepAt ??= at;
+  }
+
+  resume(at = this.now()): void {
+    if (this.asleepAt === undefined) return;
+    this.sleeps.push({ from: this.asleepAt, to: at });
+    this.asleepAt = undefined;
+    const keep = at - 24 * 60 * 60_000;
+    while (this.sleeps.length && this.sleeps[0]!.to < keep) this.sleeps.shift();
+  }
+
+  /** Awake running time since `since`. */
+  awakeMs(since: number): number {
+    const now = this.now();
+    const from = Math.max(since, this.startedAt);
+    let ms = Math.max(0, now - from);
+    const sleeps =
+      this.asleepAt === undefined
+        ? this.sleeps
+        : [...this.sleeps, { from: this.asleepAt, to: now }];
+    for (const z of sleeps) ms -= Math.max(0, Math.min(z.to, now) - Math.max(z.from, from));
+    return Math.max(0, ms);
   }
 }

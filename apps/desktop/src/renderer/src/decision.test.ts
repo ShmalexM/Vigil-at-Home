@@ -1,6 +1,19 @@
-import type { Action, ActionProposal, ActionRecord } from '@vigil/core';
+import type { Action, ActionProposal, ActionRecord, Alert } from '@vigil/core';
 import { describe, expect, it } from 'vitest';
-import { activeContainment, containLabel, keepLabel, releaseLabel, releaseStep } from './decision';
+import {
+  actionErrorText,
+  activeContainment,
+  containLabel,
+  isSimulated,
+  keepLabel,
+  othersNeedingYou,
+  provenance,
+  releaseLabel,
+  releaseStep,
+  refusalNote,
+  responseProvenance,
+  sameAlert,
+} from './decision';
 
 let n = 0;
 const rec = (action: Action, over: Partial<ActionRecord> = {}): ActionRecord => ({
@@ -57,5 +70,187 @@ describe('decision wording', () => {
     expect(containLabel([prop(suspend)])).toBe('Pause app');
     expect(containLabel([prop(block)])).toBe('Block connection');
     expect(containLabel([prop(suspend), prop(block)])).toBe('Do all 2');
+  });
+});
+
+describe('a quarantine an installer’s ownership stopped', () => {
+  const app = '/Applications/Tool.app/Contents/MacOS/Tool';
+  const refused = (path: string) =>
+    rec(
+      { kind: 'file.quarantine', path },
+      {
+        status: 'failed',
+        alertId: 'al1',
+        result: { at: 1, error: 'Not done: x', errorCode: 'installer-owned' },
+      },
+    );
+  const santaBlock = (over: Partial<ActionRecord> = {}) =>
+    rec(
+      { kind: 'santa.rule.set', ruleType: 'binary', identifier: 'a'.repeat(64), policy: 'block' },
+      { alertId: 'al1', ...over },
+    );
+
+  it('says the app is blocked only when this alert blocked it', () => {
+    const q = refused(app);
+    expect(refusalNote(q, [q, santaBlock()])).toBe(
+      'Vigil blocked this app from running but can’t move apps an installer put in Applications. Drag it to the Trash to remove it.',
+    );
+    // No block, a failed one, or one undone since: no claim.
+    for (const others of [
+      [],
+      [santaBlock({ status: 'failed' })],
+      [santaBlock({ status: 'undone' })],
+    ])
+      expect(refusalNote(q, [q, ...others])).toBe(
+        'Vigil can’t move apps an installer put in Applications. Drag it to the Trash to remove it.',
+      );
+    expect(
+      refusalNote(q, [
+        q,
+        santaBlock({
+          action: {
+            kind: 'santa.rule.set',
+            ruleType: 'binary',
+            identifier: 'b'.repeat(64),
+            policy: 'allow',
+          },
+        }),
+      ]),
+    ).not.toMatch(/blocked/);
+  });
+
+  it('uses the generic line for something that is not an app', () => {
+    const q = refused('/tmp/shared/helper.sh');
+    expect(refusalNote(q, [q, santaBlock()])).toBe(
+      'Vigil can’t move this item because it belongs to the system. Remove it yourself if you don’t need it.',
+    );
+  });
+
+  it('leaves other failures as they were', () => {
+    const plain = rec(
+      { kind: 'file.quarantine', path: '/tmp/x' },
+      { status: 'failed', result: { at: 1, error: 'boom' } },
+    );
+    expect(refusalNote(plain, [plain])).toBeUndefined();
+    expect(actionErrorText(plain, [plain])).toBe('boom');
+    const q = refused(app);
+    const elsewhere = santaBlock({ alertId: 'other' });
+    expect(sameAlert([q, elsewhere], q)).toEqual([q]);
+    expect(actionErrorText(q, sameAlert([q, elsewhere], q))).not.toMatch(/blocked/);
+  });
+});
+
+describe('a restore its owner can’t write back', () => {
+  it('shows one calm line for it', () => {
+    const r = rec(
+      { kind: 'file.restore', quarantineId: 'q1' },
+      { status: 'failed', result: { at: 1, error: 'x', errorCode: 'owner-cannot-write' } },
+    );
+    expect(actionErrorText(r, [r])).toBe(
+      'Vigil can’t put this back because its owner can’t write to that folder.',
+    );
+  });
+});
+
+describe('a startup item Vigil won’t turn off', () => {
+  it('shows one calm line for a linked folder, and for another user’s item', () => {
+    const linked = rec(
+      { kind: 'persistence.disable', path: '/home/a/.config/autostart/x.desktop' },
+      { status: 'failed', result: { at: 1, error: 'x', errorCode: 'startup-folder-linked' } },
+    );
+    expect(actionErrorText(linked, [linked])).toBe(
+      'Vigil couldn’t turn off this startup item because its folder is a link to somewhere else.',
+    );
+    const other = rec(
+      { kind: 'persistence.disable', path: '/home/b/.config/autostart/x.desktop' },
+      { status: 'failed', result: { at: 1, error: 'x', errorCode: 'not-your-item' } },
+    );
+    expect(actionErrorText(other, [other])).toBe(
+      'Vigil only acts on startup items that belong to you.',
+    );
+  });
+});
+
+describe('a move the helper stopped waiting on', () => {
+  it('shows one calm line for it', () => {
+    const r = rec(
+      { kind: 'file.quarantine', path: '/home/a/miner' },
+      { status: 'failed', result: { at: 1, error: 'x', errorCode: 'move-stalled' } },
+    );
+    expect(actionErrorText(r, [r])).toBe(
+      'Vigil couldn’t move this in time. Anything it stopped or blocked stays that way.',
+    );
+  });
+});
+
+describe('simulated containment', () => {
+  const alert = (over: Partial<Alert> = {}): Alert =>
+    ({
+      id: 'x',
+      createdAt: 1,
+      updatedAt: 1,
+      ruleId: 'r',
+      ruleVersion: 1,
+      title: 't',
+      summary: '',
+      severity: 'high',
+      fidelity: 'high',
+      notify: 'popup',
+      status: 'open',
+      containment: 'active',
+      eventIds: ['e'],
+      actionIds: [],
+      ...over,
+    }) as Alert;
+  const suspend: Action = { kind: 'process.suspend', pid: 1 };
+
+  it('follows the records, not whether the helper is connected now', () => {
+    const real = rec(suspend, { result: { at: 1, simulated: false } });
+    const dry = rec(suspend, { result: { at: 1, simulated: true } });
+    expect(isSimulated(dry)).toBe(true);
+    expect(responseProvenance([dry])).toBe('simulated');
+    expect(responseProvenance([real])).toBe('real');
+    expect(responseProvenance([real, dry])).toBe('mixed');
+    expect(responseProvenance([])).toBeUndefined();
+  });
+
+  it('counts actions with no undo, like a kill', () => {
+    const kill: Action = { kind: 'process.kill', pid: 1 };
+    const dryKill = rec(kill, { result: { at: 1, simulated: true } });
+    const realKill = rec(kill, { result: { at: 1, simulated: false } });
+    expect(responseProvenance([dryKill])).toBe('simulated');
+    expect(
+      responseProvenance([realKill, rec(suspend, { result: { at: 1, simulated: true } })]),
+    ).toBe('mixed');
+    // Undoes and actions that didn't go through say nothing about the response.
+    expect(responseProvenance([realKill, rec(suspend, { status: 'failed' })])).toBe('real');
+  });
+
+  it('never reads a row from an older build as real', () => {
+    // Older builds saved simulations without the field; only a dry-run quarantine id tells.
+    const old = rec(suspend, { result: { at: 1 } });
+    const oldDryQuarantine = rec(
+      { kind: 'file.quarantine', path: '/tmp/x' },
+      { result: { at: 1, quarantineId: 'dry-1' } },
+    );
+    expect(provenance(old)).toBe('unknown');
+    expect(provenance(oldDryQuarantine)).toBe('simulated');
+    expect(responseProvenance([old])).toBe('unknown');
+    expect(responseProvenance([old, rec(suspend, { result: { at: 1, simulated: false } })])).toBe(
+      'unknown',
+    );
+  });
+
+  it('counts the other decisions, keeping a pile this alert sits in', () => {
+    const pile = { key: 'k', who: 'claude' };
+    const a = alert({ id: 'a', containment: 'none', pile });
+    const b = alert({ id: 'b', containment: 'none', pile });
+    const c = alert({ id: 'c', containment: 'none' });
+    // Rows: the a+b pile and c.
+    expect(othersNeedingYou(a, 2, [a, b, c])).toBe(2);
+    expect(othersNeedingYou(c, 2, [a, b, c])).toBe(1);
+    expect(
+      othersNeedingYou(alert({ severity: 'low', notify: 'badge', containment: 'none' }), 2, []),
+    ).toBe(2);
   });
 });

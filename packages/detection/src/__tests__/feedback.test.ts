@@ -106,6 +106,37 @@ describe('user decisions', () => {
     fb.setMode('noisy-rule', 'shadow', me);
     expect(eng.modeOf(eng.getRule('noisy-rule')!)).toBe('shadow');
   });
+
+  it("clearing the user's override puts a rule back on its own mode, keeping its count", () => {
+    const eng = new DetectionEngine([noisy], memoryStores());
+    const fb = new Feedback(eng, undefined, () => T0);
+    eng.evaluate(exec(tool(1)));
+    fb.setMode('noisy-rule', 'shadow', me);
+    expect(eng.modeOverride('noisy-rule')).toBe('shadow');
+    expect(() => fb.clearMode('noisy-rule', { kind: 'user', via: 'x', at: 0 } as never)).toThrow(
+      /approval/,
+    );
+    fb.clearMode('noisy-rule', me);
+    expect(eng.modeOverride('noisy-rule')).toBeUndefined();
+    expect(eng.modeOf(eng.getRule('noisy-rule')!)).toBe('block');
+    expect(eng.stores.ruleState.get('noisy-rule')?.fired).toBe(1);
+    fb.clearMode('noisy-rule', me); // nothing to clear
+    expect(eng.modeOverride('noisy-rule')).toBeUndefined();
+  });
+
+  it("counts every change to a rule or its mode in the rule's revision", () => {
+    const eng = new DetectionEngine([noisy], memoryStores());
+    const fb = new Feedback(eng, undefined, () => T0);
+    const start = eng.revision('noisy-rule');
+    fb.setMode('noisy-rule', 'shadow', me);
+    fb.setMode('noisy-rule', 'shadow', me); // the same value still counts
+    expect(eng.revision('noisy-rule')).toBe(start + 2);
+    fb.clearMode('noisy-rule', me);
+    fb.clearMode('noisy-rule', me); // nothing to clear: no change
+    expect(eng.revision('noisy-rule')).toBe(start + 3);
+    eng.upsertRule({ ...eng.getRule('noisy-rule')!, version: 2 });
+    expect(eng.revision('noisy-rule')).toBe(start + 4);
+  });
 });
 
 describe('exception scope', () => {

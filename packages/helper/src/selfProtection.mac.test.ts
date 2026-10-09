@@ -3,12 +3,24 @@
 // identity, so every spelling is refused. Runs in the macOS workflow.
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  chownSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { quarantine, restore, type QuarantineOptions } from './commands/quarantine.js';
+import { realSystem } from './system.js';
 
 const enabled = process.platform === 'darwin' && process.env.VIGIL_MAC_INTEGRATION === '1';
+const sys = realSystem();
 
 describe.skipIf(!enabled)('protection by identity on APFS', () => {
   let root: string;
@@ -24,26 +36,36 @@ describe.skipIf(!enabled)('protection by identity on APFS', () => {
   });
   afterAll(() => rmSync(root, { recursive: true, force: true }));
 
-  it('refuses another Unicode form and case of a protected folder', () => {
+  it('refuses another Unicode form and case of a protected folder', async () => {
     for (const spelling of [decomposed, composed.toUpperCase(), decomposed.toUpperCase()]) {
-      expect(() => quarantine(join(root, spelling, 'node'), 'a', opts), spelling).toThrow(
-        expect.objectContaining({ code: 'refused' }),
-      );
-      expect(() => quarantine(join(root, spelling), 'b', opts), spelling).toThrow(
-        expect.objectContaining({ code: 'refused' }),
-      );
+      await expect(
+        quarantine(sys, join(root, spelling, 'node'), 'a', opts),
+        spelling,
+      ).rejects.toMatchObject({ code: 'refused' });
+      await expect(
+        quarantine(sys, join(root, spelling), 'b', opts),
+        spelling,
+      ).rejects.toMatchObject({ code: 'refused' });
     }
     expect(readFileSync(join(root, composed, 'node'), 'utf8')).toBe('runtime');
   });
 
-  it('still quarantines and restores an ordinary file through the working-folder pin', () => {
-    const dir = join(root, 'Downloads');
-    mkdirSync(dir);
+  it('still quarantines and restores an ordinary file of a user’s, folder and all', async () => {
+    // The user who runs the tests (under sudo, the owner of the temporary folder).
+    const user = Number(process.env.SUDO_UID ?? statSync(tmpdir()).uid);
+    chmodSync(root, 0o755);
+    const downloads = join(root, 'Downloads');
+    const dir = join(downloads, 'stuff');
+    mkdirSync(dir, { recursive: true, mode: 0o750 });
+    chmodSync(dir, 0o750);
+    for (const d of [downloads, dir]) chownSync(d, user, 20);
     writeFileSync(join(dir, 'evil'), 'x', { mode: 0o755 });
-    const o: QuarantineOptions = { ...opts, pinning: 'cwd' };
-    const rec = quarantine(join(dir, 'evil'), 'c', o);
+    chownSync(join(dir, 'evil'), user, 20);
+    const rec = await quarantine(sys, join(dir, 'evil'), 'c', opts);
     rmSync(dir, { recursive: true });
-    restore(rec, o);
+    await restore(sys, rec, opts);
     expect(readFileSync(join(dir, 'evil'), 'utf8')).toBe('x');
+    expect(statSync(dir).mode & 0o777).toBe(0o750);
+    expect(statSync(dir).uid).toBe(user);
   });
 });

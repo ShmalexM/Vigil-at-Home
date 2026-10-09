@@ -1,5 +1,6 @@
 import type { HelperOutcome } from '../../shared/ipc';
 import type { Action, ActionRecord, Alert, SensorEvent, Severity } from '@vigil/core';
+import { provenanceLabel, type ResponseProvenance } from './decision';
 
 export const severityLabel: Record<Severity, string> = {
   critical: 'Critical',
@@ -91,11 +92,13 @@ function santaNoun(t: string): string {
 /** Past tense for the log. */
 export function describeRecord(r: ActionRecord): string {
   const what = describeAction(r.action);
+  // The same mark the popup shows, so a simulation never reads as done for real.
+  const mark = provenanceLabel(r)?.toLowerCase();
   switch (r.status) {
     case 'done':
-      return what;
+      return mark ? `${what} (${mark})` : what;
     case 'undone':
-      return `${what} (undone)`;
+      return `${what} (undone${mark ? `, ${mark}` : ''})`;
     case 'pending':
       return `${what}…`;
     case 'denied':
@@ -140,8 +143,41 @@ export function describeEvent(e: SensorEvent): string {
   }
 }
 
-export function headline(a: Alert): string {
-  if (a.containment === 'active') return 'Vigil blocked something';
+/**
+ * How much of a response was only simulated, for a chip or after an
+ * outcome; undefined when all of it was real or nothing went through.
+ */
+export function simulatedNote(response: ResponseProvenance | undefined): string | undefined {
+  switch (response) {
+    case 'simulated':
+      return 'simulated';
+    case 'mixed':
+      return 'partly simulated';
+    case 'unknown':
+      return 'may have been simulated';
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * `response`: what Vigil's actions on this alert really did (responseProvenance).
+ * Only an all-real response says "blocked"; one an older build recorded
+ * without saying is never claimed as real.
+ */
+export function headline(a: Alert, response: ResponseProvenance | undefined): string {
+  if (a.containment === 'active') {
+    switch (response) {
+      case 'real':
+        return 'Vigil blocked something';
+      case 'simulated':
+        return 'Vigil would have blocked this';
+      case 'mixed':
+        return 'Vigil blocked part of this; the rest was only simulated';
+      default:
+        return 'Vigil acted on this';
+    }
+  }
   if (a.containment === 'released') return 'Released by you';
   return 'Vigil needs you';
 }

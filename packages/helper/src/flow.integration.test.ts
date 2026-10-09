@@ -41,6 +41,7 @@ import { HelperClient } from './client.js';
 import { linuxPaths } from './config.js';
 import { runDaemon } from './daemon.js';
 import { removeLinuxOsquery } from './linuxOsquery.js';
+import { removePinStore } from './pinStore.js';
 import { LINUX_BINARIES, realSystem } from './system.js';
 import type { SensorEvent } from '@vigil/core';
 import type { HelperRan } from './fastpath.js';
@@ -329,7 +330,10 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
     // Only put back what this test's helper changed: if it never started,
     // another test may be using the same nft table.
     if (!stop) {
-      if (dir) rmSync(dir, { recursive: true, force: true });
+      if (dir) {
+        await removePinStore(sys, paths.appPinDir, paths.appPin);
+        rmSync(dir, { recursive: true, force: true });
+      }
       return;
     }
     await stop();
@@ -340,6 +344,8 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
       systemctl('disable', '--now', 'fapolicyd');
     }
     await removeLinuxOsquery(sys);
+    // The pin files are immutable; remove them the way uninstall does.
+    await removePinStore(sys, paths.appPinDir, paths.appPin);
     rmSync(dir, { recursive: true, force: true });
   }, 120_000);
 

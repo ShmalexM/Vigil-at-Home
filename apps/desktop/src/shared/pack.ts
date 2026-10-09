@@ -403,13 +403,31 @@ const PLAIN: Record<DogNoteKind, (n: number) => string> = {
 };
 const ORDER: DogNoteKind[] = ['chat', 'job', 'explain', 'label', 'review', 'judge'];
 
+const HELPER_LABEL: Record<HelperId, string> = {
+  explainer: 'The explainer',
+  labeller: 'The labeller',
+  'rule-reviewer': 'The rule reviewer',
+};
+
+/**
+ * Who a diary line is about, in the app's own words. Never the dog's name:
+ * the Lead dog can name or rename a dog, so a name is model text, and a fixed
+ * sentence must not read out whatever a model chose to put in it.
+ */
+export function dogLabel(d: Pick<Dog, 'role' | 'helper'>): string {
+  if (d.role === 'lead') return 'The Lead dog';
+  if (d.role === 'helper' && d.helper) return HELPER_LABEL[d.helper];
+  if (d.role === 'helper') return 'A helper';
+  return 'A pack dog';
+}
+
 /**
  * The pack diary: one plain line per dog that did something today, Lead dog
  * first, in the order the pack is listed. Fixed wording from counts, never
- * written by an AI.
+ * written by an AI, and naming each dog by its role (see dogLabel).
  */
 export function diaryLines(
-  dogs: readonly Pick<Dog, 'id' | 'name'>[],
+  dogs: readonly Pick<Dog, 'id' | 'role' | 'helper'>[],
   today: readonly DiaryTally[],
   voice: PackVoice = 'pack',
 ): { dog: string; text: string; failed: number }[] {
@@ -423,11 +441,37 @@ export function diaryLines(
       const t = mine.find((x) => x.kind === k);
       return t && t.n > t.failed ? [words[k](t.n - t.failed)] : [];
     });
+    const who = dogLabel(d);
     const text =
       did.length === 0
-        ? `${d.name} tried ${times(failed)} but couldn’t finish`
-        : `${d.name} ${did.length > 1 ? `${did.slice(0, -1).join(', ')} and ${did.at(-1)}` : did[0]}`;
+        ? `${who} tried ${times(failed)} but couldn’t finish`
+        : `${who} ${did.length > 1 ? `${did.slice(0, -1).join(', ')} and ${did.at(-1)}` : did[0]}`;
     return [{ dog: d.id, text, failed: did.length === 0 ? 0 : failed }];
+  });
+}
+
+/**
+ * One more diary line per pack dog whose latest run today found something of
+ * medium or high severity, opening its notebook. Fixed wording from the
+ * report's own counts; info and low findings add nothing, and nothing here is
+ * an alert or asks anything of the person.
+ */
+export function foundLines(
+  dogs: readonly Pick<Dog, 'id' | 'role' | 'helper' | 'lastReport'>[],
+  since: number,
+  voice: PackVoice = 'pack',
+): { dog: string; text: string; found: number }[] {
+  return dogs.flatMap((d) => {
+    const r = d.lastReport;
+    if (d.role !== 'pack' || !r?.ok || r.at < since) return [];
+    const found = r.findings.filter((f) => f.severity === 'medium' || f.severity === 'high').length;
+    if (found === 0) return [];
+    const things = found === 1 ? 'thing' : 'things';
+    const text =
+      voice === 'plain'
+        ? `${dogLabel(d)} found ${found} ${things} worth a look`
+        : `${dogLabel(d)} sniffed out ${found} ${things} worth a look`;
+    return [{ dog: d.id, text, found }];
   });
 }
 
@@ -472,12 +516,55 @@ export interface DogNote {
   thinking?: string;
   provider?: string;
   model?: string;
+  /** Each tool call the run made, for the Details disclosure. Absent on older notes. */
+  calls?: NoteToolCall[];
+  /** Tokens and cost of the attempt that answered, from the Usage page's ledger. */
+  usage?: NoteUsage;
 }
 
-export type DogNoteInput = Omit<DogNote, 'id' | 'at' | 'lookedAt' | 'reasons' | 'readReasons'> & {
-  lookedAt?: string[];
+/**
+ * One tool call a run made, as the person may read it later: the arguments
+ * and a short preview of the result, both redacted like an approval card.
+ */
+export interface NoteToolCall {
+  /** The tool's key, e.g. `vigil.search_events`. */
+  tool: string;
+  title: string;
+  /** The arguments as JSON, redacted and cut short. */
+  args: string;
+  /** ran: it answered. not-run: the gate, the person or the run's end stopped it. failed: it threw or said it couldn't. */
+  outcome: 'ran' | 'not-run' | 'failed';
+  /** Why it didn't run, or how it failed. */
+  reason?: string;
+  /** The start of what it returned, redacted. */
+  result?: string;
+}
 
+export interface NoteUsage {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  /** US dollars, an estimate; null where the provider gives no price. */
+  costUsd: number | null;
+}
+
+/**
+ * A tool call as a run hands it to the notebook: the arguments and result as
+ * they were, objects or text. The notebook redacts them before it serializes
+ * or cuts anything.
+ */
+export type NoteToolCallInput = Omit<NoteToolCall, 'args' | 'result'> & {
+  args: unknown;
+  result?: unknown;
+};
+
+export type DogNoteInput = Omit<
+  DogNote,
+  'id' | 'at' | 'lookedAt' | 'reasons' | 'readReasons' | 'calls'
+> & {
+  lookedAt?: string[];
   reasons?: string[];
+  calls?: NoteToolCallInput[];
   readReasons?: string[];
 };
 
@@ -511,4 +598,65 @@ export function pileWords(
   return voice === 'plain'
     ? `${pile.count} alerts from ${pile.who}: “${pile.title}”. They’re grouped so you can look at them and decide them together.`
     : `${pile.who} set off “${pile.title}” ${pile.count} times. I’ve stacked them into one pile, so you can look once and decide them all together.`;
+}
+
+// ---------------------------------------------------------------- schedules
+
+const HOUR = 60 * 60_000;
+/** How often Vigil looks for scheduled jobs that are due. */
+export const SCHEDULE_CHECK_MS = 5 * 60_000;
+/** Nightly jobs run between these local hours. */
+const NIGHT = [1, 5] as const;
+
+type Scheduled = Pick<Dog, 'role' | 'enabled' | 'schedule' | 'createdAt' | 'lastReport'>;
+
+/**
+ * Whether a scheduled pack dog's job is due at `at`, with `hour` the local
+ * hour. The one rule the scheduler uses, shared so a card can say when the
+ * next run is. A new dog's first night is its first nightly run, and a run
+ * that failed is tried again an hour later rather than a whole period on.
+ */
+export function jobDue(d: Scheduled, at: number, hour: number): boolean {
+  if (d.role !== 'pack' || !d.enabled || d.schedule === 'manual') return false;
+  const last = d.lastReport;
+  const night = hour >= NIGHT[0] && hour < NIGHT[1];
+  const since = at - (last?.at ?? d.createdAt);
+  return d.schedule === 'hourly' || (last && !last.ok && !last.retry)
+    ? since >= HOUR && (d.schedule !== 'nightly' || night)
+    : d.schedule === 'daily'
+      ? since >= 24 * HOUR
+      : night && (!last || since >= 20 * HOUR);
+}
+
+/**
+ * When the scheduler will next find the job due, stepping as it does, up to
+ * two days ahead. `at` itself when it's due now. A busy Mac or low battery
+ * can push the real run later.
+ */
+export function nextRunAt(
+  d: Scheduled,
+  at: number,
+  hourOf: (t: number) => number = (t) => new Date(t).getHours(),
+): number | undefined {
+  for (let t = at; t <= at + 48 * HOUR; t += SCHEDULE_CHECK_MS)
+    if (jobDue(d, t, hourOf(t))) return t;
+  return undefined;
+}
+
+/** "tonight ~1–5 am", "in 40 min", "today 14:05": fixed wording for a card. */
+export function nextRunWords(
+  next: number,
+  now: number,
+  nightly: boolean,
+  time: (t: number) => string = (t) =>
+    new Date(t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }),
+): string {
+  const window = `~${NIGHT[0]}–${NIGHT[1]} am`;
+  if (next - now < SCHEDULE_CHECK_MS) return nightly ? `tonight ${window}` : 'any minute';
+  if (nightly) return next - now < 24 * HOUR ? `tonight ${window}` : `tomorrow night ${window}`;
+  if (next - now < HOUR) return `in ${Math.round((next - now) / 60_000)} min`;
+  const day = (t: number) => new Date(t).toDateString();
+  if (day(next) === day(now)) return `today ${time(next)}`;
+  if (day(next) === day(now + 24 * HOUR)) return `tomorrow ${time(next)}`;
+  return new Date(next).toLocaleDateString(undefined, { weekday: 'short' }) + ` ${time(next)}`;
 }

@@ -1,5 +1,5 @@
 import { CircleCheck, Download, Power, Settings } from 'lucide-react';
-import { useLive, vigil } from '../api';
+import { useClock, useLive, vigil } from '../api';
 import {
   NeedsYouLine,
   needsRows,
@@ -13,8 +13,13 @@ import { Button, Chip, IconButton, LevelPill, SeverityMark } from '../components
 import { timeAgo } from '../format';
 import { isNoticed, needsDecision } from '../../../shared/attention';
 
+/** Rows the popover lists before handing over to the app. */
+export const POPOVER_ROWS = 5;
+
 /** The menu-bar popover: "it's working", then Needs you, then what Vigil only noticed. */
 export function Popover() {
+  // It's loaded once and kept, so "2 min ago" must move on while it waits.
+  useClock();
   const [status] = useLive(() => vigil.getStatus());
   const [alerts] = useLive(() => vigil.listAlerts('open'));
   const [updates] = useLive(() => vigil.getUpdates());
@@ -30,7 +35,16 @@ export function Popover() {
             <Shield height={20} />
             <span className="t-h3">Vigil at Home</span>
           </div>
-          {status && <LevelPill level={status.level} small />}
+          {status && (
+            <span
+              className="row"
+              style={{ gap: 6 }}
+              title="How the protection layers are running. Alerts never change this."
+            >
+              <span className="t-small muted">Protection</span>
+              <LevelPill level={status.level} small />
+            </span>
+          )}
         </div>
         {status && status.reasons.length === 0 && <WorkingHeadline needsYou={status.needsYou} />}
         {status && status.needsYou > 0 && <NeedsYouLine count={status.needsYou} />}
@@ -50,10 +64,10 @@ export function Popover() {
           <section className="col" style={{ gap: 6 }}>
             <div className="row spread">
               <span className="t-label">Needs you</span>
-              <span className="count hot">{needs.length}</span>
+              <span className="count hot">{status?.needsYou ?? needs.length}</span>
             </div>
             <div className="list">
-              {needs.map((r) => (
+              {needs.slice(0, POPOVER_ROWS).map((r) => (
                 <button key={r.id} type="button" className="list-row" onClick={() => open(r.id)}>
                   <div className="col grow" style={{ gap: 2 }}>
                     <span className="t-h3 ellipsis">{r.title}</span>
@@ -67,6 +81,15 @@ export function Popover() {
                 </button>
               ))}
             </div>
+            {needs.length > POPOVER_ROWS && (
+              <button
+                type="button"
+                className="btn sm ghost"
+                onClick={() => void vigil.openMain('alerts')}
+              >
+                See all {status?.needsYou ?? needs.length} in Vigil
+              </button>
+            )}
           </section>
         )}
 
@@ -79,7 +102,16 @@ export function Popover() {
           </div>
         )}
 
-        {status && <NoticedList alerts={noticed} view={status.alertView} open={open} />}
+        {status && (
+          <NoticedList
+            alerts={noticed}
+            total={status.noticed}
+            clearable={status.noticedClearable}
+            view={status.alertView}
+            open={open}
+            limit={5}
+          />
+        )}
       </div>
 
       <footer className="row">
