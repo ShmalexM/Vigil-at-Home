@@ -13,6 +13,7 @@ import {
 } from '@vigil/core';
 import {
   AgentRegistry,
+  BLOCKED_EXCLUSION,
   AgentTracker,
   DEFAULT_FEEDS,
   DetectionEngine,
@@ -256,9 +257,14 @@ export class Detector {
 
   /** approveProposal, with the helper's reason when it refused. */
   acceptProposal(id: string, mode?: RuleMode): Promise<ChangeResult<void>> {
-    return this.change(() => {
-      this.pipeline.approve(id, userOrigin('rules-screen'), mode ? { mode } : {});
-    });
+    return this.change(
+      () => {
+        this.pipeline.approve(id, userOrigin('rules-screen'), mode ? { mode } : {});
+      },
+      {},
+      // Again once the password is in: it must still be waiting and still pass.
+      () => this.pipeline.commitProblem(id),
+    );
   }
 
   rejectProposal(id: string, note?: string): void {
@@ -489,8 +495,18 @@ export class Detector {
    * password there; if the user cancels or the helper refuses, nothing
    * changes, so the app never runs a rule as off or excepted while the helper
    * still blocks with it. Changes go one at a time, in order.
+   *
+   * Once the helper says yes, every check runs again before anything is made
+   * (`recheck`, plus the ones every change gets): the threat lists may have
+   * changed while the password dialog was open. Only what the change itself
+   * touched is then made, so nothing else that happened meanwhile (a
+   * suggestion withdrawn, say) is undone.
    */
-  private change<T>(fn: () => T, opts: HelperSyncOptions = {}): Promise<ChangeResult<T>> {
+  private change<T>(
+    fn: () => T,
+    opts: HelperSyncOptions = {},
+    recheck?: () => string | undefined,
+  ): Promise<ChangeResult<T>> {
     const run = async (): Promise<ChangeResult<T>> => {
       const before = this.snapshot();
       // A change refused outright (a proposal that no longer passes its checks) throws here.
@@ -503,17 +519,34 @@ export class Detector {
       }
       const after = this.snapshot();
       const set = this.helperRules();
-      this.restore(before);
+      const hashes = namedHashes(before, after);
+      const blockedAtStart = new Set(hashes.filter((h) => this.pipeline.isBlockedHash(h)));
+      this.applyDelta(after, before);
       this.recount(false);
+      let outcome: HelperSyncOutcome | undefined;
       let reason: string | undefined;
-      let settled = false;
       const settle = (helper: HelperSyncOutcome) => {
-        if (settled) return;
-        settled = true;
-        // `unavailable` is applied as before: with the helper not installed or
-        // not connected there is no password to ask for, and the app is what
-        // enforces; the helper is sent the change when it connects (and asks then).
-        if (!notApplied(helper)) this.restore(after);
+        if (outcome) return;
+        outcome = helper;
+        if (notApplied(helper)) return;
+        const problem =
+          recheck?.() ??
+          this.commitConflict(before, after) ??
+          (hashes.some((h) => !blockedAtStart.has(h) && this.pipeline.isBlockedHash(h))
+            ? BLOCKED_EXCLUSION
+            : undefined);
+        if (problem) {
+          outcome = 'failed';
+          reason = problem;
+          // The helper may already have the change: send it the rules in force again.
+          void this.syncHelper?.();
+          return;
+        }
+        // `unavailable` is made too: with the helper not installed or not
+        // connected (known before anything is sent) there is no password to
+        // ask for and the app is what enforces; the helper gets the change
+        // when it connects, and asks then.
+        this.applyDelta(before, after);
         this.recount(false);
       };
       const helper = await this.syncHelper({
@@ -524,11 +557,24 @@ export class Detector {
         onError: (r) => (reason = r),
       });
       settle(helper);
-      return reason === undefined ? { value, helper } : { value, helper, reason };
+      const final = outcome ?? helper;
+      return reason === undefined ? { value, helper: final } : { value, helper: final, reason };
     };
     const done = this.changing.then(run);
     this.changing = done.catch(() => undefined);
     return done;
+  }
+
+  /** A suggestion the change touched that something else changed while it waited. */
+  private commitConflict(before: Snapshot, after: Snapshot): string | undefined {
+    const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+    for (const [id, p] of after.proposals) {
+      const was = before.proposals.get(id);
+      if (same(was, p)) continue;
+      if (!same(this.stores.proposals.get(id), was))
+        return 'The suggestion changed while waiting for your password.';
+    }
+    return undefined;
   }
 
   private snapshot(): Snapshot {
@@ -542,27 +588,36 @@ export class Detector {
     };
   }
 
-  private restore(s: Snapshot): void {
+  /** Make what changed from `from` to `to`, and only that. */
+  private applyDelta(from: Snapshot, to: Snapshot): void {
     const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
-    for (const r of this.engine.allRules()) if (!s.rules.has(r.id)) this.engine.removeRule(r.id);
-    for (const [id, r] of s.rules) if (!same(this.engine.getRule(id), r)) this.engine.upsertRule(r);
-    for (const [id, mode] of s.modes) {
+    const ids = <V>(a: Map<string, V>, b: Map<string, V>) => new Set([...a.keys(), ...b.keys()]);
+    for (const id of ids(from.rules, to.rules)) {
+      const r = to.rules.get(id);
+      if (same(from.rules.get(id), r)) continue;
+      if (r) this.engine.upsertRule(r);
+      else this.engine.removeRule(id);
+    }
+    for (const id of ids(from.modes, to.modes)) {
+      const mode = to.modes.get(id);
+      if (from.modes.get(id) === mode) continue;
       const st = this.stores.ruleState.get(id);
-      if (st?.mode === mode) continue;
       const { mode: _m, ...rest } = st ?? { ruleId: id, fired: 0 };
       this.stores.ruleState.put(mode === undefined ? rest : { ...rest, mode });
     }
     const ts = this.now();
-    const saved = new Map(this.stores.rules.list().map((r) => [r.id, r]));
-    for (const id of saved.keys()) if (!s.saved.has(id)) this.stores.rules.remove(id);
-    for (const [id, r] of s.saved) if (!same(saved.get(id), r)) this.stores.rules.save(r, ts);
-    const had = new Set(s.exceptions.map((e) => e.id));
-    for (const e of this.stores.exceptions.all())
-      if (!had.has(e.id)) this.stores.exceptions.remove(e.id);
-    const now = new Set(this.stores.exceptions.all().map((e) => e.id));
-    for (const e of s.exceptions) if (!now.has(e.id)) this.stores.exceptions.add(e);
-    for (const [, p] of s.proposals)
-      if (!same(this.stores.proposals.get(p.id), p)) this.stores.proposals.put(p);
+    for (const id of ids(from.saved, to.saved)) {
+      const r = to.saved.get(id);
+      if (same(from.saved.get(id), r)) continue;
+      if (r) this.stores.rules.save(r, ts);
+      else this.stores.rules.remove(id);
+    }
+    const had = new Map(from.exceptions.map((e) => [e.id, e]));
+    const has = new Map(to.exceptions.map((e) => [e.id, e]));
+    for (const id of had.keys()) if (!has.has(id)) this.stores.exceptions.remove(id);
+    for (const [id, e] of has) if (!had.has(id)) this.stores.exceptions.add(e);
+    for (const [id, p] of to.proposals)
+      if (!same(from.proposals.get(id), p)) this.stores.proposals.put(p);
   }
 
   /**
@@ -631,4 +686,32 @@ function appHistory(store: Store): EventHistory {
     // The app prunes its own events.
     prune: () => 0,
   };
+}
+
+/**
+ * The program hashes a change newly names in an exclusion or exception, so
+ * the change can be refused if one is blocked while it waits for the password.
+ */
+function namedHashes(before: Snapshot, after: Snapshot): string[] {
+  const out = new Set<string>();
+  const walk = (v: unknown): void => {
+    if (Array.isArray(v)) return v.forEach(walk);
+    if (!v || typeof v !== 'object') return;
+    const o = v as Record<string, unknown>;
+    if (o.field === 'process.sha256')
+      for (const x of Array.isArray(o.value) ? o.value : [o.value])
+        if (typeof x === 'string') out.add(x.toLowerCase());
+    Object.values(o).forEach(walk);
+  };
+  for (const [id, r] of after.rules) {
+    const old = new Set((before.rules.get(id)?.exclusions ?? []).map((x) => JSON.stringify(x)));
+    walk(r.exclusions.filter((x) => !old.has(JSON.stringify(x))));
+  }
+  const had = new Set(before.exceptions.map((e) => e.id));
+  for (const e of after.exceptions) {
+    if (had.has(e.id)) continue;
+    const h = (e.match as Record<string, unknown>)['process.sha256'];
+    if (typeof h === 'string') out.add(h.toLowerCase());
+  }
+  return [...out];
 }

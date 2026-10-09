@@ -1,7 +1,9 @@
 import type { RuleMode } from '@vigil/core';
 import {
+  aiMayNotChange,
   BLOCKED_EXCLUSION,
   exclusionFor,
+  type ProposalSubject,
   type Detection,
   type Proposal,
   type SubmitResult,
@@ -112,10 +114,26 @@ export class RuleSuggestions {
     ];
     const base = { kind, ruleId, ruleName: rule.name };
     const { pipeline } = this.detector;
+    // What an AI may touch at all: never an agent rule, a blocking rule or a blocklist rule.
+    const outOfScope = aiMayNotChange(rule, this.detector.engine.modeOf(rule));
+    if (outOfScope) return { ...base, status: 'failed', note: outOfScope };
+    // The alert's program goes with the draft, so it is checked against the
+    // blocklists until it is decided, however old the alert.
+    const proc = d && 'process' in d.event ? d.event.process : undefined;
+    const subject: ProposalSubject = {};
+    if (proc?.sha256) subject.sha256 = proc.sha256;
+    if (proc?.teamId) subject.teamId = proc.teamId;
+    if (proc?.signingId) subject.signingId = proc.signingId;
     // An alert about a program the user blocked, or a feed lists as bad, is never quieted.
-    const sha = d && 'process' in d.event ? d.event.process?.sha256 : undefined;
-    if (sha && pipeline.isBlockedHash(sha))
+    if (d && pipeline.isBlockedSubject(subject))
       return { ...base, status: 'failed', note: BLOCKED_EXCLUSION };
+    if (kind === 'exclude' && !subject.sha256)
+      return {
+        ...base,
+        status: 'failed',
+        note: 'The alert doesn’t say which program it was, so Vigil can’t check it against your blocked list',
+      };
+    const about = d ? subject : undefined;
     let res: SubmitResult;
     let change: string;
     if (kind === 'exclude') {
@@ -127,6 +145,7 @@ export class RuleSuggestions {
         { ruleId, addExclusion: c, rationale, evidence },
         by.provider,
         by.name,
+        about,
       );
     } else {
       change = `Move "${rule.name}" to Shadow: it keeps recording matches but stops alerting`;
@@ -134,6 +153,7 @@ export class RuleSuggestions {
         { ruleId, toMode: 'shadow', rationale, evidence },
         by.provider,
         by.name,
+        about,
       );
     }
     if (res.duplicateOf) return { ...base, change, status: 'already', proposalId: res.duplicateOf };

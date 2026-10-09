@@ -466,6 +466,42 @@ describe('blocking rules in the helper', () => {
     expect(fast.status().lists['known_bad_sha256']).toBe(RETIRED_TEST_MAX + 1);
   });
 
+  it('takes a sync and the lists it asked for together, or not at all', async () => {
+    const many = Array.from({ length: RETIRED_TEST_MAX + 1 }, (_, i) =>
+      i.toString(16).padStart(64, '0'),
+    );
+    const { sync, lists } = appSet({ known_bad_sha256: many });
+    approve = true;
+    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    const before = fast.status();
+    const [, ...rest] = sync.rules;
+    // Drops a rule (password given) and changes a list the helper will refuse.
+    const next = {
+      ...sync,
+      rules: rest,
+      lists: { ...sync.lists, known_bad_sha256: listDigest([BAD]) },
+    };
+    const out = await client.call<{ needLists: string[]; committed: boolean }>(next);
+    expect(out).toMatchObject({ needLists: ['known_bad_sha256'], committed: false });
+    // Nothing of it is in force while the list is on its way...
+    expect(fast.status()).toEqual(before);
+    await expect(sendLists(out.needLists, { known_bad_sha256: [BAD] })).rejects.toMatchObject({
+      code: 'refused',
+    });
+    // ...nor after the list is refused: the rule it dropped still blocks.
+    expect(fast.status()).toEqual(before);
+    expect(fast.rules().map((r) => r.id)).toEqual(sync.rules.map((r) => r.id));
+
+    // The same change with an acceptable list goes in whole.
+    const grown = [...many, BAD];
+    const ok = { ...next, lists: { ...sync.lists, known_bad_sha256: listDigest(grown) } };
+    await sendLists((await client.call<{ needLists: string[] }>(ok)).needLists, {
+      known_bad_sha256: grown,
+    });
+    expect(fast.status().rules).toBe(rest.length);
+    expect(fast.status().lists['known_bad_sha256']).toBe(grown.length);
+  });
+
   it('tells subscribers what it already did about each event, replays included', async () => {
     const got: { id: string; ran: HelperRan[] }[] = [];
     const ran: HelperRan[] = [

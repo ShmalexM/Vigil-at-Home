@@ -14,7 +14,7 @@ import {
   type RuleType,
   type SantaRule,
 } from '@vigil/sensors';
-import type { HelperAction, HelperCommand } from './protocol.js';
+import type { DetectionSync, HelperAction, HelperCommand } from './protocol.js';
 import { needsApproval } from './protocol.js';
 import { Journal, type JournalEntry } from './journal.js';
 import type { Approvals } from './approval.js';
@@ -367,19 +367,20 @@ export class Executor {
         } catch (err) {
           throw policyError(err);
         }
-        if (!this.d.preexec) return { ...synced, preexec: null };
-        const before = this.d.rules.rev;
-        const preexec = await this.d.preexec.apply(cmd.rules);
-        if (this.d.rules.rev !== before) await this.syncSanta();
-        return { ...synced, preexec };
+        // Santa's pre-launch rules follow the rules in force, so only once the sync is.
+        if (!this.d.preexec || !synced.committed) return { ...synced, preexec: null };
+        return { ...synced, preexec: await this.applyPreexec(cmd.rules) };
       }
       case 'detection.list.set': {
         if (!this.d.fastPath) throw new ActionError('failed', 'helper rules are not set up');
+        let put;
         try {
-          return this.d.fastPath.putList(cmd);
+          put = this.d.fastPath.putList(cmd);
         } catch (err) {
           throw policyError(err);
         }
+        if (this.d.preexec && put.committed) await this.applyPreexec(this.d.fastPath.rules());
+        return put;
       }
       case 'santa.profile':
         return { mobileconfig: santaProfile({ syncPort: this.d.syncPort }) };
@@ -387,6 +388,14 @@ export class Executor {
         // Handled by the server, which owns the connection.
         throw new ActionError('invalid', 'events.subscribe is handled by the connection');
     }
+  }
+
+  /** Hand Santa the pre-launch rules for these rules, and sync Santa if they changed. */
+  private async applyPreexec(rules: DetectionSync['rules']) {
+    const before = this.d.rules.rev;
+    const preexec = await this.d.preexec!.apply(rules);
+    if (this.d.rules.rev !== before) await this.syncSanta();
+    return preexec;
   }
 
   /**

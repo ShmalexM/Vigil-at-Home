@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { SensorEvent } from '@vigil/core';
-import { INDICATOR_RULE, type AnalyzeRunner } from '@vigil/detection';
+import { BLOCKING_RULE, INDICATOR_RULE, type AnalyzeRunner } from '@vigil/detection';
 import { afterAll, describe, expect, it } from 'vitest';
 import { Store } from './db/store.js';
 import { Detector } from './detection.js';
@@ -148,12 +148,13 @@ describe('AI rule suggestions in the app', () => {
 
   describe('drafted by the Lead dog in chat', () => {
     const scout = { provider: 'codex', name: 'Scout' };
-    async function withAlert(sha256?: string) {
+    async function withAlert(sha256: string | null = '5'.repeat(64), ago = 0) {
       const t = setup(answer);
       await t.detector.reviewRules({ force: true });
       await t.ui.accept(t.ui.view().pending[0]!.id);
       const e = connect('paste.ee');
       if (sha256 && 'process' in e && e.process) e.process.sha256 = sha256;
+      e.ts -= ago;
       await t.core.handleEvent(e);
       t.core.events.flush();
       const alert = t.store.listAlerts().find((a) => t.store.getAlertDetection(a.id));
@@ -295,7 +296,7 @@ describe('AI rule suggestions in the app', () => {
     });
   });
 
-  describe('weakening a blocking rule only the app runs', () => {
+  describe('what an AI may not touch, and the password for what the person changes', () => {
     const cleanups: (() => void)[] = [];
     afterAll(() => cleanups.forEach((f) => f()));
     const withHelper = (detector: Detector) => {
@@ -303,49 +304,24 @@ describe('AI rule suggestions in the app', () => {
       cleanups.push(h.done);
       return h;
     };
+    const scout = { provider: 'codex', name: 'Scout' };
 
-    it('asks for the password before Scout’s turn-down of a blocking first-seen rule goes live', async () => {
+    it('never drafts a change to a rule that is blocking; the person’s own change asks for the password', async () => {
       const { detector, ui } = setup(answer);
       const { asked, helper } = withHelper(detector);
       const mode = () => detector.rules().find((r) => r.rule.id === 'exec-from-shared-temp')!.mode;
       expect(await detector.setMode('exec-from-shared-temp', 'block')).toBe('applied');
-      expect(asked).toEqual([]);
-      // The helper never runs it: it needs the app's "first seen" baseline.
-      expect(detector.helperRules().rules.map((r) => r.id)).not.toContain('exec-from-shared-temp');
-
-      const d = ui.draft(
-        {
-          kind: 'turn-down',
-          ruleId: 'exec-from-shared-temp',
-          why: 'It keeps firing on my builds.',
-        },
-        { provider: 'codex', name: 'Scout' },
-      );
-      expect(d.status).toBe('waiting');
-
-      // Cancelled password: nothing changes and the suggestion still waits.
-      helper.approve = false;
-      expect(await ui.accept(d.proposalId!)).toBe('declined');
-      expect(asked.at(-1)).toEqual([
-        'stop blocking with “New program started from a temporary folder”',
-      ]);
-      expect(mode()).toBe('block');
-      expect(ui.view().pending.map((p) => p.id)).toEqual([d.proposalId]);
-
-      // The Rules page's own mode switch asks too.
-      expect(await detector.setMode('exec-from-shared-temp', 'alert')).toBe('declined');
-      expect(mode()).toBe('block');
-
-      helper.approve = true;
-      expect(await ui.accept(d.proposalId!)).toBe('applied');
-      expect(mode()).toBe('shadow');
-    });
-
-    it('asks before an exclusion is added to a blocking rule only the app runs', async () => {
-      const { detector, ui } = setup(answer);
-      const { asked, helper } = withHelper(detector);
-      expect(await detector.setMode('exec-from-shared-temp', 'block')).toBe('applied');
-      const res = detector.pipeline.submitTuning(
+      expect(
+        ui.draft(
+          {
+            kind: 'turn-down',
+            ruleId: 'exec-from-shared-temp',
+            why: 'It keeps firing on my builds.',
+          },
+          scout,
+        ),
+      ).toMatchObject({ status: 'failed', note: BLOCKING_RULE });
+      const tuned = detector.pipeline.submitTuning(
         {
           ruleId: 'exec-from-shared-temp',
           addExclusion: { field: 'process.sha256', op: 'eq', value: '3'.repeat(64) },
@@ -354,14 +330,119 @@ describe('AI rule suggestions in the app', () => {
         'codex',
         'Scout',
       );
-      expect(res.ok).toBe(true);
+      expect(tuned).toMatchObject({ ok: false, errors: [BLOCKING_RULE] });
+      expect(ui.view().pending).toHaveLength(0);
+
       helper.approve = false;
-      expect(await ui.accept(res.proposalId!)).toBe('declined');
+      expect(await detector.setMode('exec-from-shared-temp', 'shadow')).toBe('declined');
       expect(asked.at(-1)).toEqual([
-        'change what “New program started from a temporary folder” blocks',
+        'stop blocking with “New program started from a temporary folder”',
       ]);
-      expect(detector.engine.getRule('exec-from-shared-temp')!.exclusions).toHaveLength(0);
-      expect(ui.view().pending.map((p) => p.id)).toEqual([res.proposalId]);
+      expect(mode()).toBe('block');
+      helper.approve = true;
+      expect(await detector.setMode('exec-from-shared-temp', 'shadow')).toBe('applied');
+      expect(mode()).toBe('shadow');
+    });
+
+    it('refuses at accept a suggestion saved before the upgrade for a rule that now blocks', async () => {
+      const { detector, ui } = setup(answer);
+      withHelper(detector);
+      const base = detector.engine.getRule('exec-from-shared-temp')!;
+      const res = detector.pipeline.submitRetirement(
+        { ruleId: base.id, toMode: 'shadow', rationale: 'Noisy.', evidence: ['chat'] },
+        'codex',
+        'Scout',
+      );
+      expect(res.ok).toBe(true);
+      // The rule is set to Block after the suggestion was queued.
+      expect(await detector.setMode(base.id, 'block')).toBe('applied');
+      await expect(ui.accept(res.proposalId!)).rejects.toThrow(BLOCKING_RULE);
+      expect(detector.rules().find((r) => r.rule.id === base.id)!.mode).toBe('block');
+      expect(detector.pipeline.get(res.proposalId!)).toMatchObject({ status: 'withdrawn' });
+    });
+
+    it('re-checks once the password is in: a suggestion withdrawn while waiting is not made', async () => {
+      const bad = '6'.repeat(64);
+      const t = setup(answer);
+      await t.detector.reviewRules({ force: true });
+      await t.ui.accept(t.ui.view().pending[0]!.id);
+      const e = connect('paste.ee');
+      if ('process' in e && e.process) e.process.sha256 = bad;
+      await t.core.handleEvent(e);
+      t.core.events.flush();
+      const alertId = t.store.listAlerts().find((a) => t.store.getAlertDetection(a.id))!.id;
+      const d = t.ui.draft(
+        { kind: 'exclude', alertId, scope: 'this_path', why: 'That is my own updater.' },
+        scout,
+      );
+      expect(d.status).toBe('waiting');
+
+      // The helper holds the change while the password dialog is open.
+      let answer_: (v: 'applied') => void = () => {};
+      t.detector.syncHelper = (opts = {}) =>
+        new Promise((resolve) => {
+          answer_ = (v) => {
+            opts.settle?.(v);
+            resolve(v);
+          };
+        });
+      const accepting = t.ui.acceptWithReason(d.proposalId!);
+      await new Promise((r) => setTimeout(r, 0));
+      // Meanwhile a feed lists the program and the suggestion is withdrawn.
+      t.detector.engine.stores.lists.replace('known_bad_sha256', [bad], {
+        source: 'feeds',
+        updatedAt: 0,
+      });
+      expect(t.detector.pipeline.withdrawAffected()).toBe(1);
+      answer_('applied');
+      const out = await accepting;
+      expect(out.helper).toBe('failed');
+      expect(out.helperReason).toMatch(/blocked list|malicious/);
+      expect(t.detector.engine.getRule('ai-paste-site')!.exclusions).toHaveLength(0);
+      expect(t.detector.pipeline.get(d.proposalId!)).toMatchObject({ status: 'withdrawn' });
+      expect(t.ui.view().pending).toHaveLength(0);
+    });
+
+    it('carries an old alert’s program into the draft and withdraws it once that program is blocked', async () => {
+      const t = setup(answer);
+      await t.detector.reviewRules({ force: true });
+      await t.ui.accept(t.ui.view().pending[0]!.id);
+      const prog = '8'.repeat(64);
+      const e = connect('paste.ee');
+      if ('process' in e && e.process) e.process.sha256 = prog;
+      // 20 days ago: outside the 14 days the replay looks at.
+      e.ts -= 20 * 86_400_000;
+      await t.core.handleEvent(e);
+      t.core.events.flush();
+      const alertId = t.store.listAlerts().find((a) => t.store.getAlertDetection(a.id))!.id;
+      const d = t.ui.draft(
+        { kind: 'exclude', alertId, scope: 'this_path', why: 'That is my own updater.' },
+        scout,
+      );
+      expect(d.status).toBe('waiting');
+      const p = t.detector.pipeline.get(d.proposalId!)!;
+      expect(p.subject).toMatchObject({ sha256: prog });
+      expect(p.hides ?? []).not.toContain(prog);
+      t.detector.engine.stores.lists.add('user_blocked_sha256', prog, {
+        source: 'user',
+        updatedAt: 0,
+      });
+      expect(t.ui.view().pending).toHaveLength(0);
+      await expect(t.ui.accept(d.proposalId!)).rejects.toThrow(/withdrawn/);
+      expect(t.detector.engine.getRule('ai-paste-site')!.exclusions).toHaveLength(0);
+    });
+
+    it('does not draft an exclusion from an alert that doesn’t name its program', async () => {
+      const t = setup(answer);
+      await t.detector.reviewRules({ force: true });
+      await t.ui.accept(t.ui.view().pending[0]!.id);
+      await t.core.handleEvent(connect('paste.ee'));
+      t.core.events.flush();
+      const alertId = t.store.listAlerts().find((a) => t.store.getAlertDetection(a.id))!.id;
+      expect(
+        t.ui.draft({ kind: 'exclude', alertId, scope: 'this_path', why: 'Mine.' }, scout),
+      ).toMatchObject({ status: 'failed', note: expect.stringMatching(/which program/) });
+      expect(t.ui.view().pending).toHaveLength(0);
     });
   });
 });

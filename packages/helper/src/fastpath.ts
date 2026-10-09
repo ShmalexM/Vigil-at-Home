@@ -118,6 +118,12 @@ export class FastPath {
   private digests = new Map<string, string>();
   /** Lists arriving in parts: name → digest and the parts so far. */
   private incoming = new Map<string, { digest: string; parts: (string[] | undefined)[] }>();
+  /**
+   * A sync waiting for the lists it named: nothing of it is in force until
+   * every one has arrived and the whole of it passes, so a list refused at
+   * the end can never leave the sync's rules half applied.
+   */
+  private pending: { cmd: DetectionSync; need: Set<string>; lists: Saved['lists'] } | undefined;
   private readonly now: () => number;
 
   constructor(private readonly opts: FastPathOptions) {
@@ -186,20 +192,35 @@ export class FastPath {
   }
 
   /**
-   * Replace the rules. Returns the lists whose contents the app should send;
-   * until they arrive the current contents stay in force.
+   * Replace the rules. Returns the lists whose contents the app should send.
+   * With none to send the sync is in force at once (`committed`); otherwise
+   * it waits, with the current rules and lists still in force, until the last
+   * of those lists arrives, and then goes in whole or not at all.
    */
-  sync(cmd: DetectionSync): { needLists: string[]; rev: number } {
-    const lists: Saved['lists'] = {};
-    for (const name of Object.keys(cmd.lists)) {
-      const have = this.state.lists[name];
-      if (have) lists[name] = have;
-    }
-    const retired = this.retire(lists);
+  sync(cmd: DetectionSync): { needLists: string[]; rev: number; committed: boolean } {
+    this.pending = undefined;
     // Throws RuleCompileError before anything changes. That includes a regex or
     // glob that could take too long to match (regexProblem, globProblem): adding
     // rules needs no password, so the same checks as the app's keep one rule
     // from stalling every check here.
+    for (const r of cmd.rules) compileRule({ ...r, mode: 'block' });
+    const needLists = Object.keys(cmd.lists).filter((n) => this.digests.get(n) !== cmd.lists[n]);
+    if (needLists.length === 0) {
+      this.commit(cmd, {});
+      return { needLists, rev: this.state.rev, committed: true };
+    }
+    this.pending = { cmd, need: new Set(needLists), lists: {} };
+    return { needLists, rev: this.state.rev, committed: false };
+  }
+
+  /** Put a sync in force with the lists that arrived for it. Throws, changing nothing, if it can't. */
+  private commit(cmd: DetectionSync, arrived: Saved['lists']): void {
+    const lists: Saved['lists'] = {};
+    for (const name of Object.keys(cmd.lists)) {
+      const have = arrived[name] ?? this.state.lists[name];
+      if (have) lists[name] = have;
+    }
+    const retired = this.retire(lists);
     this.apply({
       rev: this.state.rev + 1,
       rules: cmd.rules,
@@ -210,14 +231,34 @@ export class FastPath {
       retired,
     });
     this.save();
-    return {
-      needLists: Object.keys(cmd.lists).filter((n) => this.digests.get(n) !== cmd.lists[n]),
-      rev: this.state.rev,
-    };
   }
 
-  /** One part of a list. The list changes only once every part is in and the digest matches. */
-  putList(cmd: DetectionListSet): { complete: boolean } {
+  /** The rules in force. */
+  rules(): DetectionRule[] {
+    return this.state.rules;
+  }
+
+  /**
+   * One part of a list. The list changes only once every part is in and the
+   * digest matches. A list a waiting sync asked for joins that sync, which
+   * goes in force (`committed`) with the last of them; if any of it fails,
+   * the sync is dropped and nothing changes.
+   */
+  putList(cmd: DetectionListSet): { complete: boolean; committed: boolean } {
+    const p = this.pending;
+    const forSync = p !== undefined && p.need.has(cmd.list) && p.cmd.lists[cmd.list] === cmd.digest;
+    try {
+      return this.takePart(cmd, forSync);
+    } catch (err) {
+      if (forSync) this.pending = undefined;
+      throw err;
+    }
+  }
+
+  private takePart(
+    cmd: DetectionListSet,
+    forSync: boolean,
+  ): { complete: boolean; committed: boolean } {
     let inc = this.incoming.get(cmd.list);
     if (!inc || inc.digest !== cmd.digest || inc.parts.length !== cmd.parts) {
       inc = { digest: cmd.digest, parts: Array.from({ length: cmd.parts }, () => undefined) };
@@ -227,14 +268,23 @@ export class FastPath {
     }
     if (cmd.part >= cmd.parts) throw new Error('part is past the last one');
     inc.parts[cmd.part] = cmd.entries;
-    if (inc.parts.some((p) => p === undefined)) return { complete: false };
+    if (inc.parts.some((p) => p === undefined)) return { complete: false, committed: false };
     this.incoming.delete(cmd.list);
     const entries = inc.parts.flat() as string[];
     if (listDigest(entries) !== cmd.digest) throw new Error(`list ${cmd.list} arrived damaged`);
+    const p = this.pending;
+    if (forSync && p) {
+      p.lists[cmd.list] = entries;
+      p.need.delete(cmd.list);
+      if (p.need.size > 0) return { complete: true, committed: false };
+      this.pending = undefined;
+      this.commit(p.cmd, p.lists);
+      return { complete: true, committed: true };
+    }
     const lists = { ...this.state.lists, [cmd.list]: entries };
     this.apply({ ...this.state, rev: this.state.rev + 1, lists, retired: this.retire(lists) });
     this.save();
-    return { complete: true };
+    return { complete: true, committed: true };
   }
 
   status(): { rev: number; rules: number; lists: Record<string, number>; retired: number } {

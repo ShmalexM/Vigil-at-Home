@@ -2,7 +2,14 @@ import { PreflightRequest } from '@vigil/core';
 import { describe, expect, it } from 'vitest';
 import { conditionUsesAgentFields, exclusionHidesAgent, isAgentField } from '../agents/fields.js';
 import { toolRequestEvent } from '../agents/preflight.js';
-import { INDICATOR_RULE, isIndicatorRule } from '../proposals/pipeline.js';
+import {
+  aiMayNotChange,
+  BLOCKING_RULE,
+  INDICATOR_EXCLUSION,
+  INDICATOR_RULE,
+  isIndicatorRule,
+  USER_TUNED_ONLY,
+} from '../proposals/pipeline.js';
 import { ruleLanguageGuide } from '../proposals/tools.js';
 import { replayRule } from '../proposals/replay.js';
 import { MemoryExceptionStore } from '../state/stores.js';
@@ -319,10 +326,10 @@ describe('AI tuning proposals', () => {
 
   it('a waiting turn-down to one mode does not swallow a turn-down to another', () => {
     const { pipeline, engine } = twoWeeks();
-    engine.upsertRule({ ...(baseRule as object), mode: 'block' } as never);
+    engine.upsertRule(baseRule);
     const vig = pipeline.suggestDemotion({
       ruleId: 'unsigned-net-alert',
-      to: 'alert',
+      to: 'disabled',
       message: 'You keep marking these safe.',
     })!;
     expect(vig.ok).toBe(true);
@@ -638,6 +645,126 @@ describe('AI proposals about blocked-indicator rules', () => {
     expect(() => pipeline.approve('old-1', userOrigin('rules-screen'))).toThrow(INDICATOR_RULE);
     expect(engine.modeOf(base)).toBe('block');
     expect(pipeline.get('old-1')).toMatchObject({ status: 'withdrawn' });
+  });
+});
+
+describe('the one check on what an AI may change', () => {
+  const retire = (ruleId: string) => ({
+    ruleId,
+    toMode: 'shadow',
+    rationale: 'Noisy.',
+    evidence: ['Drafted by Scout in chat'],
+  });
+  const exclude = (ruleId: string) => ({
+    ruleId,
+    addExclusion: { field: 'process.sha256', op: 'eq', value: '1'.repeat(64) },
+    rationale: 'This one program is fine.',
+  });
+
+  it('finds a blocklist lookup inside an exclusion, at any depth', () => {
+    const { pipeline, engine } = twoWeeks();
+    engine.upsertRule(
+      testRule({
+        id: 'curl-ran',
+        condition: { field: 'process.name', op: 'eq', value: 'curl' },
+        exclusions: [
+          {
+            all: [
+              { field: 'process.name', op: 'eq', value: 'curl' },
+              { not: { inList: { list: 'known_bad_sha256', field: 'process.sha256' } } },
+            ],
+          },
+        ],
+      }),
+    );
+    const rule = engine.getRule('curl-ran')!;
+    expect(isIndicatorRule(rule)).toBe(true);
+    expect(aiMayNotChange(rule, 'alert')).toBe(INDICATOR_RULE);
+    expect(pipeline.submitRetirement(retire('curl-ran'), 'claude', 'Scout').errors).toEqual([
+      INDICATOR_RULE,
+    ]);
+    expect(pipeline.submitTuning(exclude('curl-ran'), 'claude').errors).toEqual([INDICATOR_RULE]);
+    // Nor may an AI add such a lookup as an exclusion, to a rule or a new one.
+    engine.upsertRule(
+      testRule({ id: 'plain', condition: { field: 'process.name', op: 'eq', value: 'wget' } }),
+    );
+    const sneaky = {
+      ruleId: 'plain',
+      addExclusion: {
+        all: [
+          { field: 'process.name', op: 'eq', value: 'wget' },
+          { not: { inList: { list: 'user_blocked_sha256', field: 'process.sha256' } } },
+        ],
+      },
+      rationale: 'Only the bad ones matter.',
+    };
+    expect(pipeline.submitTuning(sneaky, 'claude').errors).toEqual([INDICATOR_EXCLUSION]);
+    const rule2 = {
+      ...pasteRule,
+      id: 'paste-x',
+      exclusions: [{ inList: { list: 'known_bad_domains', field: 'remoteHost' } }],
+    };
+    expect(pipeline.submitRule({ rule: rule2, rationale: why }, 'claude').errors).toEqual([
+      INDICATOR_EXCLUSION,
+    ]);
+  });
+
+  it('never lets an AI change a rule that is blocking now', () => {
+    const { pipeline, engine } = twoWeeks();
+    engine._setMode('exec-from-shared-temp', 'block');
+    expect(
+      pipeline.submitRetirement(retire('exec-from-shared-temp'), 'codex', 'Scout'),
+    ).toMatchObject({ ok: false, final: true, errors: [BLOCKING_RULE] });
+    expect(pipeline.submitTuning(exclude('exec-from-shared-temp'), 'claude').errors).toEqual([
+      BLOCKING_RULE,
+    ]);
+  });
+
+  it('refuses at accept an agent-sequence turn-down queued before the guard knew sequences', () => {
+    const { pipeline, engine } = twoWeeks();
+    engine.upsertRule(
+      testRule({
+        id: 'seq-agent',
+        condition: { field: 'process.name', op: 'eq', value: 'curl' },
+        sequence: {
+          steps: [
+            {
+              eventKinds: ['process.exec'],
+              condition: { field: 'process.agent.id', op: 'eq', value: 'claude-code' },
+            },
+          ],
+          key: ['process.pid'],
+          windowSec: 60,
+        },
+      }),
+    );
+    const base = engine.getRule('seq-agent')!;
+    const old = (id: string) => ({
+      id,
+      kind: 'retire' as const,
+      createdAt: NOW - HOUR,
+      provider: 'claude',
+      by: 'Scout',
+      rationale: 'Quiet.',
+      evidence: [],
+      rule: base,
+      baseRuleId: base.id,
+      baseRuleVersion: base.version,
+      retireTo: 'shadow' as const,
+      status: 'awaiting_review' as const,
+      lint: { errors: [], warnings: [] },
+    });
+    const store = (pipeline as unknown as { store: { put(p: unknown): void } }).store;
+    store.put(old('old-seq-1'));
+    expect(() => pipeline.approve('old-seq-1', userOrigin('rules-screen'))).toThrow(
+      USER_TUNED_ONLY,
+    );
+    expect(engine.modeOf(base)).toBe('alert');
+    store.put(old('old-seq-2'));
+    expect(pipeline.list().find((p) => p.id === 'old-seq-2')).toMatchObject({
+      status: 'withdrawn',
+    });
+    expect(pipeline.commitProblem('old-seq-2')).toBe(USER_TUNED_ONLY);
   });
 });
 

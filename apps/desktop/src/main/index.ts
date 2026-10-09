@@ -2,8 +2,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { app, dialog, Notification, powerMonitor, safeStorage, shell } from 'electron';
-import { listDigest } from '@vigil/detection/fastpath';
-import { HelperCallError } from '@vigil/helper/client';
 import { z } from 'zod';
 import type { HelperInstallResult } from '../shared/ipc.js';
 import { AgentService } from './agents/service.js';
@@ -11,12 +9,7 @@ import { AiBridge } from './ai.js';
 import { Store } from './db/store.js';
 import { demoInstalled, seedAgentsDemo, seedDemo, startDemoFeed } from './demo.js';
 import { seedUsageDemo } from './usage-demo.js';
-import {
-  Detector,
-  type HelperSync,
-  type HelperSyncOptions,
-  type HelperSyncOutcome,
-} from './detection.js';
+import { Detector } from './detection.js';
 import {
   helperBundleDir,
   helperInstallCommand,
@@ -24,6 +17,7 @@ import {
   runHelperScript,
 } from './helper-install.js';
 import { HelperLink } from './helper.js';
+import { helperRulesSync } from './helper-sync.js';
 import { registerIpc } from './ipc.js';
 import { systemProbe } from './onboarding/checks.js';
 import { demoProbe } from './onboarding/demo.js';
@@ -371,65 +365,14 @@ function start(): void {
   // Sensor events arrive through the helper, which reads Santa's and osquery's logs as root.
   helper.on('event', (e) => void core.handleEvent(e));
   const checkHealth = () => reportHealth(core.sensors, probe);
-  // Re-sent on every connection and whenever the rules, exceptions or lists change.
-  let helperRulesSent: string | undefined;
-  // A set the user declined to approve (a loosening needs their password). Not
-  // asked again until the rules change, so the health timer never re-prompts.
-  let helperRulesDeclined: string | undefined;
-  // The helper runs the blocking rules it can on its own, so blocks happen
-  // even while the app is closed, and hands Santa the pre-launch ones.
-  let helperRulesSync: Promise<unknown> = Promise.resolve();
-  // What the helper client says when the password was cancelled or a held change dropped.
-  const PASSWORD_REFUSALS = new Set(['not approved', 'approval was not accepted', 'not sent']);
-  const syncHelperRules: HelperSync = (opts = {}) => {
-    // `settle` runs inside the queue, so a user change lands before the next sync reads the rules.
-    const next = helperRulesSync.then(async () => {
-      const out = await sendHelperRules(opts);
-      opts.settle?.(out);
-      return out;
-    });
-    helperRulesSync = next;
-    return next;
-  };
-  const sendHelperRules = async (opts: HelperSyncOptions): Promise<HelperSyncOutcome> => {
-    if (!core.detector) return 'unavailable';
-    const set = opts.set ?? core.detector.helperRules();
-    const lists = Object.entries(set.lists).map(([l, entries]) => [l, listDigest(entries)]);
-    const key = JSON.stringify({ ...set, lists });
-    if (key === helperRulesSent) return 'applied';
-    if (key === helperRulesDeclined && !opts.byUser) return 'declined';
-    try {
-      const how = opts.hold ? { hold: true, ...(opts.onHeld ? { onHeld: opts.onHeld } : {}) } : {};
-      if (!(await helper.syncRules(set, how))) return 'unavailable';
-      helperRulesSent = key;
-      return 'applied';
-    } catch (err) {
-      if (
-        err instanceof HelperCallError &&
-        err.code === 'refused' &&
-        PASSWORD_REFUSALS.has(err.message)
-      ) {
-        helperRulesDeclined = key;
-        return 'declined';
-      }
-      // The helper looked at the rules and turned them down (one doesn't
-      // compile, or a list would drop too much): the change is not made.
-      if (err instanceof HelperCallError && (err.code === 'refused' || err.code === 'invalid')) {
-        helperRulesDeclined = key;
-        opts.onError?.(err.message);
-        return 'failed';
-      }
-      console.warn('[helper rules] could not update the helper:', err);
-      return 'unavailable';
-    }
-  };
+  const helperRules = helperRulesSync(helper, () => core.detector?.helperRules());
+  const syncHelperRules = helperRules.sync;
   if (core.detector) core.detector.syncHelper = syncHelperRules;
   helper.on('state', (state) => {
     void checkHealth();
     if (state === 'connected') {
       void saveSantaProfile();
-      helperRulesSent = undefined;
-      helperRulesDeclined = undefined;
+      helperRules.reset();
       void syncHelperRules();
     }
   });
