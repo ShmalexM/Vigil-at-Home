@@ -389,6 +389,40 @@ describe("the shared redaction's secret scan in copied evidence", () => {
     });
   });
 
+  it('reads percent-encoded names in any string', () => {
+    expect(command('curl https://example.test/?%74%6f%6b%65%6e=FAKEFAKE01')).toBe(WITHHELD);
+    expect(command('curl https://example.test/?a=b&%74%6f%6b%65%6e=FAKEFAKE01&x=$y')).toBe(
+      WITHHELD,
+    );
+    expect(command('open https://example.com/a%20b?page=2')).toBe(
+      'open https://example.com/a%20b?page=2',
+    );
+  });
+
+  it("keeps labels that only look like a tool's flag, and rule titles", () => {
+    for (const label of [
+      'com.example.library-prefs',
+      'api-prod.rarible.example',
+      'mysql-prod.cnf',
+      'com.mariadb.mariadb-pkg',
+      'homebrew.mxcl.postgresql@14',
+    ])
+      expect(redactEvidence({ subject: { label } }, names), label).toEqual({ subject: { label } });
+    // A withheld command doesn't take labels and titles that merely share a word with it.
+    const out = redactEvidence(
+      {
+        alert: {
+          title: 'Download via curl piped to shell',
+          subject: { label: 'null.example.com' },
+        },
+        events: [{ command: 'curl -u me:FAKEFAKE0001 https://x.test >/dev/null' }],
+      },
+      names,
+    ) as { alert: { title: string; subject: { label: string } } };
+    expect(out.alert.title).toBe('Download via curl piped to shell');
+    expect(out.alert.subject.label).toBe('null.example.com');
+  });
+
   // The shared redaction doesn't scan JSON object keys yet; Security review is
   // fixing that in @vigil/ai/redact. Drop `.fails` once it is on main.
   it.fails('withholds a note whose JSON keys hold a secret, encoded once or twice', () => {

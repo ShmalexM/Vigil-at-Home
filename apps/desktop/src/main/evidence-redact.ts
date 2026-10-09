@@ -22,7 +22,7 @@ import {
  *
  * This is a best-effort safety net, not a guarantee. A secret written so no
  * pattern can see it gets through: split by quotes (`PGPASS""WORD=…`),
- * percent-encoded (`%74%6f%6b%65%6e=`), or decoded at run time
+ * encoded twice, or decoded at run time
  * (`$(… | base64 -d)`). The app asks the user to review the copy before
  * sharing it.
  */
@@ -44,9 +44,10 @@ export const WITHHELD = '[withheld: may contain a secret]';
  * are not scanned (a rule titled "Credentials file read" stays readable) and
  * are withheld only when they repeat a withheld command (see
  * `redactEvidence`). Subject labels are names that whoever made the thing
- * chose (a file's name, a launchd label), so they are scanned like any other
- * string, and withheld as well when they repeat a withheld command or the
- * last part of a withheld path.
+ * chose (a file's name, a launchd label), so they are scanned for secrets by
+ * name, shape and the shared redaction (not the tools' command-line flag
+ * rules), and withheld as well when they repeat a withheld command or name a
+ * withheld path.
  */
 const COMMAND_LISTS = new Set(['args', 'programArgs']);
 const URL_FIELDS = new Set(['url', 'originUrl']);
@@ -101,15 +102,37 @@ function sharedFindsSecret(text: string): boolean {
   );
 }
 
+/** The text with `%xx` escapes decoded, so `%74oken=` reads as `token=`. */
+function percentDecoded(text: string): string {
+  return text.replace(/%([0-9a-f]{2})/gi, (_, hex: string) =>
+    String.fromCharCode(parseInt(hex, 16)),
+  );
+}
+
+/** Whether text holds a secret by the name or shape hints, or the shared redaction. */
+function hintsOrShared(text: string): boolean {
+  const decoded = percentDecoded(text);
+  if (SECRET_HINTS.some((p) => p.test(text) || (decoded !== text && p.test(decoded)))) return true;
+  return sharedFindsSecret(text);
+}
+
+/**
+ * Whether a label (a file's name, a launchd label, a host) might hold a
+ * secret. The tools' own flag rules below are for command lines and would
+ * take `com.example.library-prefs` for `rar -p…`, so they don't apply.
+ */
+function labelHoldsSecret(text: string): boolean {
+  return hintsOrShared(text);
+}
+
 /** Whether a command line might hold a secret, by this file's scan or the shared redaction's. */
 function mightHoldSecret(text: string): boolean {
-  if (SECRET_HINTS.some((p) => p.test(text))) return true;
   if (/mysql|mariadb/i.test(text) && /-p/i.test(text)) return true;
   if (/redis-cli/i.test(text) && /-a|\bauth\b/i.test(text)) return true;
   if (/curl/i.test(text) && /\s-[a-z]*[uK]|--user(?![-\w])|--config/.test(text)) return true;
   if (/unzip/i.test(text) && /-P/.test(text)) return true;
   if (/7z|7za|rar/i.test(text) && /-p\S/.test(text)) return true;
-  return sharedFindsSecret(text);
+  return hintsOrShared(text);
 }
 
 function escapeRegExp(text: string): string {
@@ -160,6 +183,11 @@ type Withheld = string[];
 function walk(value: unknown, names: EvidenceNames, withheld: Withheld, key?: string): unknown {
   if (typeof value === 'string') {
     if (key !== undefined && FIXED_TEXT.has(key)) return redactNames(value, names);
+    if (key === 'label') {
+      if (!labelHoldsSecret(value)) return redactNames(value, names);
+      withheld.push(value);
+      return WITHHELD;
+    }
     const out =
       key !== undefined && URL_FIELDS.has(key)
         ? urlString(value, names)
@@ -183,16 +211,21 @@ function walk(value: unknown, names: EvidenceNames, withheld: Withheld, key?: st
   return value;
 }
 
-/**
- * Whether a line of alert text repeats something withheld: a whole command,
- * one of its args, or the last part of a withheld path (a file's label is
- * its name).
- */
+/** Whether a line of alert text repeats something withheld: a whole command, or one of its args. */
 function carries(text: unknown, withheld: Withheld): boolean {
-  if (typeof text !== 'string') return false;
+  return typeof text === 'string' && withheld.some((w) => w.length >= 4 && text.includes(w));
+}
+
+/**
+ * Whether a label names a withheld path: it is the path's last part, or ends
+ * with it (a file's label is its name).
+ */
+function namesWithheldPath(label: unknown, withheld: Withheld): boolean {
+  if (typeof label !== 'string') return false;
   return withheld.some((w) => {
+    if (!/^(?:~|\.{0,2})\/\S*$/.test(w)) return false;
     const last = w.slice(w.lastIndexOf('/') + 1);
-    return (w.length >= 4 && text.includes(w)) || (last.length >= 4 && text.includes(last));
+    return last !== '' && (label === last || label.endsWith(`/${last}`));
   });
 }
 
@@ -260,6 +293,7 @@ function withholdRepeats(value: unknown, out: unknown, withheld: Withheld): void
   } else if (isRecord(value) && isRecord(out)) {
     for (const [k, v] of Object.entries(value)) {
       if (REPEATS.has(k) && carries(v, withheld)) out[k] = WITHHELD;
+      else if (k === 'label' && namesWithheldPath(v, withheld)) out[k] = WITHHELD;
       else withholdRepeats(v, out[k], withheld);
     }
   }
