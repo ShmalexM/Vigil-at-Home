@@ -25,6 +25,7 @@ import { Button, Card, Chip, Segmented, StatusMark } from '../components/ui';
 import { realProcess } from '../evidence';
 import { actorLabel, clock, describeAction, describeEvent, timeAgo, timeOfDay } from '../format';
 import { matchText } from '../rule-modes';
+import { actionErrorText, sameAlert } from '../decision';
 import { parseActivityParam, VIGIL_CONNECTOR, VIGIL_SELF } from './agents-format';
 import { PageHead } from './AppShell';
 import { onRovingKeyDown } from '../components/roving';
@@ -591,7 +592,9 @@ function ActionLog() {
             <span className="ellipsis">{describeAction(r.action)}</span>
             <span className="t-small ellipsis">
               {r.reason}
-              {r.result?.error ? ` · ${r.result.error}` : ''}
+              {actionErrorText(r, sameAlert(actions ?? [], r))
+                ? ` · ${actionErrorText(r, sameAlert(actions ?? [], r))}`
+                : ''}
             </span>
           </div>
           <Chip tone={r.actor === 'user' ? 'accent' : r.actor === 'ai' ? 'ai' : undefined}>

@@ -195,7 +195,7 @@ describe('who acts on a path', () => {
       chmodSync(shared, 0o777);
       writeFileSync(join(shared, 'rootfile'), '');
       await expect(actorFor(sys, join(shared, 'rootfile'))).rejects.toMatchObject({
-        code: 'refused',
+        code: 'installer-owned',
       });
     },
   );

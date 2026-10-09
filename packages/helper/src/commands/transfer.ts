@@ -145,7 +145,7 @@ export async function actorFor(sys: System, path: string): Promise<Actor> {
   if (uid === 0) {
     if (!item || item.uid === 0)
       throw new ActionError(
-        'refused',
+        'installer-owned',
         `${path} belongs to root in a folder others can change; Vigil's helper does not move it`,
       );
     uid = item.uid;

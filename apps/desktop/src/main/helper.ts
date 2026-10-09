@@ -163,6 +163,13 @@ export class HelperLink
       if (!(err instanceof HelperCallError) || /connection closed/.test(err.message)) {
         this.dropped(client);
       }
+      if (err instanceof HelperCallError && err.code === 'installer-owned') {
+        return {
+          at: Date.now(),
+          error: 'Not done: it belongs to an installer or the system',
+          errorCode: 'installer-owned',
+        };
+      }
       const error =
         err instanceof HelperCallError && err.code === 'refused'
           ? `Not done: ${err.message}`

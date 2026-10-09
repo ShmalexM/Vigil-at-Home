@@ -154,7 +154,12 @@ export interface HelperRequest {
   approval?: string;
 }
 
-export type ErrorCode = 'invalid' | 'refused' | 'failed' | 'not_found';
+/**
+ * `installer-owned`: a refusal to move an item root owns in a folder others
+ * can write to, like an app a package installed in /Applications
+ * (commands/transfer.ts). The app words it for the user.
+ */
+export type ErrorCode = 'invalid' | 'refused' | 'failed' | 'not_found' | 'installer-owned';
 
 export type HelperResponse =
   | { id: string; ok: true; result: unknown }

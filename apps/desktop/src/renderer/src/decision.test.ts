@@ -1,6 +1,15 @@
 import type { Action, ActionProposal, ActionRecord } from '@vigil/core';
 import { describe, expect, it } from 'vitest';
-import { activeContainment, containLabel, keepLabel, releaseLabel, releaseStep } from './decision';
+import {
+  actionErrorText,
+  activeContainment,
+  containLabel,
+  installerOwnedNote,
+  keepLabel,
+  releaseLabel,
+  releaseStep,
+  sameAlert,
+} from './decision';
 
 let n = 0;
 const rec = (action: Action, over: Partial<ActionRecord> = {}): ActionRecord => ({
@@ -57,5 +66,72 @@ describe('decision wording', () => {
     expect(containLabel([prop(suspend)])).toBe('Pause app');
     expect(containLabel([prop(block)])).toBe('Block connection');
     expect(containLabel([prop(suspend), prop(block)])).toBe('Do all 2');
+  });
+});
+
+describe('a quarantine an installer’s ownership stopped', () => {
+  const app = '/Applications/Tool.app/Contents/MacOS/Tool';
+  const refused = (path: string) =>
+    rec(
+      { kind: 'file.quarantine', path },
+      {
+        status: 'failed',
+        alertId: 'al1',
+        result: { at: 1, error: 'Not done: x', errorCode: 'installer-owned' },
+      },
+    );
+  const santaBlock = (over: Partial<ActionRecord> = {}) =>
+    rec(
+      { kind: 'santa.rule.set', ruleType: 'binary', identifier: 'a'.repeat(64), policy: 'block' },
+      { alertId: 'al1', ...over },
+    );
+
+  it('says the app is blocked only when this alert blocked it', () => {
+    const q = refused(app);
+    expect(installerOwnedNote(q, [q, santaBlock()])).toBe(
+      'Vigil blocked this app from running but can’t move apps an installer put in Applications. Drag it to the Trash to remove it.',
+    );
+    // No block, a failed one, or one undone since: no claim.
+    for (const others of [
+      [],
+      [santaBlock({ status: 'failed' })],
+      [santaBlock({ status: 'undone' })],
+    ])
+      expect(installerOwnedNote(q, [q, ...others])).toBe(
+        'Vigil can’t move apps an installer put in Applications. Drag it to the Trash to remove it.',
+      );
+    expect(
+      installerOwnedNote(q, [
+        q,
+        santaBlock({
+          action: {
+            kind: 'santa.rule.set',
+            ruleType: 'binary',
+            identifier: 'b'.repeat(64),
+            policy: 'allow',
+          },
+        }),
+      ]),
+    ).not.toMatch(/blocked/);
+  });
+
+  it('uses the generic line for something that is not an app', () => {
+    const q = refused('/tmp/shared/helper.sh');
+    expect(installerOwnedNote(q, [q, santaBlock()])).toBe(
+      'Vigil can’t move this item because it belongs to the system. Remove it yourself if you don’t need it.',
+    );
+  });
+
+  it('leaves other failures as they were', () => {
+    const plain = rec(
+      { kind: 'file.quarantine', path: '/tmp/x' },
+      { status: 'failed', result: { at: 1, error: 'boom' } },
+    );
+    expect(installerOwnedNote(plain, [plain])).toBeUndefined();
+    expect(actionErrorText(plain, [plain])).toBe('boom');
+    const q = refused(app);
+    const elsewhere = santaBlock({ alertId: 'other' });
+    expect(sameAlert([q, elsewhere], q)).toEqual([q]);
+    expect(actionErrorText(q, sameAlert([q, elsewhere], q))).not.toMatch(/blocked/);
   });
 });

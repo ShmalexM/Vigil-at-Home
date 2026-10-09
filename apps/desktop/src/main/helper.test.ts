@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SensorEvent } from '@vigil/core';
 import type { HelperRan } from '@vigil/helper';
-import type { HelperClient } from '@vigil/helper/client';
+import { HelperCallError, type HelperClient } from '@vigil/helper/client';
 import { describe, expect, it } from 'vitest';
 import { HelperLink } from './helper.js';
 
@@ -91,6 +91,26 @@ describe('HelperLink', () => {
     };
     await link.reconnect();
     expect(subscribed).toEqual(['e1']);
+    link.stop();
+  });
+
+  it('marks a quarantine refused for an installer-owned item, for the app to word', async () => {
+    const fake = fakeClient((cmd) => {
+      if (cmd.kind === 'file.quarantine')
+        throw new HelperCallError('belongs to root', 'installer-owned');
+      throw new HelperCallError('no', 'refused');
+    });
+    const link = new HelperLink(socket(), async () => fake.client);
+    await link.tryConnect();
+    const r = await link.execute({ kind: 'file.quarantine', path: '/Applications/X.app' });
+    expect(r).toMatchObject({
+      errorCode: 'installer-owned',
+      error: expect.stringMatching(/^Not done/),
+    });
+    // Other refusals carry no code.
+    const other = await link.execute({ kind: 'process.suspend', pid: 5 });
+    expect(other.errorCode).toBeUndefined();
+    expect(other.error).toBe('Not done: no');
     link.stop();
   });
 
