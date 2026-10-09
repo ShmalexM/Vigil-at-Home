@@ -317,6 +317,8 @@ export const calls = {
   /** A dog's notebook, or every note about one alert, rule, event or tool. */
   listPackNotes: z.tuple([NotesFilter]),
   clearPackNotes: z.tuple([DogRef.optional()]),
+  /** Up to 200 of those notes as Markdown or JSON, rendered and redacted in the app. */
+  exportPackNotes: z.tuple([NotesFilter, z.enum(['md', 'json']), z.string().max(200)]),
   /** What the pack remembers, from the person's own words. */
   listPackMemory: z.tuple([]),
   addPackMemory: z.tuple([MemoryInput]),
@@ -719,6 +721,7 @@ export interface CallResults {
   refreshConnector: AiActionResult;
   listPackNotes: DogNote[];
   clearPackNotes: void;
+  exportPackNotes: string;
   listPackMemory: MemoryEntry[];
   addPackMemory: { ok: boolean; error?: string };
   forgetPackMemory: void;
