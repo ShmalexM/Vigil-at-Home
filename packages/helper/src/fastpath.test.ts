@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import {
   builtinRulesFor,
@@ -58,6 +59,8 @@ let approvalsDir: string;
 /** Whether the fake password dialog says yes; every answer is recorded. */
 let approve = false;
 const prompts: string[] = [];
+/** Runs while the fake password dialog is open, before its answer. */
+let whilePrompting: (() => Promise<void>) | undefined;
 let clock = 1_000_000;
 
 beforeAll(async () => {
@@ -72,6 +75,7 @@ beforeAll(async () => {
     rules: new RuleStore(join(root, 'rules.json')),
     quarantine: { quarantineDir: join(root, 'Quarantine') },
     syncPort: 47821,
+    now: () => clock,
     get fastPath() {
       return fast;
     },
@@ -82,6 +86,7 @@ beforeAll(async () => {
   // Stands in for the password dialog: only a yes writes the root-owned approval.
   client = await HelperClient.connect(join(root, 'helper.sock'), async (nonce, prompt, also) => {
     prompts.push(prompt);
+    await whilePrompting?.();
     if (approve) for (const n of [nonce, ...(also ?? [])]) Approvals.writeApproval(approvalsDir, n);
     return approve;
   });
@@ -97,6 +102,7 @@ beforeEach(() => {
   sys.signals.length = 0;
   prompts.length = 0;
   approve = false;
+  whilePrompting = undefined;
 });
 
 const exec = (pid: number, sha256: string, path = '/tmp/payload'): SensorEvent => ({
@@ -118,6 +124,15 @@ function appSet(lists: Record<string, string[]>, exceptions: DetectionSync['exce
     lists: Object.fromEntries(set.lists.map((l) => [l, listDigest(lists[l] ?? [])])),
   };
   return { sync, lists };
+}
+
+/** Send a sync with the contents of every list it names, as the app does: one step. */
+async function syncWith<T = { applied: boolean; needLists: string[] }>(
+  sync: DetectionSync,
+  lists: Record<string, string[]>,
+): Promise<T> {
+  const entries = Object.fromEntries(Object.keys(sync.lists).map((n) => [n, lists[n] ?? []]));
+  return client.call<T>({ ...sync, entries });
 }
 
 async function sendLists(names: string[], lists: Record<string, string[]>): Promise<void> {
@@ -162,16 +177,21 @@ describe('blocking rules in the helper', () => {
     const hashes = Array.from({ length: 2500 }, (_, i) => i.toString(16).padStart(64, '0'));
     hashes.push(BAD);
     const { sync, lists } = appSet({ known_bad_sha256: hashes, known_bad_ips: ['203.0.113.9'] });
-    const first = await client.call<{ needLists: string[] }>(sync);
+    // Without the lists' contents nothing changes, and the helper says which it lacks.
+    const first = await client.call<{ applied: boolean; needLists: string[] }>(sync);
+    expect(first.applied).toBe(false);
     expect(first.needLists.sort()).toEqual([
       'known_bad_ips',
       'known_bad_sha256',
       'user_blocked_sha256',
     ]);
-    await sendLists(first.needLists, lists);
+    expect(fast.status().rules).toBe(0);
+    // Rules and lists together go in as one.
+    expect(await syncWith(sync, lists)).toMatchObject({ applied: true, needLists: [] });
     expect(fast.status().lists['known_bad_sha256']).toBe(2501);
+    expect(fast.status().rules).toBe(sync.rules.length);
     // Same lists again: nothing to send.
-    expect((await client.call<{ needLists: string[] }>(sync)).needLists).toEqual([]);
+    expect(await client.call(sync)).toMatchObject({ applied: true, needLists: [] });
 
     sys.processes.set(4242, { path: '/tmp/payload', started: 'T' });
     const ran = await fast.check(exec(4242, BAD));
@@ -190,7 +210,7 @@ describe('blocking rules in the helper', () => {
       { id: 'x1', ruleId: '*', match: { 'process.path': '/tmp/allowed' }, createdAt: 1 },
     ]);
     approve = true;
-    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    await syncWith(sync, lists);
     expect(prompts).toEqual(['Vigil wants to loosen its blocking rules: add an exception to *.']);
     sys.processes.set(5000, { path: '/tmp/allowed', started: 'T' });
     expect(await fast.check(exec(5000, BAD, '/tmp/allowed'))).toEqual([]);
@@ -220,7 +240,7 @@ describe('blocking rules in the helper', () => {
 
   it('keeps the rules across a restart, and ignores a damaged file', async () => {
     const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
-    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    await syncWith(sync, lists);
     const again = makeFastPath(executor);
     again.load();
     expect(again.status()).toEqual(fast.status());
@@ -231,6 +251,57 @@ describe('blocking rules in the helper', () => {
     const broken = makeFastPath(executor);
     broken.load();
     expect(broken.status().rules).toBe(0);
+  });
+
+  it('answers once the rules are saved and reports Santa’s hand-off on its own', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    const out = await syncWith({ ...sync, syncId: 'sync-1' }, lists);
+    expect(out).toMatchObject({ applied: true });
+    const status = await client.call<{ syncId: string | null; rev: number }>({
+      kind: 'detection.status',
+    });
+    expect(status).toMatchObject({ syncId: 'sync-1', rules: sync.rules.length });
+    // A second client sees the same, and a stray list update changes no rules.
+    await sendLists(['known_bad_sha256'], { known_bad_sha256: [BAD, 'c'.repeat(64)] });
+    expect(fast.rules().map((r) => r.id)).toEqual(sync.rules.map((r) => r.id));
+    expect(fast.syncId()).toBe('sync-1');
+    // Survives a restart.
+    const again = makeFastPath(executor);
+    again.load();
+    expect(again.syncId()).toBe('sync-1');
+  });
+
+  it('does not wait on Santa’s pre-launch rules before answering', async () => {
+    let finish: (v: unknown) => void = () => {};
+    const slowSanta = { apply: () => new Promise((r) => (finish = r)) };
+    const own = new Executor({
+      sys,
+      journal: new Journal(join(root, 'journal-preexec.json')),
+      approvals: new Approvals({ dir: approvalsDir, requiredOwnerUid: process.getuid!() }),
+      rules: new RuleStore(join(root, 'rules-preexec.json')),
+      quarantine: { quarantineDir: join(root, 'Quarantine') },
+      syncPort: 47821,
+      preexec: slowSanta as never,
+      fastPath: new FastPath({
+        file: join(root, 'preexec-rules.json'),
+        installed: [SELF],
+        run: async () => ({}) as never,
+      }),
+    });
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    const entries = Object.fromEntries(Object.keys(sync.lists).map((n) => [n, lists[n] ?? []]));
+    const out = await own.execute({ ...sync, entries, syncId: 'with-santa' });
+    // Answered with the rules saved, while Santa is still busy.
+    expect(out).toMatchObject({ kind: 'done', result: { applied: true, preexec: 'pending' } });
+    expect(await own.execute({ kind: 'detection.status' })).toMatchObject({
+      kind: 'done',
+      result: { syncId: 'with-santa', preexec: 'pending' },
+    });
+    finish({ installed: 1 });
+    expect(await own.preexecSettled()).toEqual({ installed: 1 });
+    expect(await own.execute({ kind: 'detection.status' })).toMatchObject({
+      result: { preexec: { installed: 1 } },
+    });
   });
 
   it('refuses rules that do not compile, without dropping the current ones', async () => {
@@ -394,7 +465,7 @@ describe('blocking rules in the helper', () => {
   it('needs the admin password to turn a rule off, change it or add a path', async () => {
     const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
     approve = true;
-    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    await syncWith(sync, lists);
     approve = false;
     const rev = fast.status().rev;
     const [first, ...rest] = sync.rules;
@@ -455,7 +526,7 @@ describe('blocking rules in the helper', () => {
     const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
     const cmd = { ...sync, rules: [...sync.rules, extra] };
     approve = true;
-    await sendLists((await client.call<{ needLists: string[] }>(cmd)).needLists, lists);
+    await syncWith(cmd, lists);
     approve = false;
     prompts.length = 0;
     return cmd;
@@ -582,14 +653,125 @@ describe('blocking rules in the helper', () => {
     }
   });
 
+  it('answers detection.status only once a sync read before it is in force', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    approve = true;
+    await syncWith({ ...sync, syncId: 'order-0' }, lists);
+    approve = false;
+    // Sent back to back on one connection, as the app does after a timeout.
+    const synced = client.call({ ...sync, syncId: 'order-1' });
+    const status = client.call<{ syncId: string | null }>({ kind: 'detection.status' });
+    expect(await status).toMatchObject({ syncId: 'order-1' });
+    await synced;
+    // Handed to the helper one after the other: nothing waits between the
+    // sync's checks and its save, so status can't slip in before it.
+    const direct = executor.execute({ ...sync, syncId: 'order-2' });
+    const after = executor.execute({ kind: 'detection.status' });
+    expect(await after).toMatchObject({ kind: 'done', result: { syncId: 'order-2' } });
+    await direct;
+  });
+
+  it('keeps the old sync in force while the password is asked, and after a no', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    approve = true;
+    await syncWith({ ...sync, syncId: 'pw-0' }, lists);
+    approve = false;
+    const [, ...rest] = sync.rules;
+    const other = await HelperClient.connect(join(root, 'helper.sock'), async () => false);
+    const seen: unknown[] = [];
+    whilePrompting = async () => {
+      seen.push(await other.call({ kind: 'detection.status' }));
+    };
+    await expect(client.call({ ...sync, rules: rest, syncId: 'pw-1' })).rejects.toMatchObject({
+      code: 'refused',
+    });
+    expect(seen).toMatchObject([{ syncId: 'pw-0' }]);
+    expect(await other.call({ kind: 'detection.status' })).toMatchObject({ syncId: 'pw-0' });
+    expect(fast.status().rules).toBe(sync.rules.length);
+    other.close();
+  });
+
+  it('refuses a sync whose password came after the app stopped waiting', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    approve = true;
+    await syncWith({ ...sync, syncId: 'late-0' }, lists);
+    const [, ...rest] = sync.rules;
+    const rev = fast.status().rev;
+    // The user types the password, but only after the app gave up and
+    // counted the change as cancelled.
+    whilePrompting = async () => {
+      clock += 60_000;
+    };
+    const late = { ...sync, rules: rest, syncId: 'late-1', notAfter: clock + 1000 };
+    await expect(client.call(late)).rejects.toMatchObject({
+      code: 'refused',
+      message: 'the app stopped waiting for this change',
+    });
+    expect(prompts).toHaveLength(1);
+    expect(fast.status()).toMatchObject({ rev, rules: sync.rules.length });
+    expect(fast.syncId()).toBe('late-0');
+    // Once past it, the helper doesn't even ask.
+    prompts.length = 0;
+    await expect(client.call({ ...late, syncId: 'late-2' })).rejects.toMatchObject({
+      code: 'refused',
+    });
+    expect(prompts).toEqual([]);
+
+    // A yes in time goes through.
+    whilePrompting = undefined;
+    const inTime = { ...sync, rules: rest, syncId: 'late-3', notAfter: clock + 1000 };
+    await client.call(inTime);
+    expect(fast.syncId()).toBe('late-3');
+    expect(fast.status().rules).toBe(rest.length);
+    await client.call({ ...sync, syncId: 'late-4' });
+  });
+
+  it('needs the admin password to turn down or loosen a blocking rule only the app runs', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    const appRule = {
+      id: 'exec-from-shared-temp',
+      name: 'New program started from a temporary folder',
+      digest: 'a'.repeat(64),
+    };
+    approve = true;
+    await syncWith({ ...sync, appRules: [appRule] }, lists);
+    approve = false;
+    prompts.length = 0;
+    const rev = fast.status().rev;
+
+    // The helper never runs it, yet turning it down or excluding from it still asks.
+    for (const cmd of [
+      { ...sync, appRules: [] },
+      { ...sync },
+      { ...sync, appRules: [{ ...appRule, digest: 'c'.repeat(64) }] },
+    ])
+      await expect(client.call(cmd)).rejects.toMatchObject({ code: 'refused' });
+    expect(prompts).toEqual([
+      `Vigil wants to loosen its blocking rules: stop blocking with “${appRule.name}”.`,
+      `Vigil wants to loosen its blocking rules: stop blocking with “${appRule.name}”.`,
+      `Vigil wants to loosen its blocking rules: change what “${appRule.name}” blocks.`,
+    ]);
+    expect(fast.status().rev).toBe(rev);
+
+    // Renaming it or adding another blocking rule asks nothing.
+    prompts.length = 0;
+    const more = { id: 'my-rule', name: 'Mine', digest: 'd'.repeat(64) };
+    await client.call({ ...sync, appRules: [{ ...appRule, name: 'Renamed' }, more] });
+    expect(prompts).toEqual([]);
+
+    // With the password, it goes through.
+    approve = true;
+    await client.call({ ...sync, appRules: [] });
+    approve = false;
+    prompts.length = 0;
+    await client.call(sync);
+    expect(prompts).toEqual([]);
+  });
+
   it('asks for the password for anything newly named as Vigil, even inside its folder', async () => {
     const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
     approve = true;
-    await sendLists(
-      (await client.call<{ needLists: string[] }>({ ...sync, selfPaths: ['/opt/Vigil at Home'] }))
-        .needLists,
-      lists,
-    );
+    await syncWith({ ...sync, selfPaths: ['/opt/Vigil at Home'] }, lists);
     approve = false;
     prompts.length = 0;
     // The same folder again needs nothing.
@@ -620,7 +802,7 @@ describe('blocking rules in the helper', () => {
     const image = { path: '/home/alex/Apps/Vigil.AppImage', id: '2049:5501' };
     files.set(image.path, image.id);
     approve = true;
-    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    await syncWith(sync, lists);
     prompts.length = 0;
     await client.call({ ...sync, selfImages: [image], selfHashes: [own] });
     expect(prompts).toEqual([
@@ -661,7 +843,7 @@ describe('blocking rules in the helper', () => {
   it('lets a held rule change ride on the next password dialog', async () => {
     const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
     approve = true;
-    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    await syncWith(sync, lists);
     prompts.length = 0;
     const exception = {
       id: 'x9',
@@ -700,7 +882,7 @@ describe('blocking rules in the helper', () => {
   it('refuses a held rule change when the dialog it rode on gets a no', async () => {
     const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
     approve = true;
-    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    await syncWith(sync, lists);
     await client.call({
       kind: 'santa.rule.set',
       ruleType: 'binary',
@@ -721,7 +903,7 @@ describe('blocking rules in the helper', () => {
 
   it('drops held rule changes without asking', async () => {
     const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
-    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    await syncWith(sync, lists);
     prompts.length = 0;
     const { result: syncing } = await holdNow({ ...sync, selfPaths: [...sync.selfPaths, '/tmp'] });
     client.dropHeld();
@@ -733,7 +915,7 @@ describe('blocking rules in the helper', () => {
   it('keeps an entry a list drops blocking for a week', async () => {
     const OTHER = 'a'.repeat(64);
     const { sync, lists } = appSet({ known_bad_sha256: [BAD, OTHER] });
-    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    await syncWith(sync, lists);
     // A list update without BAD, as anything on the user's account could send.
     await sendLists(['known_bad_sha256'], { known_bad_sha256: [OTHER] });
     expect(fast.status().lists['known_bad_sha256']).toBe(1);
@@ -765,13 +947,50 @@ describe('blocking rules in the helper', () => {
       i.toString(16).padStart(64, '0'),
     );
     const { sync, lists } = appSet({ known_bad_sha256: many });
-    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    await syncWith(sync, lists);
     await expect(
       sendLists(['known_bad_sha256'], { known_bad_sha256: [BAD] }),
     ).rejects.toMatchObject({
       code: 'refused',
     });
     expect(fast.status().lists['known_bad_sha256']).toBe(RETIRED_TEST_MAX + 1);
+  });
+
+  it('takes rules and lists in one step, all or nothing', async () => {
+    const many = Array.from({ length: RETIRED_TEST_MAX + 1 }, (_, i) =>
+      i.toString(16).padStart(64, '0'),
+    );
+    const { sync, lists } = appSet({ known_bad_sha256: many });
+    approve = true;
+    await syncWith(sync, lists);
+    const before = fast.status();
+    const [, ...rest] = sync.rules;
+    // Drops a rule (password given) and carries a list the helper will refuse.
+    const next = {
+      ...sync,
+      rules: rest,
+      lists: { ...sync.lists, known_bad_sha256: listDigest([BAD]) },
+    };
+    await expect(syncWith(next, { ...lists, known_bad_sha256: [BAD] })).rejects.toMatchObject({
+      code: 'refused',
+    });
+    // Nothing of it is in force: the rule it dropped still blocks, the list is as it was.
+    expect(fast.status()).toEqual(before);
+    expect(fast.rules().map((r) => r.id)).toEqual(sync.rules.map((r) => r.id));
+    // A list that doesn't match its digest is refused the same way.
+    await expect(
+      client.call({ ...next, entries: { known_bad_sha256: ['f'.repeat(64)] } }),
+    ).rejects.toMatchObject({ code: 'invalid' });
+    expect(fast.status()).toEqual(before);
+
+    // The same change with an acceptable list goes in whole.
+    const grown = [...many, BAD];
+    const ok = { ...next, lists: { ...sync.lists, known_bad_sha256: listDigest(grown) } };
+    expect(await syncWith(ok, { ...lists, known_bad_sha256: grown })).toMatchObject({
+      applied: true,
+    });
+    expect(fast.status().rules).toBe(rest.length);
+    expect(fast.status().lists['known_bad_sha256']).toBe(grown.length);
   });
 
   it('tells subscribers what it already did about each event, replays included', async () => {
@@ -798,6 +1017,47 @@ describe('blocking rules in the helper', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(replayed).toEqual([ran]);
     replay.close();
+  });
+});
+
+describe('one sync carrying big lists', () => {
+  it('takes a detection.sync over the usual line limit, and nothing else that long', async () => {
+    // Keeps what earlier tests left on the list, so nothing has to drop.
+    const kept = Array.from({ length: RETIRED_TEST_MAX + 1 }, (_, i) =>
+      i.toString(16).padStart(64, '0'),
+    );
+    const big = [
+      ...kept,
+      BAD,
+      ...Array.from({ length: 20_000 }, (_, i) => i.toString(16).padStart(64, 'b')),
+    ];
+    const { sync, lists } = appSet({ known_bad_sha256: big });
+    expect(JSON.stringify({ ...sync, entries: lists }).length).toBeGreaterThan(1024 * 1024);
+    expect(await syncWith(sync, lists)).toMatchObject({ applied: true });
+    expect(fast.status().lists['known_bad_sha256']).toBe(new Set(big).size);
+    // Any other command that long is cut off.
+    const other = await HelperClient.connect(join(root, 'helper.sock'), async () => false);
+    const huge = { kind: 'helper.journal', limit: 1, pad: 'x'.repeat(2 * 1024 * 1024) };
+    await expect(other.call(huge as never)).rejects.toMatchObject({ code: 'failed' });
+  });
+
+  it('refuses a long line that starts as a sync but parses as another command', async () => {
+    // JSON lets the later "kind" win, so the line's start alone can't grant the sync limit.
+    const pad = ' '.repeat(2 * 1024 * 1024);
+    const line = `{"id":"dup","command":{"kind":"detection.sync"${pad},"kind":"helper.journal","limit":1}}\n`;
+    const sock = createConnection(join(root, 'helper.sock'));
+    const reply = await new Promise<string>((resolve, reject) => {
+      let got = '';
+      sock.setEncoding('utf8');
+      sock.on('data', (d: string) => {
+        got += d;
+        if (got.includes('\n')) resolve(got.slice(0, got.indexOf('\n')));
+      });
+      sock.on('error', reject);
+      sock.write(line);
+    });
+    sock.destroy();
+    expect(JSON.parse(reply)).toMatchObject({ id: 'dup', ok: false, code: 'invalid' });
   });
 });
 
@@ -906,7 +1166,7 @@ describe('Vigil’s own programs, granted apart from the rules', () => {
 
   it('takes the rules with no self set and keeps the one granted', async () => {
     const { sync, lists } = rulesOnly();
-    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    await syncWith(sync, lists);
     expect(prompts).toEqual([]);
     expect(fast.self().paths).toEqual([]);
     await client.call(grant([SELF]));
@@ -960,7 +1220,7 @@ describe('Vigil’s own programs, granted apart from the rules', () => {
 
   it('leaves the rules in force when the grant is declined', async () => {
     const { sync, lists } = rulesOnly();
-    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    await syncWith(sync, lists);
     await expect(client.call(grant([DOWNLOADS]))).rejects.toMatchObject({ code: 'refused' });
     expect(fast.status().rules).toBe(sync.rules.length);
     sys.processes.set(8000, { path: '/tmp/payload', started: 'T' });
@@ -970,7 +1230,7 @@ describe('Vigil’s own programs, granted apart from the rules', () => {
 
   it('protects only what was granted and the installed app while a grant waits', async () => {
     const { sync, lists } = rulesOnly();
-    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    await syncWith(sync, lists);
     // The installer's folder is protected whatever was granted.
     sys.processes.set(8100, { path: app(SELF), started: 'T' });
     const kill = (await fast.check(exec(8100, BAD, app(SELF)))).find(
@@ -996,7 +1256,7 @@ describe('Vigil’s own programs, granted apart from the rules', () => {
   it('still takes an older app’s rules and self set together, asking as before', async () => {
     const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
     // The first sync naming the installed app needs nothing.
-    await sendLists((await client.call<{ needLists: string[] }>(sync)).needLists, lists);
+    await syncWith(sync, lists);
     expect(prompts).toEqual([]);
     expect(fast.self().paths).toEqual([SELF]);
     // The same set again needs nothing; a new path asks.

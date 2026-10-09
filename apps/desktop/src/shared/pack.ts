@@ -157,12 +157,39 @@ export interface LeadAction {
   jobTainted?: boolean;
 }
 
+/**
+ * A rule change the Lead dog drafted to quiet an alert. It is only ever a
+ * suggestion: it waits under Suggested changes on Rules, with the same
+ * checks as the rule reviewer's, until the user accepts it there.
+ */
+export interface RuleDraft {
+  id: string;
+  /** exclude: stop the rule matching one program, path or host; turn-down: move the rule to Shadow. */
+  kind: 'exclude' | 'turn-down';
+  ruleId?: string;
+  ruleName?: string;
+  /** What accepting it would change, in plain words. */
+  change?: string;
+  /** The suggestion it made, or the one already waiting that says the same. */
+  proposalId?: string;
+  /** waiting: added under Suggested changes; already: the same one was waiting; failed: refused. */
+  status: 'waiting' | 'already' | 'failed';
+  /** Why it was refused. */
+  note?: string;
+  /** What the checks warned about, e.g. look-alikes an exclusion would also skip. */
+  warnings?: string[];
+  /** Matches on the last 14 days, before and after the change. */
+  hits?: { before: number; after: number };
+}
+
 export interface ChatMessage {
   id: string;
   at: number;
   from: 'you' | 'lead';
   text: string;
   actions?: LeadAction[];
+  /** Rule changes the Lead dog drafted; each waits under Suggested changes. */
+  rules?: RuleDraft[];
   /** What the Lead dog noted in, or crossed out of, the pack's memory. */
   memory?: MemoryChange[];
   /** Tools the Lead dog used while answering. */

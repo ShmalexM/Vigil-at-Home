@@ -145,7 +145,8 @@ function Exclusions({ view, reload }: { view: RuleEditorView; reload: () => void
             size="sm"
             label="Remove"
             onClick={async () => {
-              await vigil.removeException(x.id);
+              const r = await vigil.removeException(x.id);
+              if (!r.ok) setIssues(r);
               reload();
             }}
           >
@@ -230,6 +231,12 @@ function JsonEditor({
 
   const save = async () => {
     const r = await vigil.saveRule(text);
+    if (r.helper === 'declined' || r.helper === 'failed') {
+      // The draft is fine; the helper (or the password) turned it down, so nothing changed.
+      setChecked({ text, result: { ...r, ok: true, errors: [], warnings: [] } });
+      toast({ text: r.errors[0] ?? 'Not changed' });
+      return;
+    }
     setChecked({ text, result: r });
     if (r.ok) {
       toast({ text: 'Rule saved' });
@@ -283,7 +290,11 @@ function JsonEditor({
             label="Hold to restore the shipped rule"
             doneLabel="Restored"
             onConfirm={async () => {
-              await vigil.revertRule(view.rule.id);
+              const r = await vigil.revertRule(view.rule.id);
+              if (!r.ok) {
+                toast({ text: r.errors[0] ?? 'Not changed' });
+                return;
+              }
               toast({ text: 'Restored the shipped version' });
               onSaved();
             }}
@@ -296,7 +307,11 @@ function JsonEditor({
             label="Hold to delete"
             doneLabel="Deleted"
             onConfirm={async () => {
-              await vigil.deleteRule(view.rule.id);
+              const r = await vigil.deleteRule(view.rule.id);
+              if (!r.ok) {
+                toast({ text: r.errors[0] ?? 'Not changed' });
+                return;
+              }
               toast({ text: 'Rule deleted' });
               onClose();
             }}

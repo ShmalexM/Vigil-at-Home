@@ -392,14 +392,17 @@ export interface AlertDetail {
 /**
  * What became of a rule change on the helper, which blocks with the app
  * closed. `declined`: it loosened blocking, the user cancelled the password,
- * and nothing changed. `unavailable`: the helper isn't connected; Vigil made
- * the change and the helper gets it when it reconnects.
+ * and nothing changed. `failed`: the helper refused it (`helperReason` says
+ * why), and nothing changed. `unavailable`: the helper isn't connected; Vigil
+ * made the change and the helper gets it when it reconnects.
  */
-export type HelperOutcome = 'applied' | 'declined' | 'unavailable';
+export type HelperOutcome = 'applied' | 'declined' | 'failed' | 'unavailable';
 
 export interface RuleModeResult {
   rule: Rule;
   helper: HelperOutcome;
+  /** The helper's reason, when it refused the change. */
+  helperReason?: string;
 }
 
 /**
@@ -408,12 +411,19 @@ export interface RuleModeResult {
  * rule is in, because that changed since the screen drew it.
  */
 export type QuietRuleResult =
-  | { ok: true; prior: RuleMode | null; token: string; rule: Rule; helper: HelperOutcome }
+  | {
+      ok: true;
+      prior: RuleMode | null;
+      token: string;
+      rule: Rule;
+      helper: HelperOutcome;
+      reason?: string;
+    }
   | { ok: false; mode: RuleMode };
 
 /** Its undo: done, or refused because the rule changed since (the mode it is in now). */
 export type UndoQuietRuleResult =
-  { ok: true; rule: Rule; helper: HelperOutcome } | { ok: false; mode: RuleMode };
+  { ok: true; rule: Rule; helper: HelperOutcome; reason?: string } | { ok: false; mode: RuleMode };
 
 export interface RuleView {
   rule: Rule;
@@ -502,6 +512,8 @@ export interface RuleSuggestionView {
   kind: 'new_rule' | 'tuning' | 'retire';
   createdAt: number;
   provider: string;
+  /** The Lead dog's name, when it drafted this in chat. */
+  by?: string;
   rationale: string;
   evidence: string[];
   ruleId: string;
@@ -552,6 +564,11 @@ export interface RuleCheck {
   replay?: ReplayPreview;
   /** For an edit to an existing rule: what it would stop catching. */
   impact?: ImpactPreview;
+  /**
+   * For a change, what the helper made of it. On `declined` or `failed`
+   * nothing changed: `ok` is false and `errors` says why.
+   */
+  helper?: HelperOutcome;
 }
 
 /**
@@ -631,14 +648,14 @@ export interface CallResults {
   getRuleEditor: RuleEditorView | null;
   previewRule: RuleCheck;
   saveRule: RuleCheck;
-  revertRule: void;
-  deleteRule: void;
+  revertRule: RuleCheck;
+  deleteRule: RuleCheck;
   addExclusion: RuleCheck;
   removeExclusion: RuleCheck;
-  removeException: void;
+  removeException: RuleCheck;
   excludeFromAlert: RuleCheck;
   listRuleSuggestions: RuleSuggestionsView;
-  acceptRuleSuggestion: { helper: HelperOutcome };
+  acceptRuleSuggestion: { helper: HelperOutcome; helperReason?: string };
   dismissRuleSuggestion: void;
   reviewRulesNow: RuleSuggestionsView;
   listActions: ActionRecord[];

@@ -167,6 +167,17 @@ describe('RuleEditor', () => {
     ).toBe(true);
   });
 
+  it('keeps the mode the rule runs in when an exclusion is added or removed', () => {
+    const { engine, editor } = setup();
+    // The user turned blocking on; the rule's own mode is still alert.
+    engine._setMode('exec-from-shared-temp', 'block');
+    const ex = { field: 'process.sha256', op: 'eq', value: '1'.repeat(64) };
+    expect(editor.addExclusion('exec-from-shared-temp', ex, me).ok).toBe(true);
+    expect(engine.modeOf(engine.getRule('exec-from-shared-temp')!)).toBe('block');
+    expect(editor.removeExclusion('exec-from-shared-temp', 0, me).ok).toBe(true);
+    expect(engine.modeOf(engine.getRule('exec-from-shared-temp')!)).toBe('block');
+  });
+
   it('builds the narrowest exclusion the event supports', () => {
     const p = proc({ path: '/tmp/x', sha256: 'a'.repeat(64) });
     expect(exclusionFor(exec(p), 'this_binary')).toEqual({

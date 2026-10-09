@@ -31,6 +31,7 @@ import { PackMemory } from './pack/memory.js';
 import { PackService } from './pack/service.js';
 import { seedPackDemo } from './pack/demo.js';
 import { PowerPolicy } from './power.js';
+import { RuleSuggestions } from './rule-suggestions.js';
 import { hashSelf, selfPaths } from './self-path.js';
 import {
   AwakeClock,
@@ -337,6 +338,12 @@ function start(): void {
     isBusy: () => power.isBusy(),
     notebook: new Notebook(db, { onChange: pushPack }),
     memory: new PackMemory(db, { onChange: pushPack }),
+    // The Lead dog's rule drafts join the rule reviewer's under Suggested changes.
+    rules: new RuleSuggestions(
+      detector,
+      () => ai.ruleReviewRunner() !== undefined,
+      (alertId) => store.getAlertDetection(alertId),
+    ),
     onChange: pushPack,
   });
   ai.on('busy', (helper, busy) => pack.helperBusy(helper, busy));

@@ -140,6 +140,19 @@ const RANK_KEYED = 2;
 /** A known token format: its marker says more than <redacted>. */
 const RANK_FORMAT = 3;
 const RANK_KEY = 4;
+/** An object key that holds a secret: replaced whole, by a numbered placeholder. */
+const RANK_SECRET_KEY = 5;
+
+/**
+ * What a finding for an object key that holds a secret is replaced with
+ * until render() numbers it. Never written out as it is.
+ */
+const KEY_SLOT = '\0key\0';
+
+/** The placeholder for the nth object key that held a secret, from 1. */
+function redactedKey(n: number): string {
+  return `[REDACTED_KEY_${n}]`;
+}
 
 const WITHHOLD: Finding = { start: 0, end: 0, with: '', rank: RANK_KEY, withhold: true };
 
@@ -393,6 +406,8 @@ const NON_SECRET_SUFFIXES = new Set([
 
 const CREDENTIAL_WORDS = new Set([
   'pwd',
+  // DB_PW=, "pw": — only ever read as a name given a value, never in prose.
+  'pw',
   'auth',
   'authorization',
   'apikey',
@@ -418,6 +433,8 @@ const CREDENTIAL_PAIRS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   ['connection', new Set(['string', 'strings', 'str'])],
   ['conn', new Set(['string', 'strings', 'str'])],
 ]);
+/** The word before signature in the name of a signed URL's signature. */
+const SIGNED_URL_WORDS = new Set(['amz', 'goog']);
 /** Password-like words, where even a short number is the secret (a PIN or a one-time code). */
 const ONE_TIME_WORDS = new Set(['otp', 'totp', 'hotp', 'mfacode']);
 const KEY_QUALIFIER_LIST = [
@@ -439,7 +456,7 @@ const KEY_QUALIFIER_LIST = [
 const KEY_QUALIFIERS = new Set(KEY_QUALIFIER_LIST);
 const QUALIFIED_KEY = new RegExp(`(?:${KEY_QUALIFIER_LIST.join('|')})key$`);
 const QUICK_CREDENTIAL =
-  /pass|pwd|token|secret|key|auth|credential|cookie|jwt|otp|mfa|2fa|bearer|dsn|hmac|conn/i;
+  /pass|pw|token|secret|key|auth|credential|cookie|jwt|otp|mfa|2fa|bearer|dsn|hmac|conn|signature/i;
 
 // Names repeat, often thousands of times in one result: each is split once.
 const MAX_CACHED_NAMES = 1024;
@@ -492,6 +509,9 @@ export function isCredentialName(name: string): boolean {
     if (part.endsWith('token')) return true;
     if (CREDENTIAL_WORDS.has(part)) return true;
     if (CREDENTIAL_PAIRS.get(part)?.has(parts[i + 1] ?? '')) return true;
+    // X-Amz-Signature, X-Goog-Signature: only signed URLs use these names, so
+    // their value is a secret even in hex, unlike a code signature's.
+    if (part === 'signature' && i > 0 && SIGNED_URL_WORDS.has(parts[i - 1]!)) return true;
     if (QUALIFIED_KEY.test(part)) return true;
     return part === 'key' && i > 0 && KEY_QUALIFIERS.has(parts[i - 1]!);
   });
@@ -504,6 +524,7 @@ function isPasswordName(name: string): boolean {
     (part, i) =>
       /password|passwd|passphrase/.test(part) ||
       part === 'pwd' ||
+      part === 'pw' ||
       ONE_TIME_WORDS.has(part) ||
       ((part === 'mfa' || part === '2fa') && parts[i + 1] === 'code') ||
       (part === 'pass' && i === parts.length - 1),
@@ -792,6 +813,33 @@ function addNetrc(text: string, f: Findings): void {
 }
 
 // ---------------------------------------------------------------------------
+// Names written with percent escapes or + for a blank, as in a form body or
+// a query string: pass%77ord=x, %70assword=x, api+key=x. Each is decoded
+// before it is matched; a value given to a credential name found only that
+// way withholds the field. (A field that is one URL decodes its parameter
+// names in analyzeUrl and cuts their values out exactly.)
+
+const ENCODED_NAME = /(?<![^\s?&;"'])([A-Za-z0-9._~%+-]+)=/g;
+
+function addEncodedNames(text: string, f: Findings): void {
+  if (!text.includes('%') && !text.includes('+')) return;
+  ENCODED_NAME.lastIndex = 0;
+  for (let m = ENCODED_NAME.exec(text); m; m = ENCODED_NAME.exec(text)) {
+    const raw = m[1]!;
+    if (!raw.includes('%') && !raw.includes('+')) continue;
+    const name = decodeQueryPart(raw);
+    if (name === raw || !isCredentialName(name)) continue;
+    const at = m.index + m[0].length;
+    let end = at;
+    while (end < text.length && !isSpace(text.charCodeAt(end)) && text[end] !== '&') end++;
+    if (!isBenignValue(decodeQueryPart(text.slice(at, end)), isPasswordName(name))) {
+      f.withhold(at);
+      return;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Passwords given as command-line flags by tools that take them that way:
 // curl -u user:pw, sshpass -p pw, docker login -p pw, openssl -k pw, mysql
 // -ppw, redis-cli -a pw, mongosh -p pw. In free text these only withhold the
@@ -803,7 +851,9 @@ function addNetrc(text: string, f: Findings): void {
  * The words a field must hold, then the flag with a value. A value that
  * starts with < is a marker an argument list's redaction left there.
  */
-const COMMAND_SECRETS: ReadonlyArray<readonly [readonly RegExp[], RegExp]> = [
+const COMMAND_SECRETS: ReadonlyArray<
+  readonly [readonly RegExp[], RegExp | ((text: string) => boolean)]
+> = [
   // curl -u user:pass, --user user:pass, -uuser:pass; with no colon, curl asks.
   [[/curl/], /\s(?:-[uU][ \t]*|--(?:proxy-)?user(?:[ \t]+|=))["']?[^\s"':]*:[^\s<]/],
   [[/curl/], /\s--oauth2-bearer[ \t=]+[^\s<]/],
@@ -814,14 +864,91 @@ const COMMAND_SECRETS: ReadonlyArray<readonly [readonly RegExp[], RegExp]> = [
   [[/mysql|mariadb/], /\s-p[^\s<-]/],
   [[/redis-cli/], /\s(?:-a|--pass)[ \t]+[^\s<-]/],
   [[/mongo/], /\s-p[ \t]*[^\s<-]/],
+  // security add-generic-password -w pw. A -w with no value, at the end or
+  // before another flag, prompts for it.
+  [[/security/, /add-(?:generic|internet)-password/], /\s-w[ \t]*["']?[^\s<"'-]/],
+  // aws configure set aws_secret_access_key x, npm config set
+  // //registry/:_authToken x, yarn config set npmAuthToken x.
+  [[/aws|npm|yarn/, /config/], configSetSecret],
+  // zip -P pw, unzip -P pw.
+  [[/zip/], /\s-P[ \t]*["']?[^\s<"'-]/],
+  // htpasswd -b file user pw, htpasswd -nb user pw.
+  [[/htpasswd/], htpasswdPassword],
+  // smbclient -U user%pw: with no %, it prompts.
+  [[/smbclient|rpcclient/], /\s(?:-U[ \t]*|--user(?:=|[ \t]+))["']?[^\s%<]*%[^\s<]/],
+  // lftp -u user,pw: with no comma, it prompts.
+  [[/lftp/], /\s(?:-u[ \t]*|--user(?:=|[ \t]+))["']?[^\s,<]*,[^\s<]/],
 ];
 
-const COMMAND_HINT = /curl|sshpass|docker|podman|openssl|mysql|mariadb|redis-cli|mongo/;
+const COMMAND_HINT =
+  /curl|sshpass|docker|podman|openssl|mysql|mariadb|redis-cli|mongo|security|aws|npm|yarn|zip|htpasswd|smbclient|rpcclient|lftp/;
+
+/**
+ * True when htpasswd is given its password: after a flag group holding b,
+ * at least two more words that aren't flags (the user and the password, or
+ * the file and the user before it). One pass over the words: a pattern that
+ * skipped any number of flags would retry them from each flag.
+ */
+function htpasswdPassword(text: string): boolean {
+  let batch = false;
+  let words = 0;
+  for (const word of text.split(/[ \t\r\n]+/)) {
+    if (word.startsWith('-')) {
+      if (/^-[A-Za-z]*b/.test(word)) batch = true;
+    } else if (batch && word && !word.startsWith('<') && ++words >= 2) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** The word set, which a config tool's setting follows. */
+const CONFIG_SET = /(?<!\S)set[ \t]+/g;
+
+/** A word without the quotes around it. */
+function unquote(word: string): string {
+  return word.replace(/^["']+/, '').replace(/["']+$/, '');
+}
+
+/**
+ * True when a config tool is given a setting a credential name names, and a
+ * value for it: `set` (flags aside), the name, then the value. The name is
+ * read after the last colon, so npm's //registry/:_authToken is _authToken.
+ * One pass over the words: each set reads on only up to the next word that
+ * isn't a flag.
+ */
+function configSetSecret(text: string): boolean {
+  let at = 0;
+  /** The next word, and the blanks after it. */
+  const word = (): string => {
+    const start = at;
+    while (at < text.length && !isSpace(text.charCodeAt(at))) at++;
+    const found = text.slice(start, at);
+    while (at < text.length && isSpace(text.charCodeAt(at))) at++;
+    return found;
+  };
+  /** The next word that isn't a flag. */
+  const operand = (): string => {
+    let found = word();
+    while (found.startsWith('-')) found = word();
+    return unquote(found);
+  };
+  CONFIG_SET.lastIndex = 0;
+  for (let m = CONFIG_SET.exec(text); m; m = CONFIG_SET.exec(text)) {
+    at = m.index + m[0].length;
+    const name = operand();
+    const value = operand();
+    if (!value || value.startsWith('<')) continue;
+    if (isCredentialName(name.slice(name.lastIndexOf(':') + 1))) return true;
+  }
+  return false;
+}
 
 function addCommandSecrets(text: string, f: Findings): void {
   if (!COMMAND_HINT.test(text)) return;
   for (const [tools, flag] of COMMAND_SECRETS) {
-    if (tools.every((tool) => tool.test(text)) && flag.test(text)) {
+    if (!tools.every((tool) => tool.test(text))) continue;
+    if (typeof flag === 'function' ? flag(text) : flag.test(text)) {
       f.withhold(0);
       return;
     }
@@ -927,6 +1054,9 @@ function namesSecret(text: string): boolean {
   return found.list.length > 0;
 }
 
+// A secret encoded twice (base64 of base64) is not looked for: it is rare in
+// ordinary activity, and decoding every blob a second time would cost real
+// time on what is already the slowest rule.
 function hidesSecret(run: string): boolean {
   let carry = '';
   for (let at = 0; at < run.length; at += BASE64_CHUNK) {
@@ -978,6 +1108,8 @@ interface JsonString {
   readonly conditional: Conditional | undefined;
   /** An array's element: it may be an argument of a command list. */
   readonly element: boolean;
+  /** An object's key, not a value. */
+  readonly key: boolean;
 }
 
 interface JsonRead {
@@ -1048,6 +1180,17 @@ function readJson(text: string, open: number): JsonRead {
     const { end, escaped } = jsonStringEnd(text, i);
     if (end < 0) return false;
     const key = escaped ? (JSON.parse(text.slice(i, end)) as string) : text.slice(i + 1, end - 1);
+    // The key is read for secrets too: a name classifies its value, but may
+    // itself be a token.
+    strings.push({
+      start: i + 1,
+      end: end - 1,
+      escaped,
+      secret: undefined,
+      conditional: undefined,
+      element: false,
+      key: true,
+    });
     if (frame.first === undefined) {
       frame.first = key;
     } else {
@@ -1090,7 +1233,15 @@ function readJson(text: string, open: number): JsonRead {
       const { end, escaped } = jsonStringEnd(text, i);
       if (end < 0) return fail(i);
       const element = frames.length > 0 && !frames[frames.length - 1]!.object;
-      strings.push({ start: i + 1, end: end - 1, escaped, secret, conditional, element });
+      strings.push({
+        start: i + 1,
+        end: end - 1,
+        escaped,
+        secret,
+        conditional,
+        element,
+        key: false,
+      });
       i = end;
     } else {
       const number = matchAt(JSON_NUMBER, text, i).length;
@@ -1166,6 +1317,17 @@ function analyzeString(
   return found;
 }
 
+/**
+ * True when an object key holds a secret: anything any rule finds in it,
+ * read as a word, so that any secret at all counts, whatever its shape.
+ * User, host and email names are not secrets, and a key keeps them.
+ */
+function keyHoldsSecret(key: string, options: NameOptions, depth: number): boolean {
+  if (key.length > MAX_REDACT_CHARS) return true;
+  if (!mayHoldSecret(key, options)) return false;
+  return analyzeString(key, options, depth, 'word').some((x) => x.withhold || x.rank > RANK_NAME);
+}
+
 /** Add what each string of a clean read holds, as found in the text. */
 function addJsonFindings(
   text: string,
@@ -1176,6 +1338,25 @@ function addJsonFindings(
 ): void {
   for (const s of read.strings) {
     if (f.withheld) return;
+    if (s.key) {
+      // A key that holds a secret is replaced whole, with a placeholder
+      // render() numbers so no two keys of the field are the same. The whole
+      // key goes, escapes and all, so the text stays valid JSON.
+      if (s.end === s.start) continue;
+      const key = s.escaped
+        ? (JSON.parse(text.slice(s.start - 1, s.end + 1)) as string)
+        : text.slice(s.start, s.end);
+      if (keyHoldsSecret(key, options, depth + 1)) {
+        f.push({
+          start: s.start,
+          end: s.end,
+          with: KEY_SLOT,
+          rank: RANK_SECRET_KEY,
+          withhold: false,
+        });
+      }
+      continue;
+    }
     if (s.secret) {
       if (!s.escaped) {
         const value = text.slice(s.start, s.end);
@@ -1224,7 +1405,15 @@ function addJsonFindings(
       else f.push({ ...x, start, end });
     }
   }
-  for (const [start, end] of read.numbers) f.token(start, end, REDACTED, RANK_KEYED);
+  // A number is replaced by a string, so JSON stays JSON. In JSON held in a
+  // string, the quotes would need escaping as written: the field is withheld.
+  for (const [start, end] of read.numbers) {
+    if (depth > 0) {
+      f.withhold(start);
+      return;
+    }
+    f.push({ start, end, with: `"${REDACTED}"`, rank: RANK_KEYED, withhold: false });
+  }
 }
 
 /**
@@ -1255,6 +1444,7 @@ function addJson(
         secret: undefined,
         conditional: undefined,
         element: false,
+        key: false,
       };
       addJsonFindings(
         text,
@@ -1394,6 +1584,8 @@ const SECRET_HINT = new RegExp(
     '\\/(?:Users|home)\\/',
     '[A-Za-z0-9+/_-]{16}',
     '\\\\',
+    // A percent escape, which may spell a credential name.
+    '%[0-9A-Fa-f]{2}',
   ].join('|'),
   'i',
 );
@@ -1413,17 +1605,56 @@ function byStart(a: Finding, b: Finding): number {
   return a.start - b.start || b.end - a.end;
 }
 
-/** Drop findings that start inside a JSON region, given as start, end pairs in order. */
-function outsideRegions(found: Finding[], regions: readonly number[]): Finding[] {
+/**
+ * Drop findings that start inside a JSON region, given as start, end pairs in
+ * order. Each secret dropped is added to `inside`, in order.
+ */
+function outsideRegions(
+  found: Finding[],
+  regions: readonly number[],
+  inside: Finding[],
+): Finding[] {
   found.sort(byStart);
   const out: Finding[] = [];
   let r = 0;
   for (const x of found) {
     while (r < regions.length && regions[r + 1]! <= x.start) r += 2;
-    if (r < regions.length && regions[r]! <= x.start) continue;
+    if (r < regions.length && regions[r]! <= x.start) {
+      if (x.rank > RANK_NAME) inside.push(x);
+      continue;
+    }
     out.push(x);
   }
   return out;
+}
+
+/**
+ * True when a secret the rules found in the raw text of a JSON region is one
+ * the JSON reading did not: no secret it found overlaps it. Such a secret is
+ * always within one string of the JSON, or one of its numbers: a match that
+ * runs past a quote is no clean token, and withholds the field at once.
+ * `inside` is in order.
+ */
+function missedByJson(inside: readonly Finding[], read: readonly Finding[]): boolean {
+  const secrets = read.filter((x) => x.rank > RANK_NAME).sort(byStart);
+  // reach[i]: the furthest end of secrets[0..i].
+  const reach: number[] = [];
+  let furthest = -1;
+  for (const x of secrets) {
+    furthest = Math.max(furthest, x.end);
+    reach.push(furthest);
+  }
+  for (const x of inside) {
+    let lo = 0;
+    let hi = secrets.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (secrets[mid]!.start < x.end) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo === 0 || reach[lo - 1]! <= x.start) return true;
+  }
+  return false;
 }
 
 /**
@@ -1584,6 +1815,7 @@ const DETECTORS = [
   addCommandSecrets,
   addXml,
   addKeyedValues,
+  addEncodedNames,
   addBase64,
 ];
 
@@ -1614,8 +1846,13 @@ function analyze(text: string, options: NameOptions, depth: number, shape: Shape
     addJson(text, options, depth, json, regions);
     if (json.withheld) return [WITHHOLD];
   }
-  // Inside JSON, the JSON reading of each precise span stands.
-  const found = regions.length ? outsideRegions(rules.list, regions) : rules.list;
+  // Inside JSON, the JSON reading of each precise span stands. The rules'
+  // reading of the raw text still counts: a secret it found there that the
+  // JSON reading did not withholds the field, so a gap in the JSON reading
+  // can never pass a secret on.
+  const inside: Finding[] = [];
+  const found = regions.length ? outsideRegions(rules.list, regions, inside) : rules.list;
+  if (inside.length && missedByJson(inside, json.list)) return [WITHHOLD];
   found.push(...json.list);
   if (!found.some((x) => x.rank > RANK_NAME)) return found;
   // A secret. JSON's own reading placed each one it found, by key.
@@ -1663,11 +1900,39 @@ function settle(found: Finding[]): Finding[] {
   return [...secrets.map((x) => ({ ...x, withhold: false })), ...out].sort(byStart);
 }
 
+const UNICODE_ESCAPE = /\\u([0-9A-Fa-f]{4})/g;
+const KEY_PLACEHOLDER = /\[REDACTED_KEY_\d+\]/g;
+
+/**
+ * The key placeholders the text already holds, written as they are or with
+ * \u escapes, at any depth of JSON in a string. A placeholder render() adds
+ * is never one of these, so it can't make two keys of an object the same.
+ */
+function placeholdersIn(text: string): Set<string> {
+  let plain = text;
+  for (let i = 0; i < 8 && plain.includes('\\u'); i++) {
+    const next = plain.replace(UNICODE_ESCAPE, (_, hex: string) =>
+      String.fromCharCode(parseInt(hex, 16)),
+    );
+    if (next === plain) break;
+    plain = next;
+  }
+  return new Set(plain.match(KEY_PLACEHOLDER) ?? []);
+}
+
 function render(text: string, spans: readonly Finding[]): string {
   let out = '';
   let last = 0;
+  let taken: Set<string> | undefined;
+  let n = 0;
   for (const s of spans) {
-    out += text.slice(last, s.start) + s.with;
+    let replacement = s.with;
+    if (replacement === KEY_SLOT) {
+      taken ??= placeholdersIn(text);
+      do replacement = redactedKey(++n);
+      while (taken.has(replacement));
+    }
+    out += text.slice(last, s.start) + replacement;
     last = s.end;
   }
   return out + text.slice(last);
@@ -1759,8 +2024,25 @@ export function redactArgv(argv: readonly string[], options: NameOptions = {}): 
   return redactArgvWithin(argv, options);
 }
 
+// Keys repeat, often thousands of times in one value: each is read once.
+const keyCache = new Map<string, boolean>();
+
+/** keyHoldsSecret for a key of structured data, read with no local names. */
+function objectKeyHoldsSecret(key: string): boolean {
+  let secret = keyCache.get(key);
+  if (secret === undefined) {
+    secret = keyHoldsSecret(key, {}, 0);
+    if (keyCache.size >= MAX_CACHED_NAMES) keyCache.clear();
+    if (key.length <= MAX_CACHED_LENGTH) keyCache.set(key, secret);
+  }
+  return secret;
+}
+
 /**
- * Redact every string in a JSON-like value. Keys are kept. A value under a
+ * Redact every string in a JSON-like value. Keys are kept, but a key that
+ * holds a secret (a token, a key=value, anything a rule finds in it) is
+ * replaced by a numbered placeholder, [REDACTED_KEY_1], [REDACTED_KEY_2]...,
+ * never the same as another key of its object. A value under a
  * credential-named key (password, x-api-key, authToken, ...) is replaced
  * whatever it looks like: with REDACTED when it is one plain token, else
  * WITHHELD. When that value is an object or array, its shape is kept and
@@ -1771,7 +2053,7 @@ export function redactArgv(argv: readonly string[], options: NameOptions = {}): 
  * or one that throws when read is withheld whole.
  */
 export function redactValue(value: unknown, options: NameOptions): unknown {
-  return redactWithin(value, options, undefined, 0, new Set(), undefined);
+  return redactWithin(value, options, undefined, 0, new Set(), undefined, { count: 0 });
 }
 
 /** `secret` is set under a credential-named key: true when it names a password. */
@@ -1782,6 +2064,7 @@ function redactWithin(
   depth: number,
   ancestors: Set<object>,
   oversized: number[] | undefined,
+  keys: { count: number },
 ): unknown {
   if (secret) {
     if (typeof value === 'string') {
@@ -1809,11 +2092,13 @@ function redactWithin(
       return value.map((item) =>
         typeof item === 'string' && !secret
           ? redactText(item, options, oversized, 'word')
-          : redactWithin(item, options, secret, depth + 1, ancestors, oversized),
+          : redactWithin(item, options, secret, depth + 1, ancestors, oversized, keys),
       );
     }
     const out: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value)) {
+    const entries = Object.entries(value);
+    let names: Set<string> | undefined;
+    for (const [key, item] of entries) {
       let redacted: unknown;
       if (secret && typeof item === 'number' && hasNonSecretSuffix(key)) {
         redacted = item;
@@ -1829,18 +2114,26 @@ function redactWithin(
           typeof item === 'string' &&
           isConditionalSecret(name.conditional, item)
             ? REDACTED
-            : redactWithin(item, options, keyed, depth + 1, ancestors, oversized);
+            : redactWithin(item, options, keyed, depth + 1, ancestors, oversized, keys);
       }
-      if (key === '__proto__') {
+      // A key that holds a secret is replaced by a numbered placeholder, one
+      // no other key of the object has.
+      let outKey = key;
+      if (objectKeyHoldsSecret(key)) {
+        names ??= new Set(entries.map(([name]) => name));
+        do outKey = redactedKey(++keys.count);
+        while (names.has(outKey));
+      }
+      if (outKey === '__proto__') {
         // Kept as a key, not taken for the prototype.
-        Object.defineProperty(out, key, {
+        Object.defineProperty(out, outKey, {
           value: redacted,
           enumerable: true,
           writable: true,
           configurable: true,
         });
       } else {
-        out[key] = redacted;
+        out[outKey] = redacted;
       }
     }
     return out;
@@ -1962,7 +2255,9 @@ function fitJson(
 export function redactAndSerialize(value: unknown, options: RedactionOptions): SerializedData {
   const max = Math.max(0, options.maxBytes);
   const oversized: number[] = [];
-  const redacted = redactWithin(value, options, undefined, 0, new Set(), oversized);
+  const redacted = redactWithin(value, options, undefined, 0, new Set(), oversized, {
+    count: 0,
+  });
   const omitted = { count: 0 };
   const fitted = fitJson(unwritable(redacted) ? null : redacted, '', max, omitted);
   if (fitted) return { text: fitted.text, omitted: omitted.count, oversized };

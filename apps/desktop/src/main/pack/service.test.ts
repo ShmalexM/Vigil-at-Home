@@ -8,7 +8,7 @@ import type { ConnectorHub, ConnectorRecord, RemoteTool } from './connectors.js'
 import { DetectionEngine, decide, memoryStores, toolRequestEvent } from '@vigil/detection';
 import { PackMemory } from './memory.js';
 import { Notebook } from './notebook.js';
-import { PackService, type PackAiStatus } from './service.js';
+import { PackService, type PackAiStatus, type PackDeps } from './service.js';
 import type { ToolApproval, ToolDecision } from '../../shared/pack.js';
 
 type Handler = (req: RunRequest<unknown>) => Promise<unknown> | unknown;
@@ -101,6 +101,12 @@ function setup(
     /** Vigil's rules, in place of a fixed answer. */
     rules?: PackDepsPreflight;
     now?: () => number;
+    /** Which AI answers every run. */
+    provider?: 'codex' | 'claude';
+    /** What the runner says about the Claude plan; left out, it says nothing. */
+    viaPlan?: boolean;
+    /** The Suggested changes queue the Lead dog's rule drafts go to. */
+    drafts?: PackDeps['rules'];
   } = {},
 ) {
   const vigil = opts.vigil ?? ['list_alerts', 'search_events'];
@@ -141,7 +147,13 @@ function setup(
         const h = handlers.shift();
         if (!h) return { ok: false, reason: 'no_provider', logId: 'x' };
         const value = await h(req as RunRequest<unknown>);
-        return { ok: true, value: req.output.parse(value), provider: 'codex', logId: 'x' };
+        return {
+          ok: true,
+          value: req.output.parse(value),
+          provider: opts.provider ?? 'codex',
+          logId: 'x',
+          ...(opts.viaPlan !== undefined ? { viaPlan: opts.viaPlan } : {}),
+        };
       },
       modelOf: () => 'gpt-5.5',
       usageOf: () => ({
@@ -173,6 +185,7 @@ function setup(
     onChange: () => undefined,
     ...(opts.hour !== undefined ? { hour: () => opts.hour! } : {}),
     ...(opts.now ? { now: opts.now } : {}),
+    ...(opts.drafts ? { rules: opts.drafts } : {}),
   });
   return {
     pack,
@@ -876,6 +889,158 @@ describe('the pack', () => {
         ),
       );
       expect(r.calls).toEqual([[NEW_GITHUB.id, 'create_issue', { title: 'x' }]]);
+    });
+  });
+
+  describe('rule drafts', () => {
+    /** Stands in for the Suggested changes queue: one pending suggestion per rule. */
+    function queue() {
+      const pending = new Map<string, string>();
+      const calls: unknown[] = [];
+      const rules: NonNullable<PackDeps['rules']> = {
+        draft: (req, by) => {
+          calls.push({ req, by });
+          const ruleId = req.ruleId ?? 'unsigned-net';
+          const base = { kind: req.kind, ruleId, ruleName: 'Unsigned program online' };
+          if (ruleId === 'agent-rule')
+            return { ...base, status: 'failed', note: 'Agent rules are tuned only by you.' };
+          const had = pending.get(ruleId);
+          if (had) return { ...base, status: 'already', proposalId: had };
+          pending.set(ruleId, `p-${pending.size + 1}`);
+          return {
+            ...base,
+            change: 'Stop "Unsigned program online" matching when process.sha256 is abc',
+            status: 'waiting',
+            proposalId: pending.get(ruleId)!,
+          };
+        },
+      };
+      return { rules, calls, pending };
+    }
+    const QUIET = { kind: 'exclude', alertId: 'a1', scope: 'this_binary', why: 'It is my build.' };
+
+    it('only ever adds a suggestion, in every mode, Full access included', async () => {
+      for (const mode of ['ask', 'auto', 'full'] as const) {
+        const q = queue();
+        const { pack, handlers } = setup({ drafts: q.rules });
+        pack.setMode(mode);
+        handlers.push(() => ({
+          reply: 'I suggested an exclusion. It waits for your OK under Suggested changes.',
+          actions: [],
+          ruleChanges: [QUIET],
+        }));
+        await pack.say('make this stop alerting', { page: 'alerts', selected: 'a1' });
+        const msg = pack.chat().at(-1)!;
+        expect(msg.rules).toEqual([
+          expect.objectContaining({ status: 'waiting', proposalId: 'p-1', kind: 'exclude' }),
+        ]);
+        expect(q.calls).toEqual([
+          {
+            req: { kind: 'exclude', alertId: 'a1', scope: 'this_binary', why: 'It is my build.' },
+            by: { provider: 'codex', name: 'Scout' },
+          },
+        ]);
+        // A suggestion waits on Rules, not in the chat: nothing here for the person to approve.
+        expect(msg.actions).toBeUndefined();
+        expect((await pack.view()).dogs[0]!.mood).not.toBe('waiting');
+      }
+    });
+
+    it('never suggests a rule change from an answer the Claude plan wrote', async () => {
+      const q = queue();
+      // The Pack page cached "no plan" before the user turned it on: the run's own word counts.
+      const { pack, handlers } = setup({
+        drafts: q.rules,
+        provider: 'claude',
+        viaPlan: true,
+        status: { leadMayUsePlan: false },
+      });
+      await pack.view();
+      handlers.push(() => ({ reply: 'Suggested.', actions: [], ruleChanges: [QUIET] }));
+      await pack.say('make this stop alerting');
+      expect(pack.chat().at(-1)!.rules).toMatchObject([
+        { status: 'failed', note: expect.stringContaining('plan only explains') },
+      ]);
+      expect(q.calls).toEqual([]);
+    });
+
+    it('treats a Claude answer as the plan’s when the runner did not say', async () => {
+      const q = queue();
+      const { pack, handlers } = setup({ drafts: q.rules, provider: 'claude' });
+      handlers.push(() => ({ reply: 'Suggested.', actions: [], ruleChanges: [QUIET] }));
+      await pack.say('make this stop alerting');
+      expect(pack.chat().at(-1)!.rules).toMatchObject([{ status: 'failed' }]);
+      expect(q.calls).toEqual([]);
+    });
+
+    it('drafts from a Claude answer the API key wrote', async () => {
+      const q = queue();
+      const { pack, handlers } = setup({
+        drafts: q.rules,
+        provider: 'claude',
+        viaPlan: false,
+        status: { leadMayUsePlan: true },
+      });
+      handlers.push(() => ({ reply: 'Suggested.', actions: [], ruleChanges: [QUIET] }));
+      await pack.say('make this stop alerting');
+      expect(pack.chat().at(-1)!.rules).toMatchObject([{ status: 'waiting' }]);
+      expect(q.calls).toHaveLength(1);
+    });
+
+    it('says why a draft was refused, and when the same one is already waiting', async () => {
+      const q = queue();
+      const { pack, handlers } = setup({ drafts: q.rules });
+      handlers.push(() => ({
+        reply: 'Tried.',
+        actions: [],
+        ruleChanges: [QUIET, { kind: 'turn-down', ruleId: 'agent-rule', why: 'Too noisy.' }],
+      }));
+      await pack.say('quiet these');
+      expect(pack.chat().at(-1)!.rules).toMatchObject([
+        { status: 'waiting', proposalId: 'p-1' },
+        { status: 'failed', note: 'Agent rules are tuned only by you.' },
+      ]);
+      handlers.push(() => ({ reply: 'Again.', actions: [], ruleChanges: [QUIET] }));
+      await pack.say('make it stop');
+      expect(pack.chat().at(-1)!.rules).toMatchObject([{ status: 'already', proposalId: 'p-1' }]);
+      expect(q.pending.size).toBe(1);
+    });
+
+    it('drafts at most two changes per answer, and none without the queue', async () => {
+      const q = queue();
+      const { pack, handlers, runs } = setup({ drafts: q.rules });
+      handlers.push(() => ({
+        reply: 'Lots.',
+        actions: [],
+        ruleChanges: ['r1', 'r2', 'r3', 'r4'].map((ruleId) => ({
+          kind: 'turn-down',
+          ruleId,
+          why: 'Noisy.',
+        })),
+      }));
+      await pack.say('quiet everything');
+      expect(pack.chat().at(-1)!.rules).toHaveLength(2);
+      expect(q.calls).toHaveLength(2);
+      handlers.push(() => ({ reply: 'Ok.', actions: [] }));
+      await pack.say('thanks');
+      expect(JSON.stringify(runs.at(-1)!.data)).toContain('"ruleId":"r1"');
+
+      const bare = setup();
+      bare.handlers.push(() => ({ reply: 'Hm.', actions: [], ruleChanges: [QUIET] }));
+      await bare.pack.say('make this stop');
+      expect(bare.pack.chat().at(-1)!.rules).toMatchObject([
+        { status: 'failed', note: 'Detection isn’t running' },
+      ]);
+    });
+
+    it('tells the Lead dog it can only suggest, and that it still cannot approve a rule', async () => {
+      const { pack, handlers, runs } = setup();
+      handlers.push(() => ({ reply: 'Hi.', actions: [] }));
+      await pack.say('hi');
+      const text = runs[0]!.instructions;
+      expect(text).toContain('approve, edit or turn off a rule');
+      expect(text).toMatch(/make this stop alerting/);
+      expect(text).toMatch(/nothing changes until the person accepts it/);
     });
   });
 
