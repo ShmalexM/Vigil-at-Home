@@ -169,6 +169,25 @@ export class Store {
    */
   private search:
     { text: string; needle: string; seen: Map<number, boolean>; all?: Set<number> } | undefined;
+  /**
+   * countEventsSince's last answer per start time, with the newest rowid it
+   * had counted. New rows get higher rowids, so the next answer only counts
+   * rows added since; deletes drop it. The menu bar and every open window ask
+   * "checked today" after each change, and counting a busy day from scratch
+   * walks millions of index entries (30 ms and more each time).
+   *
+   * Both memos rely on every write to the events table going through this
+   * class (writeEvent and pruneEvents), which keeps them right. A raw write
+   * elsewhere would leave them stale; store.test.ts checks there is none.
+   */
+  private readonly countMemo = new Map<number, { n: number; rowid: number }>();
+  /**
+   * lastEventAt's answers, dropped when an event of that source is written or
+   * any is deleted. For a quiet sensor the query walks every newer event of
+   * the others (hundreds of ms on a full database); the health check asks
+   * every minute.
+   */
+  private readonly lastMemo = new Map<string, number | null>();
 
   constructor(private readonly db: DatabaseSync) {
     db.exec(`
@@ -344,6 +363,7 @@ export class Store {
    * so an alert's evidence never depends on the dictionary.
    */
   private writeEvent(e: SensorEvent, outcome?: EventOutcome): void {
+    this.lastMemo.delete(e.source);
     // The agent session and agent the event belongs to: the tracker's tag on a
     // process, or the hook's agent on a tool request (whose process is only the
     // would-be shell). The two are always set together.
@@ -517,10 +537,25 @@ export class Store {
 
   /** Events stored since `since`. */
   countEventsSince(since: number): number {
-    const row = this.stmt('SELECT COUNT(*) AS n FROM events WHERE ts >= ?').get(since) as {
-      n: number;
-    };
-    return row.n;
+    const top = Number(
+      (this.stmt('SELECT MAX(rowid) AS r FROM events').get() as { r: number | null }).r ?? 0,
+    );
+    const known = this.countMemo.get(since);
+    const row = (
+      known && known.rowid <= top
+        ? // Only the rows added since, by rowid (`+ts` keeps the ts index out of it).
+          this.stmt(
+            'SELECT COUNT(*) + ? AS n FROM events WHERE rowid > ? AND rowid <= ? AND +ts >= ?',
+          ).get(known.n, known.rowid, top, since)
+        : this.stmt('SELECT COUNT(*) AS n FROM events WHERE ts >= ? AND rowid <= ?').get(since, top)
+    ) as { n: number };
+    const n = Number(row.n);
+    // Not inside a transaction, which may still roll back what it counted.
+    if (!this.db.isTransaction) {
+      if (this.countMemo.size >= 8) this.countMemo.clear();
+      this.countMemo.set(since, { n, rowid: top });
+    }
+    return n;
   }
 
   /** When the newest event of any source arrived, or null if none yet. */
@@ -531,9 +566,15 @@ export class Store {
 
   /** When this sensor last reported anything, or null if never. */
   lastEventAt(source: string): number | null {
+    if (this.lastMemo.has(source)) return this.lastMemo.get(source)!;
     const row = this.stmt('SELECT MAX(ts) AS ts FROM events WHERE source = ?').get(source) as {
       ts: number | null;
     };
+    // Not inside a transaction, which may still roll back what it read.
+    if (!this.db.isTransaction) {
+      if (this.lastMemo.size >= 16) this.lastMemo.clear();
+      this.lastMemo.set(source, row.ts);
+    }
     return row.ts;
   }
 
@@ -602,6 +643,8 @@ export class Store {
   /** Delete events older than `before` that no alert references. Returns rows removed. */
   pruneEvents(before: number): number {
     this.sessionCounts.clear();
+    this.countMemo.clear();
+    this.lastMemo.clear();
     const res = this.stmt(
       `DELETE FROM events WHERE ts < ? AND id NOT IN (
          SELECT j.value FROM alerts, json_each(alerts.body, '$.eventIds') AS j)`,

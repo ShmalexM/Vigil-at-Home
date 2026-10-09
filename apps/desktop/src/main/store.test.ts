@@ -1,6 +1,7 @@
-import { copyFileSync, mkdtempSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import type { AgentToolRequestEvent, EventOfKind, SensorEvent } from '@vigil/core';
 import { TEXT_SEARCH_WINDOW_MS, type EventOutcome } from '../shared/ipc.js';
@@ -91,6 +92,65 @@ describe('Store', () => {
     expect(s.pruneEvents(Number.MAX_SAFE_INTEGER)).toBe(1);
     expect(s.getEvent(keep.id)).toBeDefined();
     expect(s.getEvent(drop.id)).toBeUndefined();
+  });
+
+  it('answers event counts and last-event times as the database would, through writes, rollbacks and prunes', () => {
+    const db = new DatabaseSync(':memory:');
+    const s = new Store(db);
+    const direct = (since: number, source: string) => ({
+      count: (
+        db.prepare('SELECT COUNT(*) AS n FROM events WHERE ts >= ?').get(since) as { n: number }
+      ).n,
+      last: (
+        db.prepare('SELECT MAX(ts) AS ts FROM events WHERE source = ?').get(source) as {
+          ts: number | null;
+        }
+      ).ts,
+    });
+    const check = () => {
+      for (const source of ['santa', 'osquery', 'test'])
+        for (const since of [0, 1_050, 5_000]) {
+          const want = direct(since, source);
+          // Twice: the second answer may come from memory.
+          for (let i = 0; i < 2; i++) {
+            expect(s.countEventsSince(since)).toBe(want.count);
+            expect(s.lastEventAt(source)).toBe(want.last);
+          }
+        }
+    };
+    let seed = 7;
+    const rand = (n: number) => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n;
+    const event = (): SensorEvent => ({
+      ...makeExec(),
+      ts: 1_000 + rand(8_000),
+      source: (['santa', 'osquery', 'test'] as const)[rand(3)]!,
+    });
+    check();
+    for (let step = 0; step < 300; step++) {
+      switch (rand(6)) {
+        case 0:
+          s.insertEvent(event());
+          break;
+        case 1:
+          s.insertEvents([{ event: event() }, { event: event() }]);
+          break;
+        case 2:
+          expect(() =>
+            s.tx(() => {
+              s.insertEvent(event());
+              check();
+              throw new Error('roll back');
+            }),
+          ).toThrow('roll back');
+          break;
+        case 3:
+          s.pruneEvents(1_000 + rand(8_000));
+          break;
+        default:
+          break;
+      }
+      check();
+    }
   });
 
   it('counts rule matches since a time', () => {
@@ -600,5 +660,31 @@ describe('Store: agents', () => {
     expect(stats.get('explain')).toEqual({ runs: 1, lastAt: 900 });
     expect(stats.get('classify')).toEqual({ runs: 0, lastAt: 50 });
     expect(stats.has('analyze')).toBe(false);
+  });
+});
+
+describe('Store: who writes events', () => {
+  it('is the only code that changes the events table, so its memos stay right', () => {
+    const root = fileURLToPath(new URL('../../../../', import.meta.url));
+    const writes =
+      /\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE|DELETE\s+FROM|REPLACE\s+INTO)\s+events\b/i;
+    const found: string[] = [];
+    const walk = (dir: string): void => {
+      for (const d of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, d.name);
+        if (d.isDirectory()) walk(path);
+        else if (/\.(?:ts|tsx|mjs|js)$/.test(d.name) && !/\.test\.tsx?$/.test(d.name)) {
+          if (writes.test(readFileSync(path, 'utf8'))) found.push(relative(root, path));
+        }
+      }
+    };
+    // App and package code; measurement scripts (perf/) build their own tables.
+    for (const top of ['apps', 'packages'])
+      for (const d of readdirSync(join(root, top))) walk(join(root, top, d, 'src'));
+    // Migrations run before a Store exists.
+    expect(found.sort()).toEqual([
+      'apps/desktop/src/main/db/schema.ts',
+      'apps/desktop/src/main/db/store.ts',
+    ]);
   });
 });
