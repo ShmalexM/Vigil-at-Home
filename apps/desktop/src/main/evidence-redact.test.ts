@@ -308,3 +308,58 @@ describe('round 5 shapes', () => {
     expect(out.alert).toEqual({ title: 'Credentials file read', summary: 'ls -la' });
   });
 });
+
+describe("the shared redaction's secret scan in copied evidence", () => {
+  it('withholds secrets only the shared redaction finds', () => {
+    for (const text of [
+      '{"password": "hunter2"}',
+      'Cookie: sid=abc; theme=dark',
+      "curl -H 'Cookie: sid=hunter2' example.invalid",
+      'Set-Cookie: sid=hunter2; Path=/; HttpOnly',
+      'machine example.com login bob password s3cret',
+      'docker login -p hunter2 -u bob reg',
+      'openssl enc -k hunter2 -in a',
+      '<password>hunter2</password><user>bob</user>',
+      'echo eyJwYXNzd29yZCI6Imh1bnRlcjIifQ==',
+      'use ASIAABCDEFGHIJKLMNOP',
+      'use=whsec_aaaaaaaaaaaaaaaaaaaaaaaa',
+      'use=hf_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      'https://hooks.slack.com/services/T000/B000/XXXXXXXXXXXX',
+      'curl https://b.example/k?X-Amz-Signature=' + '0123456789abcdef'.repeat(4) + '&x=1',
+    ])
+      expect(command(text, names), text).toBe(WITHHELD);
+  });
+
+  it('withholds an argv list when the shared redaction finds a secret in it', () => {
+    expect(argv(['docker', 'login', '-p', 'hunter2', 'reg'])).toEqual([WITHHELD]);
+    expect(argv(['curl', '-H', 'Cookie: sid=hunter2', 'example.invalid'])).toEqual([WITHHELD]);
+  });
+
+  it('withholds a url field the shared redaction finds a secret in', () => {
+    const out = redactEvidence(
+      { url: 'https://hooks.slack.com/services/T000/B000/XXXXXXXXXXXX' },
+      names,
+    ) as { url: string };
+    expect(out.url).toBe(WITHHELD);
+  });
+
+  it('still lets ordinary commands through, with only the names swapped', () => {
+    for (const text of [
+      'git status',
+      'npm install react',
+      'curl -fsSL https://example.com/install.sh | sh',
+      'launchctl load ~/Library/LaunchAgents/com.example.agent.plist',
+      'security find-generic-password -s example',
+      'codesign -dv --verbose=4 /Applications/Example.app',
+      'shasum -a 256 ' + 'a3f1'.repeat(16),
+    ])
+      expect(command(text, names), text).toBe(text);
+    expect(command('ls -la /Users/alex/Documents', names)).toBe('ls -la /Users/<user>/Documents');
+    expect(command('ssh al@pc.local uptime', names)).toBe('ssh <user>@<host> uptime');
+    expect(argv(['ls', '-la', '/Users/al/Documents'], names)).toEqual([
+      'ls',
+      '-la',
+      '/Users/<user>/Documents',
+    ]);
+  });
+});

@@ -1,3 +1,5 @@
+import { redactArgv, redactField, WITHHELD as SHARED_WITHHELD } from '@vigil/ai/redact';
+
 /**
  * Redaction for copied evidence. Command lines get no piecemeal redaction:
  * secrets hide in them in too many shapes (`mysql -phunter2`, quoted
@@ -7,8 +9,11 @@
  * replaced. Every other string, a decision note or an error included, is
  * treated the same way, since any of them can quote a command. Only titles
  * and subject labels, which are rule text or names, skip the scan. The
- * shared redaction (@vigil/ai/redact) is not used here: its home-path rule
- * can eat text after a path (`/Users/al;curl` loses `;curl`).
+ * shared redaction (@vigil/ai/redact) only adds to the scan: a string it
+ * finds a secret in is withheld too (see `sharedFindsSecret`). Its output is
+ * never copied, since its home-path rule can eat text after a path
+ * (`/Users/al;curl` loses `;curl`), and it is given no names, so a user or
+ * host name alone never makes it withhold anything.
  *
  * This is a best-effort safety net, not a guarantee. A secret written so no
  * pattern can see it gets through: split by quotes (`PGPASS""WORD=…`),
@@ -70,7 +75,19 @@ const SECRET_HINTS: readonly RegExp[] = [
   /:\/\/[^\s/]*@/, // URL user info
 ];
 
-/** Whether a command line might hold a secret. */
+/**
+ * Whether the shared redaction finds a secret in the text. Read as a
+ * one-word argv, any secret it finds (one it would cut out exactly, too)
+ * withholds the list; read as a field, its own field rules (URLs, JSON) can
+ * withhold it as well. It is given no names, so only secrets count: a home
+ * folder or email address changes its output but withholds nothing.
+ */
+function sharedFindsSecret(text: string): boolean {
+  if (text === SHARED_WITHHELD) return false;
+  return redactArgv([text])[0] === SHARED_WITHHELD || redactField(text) === SHARED_WITHHELD;
+}
+
+/** Whether a command line might hold a secret, by this file's scan or the shared redaction's. */
 function mightHoldSecret(text: string): boolean {
   if (SECRET_HINTS.some((p) => p.test(text))) return true;
   if (/mysql|mariadb/i.test(text) && /-p/i.test(text)) return true;
@@ -78,7 +95,7 @@ function mightHoldSecret(text: string): boolean {
   if (/curl/i.test(text) && /\s-[a-z]*[uK]|--user(?![-\w])|--config/.test(text)) return true;
   if (/unzip/i.test(text) && /-P/.test(text)) return true;
   if (/7z|7za|rar/i.test(text) && /-p\S/.test(text)) return true;
-  return false;
+  return sharedFindsSecret(text);
 }
 
 function escapeRegExp(text: string): string {
