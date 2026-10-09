@@ -170,6 +170,7 @@ export class Detector {
       learningUntil: opts.installedAt + LEARNING_DAYS * DAY,
       safety: { selfPaths: opts.selfPaths },
       recordHistory: false,
+      holdsLegacy: true,
       // The rule stays on; the user hears of it once, quietly, and Rules flags it.
       onSlowRule: (rule, ms, e) => {
         noteSlowRule(this.alerts, rule, ms, e).catch((err: unknown) =>

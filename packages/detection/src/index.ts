@@ -15,10 +15,13 @@ export {
   simulateLinearEngine,
 } from './rules/linear.js';
 export {
-  adoptLegacyPatterns,
+  adoptLegacyUses,
   forgetLegacyPatterns,
   isLegacyPattern,
-  legacyPatternsOf,
+  legacyKey,
+  legacyRuleIds,
+  retainLegacyUses,
+  type LegacyUse,
 } from './rules/legacy.js';
 export { isTrustedPattern, TEMPLATE_PATTERNS, TEMPLATE_REGEXES } from './rules/trusted.js';
 export { KNOWN_FIELDS, COMPUTED_FIELDS } from './rules/fields.js';

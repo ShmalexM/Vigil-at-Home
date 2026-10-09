@@ -15,7 +15,7 @@ import {
   type FirstSeenSpec,
 } from './rules/compile.js';
 import { compileField, keyOf, type FieldGetter } from './rules/fields.js';
-import { adoptLegacyPatterns } from './rules/legacy.js';
+import { adoptLegacyUses, legacyKey, retainLegacyUses, type LegacyUse } from './rules/legacy.js';
 import { SafetyFloor, type SafetyConfig } from './safety.js';
 import type { Stores } from './state/stores.js';
 import {
@@ -45,6 +45,12 @@ export interface EngineConfig {
    * went over. The rule stays on and every answer it gave stands.
    */
   onSlowRule?: (rule: DetectionRule, ms: number, e: DetectionEvent) => void;
+  /**
+   * This engine holds the rules in force (the app's, not a replay's): when
+   * one of them changes or is removed here, the legacy permissions it no
+   * longer uses are revoked (rules/legacy.ts).
+   */
+  holdsLegacy?: boolean;
 }
 
 /** Matching time one rule may take within SLOW_RULE_WINDOW_MS before onSlowRule hears of it. */
@@ -67,7 +73,7 @@ interface CompiledRule {
    * rule patterns moved to the linear-time one (rules/legacy.ts). Empty for
    * any rule that runs entirely in linear time or is Vigil's own.
    */
-  legacy: string[];
+  legacy: LegacyUse[];
   sequence:
     | {
         steps: { kinds: Set<string>; condition: CompiledCondition }[];
@@ -132,9 +138,11 @@ export function compileRule(
         (x) => x.untrusted,
       ),
       legacy: [
-        ...new Set(
-          [condition, ...exclusions, ...steps.map((st) => st.condition)].flatMap((x) => x.legacy),
-        ),
+        ...new Map(
+          [condition, ...exclusions, ...steps.map((st) => st.condition)]
+            .flatMap((x) => x.legacy)
+            .map((u) => [legacyKey(u), u]),
+        ).values(),
       ],
       sequence: rule.sequence
         ? {
@@ -173,7 +181,7 @@ export function admitSavedRules(saved: ReadonlyArray<DetectionRuleInput | Detect
     }
     try {
       const c = compileRule(r, undefined, { adoptLegacy: true });
-      adoptLegacyPatterns(c.rule.id, c.legacy);
+      adoptLegacyUses(c.rule.id, c.legacy);
       rules.push(c.rule);
     } catch (err) {
       const id = (r as { id?: unknown }).id;
@@ -255,6 +263,7 @@ export class DetectionEngine {
   private readonly recordHistory: boolean;
   private readonly makeId: () => string;
   private readonly state: EvalState;
+  private readonly holdsLegacy: boolean;
   private readonly onSlowRule: EngineConfig['onSlowRule'];
   /** Matching time per timed rule in the current window (performance.now() ms). */
   private readonly spent = new Map<string, { since: number; ms: number }>();
@@ -271,6 +280,7 @@ export class DetectionEngine {
     this.recordHistory = cfg.recordHistory ?? true;
     this.makeId = cfg.newId ?? (() => newId());
     this.onSlowRule = cfg.onSlowRule;
+    this.holdsLegacy = cfg.holdsLegacy === true;
     this.safety = new SafetyFloor(cfg.safety);
     this.state = {
       baselineHas: (scope, key) => stores.baseline.has(scope, key),
@@ -287,6 +297,10 @@ export class DetectionEngine {
       if (ids.has(c.rule.id)) throw new RuleCompileError(c.rule.id, 'duplicate rule id');
       ids.add(c.rule.id);
     }
+    if (this.holdsLegacy) {
+      for (const id of this.byId.keys()) if (!ids.has(id)) retainLegacyUses(id, []);
+      for (const c of compiled) retainLegacyUses(c.rule.id, c.legacy);
+    }
     this.byId = new Map(compiled.map((c) => [c.rule.id, c]));
     this.spent.clear();
     this.slow.clear();
@@ -295,6 +309,7 @@ export class DetectionEngine {
 
   upsertRule(rule: DetectionRuleInput | DetectionRule): DetectionRule {
     const c = compileRule(rule, this.defaultDedupeWindowSec);
+    if (this.holdsLegacy) retainLegacyUses(c.rule.id, c.legacy);
     this.byId.set(c.rule.id, c);
     this.spent.delete(c.rule.id);
     this.slow.delete(c.rule.id);
@@ -303,6 +318,7 @@ export class DetectionEngine {
   }
 
   removeRule(ruleId: string): void {
+    if (this.holdsLegacy) retainLegacyUses(ruleId, []);
     this.byId.delete(ruleId);
     this.spent.delete(ruleId);
     this.slow.delete(ruleId);

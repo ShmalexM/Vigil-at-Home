@@ -2,7 +2,7 @@ import { BlockList, isIP } from 'node:net';
 import type { Condition, DetectionEvent, FieldTest } from '../types.js';
 import { compileField, keyOf, type FieldGetter, type FieldValue } from './fields.js';
 import { caseFold, linearRegExp } from './linear.js';
-import { isLegacyPattern } from './legacy.js';
+import { isLegacyPattern, type LegacyUse } from './legacy.js';
 import { isTrustedPattern } from './trusted.js';
 
 /** Longest string a regex or glob is ever run against. Bounds evaluation time. */
@@ -30,8 +30,8 @@ export interface CompiledCondition {
   firstSeen: FirstSeenSpec[];
   /** Has a regex or glob Vigil does not ship (see isTrustedPattern), so the engine times it. */
   untrusted: boolean;
-  /** Regexes of a saved rule that run on the backtracking engine (legacy.ts). */
-  legacy: string[];
+  /** Regex tests of a saved rule that run on the backtracking engine (legacy.ts). */
+  legacy: LegacyUse[];
 }
 
 /** The rule a condition is in, which decides how its regexes and globs run. */
@@ -50,7 +50,7 @@ interface PatternHooks {
   /** The value is not one Vigil ships. */
   untrusted(): void;
   /** The regex runs on the backtracking engine as a saved rule's (legacy.ts). */
-  legacy(pattern: string): void;
+  legacy(use: LegacyUse): void;
 }
 
 /**
@@ -534,8 +534,9 @@ function patternTest(
   try {
     return test(linearRegExp(value, nocase));
   } catch (err) {
-    if (ctx.adoptLegacy || isLegacyPattern(ctx.ruleId, value)) {
-      hooks.legacy(value);
+    const legacy = { field: c.field, nocase, pattern: value };
+    if (ctx.adoptLegacy || isLegacyPattern(ctx.ruleId, legacy)) {
+      hooks.legacy(legacy);
       return test(new RegExp(value, nocase ? 'i' : ''));
     }
     throw new Error(`${c.field}: ${(err as Error).message}`, { cause: err });
@@ -642,10 +643,10 @@ export function compileCondition(
 ): CompiledCondition {
   const firstSeen: FirstSeenSpec[] = [];
   let untrusted = false;
-  const legacy: string[] = [];
+  const legacy: LegacyUse[] = [];
   const hooks: PatternHooks = {
     untrusted: () => (untrusted = true),
-    legacy: (p) => legacy.push(p),
+    legacy: (u) => legacy.push(u),
   };
 
   const walk = (c: Condition): Predicate => {

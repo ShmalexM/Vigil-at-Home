@@ -292,8 +292,10 @@ describe('blocking rules in the helper', () => {
     // The app syncs it back, marked as an older pattern: kept, and recorded.
     loaded.sync({ ...sync, rules: [...sync.rules, older], legacy: ['older-look'], lists: {} });
     expect(loaded.status().rules).toBe(sync.rules.length + 1);
-    const saved = JSON.parse(readFileSync(file, 'utf8')) as { legacy: Record<string, string[]> };
-    expect(saved.legacy).toEqual({ 'older-look': ['^/tmp/(?=p)payload$'] });
+    const saved = JSON.parse(readFileSync(file, 'utf8')) as { legacyUses: unknown };
+    expect(saved.legacyUses).toEqual({
+      'older-look': [{ field: 'process.path', nocase: false, pattern: '^/tmp/(?=p)payload$' }],
+    });
 
     // One this helper never had is skipped when marked, refused when not.
     const fresh = { ...older, id: 'fresh-look' };
@@ -319,12 +321,53 @@ describe('blocking rules in the helper', () => {
         rules: [...sync.rules, other],
         lists: {},
         retired: {},
-        legacy: {},
+        legacyUses: {},
       }),
     );
     const again = new FastPath({ file: file2, run: () => Promise.reject(new Error('unused')) });
     again.load();
     expect(again.status().rules).toBe(sync.rules.length);
+  });
+
+  it('revokes an older pattern once its rule is removed, here and in the saved file', () => {
+    const { sync } = appSet({});
+    const older = {
+      ...sync.rules[0]!,
+      id: 'older-gone',
+      condition: { field: 'process.path', op: 'regex' as const, value: '^/tmp/(?=q)payload$' },
+    };
+    const file = join(root, 'saved-then-removed.json');
+    writeFileSync(
+      file,
+      JSON.stringify({ ...sync, rules: [...sync.rules, older], lists: {}, retired: {} }),
+    );
+    const helper = () =>
+      new FastPath({ file, run: async () => ({ ok: true }) as unknown as ActionOutcome });
+    const h = helper();
+    h.load();
+    expect(h.status().rules).toBe(sync.rules.length + 1);
+    // Removed (the executor asks for the password first).
+    h.sync({ ...sync, lists: {} });
+    const saved = JSON.parse(readFileSync(file, 'utf8')) as { legacyUses: object };
+    expect(saved.legacyUses).toEqual({});
+    // The same id and text again, or with the case setting or field changed: not run.
+    const variants = [
+      older,
+      { ...older, condition: { ...older.condition, nocase: true } },
+      { ...older, condition: { ...older.condition, field: 'path' } },
+    ];
+    for (const again of variants) {
+      h.sync({ ...sync, rules: [...sync.rules, again], legacy: ['older-gone'], lists: {} });
+      expect(h.status().rules).toBe(sync.rules.length);
+      expect(() => h.sync({ ...sync, rules: [...sync.rules, again], lists: {} })).toThrow(
+        /older-gone/,
+      );
+    }
+    // Nor after a restart.
+    const later = helper();
+    later.load();
+    later.sync({ ...sync, rules: [...sync.rules, older], legacy: ['older-gone'], lists: {} });
+    expect(later.status().rules).toBe(sync.rules.length);
   });
 
   it('needs the admin password to turn a rule off, change it or add a path', async () => {

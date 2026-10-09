@@ -59,7 +59,9 @@ describe('rules saved before the linear-time engine', () => {
       ...(regexRule('r-look', LOOKAHEAD) as object),
       name: 'Renamed',
     });
-    expect(compileRule(edited).legacy).toEqual([LOOKAHEAD]);
+    expect(compileRule(edited).legacy).toEqual([
+      { field: 'process.commandLine', nocase: false, pattern: LOOKAHEAD },
+    ]);
     expect(lintRule(edited).errors).toEqual([]);
     expect(() => compileRule(regexRule('r-look', 'wget(?=\\s)'))).toThrow(/lookahead/);
   });
@@ -85,5 +87,45 @@ describe('rules saved before the linear-time engine', () => {
     );
     for (let i = 0; i < 2; i++) eng.evaluate(run(['ls']));
     expect(slow).toEqual(['r-look']);
+  });
+});
+
+describe('a legacy permission', () => {
+  const withCase = (id: string, value: string, field: string, nocase: boolean) =>
+    testRule({ id, condition: { field, op: 'regex', value, nocase } });
+
+  it('is bound to the rule id, field, case setting and text together', () => {
+    admitSavedRules([regexRule('r-look', LOOKAHEAD)]);
+    expect(() => compileRule(regexRule('r-look', LOOKAHEAD))).not.toThrow();
+    expect(() => compileRule(withCase('r-look', LOOKAHEAD, 'process.commandLine', true))).toThrow(
+      /lookahead/,
+    );
+    expect(() => compileRule(regexRule('r-look', LOOKAHEAD, 'process.path'))).toThrow(/lookahead/);
+  });
+
+  it('is revoked when the rule in force is removed, so the same rule cannot come back', () => {
+    const { rules } = admitSavedRules([regexRule('r-look', LOOKAHEAD)]);
+    const eng = new DetectionEngine(rules, memoryStores(), { holdsLegacy: true });
+    expect(eng.legacyRules()).toEqual(['r-look']);
+    eng.removeRule('r-look');
+    for (const again of [
+      regexRule('r-look', LOOKAHEAD),
+      withCase('r-look', LOOKAHEAD, 'process.commandLine', true),
+      regexRule('r-look', LOOKAHEAD, 'process.path'),
+    ]) {
+      expect(() => compileRule(again)).toThrow(/lookahead/);
+      expect(() => eng.upsertRule(again)).toThrow(/lookahead/);
+    }
+  });
+
+  it('is revoked when an edit stops using the test, and not by a replay of the edit', () => {
+    const { rules } = admitSavedRules([regexRule('r-look', LOOKAHEAD)]);
+    const eng = new DetectionEngine(rules, memoryStores(), { holdsLegacy: true });
+    // A replay or preview builds its own engine: that changes nothing.
+    new DetectionEngine([regexRule('r-look', 'curl\\s')], memoryStores());
+    expect(() => compileRule(regexRule('r-look', LOOKAHEAD))).not.toThrow();
+    eng.upsertRule(regexRule('r-look', 'curl\\s'));
+    expect(eng.legacyRules()).toEqual([]);
+    expect(() => eng.upsertRule(regexRule('r-look', LOOKAHEAD))).toThrow(/lookahead/);
   });
 });

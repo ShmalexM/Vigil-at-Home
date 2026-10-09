@@ -8,6 +8,7 @@ import {
   SLOW_RULE_BUDGET_MS,
   type SessionStart,
 } from '@vigil/detection';
+import { userOrigin } from '@vigil/detection/user';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Store } from './db/store.js';
 import { Detector, type DetectorOptions } from './detection.js';
@@ -114,6 +115,20 @@ describe('Detector', () => {
     });
     expect(out.ok).toBe(false);
     expect(out.errors.join()).toMatch(/linear-time.*lookahead/);
+  });
+
+  it('does not let a deleted older rule come back with the same id and pattern', () => {
+    const older = ownRule('older', '^/tmp/(?=e)evil$');
+    const { core } = setup({}, [older]);
+    const editor = core.detector!.editor;
+    // Kept while it stays as saved, edits included.
+    expect(editor.validate({ ...older, name: 'Renamed' }).ok).toBe(true);
+    editor.delete('older', userOrigin('rules-screen'));
+    for (const again of [older, { ...older, condition: { ...older.condition, nocase: true } }]) {
+      const out = editor.validate(again);
+      expect(out.ok).toBe(false);
+      expect(out.errors.join()).toMatch(/linear-time.*lookahead/);
+    }
   });
 
   it('says in sensor health when the linear-time engine is missing, and keeps saved rules', () => {

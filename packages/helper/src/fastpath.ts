@@ -26,12 +26,16 @@
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { isRelease, type Action, type SensorEvent } from '@vigil/core';
 import {
-  adoptLegacyPatterns,
+  adoptLegacyUses,
   admitSavedRules,
   compileRule,
   DetectionEngine,
   DetectionRule,
+  legacyKey,
+  legacyRuleIds,
   memoryStores,
+  retainLegacyUses,
+  type LegacyUse,
   type RuleException,
   type Stores,
 } from '@vigil/detection';
@@ -84,12 +88,18 @@ const Saved = z.object({
   /** Entries lists dropped, by list, with when (ms). Still blocking until RETIRE_MS later. */
   retired: z.record(z.string(), z.record(z.string(), z.number())).default({}),
   /**
-   * By rule id, the regexes it runs on the backtracking engine as it did
-   * before rule patterns moved to the linear-time one (legacy.ts in
-   * @vigil/detection). Missing in a file an earlier release wrote: every rule
-   * in it ran then, so loading it adopts them.
+   * By rule id, the regex tests (field, case setting, text) it runs on the
+   * backtracking engine as it did before rule patterns moved to the
+   * linear-time one (legacy.ts in @vigil/detection). Missing in a file an
+   * earlier release wrote: every rule in it ran then, so loading it adopts
+   * them. Only a rule still in force keeps its entry.
    */
-  legacy: z.record(z.string(), z.array(z.string())).optional(),
+  legacyUses: z
+    .record(
+      z.string(),
+      z.array(z.object({ field: z.string(), nocase: z.boolean(), pattern: z.string() })),
+    )
+    .optional(),
 });
 type Saved = z.infer<typeof Saved>;
 
@@ -100,16 +110,27 @@ const EMPTY: Saved = {
   selfPaths: [],
   lists: {},
   retired: {},
-  legacy: {},
+  legacyUses: {},
 };
 
-/** Each rule's regexes that run on the backtracking engine, for the saved file. */
-function legacyOf(rules: DetectionRule[]): Record<string, string[]> {
-  const out: Record<string, string[]> = {};
-  for (const r of rules) {
-    const legacy = compileRule(r).legacy;
-    if (legacy.length) out[r.id] = legacy;
-  }
+/** A rule as this helper would run it. */
+interface Planned {
+  rule: DetectionRule;
+  /** How its patterns run: which are timed and which keep the backtracking engine. */
+  how: string;
+  legacy: LegacyUse[];
+}
+
+function planned(rule: DetectionRule): Planned {
+  const c = compileRule(rule);
+  const legacy = c.legacy.map(legacyKey).sort();
+  return { rule, how: JSON.stringify([c.untrusted, legacy]), legacy: c.legacy };
+}
+
+/** Each rule's regex tests that run on the backtracking engine, for the saved file. */
+function legacyOf(plan: Planned[]): Record<string, LegacyUse[]> {
+  const out: Record<string, LegacyUse[]> = {};
+  for (const p of plan) if (p.legacy.length) out[p.rule.id] = p.legacy;
   return out;
 }
 
@@ -131,6 +152,8 @@ const WORDING = new Set([
 
 export class FastPath {
   private state: Saved = EMPTY;
+  /** The rules in force, as planned. */
+  private running = new Map<string, Planned>();
   private engine: DetectionEngine | undefined;
   private digests = new Map<string, string>();
   /** Lists arriving in parts: name → digest and the parts so far. */
@@ -159,15 +182,15 @@ export class FastPath {
     // wrote adopts every rule in it, since each ran then. A rule that no
     // longer compiles at all is dropped on its own; the rest keep blocking.
     let rules: DetectionRule[];
-    if (parsed.data.legacy === undefined) {
-      const admitted = admitSavedRules(parsed.data.rules);
+    const saved = parsed.data.rules;
+    if (parsed.data.legacyUses === undefined) {
+      const admitted = admitSavedRules(saved);
       for (const d of admitted.dropped)
         this.opts.log?.(`fast path: dropping saved rule: ${d.error}`);
       rules = admitted.rules;
     } else {
-      for (const [id, patterns] of Object.entries(parsed.data.legacy))
-        adoptLegacyPatterns(id, patterns);
-      rules = parsed.data.rules.filter((r) => {
+      for (const [id, uses] of Object.entries(parsed.data.legacyUses)) adoptLegacyUses(id, uses);
+      rules = saved.filter((r) => {
         try {
           compileRule(r);
           return true;
@@ -178,7 +201,8 @@ export class FastPath {
       });
     }
     try {
-      this.apply({ ...parsed.data, rules, legacy: legacyOf(rules) });
+      const plan = rules.map(planned);
+      this.apply({ ...parsed.data, rules, legacyUses: legacyOf(plan) }, plan);
     } catch (err) {
       this.opts.log?.(`fast path: saved rules did not load: ${(err as Error).message}`);
     }
@@ -218,40 +242,54 @@ export class FastPath {
       if (have) lists[name] = have;
     }
     const retired = this.retire(lists);
-    // A rule the app runs with an older pattern runs here too only if this
-    // helper had that pattern in that rule already (legacy.ts); otherwise it
-    // is skipped, and the app keeps blocking with it while it is open.
-    const older = new Set(cmd.legacy ?? []);
-    const rules = cmd.rules.filter((r) => {
-      if (!older.has(r.id)) return true;
-      try {
-        compileRule(r);
-        return true;
-      } catch (err) {
-        this.opts.log?.(
-          `fast path: skipping rule with an older pattern: ${(err as Error).message}`,
-        );
-        return false;
-      }
-    });
     // Throws RuleCompileError before anything changes. That includes a regex or
     // glob that could take too long to match (regexProblem, globProblem): adding
     // rules needs no password, so the same checks as the app's keep one rule
     // from stalling every check here.
-    this.apply({
-      rev: this.state.rev + 1,
-      rules,
-      exceptions: cmd.exceptions,
-      selfPaths: cmd.selfPaths,
-      lists,
-      retired,
-      legacy: legacyOf(rules),
-    });
+    const plan = this.plan(cmd, (err) =>
+      this.opts.log?.(`fast path: skipping rule with an older pattern: ${err.message}`),
+    );
+    const rules = plan.map((p) => p.rule);
+    this.apply(
+      {
+        rev: this.state.rev + 1,
+        rules,
+        exceptions: cmd.exceptions,
+        selfPaths: cmd.selfPaths,
+        lists,
+        retired,
+        legacyUses: legacyOf(plan),
+      },
+      plan,
+    );
     this.save();
     return {
       needLists: Object.keys(cmd.lists).filter((n) => this.digests.get(n) !== cmd.lists[n]),
       rev: this.state.rev,
     };
+  }
+
+  /**
+   * The rules this sync would have the helper run, compiled. A rule the app marks as an older pattern
+   * (`legacy`) runs only if this helper already let that exact test keep the
+   * backtracking engine; otherwise it is left out (and `skipped` hears why).
+   * Any other rule that does not compile throws.
+   */
+  private plan(cmd: DetectionSync, skipped?: (err: Error) => void): Planned[] {
+    const older = new Set(cmd.legacy ?? []);
+    const out: Planned[] = [];
+    for (const rule of cmd.rules) {
+      if (!older.has(rule.id)) {
+        out.push(planned(rule));
+        continue;
+      }
+      try {
+        out.push(planned(rule));
+      } catch (err) {
+        skipped?.(err as Error);
+      }
+    }
+    return out;
   }
 
   /** One part of a list. The list changes only once every part is in and the digest matches. */
@@ -270,7 +308,9 @@ export class FastPath {
     const entries = inc.parts.flat() as string[];
     if (listDigest(entries) !== cmd.digest) throw new Error(`list ${cmd.list} arrived damaged`);
     const lists = { ...this.state.lists, [cmd.list]: entries };
-    this.apply({ ...this.state, rev: this.state.rev + 1, lists, retired: this.retire(lists) });
+    this.apply({ ...this.state, rev: this.state.rev + 1, lists, retired: this.retire(lists) }, [
+      ...this.running.values(),
+    ]);
     this.save();
     return { complete: true };
   }
@@ -342,7 +382,12 @@ export class FastPath {
     return out;
   }
 
-  private apply(next: Saved): void {
+  /**
+   * Put `next` in force. `plan` is its rules compiled (planned). Legacy
+   * permissions follow: a rule no longer run, or no longer using a test,
+   * loses that test's permission, here and in the saved file.
+   */
+  private apply(next: Saved, plan: Planned[]): void {
     const stores: Stores = memoryStores();
     for (const name of new Set([...Object.keys(next.lists), ...Object.keys(next.retired)])) {
       const entries = [...(next.lists[name] ?? []), ...Object.keys(next.retired[name] ?? {})];
@@ -364,6 +409,9 @@ export class FastPath {
       : undefined;
     this.engine = engine;
     this.state = next;
+    this.running = new Map(plan.map((p) => [p.rule.id, p]));
+    for (const id of legacyRuleIds()) if (!this.running.has(id)) retainLegacyUses(id, []);
+    for (const p of plan) retainLegacyUses(p.rule.id, p.legacy);
     this.digests = new Map(Object.entries(next.lists).map(([n, e]) => [n, listDigest(e)]));
   }
 
