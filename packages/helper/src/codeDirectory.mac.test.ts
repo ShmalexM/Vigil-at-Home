@@ -1,7 +1,7 @@
 // Real-Mac check that the CDHash and identifier the helper reads from a
 // program's own bytes (codeDirectory.ts) are the ones codesign reports, for
-// programs that ship with macOS. Runs only on macOS (`pnpm --filter
-// @vigil/helper test:mac`); needs no root.
+// programs that ship with macOS. Runs only on macOS, and needs no root:
+// `cd packages/helper && npx vitest run --config vitest.mac.config.ts src/codeDirectory.mac.test.ts`.
 
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
