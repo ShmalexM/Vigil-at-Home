@@ -5,9 +5,12 @@
 import { basename, dirname } from 'node:path';
 import { lstatSync, readFileSync } from 'node:fs';
 import type { System } from '../system.js';
+import { PROTECTED_LABEL_PREFIXES } from '../config.js';
 import { ActionError } from './errors.js';
+import { runsProtectedProgram } from './protectedSet.js';
 import {
   quarantine,
+  resolveTarget,
   restore,
   type QuarantineOptions,
   type QuarantineRecord,
@@ -39,11 +42,33 @@ export function launchdDomain(
   return `gui/${ownerUid}`;
 }
 
+/**
+ * Launch items of Vigil itself and of the tools it relies on. They are never
+ * unloaded, whatever folder they sit in or whatever they are named on disk.
+ */
+export { PROTECTED_LABEL_PREFIXES };
+
+function isProtectedLabel(name: string): boolean {
+  const lower = name.toLowerCase();
+  return PROTECTED_LABEL_PREFIXES.some((p) => lower.startsWith(p));
+}
+
 async function readLabel(sys: System, path: string): Promise<string | undefined> {
   const r = await sys.run('plutil', ['-extract', 'Label', 'raw', '-o', '-', path]);
   const label = r.stdout.trim();
   // Labels are reverse-DNS style; refuse anything that could confuse launchctl.
   return r.code === 0 && /^[A-Za-z0-9._-]{1,255}$/.test(label) ? label : undefined;
+}
+
+/** The program a launch item runs: Program, else the first of ProgramArguments. */
+async function readPrograms(sys: System, path: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const key of ['Program', 'ProgramArguments.0']) {
+    const r = await sys.run('plutil', ['-extract', key, 'raw', '-o', '-', path]);
+    const value = r.stdout.trim();
+    if (r.code === 0 && value) out.push(value);
+  }
+  return out;
 }
 
 export async function disablePersistence(
@@ -59,6 +84,10 @@ export async function disablePersistence(
       'only plists directly inside a LaunchAgents or LaunchDaemons folder can be disabled',
     );
   }
+  if (isProtectedLabel(basename(path)))
+    throw new ActionError('refused', `${basename(path)} belongs to Vigil or its sensors`);
+  // Vet the file the way the quarantine will before unloading anything.
+  resolveTarget(path, opts);
   let st;
   try {
     st = lstatSync(path);
@@ -69,6 +98,16 @@ export async function disablePersistence(
   readFileSync(path); // readable
 
   const label = await readLabel(sys, path);
+  if (label && isProtectedLabel(label))
+    throw new ActionError('refused', `${label} belongs to Vigil or its sensors`);
+  // Whatever it is called, an item that runs Vigil or a sensor is theirs.
+  for (const program of await readPrograms(sys, path)) {
+    if (runsProtectedProgram(program, opts))
+      throw new ActionError(
+        'refused',
+        `${basename(path)} runs ${program}, part of Vigil or its sensors`,
+      );
+  }
   const domain = launchdDomain(path, st.uid, sys.consoleUid());
   let wasLoaded = false;
   if (label) {
@@ -84,8 +123,12 @@ export async function disablePersistence(
   return { quarantine: q, label, domain, wasLoaded };
 }
 
-export async function restorePersistence(sys: System, rec: PersistenceRecord): Promise<void> {
-  restore(rec.quarantine);
+export async function restorePersistence(
+  sys: System,
+  rec: PersistenceRecord,
+  opts: QuarantineOptions,
+): Promise<void> {
+  restore(rec.quarantine, opts);
   if (rec.wasLoaded) {
     const r = await sys.run('launchctl', ['bootstrap', rec.domain, rec.quarantine.originalPath]);
     if (r.code !== 0) {

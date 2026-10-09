@@ -33,6 +33,7 @@ import {
   type EventHistory,
   type FeedImporterOptions,
   type AnalyzeRunner,
+  type CheckOptions,
   type FeedStatus,
   type FlaggedEvent,
   type Proposal,
@@ -46,7 +47,7 @@ import { fastPathRules, isAppOnlyField } from '@vigil/detection/fastpath';
 import { userOrigin } from '@vigil/detection/user';
 import type { EventOutcome } from '../shared/ipc.js';
 import type { AlertService } from './alerts.js';
-import type { Store } from './db/store.js';
+import type { EventBodyRow, Store } from './db/store.js';
 import type { HelperRuleSet } from './helper.js';
 import type { HelperSelf } from './self-path.js';
 import { noteSlowRule } from './slow-rule.js';
@@ -260,14 +261,14 @@ export class Detector {
   private *flagged(from: number, to: number): Iterable<FlaggedEvent> {
     const rows = this.db
       .prepare(
-        `SELECT body, label FROM events
+        `SELECT body, args, label FROM events
          WHERE ts >= ? AND ts <= ? AND matched = 0 AND label IS NOT NULL
            AND json_extract(label, '$.label') IN ('unusual', 'suspicious')
          ORDER BY ts DESC LIMIT 2000`,
       )
-      .iterate(from, to) as Iterable<{ body: string; label: string }>;
+      .iterate(from, to) as Iterable<EventBodyRow & { label: string }>;
     for (const r of rows) {
-      const e = JSON.parse(r.body) as SensorEvent;
+      const e = this.store.event(r);
       const l = JSON.parse(r.label) as { label: 'unusual' | 'suspicious'; reason?: string };
       const f: FlaggedEvent = { kind: e.kind, subject: flaggedSubject(e), label: l.label };
       if (l.reason) f.reason = l.reason;
@@ -299,7 +300,7 @@ export class Detector {
    * free: the tracker only says which agent session asked (attribution), and
    * `engine.check` leaves no trace. Rules decide deny, ask or nothing; never allow.
    */
-  preflight(req: PreflightRequest): PreflightResult {
+  preflight(req: PreflightRequest, opts?: CheckOptions): PreflightResult {
     const ts = this.now();
     const found = req.ppid !== undefined ? this.tracker.lookup(req.ppid) : undefined;
     const event = toolRequestEvent(req, {
@@ -307,7 +308,7 @@ export class Detector {
       ts,
       ...(found?.tag ? { tag: found.tag } : {}),
     });
-    const detections = this.engine.check(event);
+    const detections = this.engine.check(event, opts);
     const reply = decide(detections, (id) => this.engine.getRule(id)?.name ?? id);
     return { reply, event, detections };
   }

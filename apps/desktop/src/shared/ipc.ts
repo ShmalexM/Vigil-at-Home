@@ -53,6 +53,9 @@ import type { UsageLimitsView, UsageReport } from './usage.js';
 import {
   ApiKeyInput,
   ApiKeyProvider,
+  FeedKey,
+  FeedKeyName,
+  type FeedKeysView,
   SettingsPane,
   SetupAction,
   SetupMode,
@@ -233,6 +236,10 @@ export const calls = {
   restartSetup: z.tuple([]),
   saveApiKey: z.tuple([ApiKeyInput]),
   clearApiKey: z.tuple([ApiKeyProvider]),
+  /** Keys for threat feeds that need one, such as abuse.ch's Auth-Key. Only whether one is saved comes back. */
+  getFeedKeys: z.tuple([]),
+  saveFeedKey: z.tuple([FeedKeyName, FeedKey]),
+  clearFeedKey: z.tuple([FeedKeyName]),
   openSettingsPane: z.tuple([SettingsPane]),
   installHelper: z.tuple([]),
   uninstallHelper: z.tuple([]),
@@ -607,6 +614,9 @@ export interface CallResults {
   restartSetup: void;
   saveApiKey: SetupView;
   clearApiKey: SetupView;
+  getFeedKeys: FeedKeysView;
+  saveFeedKey: FeedKeysView;
+  clearFeedKey: FeedKeysView;
   openSettingsPane: void;
   installHelper: HelperInstallResult;
   uninstallHelper: HelperInstallResult;

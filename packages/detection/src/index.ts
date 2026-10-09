@@ -37,6 +37,7 @@ export {
   RuleCompileError,
   SLOW_RULE_BUDGET_MS,
   SLOW_RULE_WINDOW_MS,
+  type CheckOptions,
   type EngineConfig,
 } from './engine.js';
 export {

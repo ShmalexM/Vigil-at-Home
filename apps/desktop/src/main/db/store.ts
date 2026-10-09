@@ -23,6 +23,7 @@ import {
 import type { AgentCandidate, AgentSessionView } from '../../shared/agents.js';
 import type { UsageRun } from '../../shared/usage.js';
 import { migrations } from './schema.js';
+import { ArgDictionary, argIds, encodable } from './arg-dictionary.js';
 
 type Row = { body: string };
 
@@ -118,10 +119,12 @@ export function eventViewsQuery(
   if (q.text) {
     where.push('ts >= ?');
     args.push((q.before ?? now) - TEXT_SEARCH_WINDOW_MS);
-    where.push(`body LIKE ? ESCAPE '\\'`);
-    args.push(`%${q.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+    // Arguments kept as ids (see ArgDictionary) are searched by their text,
+    // which the caller sets up with argsLike().
+    where.push(`(body LIKE ? ESCAPE '\\' OR (args IS NOT NULL AND vigil_args_hit(args)))`);
+    args.push(likePattern(q.text));
   }
-  const sql = `SELECT body, outcome, label FROM events ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+  const sql = `SELECT body, outcome, label, args FROM events ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY ts DESC, id DESC LIMIT ?`;
   args.push(q.limit ?? 200);
   return { sql, args };
@@ -142,16 +145,14 @@ const UsageRunRow = z.object({
   billed: z.boolean().optional(),
 }) satisfies z.ZodType<UsageRun>;
 
-type EventRow = { body: string; outcome: string | null; label: string | null };
-
-function eventView(r: EventRow): EventView {
-  const label = r.label ? EventLabel.safeParse(JSON.parse(r.label)) : undefined;
-  return {
-    event: SensorEvent.parse(JSON.parse(r.body)),
-    outcome: r.outcome ? EventOutcome.parse(JSON.parse(r.outcome)) : null,
-    ...(label?.success ? { label: label.data } : {}),
-  };
+/** A LIKE pattern for `text` anywhere, with LIKE's own characters escaped by backslash. */
+export function likePattern(text: string): string {
+  return `%${text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 }
+
+/** Every events read selects `args` with `body`: see Store.event. */
+export type EventBodyRow = { body: string; args: Uint8Array | null };
+type EventRow = EventBodyRow & { outcome: string | null; label: string | null };
 
 /**
  * Typed access to Vigil's SQLite database. Pure Node (node:sqlite), no Electron,
@@ -165,6 +166,14 @@ export class Store {
     { events: number; matches: number; lastAt: number; asks: number; denies: number }
   >();
   private txDepth = 0;
+  private readonly argDict: ArgDictionary;
+  /**
+   * The text search running now (argsLike), for vigil_args_hit: the text,
+   * folded as LIKE folds it, what each argument id seen so far gave, and,
+   * once a search has looked up many ids, every matching id at once.
+   */
+  private search:
+    { text: string; needle: string; seen: Map<number, boolean>; all?: Set<number> } | undefined;
   /**
    * countEventsSince's last answer per start time, with the newest rowid it
    * had counted. New rows get higher rowids, so the next answer only counts
@@ -197,6 +206,67 @@ export class Store {
       PRAGMA busy_timeout = 3000;
     `);
     this.migrate();
+    this.argDict = new ArgDictionary(db);
+    db.function('vigil_args_hit', { deterministic: false, directOnly: true }, (blob) =>
+      blob instanceof Uint8Array && this.argsHit(blob) ? 1 : 0,
+    );
+  }
+
+  /**
+   * Point vigil_args_hit at `text` before a search runs. A search that checks
+   * a few events looks up only their arguments, so its cost doesn't grow
+   * with the dictionary; one that reaches many distinct arguments matches
+   * the whole dictionary once instead, so it never costs much more than that.
+   */
+  private argsLike(text: string): void {
+    this.search = { text, needle: likeFold(text), seen: new Map() };
+  }
+
+  /** Whether any of an event's arguments holds the search text, as LIKE '%text%' would. */
+  private argsHit(blob: Uint8Array): boolean {
+    const search = this.search;
+    if (!search) return false;
+    for (const id of argIds(blob)) {
+      let hit = search.all?.has(id) ?? search.seen.get(id);
+      if (hit === undefined) {
+        if (search.seen.size >= ARG_LOOKUPS_BEFORE_SCAN) {
+          const rows = this.stmt(`SELECT id FROM arg_strings WHERE value LIKE ? ESCAPE '\\'`).all(
+            likePattern(search.text),
+          ) as { id: number }[];
+          search.all = new Set(rows.map((r) => Number(r.id)));
+          hit = search.all.has(id);
+        } else {
+          hit = likeFold(this.argDict.value(id)).includes(search.needle);
+          search.seen.set(id, hit);
+        }
+      }
+      if (hit) return true;
+    }
+    return false;
+  }
+
+  /**
+   * An event as stored: its body, with arguments kept as ids put back. Code
+   * that reads the events table itself selects `args` too and comes here.
+   */
+  event(r: EventBodyRow): SensorEvent {
+    const e = SensorEvent.parse(JSON.parse(r.body));
+    if (r.args && 'process' in e && e.process) e.process.args = this.argDict.decode(r.args);
+    return e;
+  }
+
+  private view(r: EventRow): EventView {
+    const label = r.label ? EventLabel.safeParse(JSON.parse(r.label)) : undefined;
+    return {
+      event: this.event(r),
+      outcome: r.outcome ? EventOutcome.parse(JSON.parse(r.outcome)) : null,
+      ...(label?.success ? { label: label.data } : {}),
+    };
+  }
+
+  /** Events from rows that select body and args. */
+  private events(sql: string, ...args: SQLInputValue[]): SensorEvent[] {
+    return (this.stmt(sql).all(...args) as EventBodyRow[]).map((r) => this.event(r));
   }
 
   /** Prepared once and reused: preparing costs more than most of these queries. */
@@ -243,6 +313,8 @@ export class Store {
         this.db.exec(`ROLLBACK TO ${name}`);
         this.db.exec(`RELEASE ${name}`);
       }
+      // Arguments it added or touched may be undone: don't trust the cache.
+      this.argDict?.forget();
       throw err;
     } finally {
       this.txDepth--;
@@ -288,7 +360,12 @@ export class Store {
 
   /**
    * An event may already be stored (an alert saves its events at once, with
-   * the sensor's raw record); then only its outcome is filled in.
+   * the sensor's raw record); then only its outcome is filled in, except that
+   * a copy with its arguments in the body replaces one with them as ids.
+   *
+   * A launch no rule matched keeps its arguments as ids (ArgDictionary);
+   * events a rule matched, and those an alert stores, keep them in the body,
+   * so an alert's evidence never depends on the dictionary.
    */
   private writeEvent(e: SensorEvent, outcome?: EventOutcome): void {
     this.lastMemo.delete(e.source);
@@ -299,10 +376,26 @@ export class Store {
       e.kind === 'agent.tool_request' ? e.agent : 'process' in e ? e.process?.agent : undefined;
     const session = tag?.session;
     if (session) this.sessionCounts.delete(session);
+    const p = 'process' in e ? e.process : undefined;
+    let body: SensorEvent = e;
+    let args: Uint8Array | null = null;
+    if (
+      outcome &&
+      outcome.matches.length === 0 &&
+      p?.args &&
+      p.args.length > 0 &&
+      encodable(p.args)
+    ) {
+      args = this.argDict.encode(p.args, e.ts);
+      const { args: _args, ...process } = p;
+      body = { ...e, process } as SensorEvent;
+    }
     this.stmt(
-      `INSERT INTO events (id, ts, kind, source, body, outcome, matched, agent_session, agent_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO events (id, ts, kind, source, body, outcome, matched, agent_session, agent_id, args)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
+         body = CASE WHEN args IS NOT NULL AND excluded.args IS NULL THEN excluded.body ELSE body END,
+         args = CASE WHEN excluded.args IS NULL THEN NULL ELSE args END,
          outcome = COALESCE(excluded.outcome, outcome),
          matched = CASE WHEN excluded.outcome IS NULL THEN matched ELSE excluded.matched END,
          agent_session = COALESCE(agent_session, excluded.agent_session),
@@ -312,11 +405,12 @@ export class Store {
       e.ts,
       e.kind,
       e.source,
-      JSON.stringify(e),
+      JSON.stringify(body),
       outcome ? JSON.stringify(outcome) : null,
       outcome && outcome.matches.length > 0 ? 1 : 0,
       session ?? null,
       (session && tag?.id) || null,
+      args,
     );
   }
 
@@ -327,12 +421,9 @@ export class Store {
    */
   listEventViews(q: EventQuery = {}, now = Date.now()): EventView[] {
     const { sql, args } = eventViewsQuery(q, now);
-    const rows = this.db.prepare(sql).all(...args) as {
-      body: string;
-      outcome: string | null;
-      label: string | null;
-    }[];
-    return rows.map(eventView);
+    if (q.text) this.argsLike(q.text);
+    const rows = this.db.prepare(sql).all(...args) as EventRow[];
+    return rows.map((r) => this.view(r));
   }
 
   /**
@@ -368,13 +459,13 @@ export class Store {
     }
     if (q.matchedOnly) where.push('matched = 1');
     const filter = where.join(' AND ');
-    const window = `SELECT body, outcome, label, ts, id FROM events WHERE ${filter}
+    const window = `SELECT body, outcome, label, args, ts, id FROM events WHERE ${filter}
       ORDER BY ts DESC, id DESC`;
     const scanned: string[] = [];
     const scanArgs: SQLInputValue[] = [];
     if (q.text) {
-      scanned.push(`body LIKE ? ESCAPE '\\'`);
-      scanArgs.push(`%${q.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+      scanned.push(`(body LIKE ? ESCAPE '\\' OR (args IS NOT NULL AND vigil_args_hit(args)))`);
+      scanArgs.push(likePattern(q.text));
     }
     if (q.label) {
       scanned.push(`json_extract(label, '$.label') = ?`);
@@ -382,11 +473,12 @@ export class Store {
     }
     if (!scanned.length) {
       const rows = this.db.prepare(`${window} LIMIT ?`).all(...args, q.limit) as EventRow[];
-      return { views: rows.map(eventView), partial: false };
+      return { views: rows.map((r) => this.view(r)), partial: false };
     }
+    if (q.text) this.argsLike(q.text);
     const rows = this.db
       .prepare(
-        `SELECT body, outcome, label FROM (${window} LIMIT ?)
+        `SELECT body, outcome, label, args FROM (${window} LIMIT ?)
          WHERE ${scanned.join(' AND ')} ORDER BY ts DESC, id DESC LIMIT ?`,
       )
       .all(...args, q.scanRows, ...scanArgs, q.limit) as EventRow[];
@@ -395,7 +487,7 @@ export class Store {
       this.db
         .prepare(`SELECT ts FROM events WHERE ${filter} ORDER BY ts DESC LIMIT 1 OFFSET ?`)
         .get(...args, q.scanRows) !== undefined;
-    return { views: rows.map(eventView), partial };
+    return { views: rows.map((r) => this.view(r)), partial };
   }
 
   /** Stores models' labels on events already written. Unknown ids are ignored. */
@@ -506,9 +598,9 @@ export class Store {
   /** Oldest first, for replaying rules over history. */
   *eventsBetween(from: number, to: number): Iterable<SensorEvent> {
     const rows = this.db
-      .prepare('SELECT body FROM events WHERE ts >= ? AND ts <= ? ORDER BY ts, id')
-      .iterate(from, to) as Iterable<Row>;
-    for (const r of rows) yield SensorEvent.parse(JSON.parse(r.body));
+      .prepare('SELECT body, args FROM events WHERE ts >= ? AND ts <= ? ORDER BY ts, id')
+      .iterate(from, to) as Iterable<EventBodyRow>;
+    for (const r of rows) yield this.event(r);
   }
 
   /** Opaque JSON kept next to an alert (the detection that raised it). */
@@ -526,15 +618,14 @@ export class Store {
   }
 
   getEvent(id: string): SensorEvent | undefined {
-    return this.one(SensorEvent, 'SELECT body FROM events WHERE id = ?', id);
+    return this.events('SELECT body, args FROM events WHERE id = ?', id)[0];
   }
 
   getEvents(ids: readonly string[]): SensorEvent[] {
     if (ids.length === 0) return [];
     // One statement for any number of ids, so the statement cache stays small.
-    return this.all(
-      SensorEvent,
-      'SELECT body FROM events WHERE id IN (SELECT value FROM json_each(?)) ORDER BY ts',
+    return this.events(
+      'SELECT body, args FROM events WHERE id IN (SELECT value FROM json_each(?)) ORDER BY ts',
       JSON.stringify(ids),
     );
   }
@@ -543,26 +634,24 @@ export class Store {
   getEventViews(ids: readonly string[]): EventView[] {
     if (ids.length === 0) return [];
     const rows = this.stmt(
-      `SELECT body, outcome, label FROM events
+      `SELECT body, outcome, label, args FROM events
        WHERE id IN (SELECT value FROM json_each(?)) ORDER BY ts`,
     ).all(JSON.stringify(ids)) as EventRow[];
-    return rows.map(eventView);
+    return rows.map((r) => this.view(r));
   }
 
   recentEvents(opts: { kind?: EventKind; since?: number; limit?: number } = {}): SensorEvent[] {
     const limit = opts.limit ?? 200;
     const since = opts.since ?? 0;
     return opts.kind
-      ? this.all(
-          SensorEvent,
-          'SELECT body FROM events WHERE kind = ? AND ts >= ? ORDER BY ts DESC LIMIT ?',
+      ? this.events(
+          'SELECT body, args FROM events WHERE kind = ? AND ts >= ? ORDER BY ts DESC LIMIT ?',
           opts.kind,
           since,
           limit,
         )
-      : this.all(
-          SensorEvent,
-          'SELECT body FROM events WHERE ts >= ? ORDER BY ts DESC LIMIT ?',
+      : this.events(
+          'SELECT body, args FROM events WHERE ts >= ? ORDER BY ts DESC LIMIT ?',
           since,
           limit,
         );
@@ -577,6 +666,15 @@ export class Store {
       `DELETE FROM events WHERE ts < ? AND id NOT IN (
          SELECT j.value FROM alerts, json_each(alerts.body, '$.eventIds') AS j)`,
     ).run(before);
+    // Events an alert keeps hold their arguments in the body (writeEvent),
+    // so arguments last used before the cut are no longer needed. Should an
+    // older event still hold ids, its arguments stay all the same.
+    const keep = new Set<number>();
+    for (const r of this.stmt('SELECT args FROM events WHERE ts < ? AND args IS NOT NULL').iterate(
+      before,
+    ) as Iterable<{ args: Uint8Array }>)
+      for (const id of argIds(r.args)) keep.add(id);
+    this.argDict.prune(before, keep);
     return Number(res.changes);
   }
 
@@ -903,15 +1001,15 @@ export class Store {
     const rows = (
       opts.kind
         ? this.stmt(
-            `SELECT body, outcome, label FROM events WHERE agent_session = ? AND kind = ?
+            `SELECT body, outcome, label, args FROM events WHERE agent_session = ? AND kind = ?
              ORDER BY ts ${order}, id ${order} LIMIT ?`,
           ).all(id, opts.kind, limit)
         : this.stmt(
-            `SELECT body, outcome, label FROM events WHERE agent_session = ?
+            `SELECT body, outcome, label, args FROM events WHERE agent_session = ?
              ORDER BY ts ${order}, id ${order} LIMIT ?`,
           ).all(id, limit)
     ) as EventRow[];
-    return rows.map(eventView);
+    return rows.map((r) => this.view(r));
   }
 
   /** The pids behind a session's events that matched a rule. */
@@ -1022,6 +1120,7 @@ export class Store {
            json_extract(body, '$.process.ppid') AS ppid,
            json_extract(body, '$.process.path') AS path,
            json_extract(body, '$.process.args') AS args,
+           args AS argIds,
            json_extract(body, '$.process.teamId') AS teamId,
            json_extract(body, '$.process.signingId') AS signingId
          FROM events WHERE kind = 'process.exec' AND ts >= ? ORDER BY ts DESC LIMIT ?`,
@@ -1031,6 +1130,7 @@ export class Store {
       ppid: number | null;
       path: string | null;
       args: string | null;
+      argIds: Uint8Array | null;
       teamId: string | null;
       signingId: string | null;
     }>;
@@ -1038,7 +1138,8 @@ export class Store {
       if (r.path === null || r.pid === null) continue;
       const row: ExecRow = { pid: Number(r.pid), path: r.path };
       if (r.ppid !== null) row.ppid = Number(r.ppid);
-      if (r.args !== null) {
+      if (r.argIds !== null) row.args = this.argDict.decode(r.argIds);
+      else if (r.args !== null) {
         const args = JSON.parse(r.args) as unknown;
         if (Array.isArray(args)) row.args = args.map(String);
       }
@@ -1093,4 +1194,14 @@ export class Store {
   close(): void {
     this.db.close();
   }
+}
+
+/** True when the packed id list (ArgDictionary.encode) holds one of `ids`. */
+
+/** Distinct arguments a text search looks up one by one before matching the whole dictionary. */
+const ARG_LOOKUPS_BEFORE_SCAN = 2_000;
+
+/** Text as SQLite's LIKE compares it: ASCII letters fold case, nothing else does. */
+function likeFold(text: string): string {
+  return text.replace(/[A-Z]+/g, (m) => m.toLowerCase());
 }
