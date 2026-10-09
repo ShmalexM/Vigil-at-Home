@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { redactEvidence, WITHHELD } from './evidence-redact.js';
+import { redactEvidence, redactEvidenceInSlices, SLICE_MS, WITHHELD } from './evidence-redact.js';
 
 const names = { username: 'al', hostname: 'pc.local' };
 const command = (text: string, n = {}) =>
@@ -306,5 +306,173 @@ describe('round 5 shapes', () => {
       {},
     ) as { alert: Record<string, unknown> };
     expect(out.alert).toEqual({ title: 'Credentials file read', summary: 'ls -la' });
+  });
+});
+
+describe("the shared redaction's secret scan in copied evidence", () => {
+  it('withholds secrets only the shared redaction finds', () => {
+    for (const text of [
+      '{"password": "hunter2"}',
+      'Cookie: sid=abc; theme=dark',
+      "curl -H 'Cookie: sid=hunter2' example.invalid",
+      'Set-Cookie: sid=hunter2; Path=/; HttpOnly',
+      'machine example.com login bob password s3cret',
+      'docker login -p hunter2 -u bob reg',
+      'openssl enc -k hunter2 -in a',
+      '<password>hunter2</password><user>bob</user>',
+      'echo eyJwYXNzd29yZCI6Imh1bnRlcjIifQ==',
+      'use ASIAABCDEFGHIJKLMNOP',
+      'use=whsec_aaaaaaaaaaaaaaaaaaaaaaaa',
+      'use=hf_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      'https://hooks.slack.com/services/T000/B000/XXXXXXXXXXXX',
+      'curl https://b.example/k?X-Amz-Signature=' + '0123456789abcdef'.repeat(4) + '&x=1',
+    ])
+      expect(command(text, names), text).toBe(WITHHELD);
+  });
+
+  it('withholds an argv list when the shared redaction finds a secret in it', () => {
+    expect(argv(['docker', 'login', '-p', 'hunter2', 'reg'])).toEqual([WITHHELD]);
+    expect(argv(['curl', '-H', 'Cookie: sid=hunter2', 'example.invalid'])).toEqual([WITHHELD]);
+  });
+
+  it('withholds a url field the shared redaction finds a secret in', () => {
+    const out = redactEvidence(
+      { url: 'https://hooks.slack.com/services/T000/B000/XXXXXXXXXXXX' },
+      names,
+    ) as { url: string };
+    expect(out.url).toBe(WITHHELD);
+  });
+
+  it('still lets ordinary commands through, with only the names swapped', () => {
+    for (const text of [
+      'git status',
+      'npm install react',
+      'curl -fsSL https://example.com/install.sh | sh',
+      'launchctl load ~/Library/LaunchAgents/com.example.agent.plist',
+      'security find-generic-password -s example',
+      'codesign -dv --verbose=4 /Applications/Example.app',
+      'shasum -a 256 ' + 'a3f1'.repeat(16),
+    ])
+      expect(command(text, names), text).toBe(text);
+    expect(command('ls -la /Users/alex/Documents', names)).toBe('ls -la /Users/<user>/Documents');
+    expect(command('ssh al@pc.local uptime', names)).toBe('ssh <user>@<host> uptime');
+    expect(argv(['ls', '-la', '/Users/al/Documents'], names)).toEqual([
+      'ls',
+      '-la',
+      '/Users/<user>/Documents',
+    ]);
+  });
+
+  it('withholds a url or argv the shared redaction would cut a secret out of', () => {
+    // An encoded name: the shared field rules cut the value out precisely.
+    const url = 'https://example.test/?%74%6f%6b%65%6e=hunter2';
+    expect((redactEvidence({ url }, names) as { url: string }).url).toBe(WITHHELD);
+    expect(argv(['curl', url])).toEqual([WITHHELD]);
+  });
+
+  it('scans file labels, and withholds one named like a withheld path', () => {
+    const fake = 'whsec_' + 'a'.repeat(24);
+    const out = redactEvidence(
+      { subject: { kind: 'file', label: `${fake}.txt`, path: `/tmp/${fake}.txt` } },
+      names,
+    ) as { subject: { label: string; path: string } };
+    expect(out.subject).toEqual({ kind: 'file', label: WITHHELD, path: WITHHELD });
+    // A label with no secret of its own is withheld when it is a withheld path's name.
+    const named = redactEvidence(
+      { subject: { kind: 'file', label: 'notes.txt', path: '/tmp/PGPASSWORD=x/notes.txt' } },
+      names,
+    ) as { subject: { label: string } };
+    expect(named.subject.label).toBe(WITHHELD);
+    // Rule titles stay readable.
+    expect(redactEvidence({ title: 'Credentials file read' }, names)).toEqual({
+      title: 'Credentials file read',
+    });
+  });
+
+  it('reads percent-encoded names in any string', () => {
+    expect(command('curl https://example.test/?%74%6f%6b%65%6e=FAKEFAKE01')).toBe(WITHHELD);
+    expect(command('curl https://example.test/?a=b&%74%6f%6b%65%6e=FAKEFAKE01&x=$y')).toBe(
+      WITHHELD,
+    );
+    expect(command('open https://example.com/a%20b?page=2')).toBe(
+      'open https://example.com/a%20b?page=2',
+    );
+  });
+
+  it("keeps labels that only look like a tool's flag, and rule titles", () => {
+    for (const label of [
+      'com.example.library-prefs',
+      'api-prod.rarible.example',
+      'mysql-prod.cnf',
+      'com.mariadb.mariadb-pkg',
+      'homebrew.mxcl.postgresql@14',
+    ])
+      expect(redactEvidence({ subject: { label } }, names), label).toEqual({ subject: { label } });
+    // A withheld command doesn't take labels and titles that merely share a word with it.
+    const out = redactEvidence(
+      {
+        alert: {
+          title: 'Download via curl piped to shell',
+          subject: { label: 'null.example.com' },
+        },
+        events: [{ command: 'curl -u me:FAKEFAKE0001 https://x.test >/dev/null' }],
+      },
+      names,
+    ) as { alert: { title: string; subject: { label: string } } };
+    expect(out.alert.title).toBe('Download via curl piped to shell');
+    expect(out.alert.subject.label).toBe('null.example.com');
+  });
+
+  it('withholds a note whose JSON keys hold a secret, encoded once or twice', () => {
+    const once = JSON.stringify({ ['whsec_' + 'a'.repeat(24)]: 'ok' });
+    for (const note of [once, JSON.stringify(once)]) {
+      const out = redactEvidence({ alert: { decision: { note } } }, names) as {
+        alert: { decision: { note: string } };
+      };
+      expect(out.alert.decision.note, note).toBe(WITHHELD);
+    }
+  });
+});
+
+describe('large evidence', () => {
+  it('gives the same copy in slices, letting other work run between them', async () => {
+    const events = Array.from({ length: 3000 }, (_, i) => ({
+      id: `e${i}`,
+      process: {
+        path: '/usr/bin/curl',
+        args:
+          i === 2500
+            ? ['curl', '-u', 'al:hunter2', 'https://pc.local/x']
+            : ['curl', '-s', `https://example.com/${i}`],
+        user: 'al',
+      },
+    }));
+    const evidence = {
+      alert: { title: 'Download', summary: 'curl ran', subject: { kind: 'file', label: 'x' } },
+      events,
+      actions: [{ title: 'curl -u al:hunter2 https://pc.local/x' }],
+    };
+    // A clock that moves a slice's worth on every reading, so each event yields.
+    let t = 0;
+    let yields = 0;
+    const sliced = await redactEvidenceInSlices(
+      evidence,
+      names,
+      async () => {
+        yields++;
+      },
+      () => (t += SLICE_MS),
+    );
+    expect(sliced).toEqual(redactEvidence(evidence, names));
+    expect(JSON.stringify(sliced)).toBe(JSON.stringify(redactEvidence(evidence, names)));
+    expect(yields).toBeGreaterThan(1000);
+    const out = sliced as typeof evidence;
+    expect(out.alert.summary).toBe(WITHHELD);
+    expect(out.events[2500]!.process.args).toEqual([WITHHELD]);
+    expect(out.actions[0]!.title).toBe(WITHHELD);
+    // Evidence without events is redacted in one go.
+    expect(await redactEvidenceInSlices({ command: 'git status' }, names)).toEqual({
+      command: 'git status',
+    });
   });
 });
