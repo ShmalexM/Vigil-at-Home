@@ -5,7 +5,7 @@ import type { SensorEvent } from '@vigil/core';
 import type { HelperRan } from '@vigil/helper';
 import type { HelperClient } from '@vigil/helper/client';
 import { describe, expect, it } from 'vitest';
-import { HelperLink } from './helper.js';
+import { HelperLink, RELEASE_TIMEOUT_MS } from './helper.js';
 
 function fakeClient(answer: (cmd: { kind: string }) => unknown) {
   const listeners: ((e: SensorEvent, ran: HelperRan[]) => void)[] = [];
@@ -177,6 +177,28 @@ describe('HelperLink', () => {
       ['big', 2, 3, 501],
     ]);
     expect(fake.sent.filter((c) => c.kind === 'detection.sync')).toHaveLength(1);
+    link.stop();
+  });
+
+  it('gives each sync a deadline no later than when the app stops waiting', async () => {
+    const fake = fakeClient((cmd) =>
+      cmd.kind === 'detection.sync' ? { applied: true, needLists: [], preexec: null } : {},
+    );
+    const link = new HelperLink(socket(), async () => fake.client);
+    await link.tryConnect();
+    const before = Date.now();
+    await link.syncRules(
+      { rules: [], appRules: [], exceptions: [], selfPaths: [], lists: {} },
+      { syncId: 'd1' },
+    );
+    const after = Date.now();
+    const [sync] = fake.sent.filter((c) => c.kind === 'detection.sync') as unknown as {
+      notAfter: number;
+    }[];
+    // The helper refuses it past this point, so a late password can't apply
+    // a change the app already counted as cancelled.
+    expect(sync!.notAfter).toBeGreaterThan(before);
+    expect(sync!.notAfter).toBeLessThan(after + RELEASE_TIMEOUT_MS);
     link.stop();
   });
 

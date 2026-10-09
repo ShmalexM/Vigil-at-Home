@@ -116,6 +116,12 @@ export const DetectionSync = z.strictObject({
     .string()
     .regex(/^[A-Za-z0-9-]{1,64}$/)
     .optional(),
+  /**
+   * When the app stops waiting for this sync (ms since the epoch). After it,
+   * the helper refuses the sync rather than commit it, so a password typed
+   * after the app counted the change as cancelled can't put it in force.
+   */
+  notAfter: z.number().int().positive().optional(),
 });
 export type DetectionSync = z.infer<typeof DetectionSync>;
 

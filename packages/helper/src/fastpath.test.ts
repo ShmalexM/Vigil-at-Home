@@ -45,6 +45,8 @@ let approvalsDir: string;
 /** Whether the fake password dialog says yes; every answer is recorded. */
 let approve = false;
 const prompts: string[] = [];
+/** Runs while the fake password dialog is open, before its answer. */
+let whilePrompting: (() => Promise<void>) | undefined;
 let clock = 1_000_000;
 
 beforeAll(async () => {
@@ -59,6 +61,7 @@ beforeAll(async () => {
     rules: new RuleStore(join(root, 'rules.json')),
     quarantine: { quarantineDir: join(root, 'Quarantine') },
     syncPort: 47821,
+    now: () => clock,
     get fastPath() {
       return fast;
     },
@@ -69,6 +72,7 @@ beforeAll(async () => {
   // Stands in for the password dialog: only a yes writes the root-owned approval.
   client = await HelperClient.connect(join(root, 'helper.sock'), async (nonce, prompt, also) => {
     prompts.push(prompt);
+    await whilePrompting?.();
     if (approve) for (const n of [nonce, ...(also ?? [])]) Approvals.writeApproval(approvalsDir, n);
     return approve;
   });
@@ -84,6 +88,7 @@ beforeEach(() => {
   sys.signals.length = 0;
   prompts.length = 0;
   approve = false;
+  whilePrompting = undefined;
 });
 
 const exec = (pid: number, sha256: string, path = '/tmp/payload'): SensorEvent => ({
@@ -369,6 +374,79 @@ describe('blocking rules in the helper', () => {
     expect(fast.status().rules).toBe(rest.length);
     expect(fast.status().rev).toBeGreaterThan(rev);
     await client.call(sync);
+  });
+
+  it('answers detection.status only once a sync read before it is in force', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    approve = true;
+    await syncWith({ ...sync, syncId: 'order-0' }, lists);
+    approve = false;
+    // Sent back to back on one connection, as the app does after a timeout.
+    const synced = client.call({ ...sync, syncId: 'order-1' });
+    const status = client.call<{ syncId: string | null }>({ kind: 'detection.status' });
+    expect(await status).toMatchObject({ syncId: 'order-1' });
+    await synced;
+    // Handed to the helper one after the other: nothing waits between the
+    // sync's checks and its save, so status can't slip in before it.
+    const direct = executor.execute({ ...sync, syncId: 'order-2' });
+    const after = executor.execute({ kind: 'detection.status' });
+    expect(await after).toMatchObject({ kind: 'done', result: { syncId: 'order-2' } });
+    await direct;
+  });
+
+  it('keeps the old sync in force while the password is asked, and after a no', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    approve = true;
+    await syncWith({ ...sync, syncId: 'pw-0' }, lists);
+    approve = false;
+    const [, ...rest] = sync.rules;
+    const other = await HelperClient.connect(join(root, 'helper.sock'), async () => false);
+    const seen: unknown[] = [];
+    whilePrompting = async () => {
+      seen.push(await other.call({ kind: 'detection.status' }));
+    };
+    await expect(client.call({ ...sync, rules: rest, syncId: 'pw-1' })).rejects.toMatchObject({
+      code: 'refused',
+    });
+    expect(seen).toMatchObject([{ syncId: 'pw-0' }]);
+    expect(await other.call({ kind: 'detection.status' })).toMatchObject({ syncId: 'pw-0' });
+    expect(fast.status().rules).toBe(sync.rules.length);
+    other.close();
+  });
+
+  it('refuses a sync whose password came after the app stopped waiting', async () => {
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD] });
+    approve = true;
+    await syncWith({ ...sync, syncId: 'late-0' }, lists);
+    const [, ...rest] = sync.rules;
+    const rev = fast.status().rev;
+    // The user types the password, but only after the app gave up and
+    // counted the change as cancelled.
+    whilePrompting = async () => {
+      clock += 60_000;
+    };
+    const late = { ...sync, rules: rest, syncId: 'late-1', notAfter: clock + 1000 };
+    await expect(client.call(late)).rejects.toMatchObject({
+      code: 'refused',
+      message: 'the app stopped waiting for this change',
+    });
+    expect(prompts).toHaveLength(1);
+    expect(fast.status()).toMatchObject({ rev, rules: sync.rules.length });
+    expect(fast.syncId()).toBe('late-0');
+    // Once past it, the helper doesn't even ask.
+    prompts.length = 0;
+    await expect(client.call({ ...late, syncId: 'late-2' })).rejects.toMatchObject({
+      code: 'refused',
+    });
+    expect(prompts).toEqual([]);
+
+    // A yes in time goes through.
+    whilePrompting = undefined;
+    const inTime = { ...sync, rules: rest, syncId: 'late-3', notAfter: clock + 1000 };
+    await client.call(inTime);
+    expect(fast.syncId()).toBe('late-3');
+    expect(fast.status().rules).toBe(rest.length);
+    await client.call({ ...sync, syncId: 'late-4' });
   });
 
   it('needs the admin password to turn down or loosen a blocking rule only the app runs', async () => {

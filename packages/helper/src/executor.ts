@@ -67,6 +67,8 @@ export interface ExecutorDeps {
   fastPath?: FastPath;
   /** Linux: programs blocked by hash, enforced by fapolicyd and the helper. */
   fapolicyd?: FapolicydBlocks;
+  /** The clock a sync's `notAfter` is held to; Date.now by default. */
+  now?: () => number;
 }
 
 export type ExecOutcome =
@@ -112,6 +114,7 @@ export class Executor {
     // Refuse what Linux can't do before asking for a password for it.
     if (this.d.sys.platform === 'linux') checkLinuxBlock(cmd);
     if (cmd.kind === 'detection.sync') {
+      this.inTime(cmd);
       // A sync with a rule that doesn't compile, or missing list contents,
       // changes nothing; say so before asking for a password.
       try {
@@ -374,6 +377,9 @@ export class Executor {
         return journal.recent(cmd.limit ?? 100);
       case 'detection.sync': {
         if (!this.d.fastPath) throw new ActionError('failed', 'helper rules are not set up');
+        // From here to the save nothing waits, so a detection.status read
+        // after this sync's line always sees whether it went in.
+        this.inTime(cmd);
         let synced;
         try {
           synced = this.d.fastPath.sync(cmd);
@@ -406,6 +412,17 @@ export class Executor {
         // Handled by the server, which owns the connection.
         throw new ActionError('invalid', 'events.subscribe is handled by the connection');
     }
+  }
+
+  /**
+   * Refuse a sync the app has stopped waiting for. The admin password is
+   * asked for in the app, between two sends of the same sync; once the app
+   * gives up it counts the change as cancelled, so a late yes must not
+   * apply it.
+   */
+  private inTime(cmd: DetectionSync): void {
+    if (cmd.notAfter !== undefined && (this.d.now ?? Date.now)() > cmd.notAfter)
+      throw new ActionError('refused', 'the app stopped waiting for this change');
   }
 
   /** How the last hand-off of pre-launch rules to Santa went: pending, its outcome, or the error. */

@@ -20,7 +20,9 @@ export type HelperState = 'not_installed' | 'not_running' | 'connected';
 export const HELPER_RETRY_MS = 15_000;
 const QUERY_TIMEOUT_MS = 5_000;
 const ACTION_TIMEOUT_MS = 15_000;
-const RELEASE_TIMEOUT_MS = 3 * 60_000;
+export const RELEASE_TIMEOUT_MS = 3 * 60_000;
+/** A sync's deadline on the helper falls this long before the app stops waiting. */
+const SYNC_DEADLINE_MARGIN_MS = 5_000;
 /** The helper keeps its last 2000 events; remember a little more than that. */
 const SEEN_EVENT_IDS = 4000;
 /** How long an action the helper already ran waits for the app's engine to ask for it. */
@@ -223,12 +225,21 @@ export class HelperLink
       };
       let carry = changed;
       for (let attempt = 0; attempt < 2; attempt++) {
-        const sync = carry.length
-          ? {
-              ...base,
-              entries: Object.fromEntries(carry.map((n) => [n, [...new Set(set.lists[n] ?? [])]])),
-            }
-          : base;
+        // The helper refuses this sync once the app has stopped waiting for
+        // it, so a password typed after the timeout can't put it in force
+        // after rulesState() said it wasn't.
+        const notAfter = Date.now() + RELEASE_TIMEOUT_MS - SYNC_DEADLINE_MARGIN_MS;
+        const sync = {
+          ...base,
+          notAfter,
+          ...(carry.length
+            ? {
+                entries: Object.fromEntries(
+                  carry.map((n) => [n, [...new Set(set.lists[n] ?? [])]]),
+                ),
+              }
+            : {}),
+        };
         const out = await withTimeout(
           opts.hold
             ? client.hold<HelperRulesOutcome>(sync, opts.onHeld)
