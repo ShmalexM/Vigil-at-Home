@@ -514,3 +514,40 @@ describe('finding AI apps', () => {
     expect(seen.map((s) => s.providers[0]?.state)).toEqual(['not_installed', 'ready']);
   });
 });
+
+describe('what a Claude run is billed to', () => {
+  const ok = (): AdapterRunOutput => ({
+    kind: 'ok',
+    json: { verdict: 'benign', summary: 'ok' },
+    audit: audit(),
+    usage: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, costUsd: 0.01 },
+  });
+  const claudeWith = (account: string | undefined) => ({
+    ...fake('claude', ok),
+    probe: async () => ({
+      provider: 'claude' as const,
+      state: 'ready' as const,
+      ...(account ? { account } : {}),
+    }),
+  });
+  const billedFor = async (account: string | undefined, patch: Partial<AiSettings> = {}) => {
+    const { runner, log } = setup([claudeWith(account)], { order: ['claude'], ...patch });
+    await runner.run(request);
+    return log[0] && 'billed' in log[0] ? log[0].billed : 'absent';
+  };
+
+  it('is the plan on a claude.ai login, and unknown on any other', async () => {
+    const s = defaultAiSettings('/tmp/vigil-test');
+    const sub = { claude: { ...s.claude, mode: 'subscription' as const, allowPlan: true } };
+    expect(await billedFor('claude.ai', sub)).toBe(false);
+    expect(await billedFor('console', sub)).toBe('absent');
+    expect(await billedFor(undefined, sub)).toBe('absent');
+  });
+
+  it('is the saved key in API key mode', async () => {
+    const s = defaultAiSettings('/tmp/vigil-test');
+    expect(
+      await billedFor('claude.ai', { claude: { ...s.claude, mode: 'apiKey', allowPlan: false } }),
+    ).toBe(true);
+  });
+});

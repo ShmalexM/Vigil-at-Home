@@ -10,6 +10,8 @@ export interface ExecResult {
   stderr: string;
   /** It ran past its time limit and was stopped. */
   timedOut: boolean;
+  /** The program itself isn't on this computer. */
+  missing?: true;
 }
 
 /**
@@ -38,6 +40,7 @@ export function execFileWithin(
         stdout: String(stdout),
         stderr: String(stderr),
         timedOut: false,
+        ...(err?.code === 'ENOENT' ? { missing: true as const } : {}),
       }),
     );
     const timer = setTimeout(() => {

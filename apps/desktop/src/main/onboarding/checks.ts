@@ -1,6 +1,7 @@
 import { execFileWithin } from '@vigil/ai';
 import { accessSync, constants, existsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, totalmem } from 'node:os';
+import { classifierModelChoice } from '@vigil/ai';
 import { join } from 'node:path';
 import type { CheckId } from '../../shared/setup.js';
 import { FAPOLICYD_ALLOW_RULES, LOCAL_MODEL, LOCAL_MODEL_SMALL } from './plan.js';
@@ -26,6 +27,10 @@ export interface Probe {
   home: string;
   /** Which computer is being checked; defaults to a Mac. */
   platform?: NodeJS.Platform;
+  /** Total memory, which decides the labelling models Vigil will pick; defaults to this machine's. */
+  memoryBytes?: number;
+  /** The labelling model set in AI settings (`classifier.model`), if any. */
+  classifierModel?(): string | undefined;
 }
 
 export const SANTA_SYNC_PORT = 47821;
@@ -122,11 +127,29 @@ export const CHECKS: Record<CheckId, (p: Probe) => Promise<CheckResult>> = {
     return tags ? { ok: true } : { ok: false, detail: 'Nothing answers on 127.0.0.1:11434' };
   },
 
+  /**
+   * Labelling only ever uses one of @vigil/ai's small models, so this says
+   * which one, the same way the labeller picks it. A big model the user
+   * already has explains alerts, but doesn't stand in for the small one.
+   */
   'ollama.model': async (p) => {
     const names = (await ollamaModels(p)) ?? [];
-    const ours = [LOCAL_MODEL, LOCAL_MODEL_SMALL].find((m) => names.includes(m));
-    if (ours) return { ok: true, detail: ours };
-    if (names.length) return { ok: true, detail: `Using ${names[0]} (already installed)` };
+    // The labeller's own choice, so this step is done exactly when labelling has a model.
+    const picked = classifierModelChoice(
+      names.map((name) => ({ name })),
+      p.classifierModel?.(),
+      p.memoryBytes ?? totalmem(),
+    );
+    if (picked) {
+      const ours = picked === LOCAL_MODEL || picked === LOCAL_MODEL_SMALL;
+      return { ok: true, detail: `${picked}${ours ? '' : ', already installed,'} labels events` };
+    }
+    if (names.length) {
+      return {
+        ok: false,
+        detail: `${names.length === 1 ? names[0] : `${names.length} models`} already installed can explain alerts, but labelling events needs a small model`,
+      };
+    }
     return { ok: false };
   },
 
@@ -192,7 +215,11 @@ const INHERITED_ENV = [
   'SSL_CERT_FILE',
 ] as const;
 
-export function systemProbe(home = homedir(), helperAnswers?: () => Promise<boolean>): Probe {
+export function systemProbe(
+  home = homedir(),
+  helperAnswers?: () => Promise<boolean>,
+  classifierModel?: () => string | undefined,
+): Probe {
   // Finder-launched apps get a minimal PATH. Vendor CLIs installed with npm
   // are node scripts, so node has to be findable too.
   const env: Record<string, string> = {};
@@ -206,6 +233,7 @@ export function systemProbe(home = homedir(), helperAnswers?: () => Promise<bool
     home,
     platform: process.platform,
     ...(helperAnswers ? { helperAnswers } : {}),
+    ...(classifierModel ? { classifierModel } : {}),
     exists: (path) => existsSync(path),
     executable: (path) => {
       try {

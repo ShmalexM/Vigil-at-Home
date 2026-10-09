@@ -177,3 +177,30 @@ describe('usageWindow', () => {
     expect(new Date(w.starts[6]!).getDate()).toBe(28);
   });
 });
+
+describe('what Usage says was charged', () => {
+  it('keeps a key-billed run with no price, a login it cannot place, and Ollama cloud apart', () => {
+    const u = service();
+    // Codex on an OpenAI key, priced by nobody: billed, cost unknown.
+    u.record(
+      entry({
+        provider: 'codex',
+        billed: true,
+        usage: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, costUsd: null },
+      }),
+    );
+    // Claude Code on a claude.ai plan (billed false) and on a login Vigil can't place.
+    u.record(entry({ billed: false }));
+    u.record(entry({}));
+    u.record(entry({ provider: 'ollama', model: 'gpt-oss:120b-cloud', purpose: 'classify' }));
+    u.record(entry({ provider: 'ollama', model: 'qwen2.5:1.5b', purpose: 'classify' }));
+    const r = u.report(30);
+    expect(r.totals.billedUnpricedRuns).toBe(1);
+    expect(r.totals.billedUsd).toBe(0);
+    expect(r.totals.loginUsd).toBeCloseTo(0.02);
+    const ollama = r.providers.find((p) => p.provider === 'ollama')!;
+    // The cloud model has a price Vigil doesn't see; the local one is free.
+    expect(ollama.unpricedRuns).toBe(1);
+    expect(ollama.costUsd).toBe(0);
+  });
+});

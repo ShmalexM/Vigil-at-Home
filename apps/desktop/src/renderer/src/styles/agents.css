@@ -388,3 +388,12 @@
 .filter-chip button:hover {
   background: var(--ac-bg);
 }
+.preflight-more {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--tx2);
+}
+.preflight-more summary {
+  cursor: pointer;
+  color: var(--tx1);
+}

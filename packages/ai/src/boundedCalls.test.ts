@@ -44,6 +44,11 @@ describe('bounded outside calls', () => {
     expect(r).toEqual({ code: 0, stdout: 'hi\n', stderr: '', timedOut: false });
   });
 
+  it('execFileWithin says when the program is not on this computer', async () => {
+    const r = await execFileWithin('/no/such/program-vigil-test', [], 5_000);
+    expect(r).toMatchObject({ code: null, timedOut: false, missing: true });
+  });
+
   it('a JSON-RPC request with no answer fails at its limit', async () => {
     const rpc = new JsonRpcStdio(process.execPath, ['-e', STUBBORN], {}, process.cwd(), handlers);
     const started = Date.now();
