@@ -325,7 +325,7 @@ function start(): void {
     save: (key, value) => store.setSetting(key, value),
     ai: ai.packAi(),
     vigilTools: agents.packTools(),
-    preflight: (req) => agents.packPreflight(req),
+    preflight: (req, opts) => agents.packPreflight(req, opts),
     connectors,
     scheduler: core.scheduler,
     isBusy: () => power.isBusy(),
