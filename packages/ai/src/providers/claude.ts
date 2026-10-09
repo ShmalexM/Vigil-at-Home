@@ -1,8 +1,6 @@
-import { execFile } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import {
   createSdkMcpServer,
   query,
@@ -14,6 +12,7 @@ import {
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import { buildChildEnv } from '../env.js';
+import { execOutputWithin } from '../execWithin.js';
 import type { PinStore } from '../executable.js';
 import { callTool } from '../tools.js';
 import type {
@@ -28,7 +27,8 @@ import type {
 } from '../types.js';
 import { verifyBinary } from './verifyBinary.js';
 
-const execFileAsync = promisify(execFile);
+/** How long a version or sign-in check may take. */
+const PROBE_MS = 15_000;
 
 export const VIGIL_MCP_NAME = 'vigil';
 const CLIENT_APP = 'vigil-at-home/0.1.0';
@@ -259,9 +259,9 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions): ProviderAdap
         return { provider: 'claude', state: 'needs_sign_in', detail: 'No API key saved.' };
       const env = childEnv(key);
       try {
-        const [{ stdout: version }, { stdout: auth }] = await Promise.all([
-          execFileAsync(binary.path, ['--version'], { env, timeout: 15_000 }),
-          execFileAsync(binary.path, ['auth', 'status', '--json'], { env, timeout: 15_000 }),
+        const [version, auth] = await Promise.all([
+          execOutputWithin(binary.path, ['--version'], PROBE_MS, { env }),
+          execOutputWithin(binary.path, ['auth', 'status', '--json'], PROBE_MS, { env }),
         ]);
         const status = JSON.parse(auth) as { loggedIn?: boolean; authMethod?: string };
         const signedIn = key !== undefined || status.loggedIn === true;

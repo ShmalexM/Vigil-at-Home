@@ -1,3 +1,10 @@
+import {
+  redactArgv,
+  redactField,
+  REDACTED as SHARED_REDACTED,
+  WITHHELD as SHARED_WITHHELD,
+} from '@vigil/ai/redact';
+
 /**
  * Redaction for copied evidence. Command lines get no piecemeal redaction:
  * secrets hide in them in too many shapes (`mysql -phunter2`, quoted
@@ -6,13 +13,16 @@
  * withheld whole, and otherwise only this computer's user and host names are
  * replaced. Every other string, a decision note or an error included, is
  * treated the same way, since any of them can quote a command. Only titles
- * and subject labels, which are rule text or names, skip the scan. The
- * shared redaction (@vigil/ai/redact) is not used here: its home-path rule
- * can eat text after a path (`/Users/al;curl` loses `;curl`).
+ * are rule text and skip the scan. The
+ * shared redaction (@vigil/ai/redact) only adds to the scan: a string it
+ * finds a secret in, or would cut a secret out of, is withheld too (see
+ * `sharedFindsSecret`). Its output is never copied, since its home-path rule can eat text after a path
+ * (`/Users/al;curl` loses `;curl`), and it is given no names, so a user or
+ * host name alone never makes it withhold anything.
  *
  * This is a best-effort safety net, not a guarantee. A secret written so no
  * pattern can see it gets through: split by quotes (`PGPASS""WORD=…`),
- * percent-encoded (`%74%6f%6b%65%6e=`), or decoded at run time
+ * encoded twice, or decoded at run time
  * (`$(… | base64 -d)`). The app asks the user to review the copy before
  * sharing it.
  */
@@ -30,15 +40,21 @@ export const WITHHELD = '[withheld: may contain a secret]';
  * a summary can quote one as easily as `args` can. Argv lists (a process's
  * `args`, a persistence item's `programArgs`) are withheld as one list. URLs
  * (`url`, `originUrl`) can carry `user:password@` and are also withheld when
- * they hold a newline or other control character. Titles and subject labels
- * are rule text or names: they are not scanned (a rule titled "Credentials
- * file read" stays readable) and are withheld only when they repeat a
- * withheld command (see `redactEvidence`).
+ * they hold a newline or other control character. Titles are rule text: they
+ * are not scanned (a rule titled "Credentials file read" stays readable) and
+ * are withheld only when they repeat a withheld command (see
+ * `redactEvidence`). Subject labels are names that whoever made the thing
+ * chose (a file's name, a launchd label), so they are scanned for secrets by
+ * name, shape and the shared redaction (not the tools' command-line flag
+ * rules), and withheld as well when they repeat a withheld command or name a
+ * withheld path.
  */
 const COMMAND_LISTS = new Set(['args', 'programArgs']);
 const URL_FIELDS = new Set(['url', 'originUrl']);
-/** Rule text and names: only the names change, unless they repeat a withheld command. */
-const FIXED_TEXT = new Set(['title', 'label']);
+/** Rule text: only the names change, unless it repeats a withheld command. */
+const FIXED_TEXT = new Set(['title']);
+/** Text withheld when it repeats a withheld command: rule text and subject labels. */
+const REPEATS = new Set(['title', 'label']);
 
 /** A name that may label a secret, as in `PGPASSWORD`, `api_key` or `x-auth`. */
 const SECRET_NAME =
@@ -70,15 +86,53 @@ const SECRET_HINTS: readonly RegExp[] = [
   /:\/\/[^\s/]*@/, // URL user info
 ];
 
-/** Whether a command line might hold a secret. */
+/**
+ * Whether the shared redaction finds a secret in the text: read as a one-word
+ * argv or as a field, it withholds the text or cuts a secret out of it (one
+ * more {@link SHARED_REDACTED} than the text had). It is given no names, so
+ * only secrets count: a home folder or email address changes its output but
+ * never adds a secret marker.
+ */
+function sharedFindsSecret(text: string): boolean {
+  if (text === SHARED_WITHHELD) return false;
+  const markers = (t: string) => t.split(SHARED_REDACTED).length;
+  const before = markers(text);
+  return [redactArgv([text])[0] ?? SHARED_WITHHELD, redactField(text)].some(
+    (out) => out === SHARED_WITHHELD || markers(out) > before,
+  );
+}
+
+/** The text with `%xx` escapes decoded, so `%74oken=` reads as `token=`. */
+function percentDecoded(text: string): string {
+  return text.replace(/%([0-9a-f]{2})/gi, (_, hex: string) =>
+    String.fromCharCode(parseInt(hex, 16)),
+  );
+}
+
+/** Whether text holds a secret by the name or shape hints, or the shared redaction. */
+function hintsOrShared(text: string): boolean {
+  const decoded = percentDecoded(text);
+  if (SECRET_HINTS.some((p) => p.test(text) || (decoded !== text && p.test(decoded)))) return true;
+  return sharedFindsSecret(text);
+}
+
+/**
+ * Whether a label (a file's name, a launchd label, a host) might hold a
+ * secret. The tools' own flag rules below are for command lines and would
+ * take `com.example.library-prefs` for `rar -p…`, so they don't apply.
+ */
+function labelHoldsSecret(text: string): boolean {
+  return hintsOrShared(text);
+}
+
+/** Whether a command line might hold a secret, by this file's scan or the shared redaction's. */
 function mightHoldSecret(text: string): boolean {
-  if (SECRET_HINTS.some((p) => p.test(text))) return true;
   if (/mysql|mariadb/i.test(text) && /-p/i.test(text)) return true;
   if (/redis-cli/i.test(text) && /-a|\bauth\b/i.test(text)) return true;
   if (/curl/i.test(text) && /\s-[a-z]*[uK]|--user(?![-\w])|--config/.test(text)) return true;
   if (/unzip/i.test(text) && /-P/.test(text)) return true;
   if (/7z|7za|rar/i.test(text) && /-p\S/.test(text)) return true;
-  return false;
+  return hintsOrShared(text);
 }
 
 function escapeRegExp(text: string): string {
@@ -129,6 +183,11 @@ type Withheld = string[];
 function walk(value: unknown, names: EvidenceNames, withheld: Withheld, key?: string): unknown {
   if (typeof value === 'string') {
     if (key !== undefined && FIXED_TEXT.has(key)) return redactNames(value, names);
+    if (key === 'label') {
+      if (!labelHoldsSecret(value)) return redactNames(value, names);
+      withheld.push(value);
+      return WITHHELD;
+    }
     const out =
       key !== undefined && URL_FIELDS.has(key)
         ? urlString(value, names)
@@ -158,13 +217,67 @@ function carries(text: unknown, withheld: Withheld): boolean {
 }
 
 /**
+ * Whether a label names a withheld path: it is the path's last part, or ends
+ * with it (a file's label is its name).
+ */
+function namesWithheldPath(label: unknown, withheld: Withheld): boolean {
+  if (typeof label !== 'string') return false;
+  return withheld.some((w) => {
+    if (!/^(?:~|\.{0,2})\/\S*$/.test(w)) return false;
+    const last = w.slice(w.lastIndexOf('/') + 1);
+    return last !== '' && (label === last || label.endsWith(`/${last}`));
+  });
+}
+
+/**
  * Evidence ready to copy. Keys are kept. When any command line in it was
  * withheld, so is the alert's summary, which rules fill from the command,
- * and any title or label, anywhere, that repeats the command or one of its args.
+ * and any title or label, anywhere, that repeats the command, one of its args
+ * or the last part of a withheld path.
  */
 export function redactEvidence(value: unknown, names: EvidenceNames): unknown {
   const withheld: Withheld = [];
-  const out = walk(value, names, withheld);
+  return finish(value, walk(value, names, withheld), withheld);
+}
+
+/** How long {@link redactEvidenceInSlices} works before letting other work run. */
+export const SLICE_MS = 50;
+
+const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/**
+ * {@link redactEvidence}, with the same result, for evidence that can be
+ * large: an alert keeps every repeat's events, so it can hold thousands, and
+ * the scan of each string is not cheap. The events are scanned a few at a
+ * time, letting other work (the window) run every {@link SLICE_MS}.
+ */
+export async function redactEvidenceInSlices(
+  value: unknown,
+  names: EvidenceNames,
+  yieldTo: () => Promise<void> = nextTurn,
+  now: () => number = () => performance.now(),
+): Promise<unknown> {
+  if (!isRecord(value) || !Array.isArray(value['events'])) return redactEvidence(value, names);
+  const withheld: Withheld = [];
+  const { events, ...rest } = value;
+  const out = walk(rest, names, withheld) as Record<string, unknown>;
+  const scanned: unknown[] = [];
+  let since = now();
+  for (const event of events) {
+    if (now() - since >= SLICE_MS) {
+      await yieldTo();
+      since = now();
+    }
+    scanned.push(walk(event, names, withheld));
+  }
+  // The same keys in the same order as redactEvidence gives.
+  const whole: Record<string, unknown> = {};
+  for (const k of Object.keys(value)) whole[k] = k === 'events' ? scanned : out[k];
+  return finish(value, whole, withheld);
+}
+
+/** The alert summary and repeated titles and labels, once every string has been scanned. */
+function finish(value: unknown, out: unknown, withheld: Withheld): unknown {
   if (withheld.length === 0) return out;
   const alert = isRecord(value) && isRecord(value['alert']) ? value['alert'] : undefined;
   const copied = isRecord(out) && isRecord(out['alert']) ? out['alert'] : undefined;
@@ -179,7 +292,8 @@ function withholdRepeats(value: unknown, out: unknown, withheld: Withheld): void
     value.forEach((v, i) => withholdRepeats(v, out[i], withheld));
   } else if (isRecord(value) && isRecord(out)) {
     for (const [k, v] of Object.entries(value)) {
-      if (FIXED_TEXT.has(k) && carries(v, withheld)) out[k] = WITHHELD;
+      if (REPEATS.has(k) && carries(v, withheld)) out[k] = WITHHELD;
+      else if (k === 'label' && namesWithheldPath(v, withheld)) out[k] = WITHHELD;
       else withholdRepeats(v, out[k], withheld);
     }
   }

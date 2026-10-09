@@ -28,7 +28,7 @@ import { untouched } from '../shared/piles.js';
 import { DEFAULT_APPEARANCE, type AppearanceSettings } from '../shared/themes.js';
 import { AlertService, type DecisionInput } from './alerts.js';
 import { evidenceOf } from './evidence-export.js';
-import { redactEvidence } from './evidence-redact.js';
+import { redactEvidenceInSlices } from './evidence-redact.js';
 import { EventLog } from './events.js';
 import { BATTERY_SLOWDOWN, type PowerMode } from './power.js';
 import type { Store } from './db/store.js';
@@ -44,10 +44,23 @@ import { WORTH_A_LOOK_RULE } from './worth-a-look.js';
 import { SLOW_RULE } from './slow-rule.js';
 import { UsageService } from './usage.js';
 
+/** Scheduled jobs as people know them, for a stuck-work note in the status. */
+const JOB_NAMES: Record<string, string> = {
+  'pack-dogs': 'pack dogs',
+  'label-events': 'AI labels',
+  'rule-review': 'rule reviews',
+  'threat-feeds': 'threat feeds',
+  'prune-events': 'clean-up',
+  'cap-disk': 'clean-up',
+  'sensor-health': 'sensor checks',
+  'agent-discovery': 'finding AI agents',
+};
+
 /** How long staleAlerts' answer stands while no open alert changes. */
 const STALE_TTL_MS = 60_000;
 /** Open alerts looked at for staleAlerts, newest first. */
 const STALE_SCAN_LIMIT = 2000;
+
 /** How long the Activity strip's counts are reused (see eventStats). */
 export const EVENT_STATS_TTL_MS = 5_000;
 /** How long its distinct-programs number is reused: it reads every launch of the hour. */
@@ -393,9 +406,18 @@ export class VigilCore {
     const s = { ...computeStatus([], this.sensors.list()), ...this.store.openAlertCounts() };
     const today = startOfDay(this.now());
     const alertView = this.alertView();
+    const stuck = this.scheduler
+      .status()
+      .filter((j) => j.stuck)
+      .map((j) => JOB_NAMES[j.name] ?? j.name);
     const aiOff = this.aiNotice?.();
     return {
       ...s,
+      // Work that stopped is said plainly; it doesn't lower the level.
+      reasons: stuck.length
+        ? [...s.reasons, `Background work stuck: ${stuck.join(', ')}`]
+        : s.reasons,
+      stuckJobs: stuck,
       alertView,
       badge: s.needsYou + (alertView === 'more' ? s.noticed : 0),
       watch: {
@@ -434,10 +456,11 @@ export class VigilCore {
    * It exports only the fields evidence-export.ts picks, so neither an event's
    * raw sensor record nor an internal key such as a repeat's goes out.
    */
-  alertEvidence(id: string): string | null {
+  async alertEvidence(id: string): Promise<string | null> {
     const d = this.alertDetail(id);
     if (!d) return null;
-    return JSON.stringify(redactEvidence(evidenceOf(d), this.evidenceRedaction()), null, 2);
+    const out = await redactEvidenceInSlices(evidenceOf(d), this.evidenceRedaction());
+    return JSON.stringify(out, null, 2);
   }
 
   /** Whose names the copied evidence hides. Overridable for tests. */

@@ -17,13 +17,14 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { gunzipSync, inflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { defined, nonEmpty, pidOf, type SensorEvent, type SensorEventSink } from '../types.js';
-import type { RuleStore, StoredRule } from './ruleStore.js';
+import { ruleKey, type RuleStore, type StoredRule } from './ruleStore.js';
 import { santaSigning } from '../signing.js';
 import { WRITE_WATCH_SUFFIX } from './logParser.js';
 import {
   type ClientMode,
   type PreflightResponse,
   type RuleDownloadResponse,
+  type SantaRule,
   normalizeUploadedEvent,
   normalizeUploadedFileAccessEvent,
   pick,
@@ -36,6 +37,11 @@ export const CLEAN_SYNC_SENTINEL: StoredRule = {
   removed: true,
   updatedAt: 0,
 };
+
+/** A rule's type and identifier alone, for a REMOVE. */
+function pickRuleKey(rule: SantaRule): Pick<SantaRule, 'identifier' | 'rule_type'> {
+  return { identifier: rule.identifier, rule_type: rule.rule_type };
+}
 
 export interface SyncServerOptions {
   store: RuleStore;
@@ -61,6 +67,15 @@ export interface SyncServerOptions {
   /** Requests handled at once; more get 503 until one finishes. */
   maxInFlight?: number;
   log?: (msg: string) => void;
+  /**
+   * Why a stored rule must not reach Santa, or undefined when it may: the
+   * helper refuses blocks naming its own or its sensors' programs by hash.
+   * Such a rule is left out of a clean sync and sent as REMOVE otherwise, so
+   * one Santa already has is taken back; every other rule syncs as usual.
+   */
+  refuse?: (rule: SantaRule) => string | undefined;
+  /** Waited on before each preflight, so `refuse` has what it needs. */
+  ready?: () => Promise<void>;
   /** For tests. */
   now?: () => number;
 }
@@ -101,9 +116,14 @@ export class HttpError extends Error {
 
 export class SantaSyncServer {
   private readonly sessions = new Map<string, SyncSession>();
+  /** Refused rules already logged. */
+  private readonly refusedLogged = new Set<string>();
   private inFlight = 0;
   private readonly opts: Required<
-    Omit<SyncServerOptions, 'onEvent' | 'eventDetailUrl' | 'eventDetailText' | 'log'>
+    Omit<
+      SyncServerOptions,
+      'onEvent' | 'eventDetailUrl' | 'eventDetailText' | 'log' | 'refuse' | 'ready'
+    >
   > &
     SyncServerOptions;
 
@@ -164,6 +184,7 @@ export class SantaSyncServer {
       throw new HttpError(415, 'binary proto transfer is not supported');
     }
     const body = await this.readJson(req);
+    if (stage === 'preflight') await this.opts.ready?.();
     return this.dispatch(stage, machineId, body);
   }
 
@@ -189,7 +210,23 @@ export class SantaSyncServer {
       (sum, t) => sum + (Number(pick(body, `${t}_rule_count`)) || 0),
       0,
     );
-    const active = store.active();
+    const refused = new Set<string>();
+    const all = store.active();
+    for (const r of all) {
+      const why = this.opts.refuse?.(r.rule);
+      if (!why) continue;
+      const key = ruleKey(r.rule.rule_type, r.rule.identifier);
+      refused.add(key);
+      // Once per rule, not at every sync.
+      if (this.refusedLogged.has(key)) continue;
+      if (this.refusedLogged.size < 1000) this.refusedLogged.add(key);
+      this.opts.log?.(
+        `santa sync: not sending ${r.rule.rule_type} ${logSafe(r.rule.identifier)}: ${logSafe(why)}`,
+      );
+    }
+    const isRefused = (r: StoredRule) =>
+      !r.removed && refused.has(ruleKey(r.rule.rule_type, r.rule.identifier));
+    const active = all.filter((r) => !isRefused(r));
     // If Santa's database drifted from ours (someone edited it, Santa was
     // reinstalled), replace it wholesale rather than guessing.
     const drifted =
@@ -197,7 +234,15 @@ export class SantaSyncServer {
     const clean = requestedClean || store.cleanSyncPending || drifted;
 
     const snapshotRev = store.rev;
-    let rules = clean ? active : store.changesSince(store.syncedRev);
+    let rules = clean
+      ? active
+      : store
+          .changesSince(store.syncedRev)
+          .map((r) =>
+            isRefused(r)
+              ? { ...r, rule: { ...pickRuleKey(r.rule), policy: 'REMOVE' as const } }
+              : r,
+          );
     // Santa wipes its rules on a clean sync only when the download holds at
     // least one rule (SNTSyncRuleDownload returns early on an empty one), so
     // an empty clean sync would leave whatever Santa already had. A REMOVE for

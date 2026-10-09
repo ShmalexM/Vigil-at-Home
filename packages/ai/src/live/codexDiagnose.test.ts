@@ -69,20 +69,25 @@ describe.skipIf(!process.env.VIGIL_CODEX_DIAGNOSE || !home)('Codex diagnosis', (
       },
     );
     try {
-      const init = await rpc.request<Record<string, unknown>>('initialize', {
-        clientInfo: { name: 'vigil_diag', title: null, version: '0' },
-        capabilities: { experimentalApi: true, requestAttestation: false },
-      });
+      const init = await rpc.request<Record<string, unknown>>(
+        'initialize',
+        {
+          clientInfo: { name: 'vigil_diag', title: null, version: '0' },
+          capabilities: { experimentalApi: true, requestAttestation: false },
+        },
+        30_000,
+      );
       say(`initialize ${JSON.stringify(init).slice(0, 300)}`);
       rpc.notify('initialized');
       const { account } = await rpc.request<{ account: { type: string } | null }>(
         'account/read',
         {},
+        30_000,
       );
       say(`account type ${account?.type ?? 'none'}`);
       const { config } = await rpc.request<{
         config: Record<string, unknown> & { features?: Record<string, unknown> };
-      }>('config/read', {});
+      }>('config/read', {}, 30_000);
       const on = Object.entries(config.features ?? {})
         .filter(([, v]) => v === true)
         .map(([k]) => k);
@@ -103,6 +108,7 @@ describe.skipIf(!process.env.VIGIL_CODEX_DIAGNOSE || !home)('Codex diagnosis', (
           systemPrompt: 'You help Vigil explain findings.',
           tools: [tool],
         }),
+        30_000,
       );
       say(`thread/start ${JSON.stringify({ ...thread, thread: undefined }).slice(0, 400)}`);
       await rpc.request(
@@ -118,6 +124,7 @@ describe.skipIf(!process.env.VIGIL_CODEX_DIAGNOSE || !home)('Codex diagnosis', (
             additionalProperties: false,
           },
         }),
+        30_000,
       );
       await Promise.race([done, new Promise((r) => setTimeout(r, 120_000))]);
     } finally {

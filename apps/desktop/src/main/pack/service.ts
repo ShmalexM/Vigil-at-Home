@@ -1695,6 +1695,10 @@ export class PackService {
 
   // ---------------------------------------------------------------- pack jobs
 
+  /**
+   * Run a dog's job. A run whose job the user changed meanwhile writes no
+   * report or notebook entry: it would describe work the dog no longer does.
+   */
   async runDog(id: string, urgency: 'now' | 'background' = 'now'): Promise<DogReport | undefined> {
     const dog = this.dogs().find((d) => d.id === id);
     if (!dog || dog.role !== 'pack') throw new Error('Only pack dogs run jobs');
@@ -1716,6 +1720,11 @@ export class PackService {
         deadlineMs: JOB_DEADLINE_MS,
         providers: [...JOB_PROVIDERS],
       });
+      const now = this.dogs().find((d) => d.id === id);
+      if (!now || now.job !== dog.job) {
+        this.setMood(id, 'idle');
+        return undefined;
+      }
       const report: DogReport = result.ok
         ? {
             at: this.now(),
@@ -1818,12 +1827,19 @@ export class PackService {
     };
   }
 
-  /** Scheduled jobs that are due. Skipped while the Mac is busy or on low battery. */
+  /**
+   * Run the scheduled dogs that are due, one after another; skipped while the
+   * Mac is busy or on low battery. Each dog is read afresh just before it
+   * runs, since an earlier one may have taken a while.
+   */
   async runDue(): Promise<void> {
     if (this.o.isBusy?.()) return;
-    const at = this.now();
-    const hour = this.o.hour?.() ?? new Date(at).getHours();
-    for (const d of this.dogs()) {
+    for (const { id } of this.dogs()) {
+      // Read each dog afresh: a run before it may have changed it.
+      const d = this.dogs().find((x) => x.id === id);
+      if (!d) continue;
+      const at = this.now();
+      const hour = this.o.hour?.() ?? new Date(at).getHours();
       if (jobDue(d, at, hour)) await this.runDog(d.id, 'background').catch(() => undefined);
     }
   }
@@ -1948,7 +1964,8 @@ export class PackService {
           1000,
         ),
         input: shapeFromJsonSchema(t.inputSchema),
-        run: (args) => this.callTool(dog, t, args as Record<string, unknown>, ctx),
+        run: (args, run) =>
+          this.callTool(dog, t, args as Record<string, unknown>, ctx, run?.signal),
       });
     }
     return out;
@@ -1959,6 +1976,7 @@ export class PackService {
     t: ToolEntry,
     args: Record<string, unknown>,
     ctx: RunCtx,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     const argText = clip(redactDataForPack(args), 4000);
     // What the notebook keeps of this call, as it was: the notebook redacts
@@ -1988,9 +2006,15 @@ export class PackService {
         ...(ctx.outsideText ? { outsideText: true } : {}),
       });
     let decision = gate();
+    // The run's deadline passing ends it as surely as the run returning.
+    const ended = () => {
+      if (signal?.aborted && !ctx.over) this.endRun(ctx);
+      return ctx.over;
+    };
     if (decision.kind === 'judge') {
+      if (ended()) return notRun('this run has ended.');
       this.setMood(dog.id, 'thinking', `Checking whether ${t.title} is safe`);
-      decision = afterJudge(await this.judge(dog, t, argText, ctx.requestedByUser));
+      decision = afterJudge(await this.judge(dog, t, argText, ctx.requestedByUser, signal));
       // The person may have changed the mode, the tool's choice or a rule
       // while the AI was rating it: that wins over a "low risk".
       const now = gate();
@@ -1998,11 +2022,12 @@ export class PackService {
     }
     if (decision.kind === 'deny') return notRun(decision.reason);
     // The run may have ended while the AI was rating the call.
-    if (ctx.over) return notRun('this run has ended.');
+    if (ended()) return notRun('this run has ended.');
     if (decision.kind === 'ask') {
       const answer = await this.askUser(dog, t, args, argText, decision, ctx);
-      if (answer === 'deny' || ctx.over) {
-        if (!ctx.over) this.setMood(dog.id, 'thinking', 'Carrying on without it');
+      if (ended()) return notRun('this run has ended.');
+      if (answer === 'deny') {
+        this.setMood(dog.id, 'thinking', 'Carrying on without it');
         return notRun(
           'you said no, or nobody answered in time.',
           'Not run: the person said no to this call. Carry on without it.',
@@ -2010,8 +2035,9 @@ export class PackService {
       }
     }
     // A wait for the user or the judge can be long: check again right before
-    // the call that nothing has since switched it off or a rule now stops it.
-    const stop = ctx.over ? 'this run has ended.' : this.recheck(dog, t, args);
+    // the call that nothing has since switched it off or a rule now stops it,
+    // and that the run asking for it hasn't ended meanwhile.
+    const stop = ended() ? 'this run has ended.' : this.recheck(dog, t, args);
     if (stop) return notRun(stop);
     ctx.used.push(t.key);
     const vigil = t.source === 'vigil';
@@ -2027,7 +2053,7 @@ export class PackService {
         else record('failed', r.error);
         return r.ok ? r.result : `Vigil couldn’t answer: ${r.error}`;
       }
-      const out = await this.o.connectors.call(t.source, t.name, args);
+      const out = await this.o.connectors.call(t.source, t.name, args, signal);
       record('ran', undefined, out);
       return out;
     } catch (err) {
@@ -2101,8 +2127,11 @@ export class PackService {
     t: ToolEntry,
     args: string,
     requestedByUser: boolean,
+    signal?: AbortSignal,
   ): Promise<z.infer<typeof Judged> | undefined> {
     if (!(await this.status()).judge.ready && !requestedByUser) return undefined;
+    // Checking status can be slow: start no judge run for a run that has ended.
+    if (signal?.aborted) return undefined;
     const r = await this.o.ai.run({
       // A judgement inside the user's own chat may use what the chat may; a
       // pack job's never uses a Claude plan.
@@ -2126,8 +2155,11 @@ export class PackService {
       },
       output: Judged,
       deadlineMs: JUDGE_DEADLINE_MS,
+      // The judgement ends when the run waiting on it does.
+      ...(signal ? { signal } : {}),
       providers: [...JOB_PROVIDERS],
     });
+    if (signal?.aborted) return undefined;
     this.note(
       {
         dog: dog.id,

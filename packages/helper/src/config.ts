@@ -311,6 +311,30 @@ export function installedSelf(platform: Platform = 'darwin'): string[] {
   return installedRoots(platform);
 }
 
+/**
+ * Where the programs live that no block by hash may name (ownHashes.ts): the
+ * helper's launcher and the runtime it runs under, Santa's and osquery's
+ * programs, and the installed app. Fixed paths plus the helper's own, never
+ * anything a client sends.
+ */
+export function ownProgramRoots(
+  platform: Platform,
+  helperExecutable: string,
+  runtime: string = process.execPath,
+): string[] {
+  const sensors =
+    platform === 'linux'
+      ? ['/opt/osquery', '/usr/bin/osqueryd']
+      : ['/Applications/Santa.app', '/opt/osquery', '/usr/local/bin/osqueryd'];
+  return [
+    runtime,
+    helperExecutable,
+    `${helperExecutable}.d`,
+    ...sensors,
+    ...installedSelf(platform),
+  ];
+}
+
 export interface Protection {
   /**
    * The helper's own state folder as installed (defaultPaths supportDir):

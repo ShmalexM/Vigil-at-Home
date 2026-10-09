@@ -367,7 +367,10 @@ describe('AiBridge event labels', () => {
   const unmatched = { checked: 21, matches: [] };
 
   function labelling(
-    answer: (ids: string[]) => { labels: string[]; deferred: string[] },
+    answer: (
+      ids: string[],
+    ) =>
+      { labels: string[]; deferred: string[] } | Promise<{ labels: string[]; deferred: string[] }>,
     as: { label: 'unusual' | 'suspicious'; score: number; by: 'model' | 'jev' } = {
       label: 'unusual',
       score: 0,
@@ -392,7 +395,7 @@ describe('AiBridge event labels', () => {
                   classify: async (events: readonly { id: string }[]) => {
                     const ids = events.map((e) => e.id);
                     sent.push(ids);
-                    const r = answer(ids);
+                    const r = await answer(ids);
                     return {
                       ok: true as const,
                       labels: r.labels.map((id) => ({
@@ -452,6 +455,41 @@ describe('AiBridge event labels', () => {
     core.events.flush();
     await ai.labelBatch(core.store);
     expect(sent[0]).toHaveLength(31);
+  });
+
+  it('gives a batch back when the classifier fails', async () => {
+    let round = 0;
+    const { core, ai } = labelling((ids) => {
+      if (round++ === 0) throw new Error('model crashed');
+      return { labels: ids, deferred: [] };
+    });
+    ai.labelEventsFrom(core);
+    core.ingest(makeExec('/tmp/once'), unmatched);
+    core.events.flush();
+    await expect(ai.labelBatch(core.store)).rejects.toThrow('model crashed');
+    expect(await ai.labelBatch(core.store)).toBe(1);
+  });
+
+  it('never lets new events push out a batch that was given back', async () => {
+    let release!: () => void;
+    let round = 0;
+    const { core, ai, sent } = labelling(async (ids) => {
+      if (round++ > 0) return { labels: ids, deferred: [] };
+      await new Promise<void>((r) => (release = r));
+      throw new Error('model crashed');
+    });
+    ai.labelEventsFrom(core);
+    const firsts = Array.from({ length: 200 }, (_, i) => makeExec(`/tmp/first-${i}`));
+    for (const e of firsts) core.ingest(e, unmatched);
+    core.events.flush();
+    const failing = ai.labelBatch(core.store);
+    await new Promise((r) => setImmediate(r));
+    release();
+    await expect(failing).rejects.toThrow('model crashed'); // all 200 go back; the queue is full
+    for (let i = 0; i < 50; i++) core.ingest(makeExec(`/tmp/newer-${i}`), unmatched);
+    core.events.flush();
+    await ai.labelBatch(core.store);
+    expect(sent[1]).toEqual(firsts.map((e) => e.id));
   });
 
   it('puts events the model skipped back in the queue', async () => {

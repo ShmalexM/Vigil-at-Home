@@ -132,6 +132,33 @@ describe('connectors', () => {
     ]);
   }, 20_000);
 
+  it('sends nothing once the run asking has ended, even mid-connect', async () => {
+    const { c, dir } = hub();
+    open.push(c);
+    const log = join(dir, 'calls.log');
+    const { id } = c.add({
+      kind: 'stdio',
+      name: 'Demo issues',
+      command: process.execPath,
+      args: [server],
+      env: { DEMO_CALL_LOG: log },
+    });
+    const run = new AbortController();
+    const call = c.call(id, 'create_issue', { repo: 'a/b', title: 'Late' }, run.signal);
+    run.abort(new Error('run over')); // while it is still connecting
+    await expect(call).rejects.toThrow('run over');
+    // Once connected, the same call in a live run goes through.
+    expect(await c.call(id, 'create_issue', { repo: 'a/b', title: 'Now' })).toContain('created');
+    expect(readFileSync(log, 'utf8')).toBe('Now\n');
+    const ended = new AbortController();
+    ended.abort(new Error('run over'));
+    await expect(
+      c.call(id, 'create_issue', { repo: 'a/b', title: 'After' }, ended.signal),
+    ).rejects.toThrow('run over');
+    await new Promise((r) => setTimeout(r, 200));
+    expect(readFileSync(log, 'utf8')).toBe('Now\n');
+  }, 20_000);
+
   it('hides secrets in what a connector returns before any model sees it', async () => {
     const reply = [
       'api_key=sk-ant-abcdefghijklmnopqrstuvwxyz0123',

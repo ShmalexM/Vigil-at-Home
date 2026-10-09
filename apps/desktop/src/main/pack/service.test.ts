@@ -87,6 +87,8 @@ function setup(
   opts: {
     status?: Partial<PackAiStatus>;
     preflight?: PreflightReply['decision'];
+    /** While set, checking AI status waits for it. */
+    statusGate?: { wait?: Promise<void> | undefined; entered?: () => void };
     /** Vigil's own tools; push to it to add one later. */
     vigil?: string[];
     hour?: number;
@@ -162,12 +164,18 @@ function setup(
         outputTokens: 300,
         costUsd: 0.004,
       }),
-      status: async () => ({
-        anyReady: true,
-        judge: { ready: true, detail: 'Codex checks risky calls' },
-        leadMayUsePlan: false,
-        ...opts.status,
-      }),
+      status: async () => {
+        if (opts.statusGate?.wait) {
+          opts.statusGate.entered?.();
+          await opts.statusGate.wait;
+        }
+        return {
+          anyReady: true,
+          judge: { ready: true, detail: 'Codex checks risky calls' },
+          leadMayUsePlan: false,
+          ...opts.status,
+        };
+      },
     },
     vigilTools: {
       list: () => vigil.map(LISTING),
@@ -451,6 +459,66 @@ describe('the pack', () => {
     expect(connectorCalls).toEqual([['github', 'create_issue', { title: 'y' }]]);
   });
 
+  it('makes no connector call once the run waiting on the user has ended', async () => {
+    const { pack, handlers, connectorCalls } = setup();
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    let answer: unknown;
+    handlers.push(async (req) => {
+      const run = new AbortController();
+      const pending = tool(req, 'tool_1').run({ title: 'x' }, { signal: run.signal });
+      await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+      run.abort(); // the run's deadline passes while it waits
+      pack.decideTool((await pack.view()).approvals[0]!.id, 'allow-once');
+      answer = await pending;
+      return { summary: 'done', findings: [] };
+    });
+    await pack.runDog(dog.id);
+    expect(String(answer)).toContain('run has ended');
+    expect(connectorCalls).toEqual([]);
+  });
+
+  it('starts no risk check, note or ask once the run asking has ended', async () => {
+    const statusGate: { wait?: Promise<void> | undefined; entered?: () => void } = {};
+    const { pack, handlers, runs, connectorCalls, notebook } = setup({ statusGate });
+    pack.setMode('auto');
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    let answer: unknown;
+    handlers.push(async (req) => {
+      let open!: () => void;
+      statusGate.wait = new Promise((r) => (open = r));
+      const entered = new Promise<void>((r) => (statusGate.entered = r));
+      const run = new AbortController();
+      const pending = tool(req, 'tool_1').run({ title: 'x' }, { signal: run.signal });
+      await entered;
+      run.abort(); // the deadline passes while the status check is slow
+      statusGate.wait = undefined;
+      open();
+      answer = await pending;
+      return { summary: 'done', findings: [] };
+    });
+    await pack.runDog(dog.id);
+    expect(String(answer)).toContain('run has ended');
+    expect(runs.filter((r) => r.instructions.includes('Rate how risky'))).toHaveLength(0);
+    expect(notebook.list({ dog: dog.id }).filter((n) => n.kind === 'judge')).toHaveLength(0);
+    expect((await pack.view()).approvals).toHaveLength(0);
+    expect(connectorCalls).toEqual([]);
+  });
+
+  it('ends the risk check with the run that asked for it', async () => {
+    const { pack, handlers, runs } = setup();
+    pack.setMode('auto');
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    const run = new AbortController();
+    handlers.push(async (req) => {
+      handlers.push(() => ({ risk: 'low', reason: 'small' }));
+      await tool(req, 'tool_1').run({ title: 'x' }, { signal: run.signal });
+      return { summary: 'done', findings: [] };
+    });
+    await pack.runDog(dog.id);
+    const judged = runs.find((r) => r.instructions.includes('Rate how risky'))!;
+    expect(judged.signal).toBe(run.signal);
+  });
+
   it('refuses what a Vigil rule stops, even in Full access', async () => {
     const { pack, handlers, connectorCalls } = setup({ preflight: 'deny' });
     pack.setMode('full');
@@ -598,6 +666,18 @@ describe('the pack', () => {
       vi.useRealTimers();
     }
     expect(pack.dogs().find((d) => d.id === dog.id)?.lastReport?.ok).toBe(true);
+  });
+
+  it('keeps nothing from a run whose job the user changed meanwhile', async () => {
+    const { pack, handlers, notebook } = setup();
+    const dog = pack.adopt(CREATE as never);
+    handlers.push(() => {
+      pack.updateDog(dog.id, { job: 'Watch for new login items instead' });
+      return { summary: 'old job', findings: [] };
+    });
+    expect(await pack.runDog(dog.id)).toBeUndefined();
+    expect(pack.dogs().find((d) => d.id === dog.id)?.lastReport).toBeUndefined();
+    expect(notebook.list({ dog: dog.id })).toEqual([]);
   });
 
   it('refuses a call still waiting when its run ends, so a late Allow runs nothing', async () => {

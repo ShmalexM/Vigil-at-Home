@@ -98,6 +98,11 @@ export interface FastPathOptions {
    * the password.
    */
   installed?: readonly string[];
+  /**
+   * The program of the helper's, a sensor's or the installed app's this hash
+   * is (ownHashes.ts). A rule whose response blocks one by hash is dropped.
+   */
+  ownProgram?: (identifier: string) => string | undefined;
 }
 
 /** What the helper never pauses, kills or blocks, as the app last sent it. */
@@ -230,6 +235,41 @@ export class FastPath {
     this.now = opts.now ?? Date.now;
   }
 
+  /**
+   * The rules without those whose response blocks, by a hash written into
+   * the rule, a program Vigil or its sensors run on. Each is dropped on its
+   * own with the reason logged; the others keep blocking. A hash filled in
+   * from an event is checked by the executor when the block runs.
+   */
+  private withoutOwnBlocks(rules: DetectionRule[]): DetectionRule[] {
+    const own = this.opts.ownProgram;
+    if (!own) return rules;
+    return rules.filter((r) => {
+      for (const t of r.response) {
+        if (t.kind !== 'santa.rule.set' || t.policy === 'allow') continue;
+        const program = typeof t.identifier === 'string' ? own(t.identifier) : undefined;
+        if (program) {
+          this.opts.log?.(`fast path: dropping rule ${r.id}: it would block ${program} by hash`);
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Drop the rules in force that block one of those programs by hash, once
+   * the helper has (re)hashed them (ownProgram). Rules taken before that
+   * were checked against what was known then.
+   */
+  dropOwnBlocks(): void {
+    const rules = this.withoutOwnBlocks(this.state.rules);
+    if (rules.length === this.state.rules.length) return;
+    const plan = rules.flatMap((r) => this.running.get(r.id) ?? []);
+    this.apply({ ...this.state, rev: this.state.rev + 1, rules, legacyUses: legacyOf(plan) }, plan);
+    this.save();
+  }
+
   /** Pick up the rules saved by the last sync. A missing or damaged file means none. */
   load(): void {
     let raw: string;
@@ -268,6 +308,8 @@ export class FastPath {
         }
       });
     }
+    // A rule that blocks one of Vigil's own programs by hash is dropped too.
+    rules = this.withoutOwnBlocks(rules);
     try {
       const plan = rules.map(planned);
       this.apply({ ...parsed.data, rules, legacyUses: legacyOf(plan) }, plan);
@@ -418,9 +460,12 @@ export class FastPath {
     const selfFields = self ? this.selfFrom(self) : {};
     // Throws RuleCompileError before anything changes (checkRules does the
     // same before any password is asked for).
-    const plan = this.plan(cmd, (err) =>
+    const planAll = this.plan(cmd, (err) =>
       this.opts.log?.(`fast path: skipping rule with an older pattern: ${err.message}`),
     );
+    // Less any rule that would block one of Vigil's own programs by hash.
+    const kept = new Set(this.withoutOwnBlocks(planAll.map((p) => p.rule)));
+    const plan = planAll.filter((p) => kept.has(p.rule));
     const next: Saved = {
       rev: this.state.rev + 1,
       rules: plan.map((p) => p.rule),

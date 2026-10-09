@@ -1,5 +1,5 @@
-import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { execFileWithin } from '@vigil/ai';
 import type { EventSource } from '@vigil/core';
 import type { HelperState } from './helper.js';
 import type { SensorRegistry } from './sensors.js';
@@ -55,6 +55,8 @@ export interface HealthProbe {
   platform?: NodeJS.Platform;
 }
 
+const PGREP_TIMEOUT_MS = 10_000;
+
 /**
  * The helper's sensor report, from its helper.status answer. No answer
  * because there is no connection (it dropped and is reconnecting) means
@@ -81,8 +83,9 @@ export function macProbe(
     platform,
     ...(helperSensors ? { helperSensors } : {}),
     exists: existsSync,
-    running: (name) =>
-      new Promise((resolve) => execFile('/usr/bin/pgrep', ['-x', name], (err) => resolve(!err))),
+    // A pgrep that hangs counts as not running rather than holding up the health check.
+    running: async (name) =>
+      (await execFileWithin('/usr/bin/pgrep', ['-x', name], PGREP_TIMEOUT_MS)).code === 0,
     lastEventAt,
     helper,
     now: Date.now,

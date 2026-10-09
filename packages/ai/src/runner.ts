@@ -94,6 +94,16 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
   const adapters = new Map(deps.adapters.map((a) => [a.id, a]));
   const statusCache = new Map<ProviderId, { status: ProviderStatus; at: number; ttl?: number }>();
   const probing = new Map<ProviderId, Promise<ProviderStatus>>();
+  /**
+   * Bumped when what a provider's check would say may have changed (a sign-in
+   * finished, a run failed). A check started before that installs nothing.
+   */
+  const statusGen = new Map<ProviderId, number>();
+  const forget = (id: ProviderId) => {
+    statusCache.delete(id);
+    probing.delete(id);
+    statusGen.set(id, (statusGen.get(id) ?? 0) + 1);
+  };
   const redaction = deps.settings.redaction;
   const planNames = new Map<ProviderId, string>();
   let planUsageAt = -Infinity;
@@ -159,22 +169,29 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
     const cached = statusCache.get(adapter.id);
     if (!fresh && cached && now() - cached.at < (cached.ttl ?? STATUS_TTL_MS)) return cached.status;
     // One probe at a time per provider: a slow one is waited on again, not started twice.
-    let probe = probing.get(adapter.id);
+    const id = adapter.id;
+    const gen = statusGen.get(id) ?? 0;
+    const current = () => (statusGen.get(id) ?? 0) === gen;
+    let probe = probing.get(id);
     if (!probe) {
-      probe = adapter.probe().then(
-        (status) => {
-          // A late answer still counts, for the next run.
-          statusCache.set(adapter.id, { status, at: now() });
-          return status;
-        },
-        (error: unknown): ProviderStatus => ({
-          provider: adapter.id,
-          state: 'error',
-          detail: error instanceof Error ? error.message : String(error),
-        }),
-      );
-      const settled = probe.finally(() => probing.delete(adapter.id));
-      probing.set(adapter.id, settled);
+      const settled: Promise<ProviderStatus> = adapter
+        .probe()
+        .then(
+          (status) => {
+            // A late answer still counts, for the next run, unless it is stale.
+            if (current()) statusCache.set(id, { status, at: now() });
+            return status;
+          },
+          (error: unknown): ProviderStatus => ({
+            provider: id,
+            state: 'error',
+            detail: error instanceof Error ? error.message : String(error),
+          }),
+        )
+        .finally(() => {
+          if (probing.get(id) === settled) probing.delete(id);
+        });
+      probing.set(id, settled);
       probe = settled;
     }
     // A probe that never answers (a CLI that hangs) must not hold the run, or
@@ -183,24 +200,49 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
     const late = Symbol('late');
     const status = await settleWithin(probe, PROBE_DEADLINE_MS, late);
     if (status !== late) {
-      statusCache.set(adapter.id, { status, at: now() });
+      if (current()) statusCache.set(id, { status, at: now() });
       return status;
     }
+    // The next check after the short wait starts afresh rather than joining
+    // a probe that may never answer.
+    if (probing.get(id) === probe) probing.delete(id);
     const timedOut: ProviderStatus = {
-      provider: adapter.id,
+      provider: id,
       state: 'error',
       detail: 'It did not answer in time.',
     };
-    statusCache.set(adapter.id, { status: timedOut, at: now(), ttl: TIMED_OUT_STATUS_TTL_MS });
+    if (current())
+      statusCache.set(id, { status: timedOut, at: now(), ttl: TIMED_OUT_STATUS_TTL_MS });
     return timedOut;
   }
 
-  /** Tool results go through the same redaction as the data before the model sees them. */
-  function redactingTools(tools: readonly ReadTool[]): ReadTool[] {
+  /**
+   * Tool results go through the same redaction as the data before the model
+   * sees them. Once the run's deadline passes, a model still working gets no
+   * more tool calls: nothing it asks for then is done.
+   */
+  function redactingTools(tools: readonly ReadTool[], signal: AbortSignal): ReadTool[] {
     return tools.map((t) => ({
       ...t,
-      run: async (args) => redactValue(await t.run(args), redaction),
+      run: async (args) => {
+        if (signal.aborted) throw new Error('This run is over: its deadline passed.');
+        return redactValue(await t.run(args, { signal }), redaction);
+      },
     }));
+  }
+
+  async function beforeDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T | 'timeout'> {
+    if (signal.aborted) return 'timeout';
+    let onAbort!: () => void;
+    const timedOut = new Promise<'timeout'>((resolve) => {
+      onAbort = () => resolve('timeout');
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([work, timedOut]);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
   }
 
   async function runWithDeadline(
@@ -213,7 +255,14 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
       signal.addEventListener('abort', () => resolve('timeout'), { once: true }),
     );
     return Promise.race([
-      adapter.run({ ...input, signal, onUsage: (w) => quota.observe(w) }),
+      adapter.run({
+        ...input,
+        signal,
+        // Usage reported after the deadline is stale; newer runs have reported since.
+        onUsage: (w) => {
+          if (!signal.aborted) quota.observe(w);
+        },
+      }),
       timedOut,
     ]);
   }
@@ -256,7 +305,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
       const adapter = adapters.get(id);
       if (!adapter?.signIn) throw new Error(`${id} is signed in with its own app, not from Vigil.`);
       const flow = await adapter.signIn();
-      void flow.completed.then(() => statusCache.delete(id));
+      void flow.completed.then(() => forget(id));
       return flow;
     },
 
@@ -266,7 +315,9 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
       const runId = randomUUID();
       let logId = runId;
       let entries = 0;
-      const tools = redactingTools(request.tools ?? []);
+      const deadline = AbortSignal.timeout(request.deadlineMs);
+      const signal = request.signal ? AbortSignal.any([deadline, request.signal]) : deadline;
+      const tools = redactingTools(request.tools ?? [], signal);
       const systemPrompt = buildSystemPrompt(
         request.purpose,
         tools.map((t) => t.name),
@@ -276,7 +327,6 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
         redactAndSerialize(request.data, { ...redaction, maxBytes: redaction.maxDataBytes }),
       );
       const jsonSchema = jsonSchemaFor(request.output);
-      const signal = AbortSignal.timeout(request.deadlineMs);
 
       const record = (
         provider: ProviderId | null,
@@ -318,19 +368,33 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
         const adapter = adapters.get(id);
         if (!adapter || !enabled(deps.settings, id)) continue;
         if (request.providers && !request.providers.includes(id)) continue;
-        if (
-          adapter.canServe &&
-          !(await settleWithin(adapter.canServe(planOk), PROBE_DEADLINE_MS, false))
-        )
-          continue;
-        const status = await statusOf(adapter);
-        if (status.state !== 'ready') continue;
-        if (!(request.urgency === 'now' ? quota.allowNow(id) : quota.allowBackground(id))) {
+        // Checking a provider (its sign-in, its binary's signature) counts
+        // against the deadline too: a check that hangs ends the run on time.
+        const ready = await beforeDeadline(
+          (async () => {
+            if (
+              adapter.canServe &&
+              !(await settleWithin(adapter.canServe(planOk), PROBE_DEADLINE_MS, false))
+            )
+              return 'skip';
+            if ((await statusOf(adapter)).state !== 'ready') return 'skip';
+            if (!(request.urgency === 'now' ? quota.allowNow(id) : quota.allowBackground(id)))
+              return 'quota';
+            return (await overMonthlyCap(id, planOk)) ? 'cap' : 'ready';
+          })(),
+          signal,
+        );
+        if (ready === 'timeout') {
+          record(id, 'timeout');
+          return { ok: false, reason: 'timeout', logId };
+        }
+        if (ready === 'skip') continue;
+        if (ready === 'quota') {
           lastReason = 'quota';
           held ??= PLAN_LIMITS_HELD;
           continue;
         }
-        if (await overMonthlyCap(id, planOk)) {
+        if (ready === 'cap') {
           lastReason = 'quota';
           held = MONTHLY_CAP_HELD;
           continue;
@@ -363,7 +427,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
             break;
           }
           if (out.kind === 'error') {
-            statusCache.delete(id);
+            forget(id);
             record(id, 'error', out.audit, out.message, out.usage);
             lastReason = 'error';
             lastDetail = out.message;
