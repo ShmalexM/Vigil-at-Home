@@ -38,6 +38,7 @@ export {
   type AiReach,
 } from './reach.js';
 export { readTool } from './tools.js';
+export { REDACTED, WITHHELD, redactArgv, redactField } from './redact.js';
 export type {
   SpendingDay,
   SpendingLimits,
