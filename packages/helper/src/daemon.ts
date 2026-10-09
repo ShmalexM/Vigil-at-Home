@@ -33,10 +33,17 @@ import {
 import { Approvals } from './approval.js';
 import { pinCandidate, repinFromGrant } from './appPin.js';
 import { AppPinStore } from './pinStore.js';
-import { defaultPaths, installedSelf, SANTA_SYNC_PORT, type HelperPaths } from './config.js';
-import { Executor, type ActionOutcome } from './executor.js';
+import {
+  defaultPaths,
+  installedSelf,
+  ownProgramRoots,
+  SANTA_SYNC_PORT,
+  type HelperPaths,
+} from './config.js';
+import { Executor, OWN_HASHES_WAIT_MS, type ActionOutcome } from './executor.js';
 import { eventPipeline, FastPath } from './fastpath.js';
 import { Journal } from './journal.js';
+import { OwnHashes } from './ownHashes.js';
 import {
   ensureOsquery,
   defaultOsqueryPaths,
@@ -71,6 +78,8 @@ export interface DaemonOptions {
   fapolicydRulesDir?: string;
   /** Linux: the trust answer for a program path. Defaults to the dpkg/rpm index. */
   trust?: (path: string) => SignatureInfo | undefined;
+  /** Where the programs no block by hash may name live (ownProgramRoots); tests point it elsewhere. */
+  ownProgramRoots?: string[];
   /** How long to wait before trying the sync port again when it is taken. */
   syncRetryMs?: number;
 }
@@ -141,6 +150,16 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     };
   };
 
+  // The programs no block by hash may name, hashed by the helper itself from
+  // where it knows they live; the first pass runs while everything else starts.
+  const ownHashes = new OwnHashes({
+    roots:
+      opts.ownProgramRoots ?? ownProgramRoots(linux ? 'linux' : 'darwin', paths.helperExecutable),
+    cdhashes: !linux,
+    log,
+  });
+  const rehash = (): Promise<void> => ownHashes.refresh().then(() => fastPath.dropOwnBlocks());
+
   // Blocking rules from the app, run on the sensor stream before events reach it.
   const fastPath: FastPath = new FastPath({
     file: paths.helperRules,
@@ -152,8 +171,10 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     log,
     ...(sys.fileId ? { fileId: (p: string) => sys.fileId?.(p) } : {}),
     installed: installedSelf(sys.platform),
+    ownProgram: (id) => ownHashes.owner(id),
   });
   fastPath.load();
+  void rehash().then(() => log(`hashed ${ownHashes.size} of Vigil's and its sensors' programs`));
 
   // Linux: programs blocked by hash (fapolicyd, plus the check on each launch below).
   const fapolicyd = linux
@@ -211,6 +232,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     ...(fapolicyd ? { fapolicyd } : {}),
     // The app pinned at install, never paused, stopped or blocked by hash.
     appPin: pinStore,
+    ownHashes,
     repin: {
       // Read before the password dialog; the approval re-pins only this code.
       candidate: (grant) => pinCandidate(sys, grant, { installed: installedSelf(sys.platform) }),
@@ -291,6 +313,19 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     const sync = new SantaSyncServer({
       store: rules,
       log,
+      // A block already stored that names one of these programs never reaches Santa.
+      refuse: (rule) => {
+        if (rule.policy === 'ALLOWLIST' || rule.policy === 'REMOVE') return undefined;
+        if (rule.rule_type !== 'BINARY' && rule.rule_type !== 'CDHASH') return undefined;
+        const own = ownHashes.owner(rule.identifier);
+        return own ? `it would block ${own}` : undefined;
+      },
+      // Never longer than a block by hash waits for them (OWN_HASHES_WAIT_MS).
+      ready: () =>
+        Promise.race([
+          ownHashes.ready(),
+          new Promise<void>((resolve) => setTimeout(resolve, OWN_HASHES_WAIT_MS).unref()),
+        ]),
       eventDetailUrl: 'vigil://santa/event?sha256=%file_sha%',
       eventDetailText: 'Open Vigil',
     });
@@ -365,6 +400,8 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   const osqueryTimer = setInterval(
     () => {
       keepOsquery();
+      // Picks up Santa, osquery or the app installed or updated since.
+      void rehash();
       // Puts the pin back from memory if its file went away; never a value older than the one in force.
       pinStore.repair().catch((err: Error) => log(`could not repair the app pin: ${err.message}`));
     },

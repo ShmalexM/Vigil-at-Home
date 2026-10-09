@@ -91,6 +91,11 @@ export interface FastPathOptions {
    * the password.
    */
   installed?: readonly string[];
+  /**
+   * The program of the helper's, a sensor's or the installed app's this hash
+   * is (ownHashes.ts). A rule whose response blocks one by hash is dropped.
+   */
+  ownProgram?: (identifier: string) => string | undefined;
 }
 
 /** What the helper never pauses, kills or blocks, as the app last sent it. */
@@ -171,6 +176,40 @@ export class FastPath {
     this.now = opts.now ?? Date.now;
   }
 
+  /**
+   * The rules without those whose response blocks, by a hash written into
+   * the rule, a program Vigil or its sensors run on. Each is dropped on its
+   * own with the reason logged; the others keep blocking. A hash filled in
+   * from an event is checked by the executor when the block runs.
+   */
+  private withoutOwnBlocks(rules: DetectionRule[]): DetectionRule[] {
+    const own = this.opts.ownProgram;
+    if (!own) return rules;
+    return rules.filter((r) => {
+      for (const t of r.response) {
+        if (t.kind !== 'santa.rule.set' || t.policy === 'allow') continue;
+        const program = typeof t.identifier === 'string' ? own(t.identifier) : undefined;
+        if (program) {
+          this.opts.log?.(`fast path: dropping rule ${r.id}: it would block ${program} by hash`);
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Drop the rules in force that block one of those programs by hash, once
+   * the helper has (re)hashed them (ownProgram). Rules taken before that
+   * were checked against what was known then.
+   */
+  dropOwnBlocks(): void {
+    const rules = this.withoutOwnBlocks(this.state.rules);
+    if (rules.length === this.state.rules.length) return;
+    this.apply({ ...this.state, rev: this.state.rev + 1, rules });
+    this.save();
+  }
+
   /** Pick up the rules saved by the last sync. A missing or damaged file means none. */
   load(): void {
     let raw: string;
@@ -188,15 +227,17 @@ export class FastPath {
     }
     // A rule a newer release no longer compiles (stricter regex and glob
     // checks) is dropped on its own; the rest keep blocking.
-    const rules = parsed.data.rules.filter((r) => {
-      try {
-        compileRule(r);
-        return true;
-      } catch (err) {
-        this.opts.log?.(`fast path: dropping saved rule: ${(err as Error).message}`);
-        return false;
-      }
-    });
+    const rules = this.withoutOwnBlocks(
+      parsed.data.rules.filter((r) => {
+        try {
+          compileRule(r);
+          return true;
+        } catch (err) {
+          this.opts.log?.(`fast path: dropping saved rule: ${(err as Error).message}`);
+          return false;
+        }
+      }),
+    );
     try {
       this.apply({ ...parsed.data, rules });
     } catch (err) {
@@ -287,7 +328,7 @@ export class FastPath {
     // from stalling every check here.
     this.apply({
       rev: this.state.rev + 1,
-      rules: cmd.rules,
+      rules: this.withoutOwnBlocks(cmd.rules),
       exceptions: cmd.exceptions,
       selfPaths: this.state.selfPaths,
       selfImages: this.state.selfImages,
