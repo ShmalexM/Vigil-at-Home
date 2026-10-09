@@ -184,6 +184,9 @@ export const ELEVATED_ENTRY = [
   'case $f in "" | /* | -* | *..* | *[!A-Za-z0-9._/-]*) vh_refuse "bad file name $f" ;; esac;',
   'if [ -L "$src/$f" ] || [ ! -f "$src/$f" ]; then vh_refuse "$f is not a regular file"; fi;',
   'case $f in */*) mkdir -p "$d/${f%/*}" ;; esac;',
+  // Accepted: the file can be swapped between the check above and this read
+  // (for a FIFO, or a link to an endless file). That only hangs the copy or
+  // fills /tmp until the hash check below refuses it; nothing unchecked runs.
   'cat <"$src/$f" >"$d/$f";',
   'if [ -L "$d/$f" ] || [ ! -f "$d/$f" ]; then vh_refuse "$f did not copy as a regular file"; fi;',
   'got=$(vh_sha <"$d/$f"); got=${got%% *};',
