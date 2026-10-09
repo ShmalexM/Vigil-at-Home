@@ -588,6 +588,31 @@ describe('the pack', () => {
     expect((await pack.view()).dogs.find((d) => d.id === dog.id)?.mood).not.toBe('thinking');
   });
 
+  it('keeps a scheduled run’s card quiet: one card on the Pack page, nothing else waiting', async () => {
+    let clock = 10 * 24 * 60 * 60_000;
+    const runs: number[] = [];
+    const { pack, handlers } = setup({ now: () => clock });
+    const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+    const ask = async (req: RunRequest<unknown>) => {
+      // The run ends while its write still waits, as on its deadline.
+      void tool(req, 'tool_1').run({ title: 'x' });
+      await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+      runs.push(1);
+      return { summary: 'ok', findings: [] };
+    };
+    for (let run = 0; run < 2; run++) {
+      clock += 61 * 60_000;
+      handlers.push(ask);
+      await pack.runDue();
+    }
+    expect(runs).toHaveLength(2);
+    const view = await pack.view();
+    // The Pack page's card list is the only place it shows, and two runs share it.
+    expect(view.approvals).toMatchObject([{ dogId: dog.id, tool: 'github.create_issue' }]);
+    // Nothing on Home reads it: no dog is left waiting, and the Lead dog is idle.
+    expect(view.dogs.map((d) => d.mood)).not.toContain('waiting');
+  });
+
   it('in Let AI decide, asks before rewriting or running a dog that can already change things', async () => {
     const { pack, handlers } = setup();
     const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
