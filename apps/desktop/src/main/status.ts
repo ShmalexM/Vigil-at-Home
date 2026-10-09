@@ -23,6 +23,11 @@ export interface SensorHealth {
     at: number;
     reason: 'no_certificate' | 'wrong_certificate' | 'handshake_failed';
   };
+  /**
+   * Santa: while it is still served without its certificate (a profile from
+   * before it), until when at the latest. A detail only.
+   */
+  compatUntil?: number;
 }
 
 export interface Status {

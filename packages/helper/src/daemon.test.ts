@@ -249,6 +249,7 @@ describe('helper daemon', () => {
         clientCertValid: true,
         identityProblem: null,
         installedAt: expect.any(Number),
+        compatUntil: null,
         // The test above presented Santa's certificate, and others before it.
         clientCertSeenAt: expect.any(Number),
         clientCertExpiresAt: expect.any(Number),
@@ -918,6 +919,83 @@ describe('a required flag the helper cannot write down', () => {
     } finally {
       c.close();
       await stopIt();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('compatibility mode after an upgrade', () => {
+  it('serves Santa without its certificate only until the recorded end, across restarts', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vigil-daemon-compat-'));
+    const compatPort = port + 6000;
+    const compatPaths = testPaths(dir);
+    await preClientCertLayout(compatPaths.tlsDir);
+    let clock = Date.now();
+    let failing = false;
+    const start = async () => {
+      const s = new FakeSystem();
+      s.console = process.getuid!() === 0 ? 501 : undefined;
+      const stopIt = await runDaemon({
+        paths: compatPaths,
+        syncPort: compatPort,
+        sys: s,
+        log: () => {},
+        approvalOwnerUid: process.getuid!(),
+        opensslBin: 'openssl',
+        sensorBinaries: {
+          santa: compatPaths.santaLog as string,
+          osquery: join(dir, 'no-osqueryd'),
+        },
+        osquery: false,
+        identity: {
+          now: () => clock,
+          beforeStep: (step: IdentityStep) => {
+            if (failing && step === 'state') throw new Error('disk full');
+          },
+          retryMs: 60_000,
+        },
+      });
+      const c = await HelperClient.connect(compatPaths.socket, async () => false);
+      return { stop: stopIt, c };
+    };
+    const at = (client: { key: Buffer; cert: Buffer } | false) => ({
+      port: compatPort,
+      tlsDir: compatPaths.tlsDir,
+      client,
+    });
+    let run = await start();
+    const santa = async () =>
+      (await run.c.call<{ sensors: SensorHealth }>({ kind: 'helper.status' })).sensors.santa;
+    try {
+      const until = (await santa()).compatUntil!;
+      expect(until).toBeGreaterThan(clock);
+      // Before the end: a client without a certificate is served.
+      expect((await santaPost('preflight', {}, at(false))).sync_type).toBe('CLEAN');
+      // After it: refused, though required:false is what is saved.
+      clock = until;
+      await expect(santaPost('preflight', {}, at(false))).rejects.toThrow();
+      expect(await santa()).toMatchObject({ clientCertRequired: true, compatUntil: null });
+      expect(requiredOnDisk(compatPaths.tlsDir)).toBe(false);
+      clock = until - 60_000;
+      expect((await santaPost('preflight', {}, at(false))).sync_type).toMatch(/CLEAN|NORMAL/);
+
+      // Santa presents its certificate, but the flag can't be saved; the
+      // helper restarts before a retry, after the end of compatibility mode.
+      failing = true;
+      await santaPost('preflight', {}, at(clientIdentity(compatPaths.tlsDir)));
+      for (let i = 0; i < 50 && !(await santa()).identityProblem; i++)
+        await new Promise((r) => setTimeout(r, 20));
+      expect((await santa()).identityProblem).toMatch(/Couldn’t save/);
+      run.c.close();
+      await run.stop();
+      expect(requiredOnDisk(compatPaths.tlsDir)).toBe(false);
+      clock = until + 1;
+      run = await start();
+      expect((await santa()).clientCertRequired).toBe(true);
+      await expect(santaPost('preflight', {}, at(false))).rejects.toThrow();
+    } finally {
+      run.c.close();
+      await run.stop();
       rmSync(dir, { recursive: true, force: true });
     }
   });

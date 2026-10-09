@@ -46,6 +46,8 @@ export interface HelperSantaSync {
   lastAuthRuleSyncAt?: number | null;
   /** When the helper first set up Santa's sync identity. */
   installedAt?: number | null;
+  /** While Santa is still served without its certificate: until when, at the latest. */
+  compatUntil?: number | null;
   /** Something wrong with Santa's sync identity the helper couldn't fix, or null. */
   identityProblem?: string | null;
   /** Why the sync port isn't listening, or null. */
@@ -220,7 +222,16 @@ export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
     }
     // Shown on the row for reference only: a port probe can cause one too.
     const refusal = id === 'santa' ? fromHelper?.santa?.lastRefusal : undefined;
-    const shown = { ...base, ...(refusal ? { lastRefusal: refusal } : {}) };
+    // Compatibility mode is a detail too: Santa keeps syncing meanwhile.
+    const compatUntil =
+      id === 'santa' && !fromHelper?.santa?.clientCertRequired
+        ? fromHelper?.santa?.compatUntil
+        : undefined;
+    const shown = {
+      ...base,
+      ...(refusal ? { lastRefusal: refusal } : {}),
+      ...(typeof compatUntil === 'number' ? { compatUntil } : {}),
+    };
     const times = [p.lastEventAt(id), reported?.lastEventAt ?? null].filter(
       (t): t is number => t !== null,
     );
@@ -278,7 +289,8 @@ export async function reportHealth(registry: SensorRegistry, probe: HealthProbe)
     if (
       prev?.state !== h.state ||
       prev?.note !== h.note ||
-      prev?.lastRefusal?.at !== h.lastRefusal?.at
+      prev?.lastRefusal?.at !== h.lastRefusal?.at ||
+      prev?.compatUntil !== h.compatUntil
     )
       registry.report(h);
   }

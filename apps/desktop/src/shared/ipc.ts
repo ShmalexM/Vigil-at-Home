@@ -327,6 +327,11 @@ export interface SensorView {
     at: number;
     reason: 'no_certificate' | 'wrong_certificate' | 'handshake_failed';
   };
+  /**
+   * Santa: while it is still served without its certificate (a profile from
+   * before it), until when at the latest. A detail only.
+   */
+  compatUntil?: number;
 }
 
 /** Proof that Vigil is running, for the "it's working" line. Today is since local midnight. */

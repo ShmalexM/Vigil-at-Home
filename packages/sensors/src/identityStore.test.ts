@@ -21,6 +21,7 @@ import { X509Certificate } from 'node:crypto';
 import { createSecureContext } from 'node:tls';
 import {
   CLIENT_PIN_OVERLAP_MS,
+  COMPAT_PERIOD_MS,
   IDENTITY_FILES,
   IdentityApprovalNeeded,
   type IdentityState,
@@ -405,5 +406,72 @@ describe('moving from the flat layout of earlier versions', { timeout: OPENSSL_T
       expect(s.required).toBe(false);
       await onDisk(dir);
     }
+  });
+});
+
+describe('the end of compatibility mode', { timeout: OPENSSL_TIMEOUT_MS }, () => {
+  it('requires the certificate after the deadline the move recorded, whatever the saved flag says', async () => {
+    const dir = await legacyLayout({ clientAuth: true, required: false });
+    const t0 = Date.now();
+    const s = await started(dir);
+    const until = s.current!.compatUntil!;
+    expect(until).toBeGreaterThanOrEqual(t0 + COMPAT_PERIOD_MS);
+    expect(until).toBeLessThanOrEqual(Date.now() + COMPAT_PERIOD_MS);
+    // In the versioned set, next to the flag.
+    expect(await onDisk(dir)).toMatchObject({ required: false, compatUntil: until });
+    expect(s.required).toBe(false);
+    expect(s.status()).toMatchObject({ required: false, compatUntil: until });
+
+    // Before the deadline a client without a certificate is still served...
+    expect((await started(dir, { now: () => until - 1 })).required).toBe(false);
+    // ...after it, never, with required:false still saved.
+    const late = await started(dir, { now: () => until });
+    expect(late.required).toBe(true);
+    expect(late.status()).toMatchObject({ required: true, compatUntil: null });
+    expect((await onDisk(dir)).required).toBe(false);
+    // Lowering it again takes the admin password.
+    await expect(late.reissue({ approved: false })).rejects.toBeInstanceOf(IdentityApprovalNeeded);
+  });
+
+  it('stays strict after a failed save and a restart past the deadline', async () => {
+    const dir = await legacyLayout({ clientAuth: true, required: false });
+    let failing = false;
+    const s = await started(dir, {
+      beforeStep: crashAt('state', () => failing),
+      retryMs: 60_000,
+    });
+    const until = s.current!.compatUntil!;
+    failing = true;
+    expect(s.presented(s.current!.pin)).toBe(true);
+    await s.idle();
+    expect(s.status().problem).toMatch(/Couldn’t save/);
+    s.close();
+    // The helper restarts before a retry saved it.
+    expect((await onDisk(dir)).required).toBe(false);
+    const after = await started(dir, { now: () => until + 1 });
+    expect(after.required).toBe(true);
+  });
+
+  it('gives a store moved before deadlines existed one from its next start', async () => {
+    const dir = await legacyLayout({ clientAuth: true, required: false });
+    await started(dir);
+    // As an earlier build of this change wrote it: no compatUntil.
+    const state = join(dir, 'current', IDENTITY_FILES.state);
+    const saved = JSON.parse(readFileSync(state, 'utf8')) as Record<string, unknown>;
+    delete saved.compatUntil;
+    writeFileSync(state, JSON.stringify(saved));
+    const t0 = Date.now();
+    const s = await started(dir);
+    const until = (await onDisk(dir)).compatUntil!;
+    expect(until).toBeGreaterThanOrEqual(t0 + COMPAT_PERIOD_MS);
+    expect(s.current!.compatUntil).toBe(until);
+    expect(s.required).toBe(false);
+  });
+
+  it('gives a recovery its own deadline, and a new install none', async () => {
+    const fresh = await started();
+    expect(fresh.current!.compatUntil).toBeNull();
+    await fresh.reissue({ approved: true });
+    expect(fresh.current!.compatUntil).toBeGreaterThan(Date.now());
   });
 });

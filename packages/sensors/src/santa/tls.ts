@@ -278,7 +278,15 @@ export interface IdentityState {
   revoked: string[];
   /** Whether the sync port takes only Santa's certificate. */
   required: boolean;
+  /**
+   * While `required` is false: when that ends regardless (ms since epoch).
+   * After it, the certificate is required even if the flag was never saved.
+   */
+  compatUntil: number | null;
 }
+
+/** How long a client without a certificate is still served after a move or a recovery. */
+export const COMPAT_PERIOD_MS = 14 * 24 * 3600 * 1000;
 
 const PIN_RE = /^[a-f0-9]{64}$/;
 
@@ -297,7 +305,9 @@ function parseState(raw: string): IdentityState | null {
     const revoked = Array.isArray(s.revoked)
       ? s.revoked.filter((p): p is string => typeof p === 'string' && PIN_RE.test(p))
       : [];
-    return { v: 1, pin: s.pin, previous, revoked, required: s.required === true };
+    const compatUntil =
+      typeof s.compatUntil === 'number' && Number.isFinite(s.compatUntil) ? s.compatUntil : null;
+    return { v: 1, pin: s.pin, previous, revoked, required: s.required === true, compatUntil };
   } catch {
     return null;
   }
@@ -340,6 +350,8 @@ export interface IdentityStatus {
   expiresAt: number | null;
   /** When the first start finished (the `installed` marker). */
   installedAt: number | null;
+  /** While a client without a certificate is still served: until when, at the latest. */
+  compatUntil: number | null;
   /** Something about the identity that needs attention, or null. */
   problem: string | null;
 }
@@ -396,8 +408,17 @@ export class SyncIdentityStore {
     clearTimeout(this.retry);
   }
 
+  /**
+   * Whether the certificate is required now: raised in memory, or the end of
+   * compatibility mode passed, whatever the saved flag says.
+   */
   get required(): boolean {
-    return this.requiredNow;
+    return this.requiredNow || this.compatOver();
+  }
+
+  private compatOver(now = this.now()): boolean {
+    const until = this.state?.compatUntil;
+    return typeof until === 'number' && now >= until;
   }
 
   /** The version in use, as last written. */
@@ -416,10 +437,11 @@ export class SyncIdentityStore {
   status(): IdentityStatus {
     return {
       issued: this.state !== null,
-      required: this.requiredNow,
+      required: this.required,
       p12Valid: this.p12Valid,
       expiresAt: this.clientExpiresAt,
       installedAt: this.installedAt,
+      compatUntil: this.required ? null : (this.state?.compatUntil ?? null),
       problem:
         this.persistError ??
         (this.p12Valid === false ? 'Santa’s certificate file doesn’t match its pin' : null),
@@ -444,6 +466,7 @@ export class SyncIdentityStore {
       if (installedAt !== null && loaded) {
         this.state = loaded.state;
         this.requiredNow = loaded.state.required;
+        await this.giveCompatAnEnd();
         await this.check(this.now());
       } else if (this.isLegacy()) {
         await this.migrate();
@@ -488,7 +511,7 @@ export class SyncIdentityStore {
       const cur = this.readVersion();
       if (!s || !cur) throw new Error('Santa’s sync identity isn’t set up');
       const mayLower = () => {
-        if (!o.approved && (this.requiredNow || this.state?.required))
+        if (!o.approved && (this.required || this.state?.required))
           throw new IdentityApprovalNeeded();
       };
       mayLower();
@@ -502,6 +525,7 @@ export class SyncIdentityStore {
         previous: null,
         revoked: [...new Set(revoked)].slice(-MAX_REVOKED),
         required: false,
+        compatUntil: this.now() + COMPAT_PERIOD_MS,
       };
       await this.commit(
         next,
@@ -554,6 +578,25 @@ export class SyncIdentityStore {
         }
       }
     });
+  }
+
+  /**
+   * A store moved from the flat layout before compatibility mode had an end
+   * gets one now. If that can't be saved, it holds for this run and is shown.
+   */
+  private async giveCompatAnEnd(): Promise<void> {
+    const s = this.state;
+    if (!s || s.required || s.compatUntil !== null) return;
+    const next = { ...s, compatUntil: this.now() + COMPAT_PERIOD_MS };
+    try {
+      const cur = this.readVersion();
+      if (!cur) throw new Error('the identity in use can’t be read');
+      await this.commit(next, cur.files, { lower: false });
+    } catch (err) {
+      this.state = next;
+      this.persistError = `Couldn’t save when compatibility mode ends: ${(err as Error).message}`;
+      this.log(`Santa sync: ${this.persistError}`);
+    }
   }
 
   /** Checks the version in use and writes a renewed or repaired one when needed. */
@@ -626,6 +669,7 @@ export class SyncIdentityStore {
         previous: null,
         revoked: this.state?.revoked ?? [],
         required: true,
+        compatUntil: null,
       },
       files,
       { lower: false },
@@ -712,13 +756,15 @@ export class SyncIdentityStore {
     } catch {
       // No previous pin.
     }
+    const required = existsSync(join(d, LEGACY.required));
     await this.commit(
       {
         v: 1,
         pin: certFingerprint(files.clientCert),
         previous,
         revoked: [],
-        required: existsSync(join(d, LEGACY.required)),
+        required,
+        compatUntil: required ? null : now + COMPAT_PERIOD_MS,
       },
       files,
       { lower: false },

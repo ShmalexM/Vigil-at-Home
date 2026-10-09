@@ -109,6 +109,12 @@ export interface SensorHealth {
     /** When the sync identity was first set up (its install-complete marker). */
     installedAt: number | null;
     /**
+     * While a client without a certificate is still served (compatibility
+     * mode after an upgrade or a recovery): when that ends at the latest.
+     * Null when the certificate is required.
+     */
+    compatUntil: number | null;
+    /**
      * When Santa last finished a sync that applied every rule it was sent,
      * kept across restarts. A handshake alone never counts.
      */
@@ -202,6 +208,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
         clientCertValid: id?.p12Valid ?? null,
         identityProblem: id?.problem ?? null,
         installedAt: id?.installedAt ?? null,
+        compatUntil: id?.compatUntil ?? null,
         clientCertSeenAt: clientAuth?.seenAt ?? null,
         clientCertExpiresAt: id?.expiresAt ?? null,
         lastRuleSyncAt: clientAuth?.ruleSyncs.last ?? null,

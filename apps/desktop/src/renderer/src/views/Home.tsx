@@ -215,6 +215,12 @@ export function HomeView({ go }: { go: (r: string) => void }) {
                       at {new Date(s.lastRefusal.at).toLocaleTimeString()}
                     </span>
                   )}
+                  {s.compatUntil !== undefined && (
+                    <span className="t-small" style={{ color: 'var(--tx3)', textAlign: 'right' }}>
+                      Santa syncs without its certificate until{' '}
+                      {new Date(s.compatUntil).toLocaleDateString()}, or until it first uses it
+                    </span>
+                  )}
                   {s.repair === 'santa-sync' && <RepairSantaSync go={go} />}
                   {s.id === 'helper' &&
                     (s.state !== 'ok' || status.helperOutdated) &&

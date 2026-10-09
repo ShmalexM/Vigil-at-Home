@@ -249,6 +249,12 @@ describe("Santa's syncs with the helper", () => {
           }),
         )
       )['santa'];
+    // Compatibility mode: a quiet detail with its end date, the level stays ok.
+    const compatUntil = NOW + 10 * 86_400_000;
+    const compat = await layer({ ...required, clientCertRequired: false, compatUntil });
+    expect(compat).toMatchObject({ state: 'ok', compatUntil });
+    expect(compat?.repair).toBeUndefined();
+    expect((await layer({ ...required, compatUntil: null }))?.compatUntil).toBeUndefined();
     const lastRefusal = { at: NOW - MIN, reason: 'no_certificate' as const };
     const probed = await layer({ ...required, lastRefusal });
     expect(probed).toMatchObject({ state: 'ok', lastRefusal });
