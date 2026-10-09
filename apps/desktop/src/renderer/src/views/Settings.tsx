@@ -1,14 +1,19 @@
 import { useEffect } from 'react';
-import { BellRing } from 'lucide-react';
+import { BellRing, ClipboardCopy } from 'lucide-react';
 import { useLive, vigil } from '../api';
 import { AlertViewSwitch } from '../components/Attention';
 import { useToast } from '../components/Toasts';
 import { Button, Card, SectionHead } from '../components/ui';
+import { aboutText, systemName } from './about';
 import { AiSection } from './Ai';
 import { AppearanceSection } from './Appearance';
+import { ThreatFeedsSection } from './ThreatFeeds';
 import { UpdatesRow } from './Updates';
 import { ADVANCED_NAV, PageHead } from './AppShell';
 import { SetupPanel } from './onboarding/SetupPanel';
+import { computer, onLinux } from '../platform';
+
+const bar = onLinux ? 'tray' : 'menu bar';
 
 export function SettingsView({ go }: { go: (r: string) => void }) {
   const [settings, reload] = useLive(() => vigil.getSettings());
@@ -20,7 +25,7 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
 
   return (
     <div className="page">
-      <PageHead title="Settings" purpose="How Vigil looks and behaves on this Mac." />
+      <PageHead title="Settings" purpose={`How Vigil looks and behaves on this ${computer}.`} />
       <Card>
         <AppearanceSection
           theme={settings.theme}
@@ -35,7 +40,7 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
         <Card>
           <SectionHead
             title="Alerts"
-            sub="Show me less keeps Home and the menu bar to what needs your decision, with everything Vigil only noticed in History. Show me more lists those on Home too and counts them on the menu-bar icon. What Vigil blocks is the same either way."
+            sub={`Show me less keeps Home and the ${bar} to what needs your decision, with everything Vigil only noticed in History. Show me more lists those on Home too and counts them on the ${bar} icon. What Vigil blocks is the same either way.`}
           />
           <div className="row spread">
             <span>How much to show</span>
@@ -45,7 +50,22 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
       )}
       <SetupPanel />
       <Card>
-        <SectionHead title="About" />
+        <SectionHead
+          title="About"
+          right={
+            <Button
+              size="sm"
+              kind="ghost"
+              icon={<ClipboardCopy size={14} />}
+              onClick={async () => {
+                await navigator.clipboard.writeText(aboutText(settings, status));
+                toast({ text: 'Copied. Paste it into a bug report.' });
+              }}
+            >
+              Copy for a bug report
+            </Button>
+          }
+        />
         <dl className="kv">
           <dt>Version</dt>
           <dd>
@@ -56,6 +76,8 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
           <dd>
             <UpdatesRow />
           </dd>
+          <dt>System</dt>
+          <dd>{systemName(settings.platform, settings.arch)}</dd>
           <dt>Data folder</dt>
           <dd className="mono">{settings.dataDir}</dd>
           <dt>License</dt>
@@ -65,8 +87,8 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
       <details className="settings-advanced">
         <summary className="t-h2">Advanced</summary>
         <span className="t-small">
-          The detail behind what Vigil does: every alert, the rules, raw activity, AI providers and
-          spending. Nothing here is needed day to day.
+          The detail behind what Vigil does: every alert, the rules, raw activity, AI providers,
+          threat feeds and spending. Nothing here is needed day to day.
         </span>
         <Card>
           <SectionHead
@@ -83,6 +105,9 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
         </Card>
         <Card>
           <AiSection />
+        </Card>
+        <Card>
+          <ThreatFeedsSection />
         </Card>
         <Card>
           <SectionHead

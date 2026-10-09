@@ -3,10 +3,12 @@
 // expected executable path or start time, and suspend records the identity
 // so resume can check it again.
 
+import { selfRoots, underSelfRoot } from '@vigil/core/self';
 import type { System } from '../system.js';
 import type { Platform } from '../platform.js';
 import { protectionFor } from '../config.js';
 import { ActionError } from './errors.js';
+import { runsFromSelfImage } from './selfImage.js';
 
 export interface ProcessIdentity {
   pid: number;
@@ -48,6 +50,8 @@ export function isProtectedProcess(path: string, platform: Platform = 'darwin'):
 export interface ProcessTarget {
   /** Expected executable path. */
   path?: string;
+  /** Linux: what is Vigil's own (FastPath.self()), never paused or stopped. */
+  self?: { paths: readonly string[]; images: readonly string[] };
   /** Expected start time, ms since epoch. ps reports whole seconds, so it matches within a second. */
   startTime?: number;
 }
@@ -57,12 +61,24 @@ export function parseLstart(lstart: string): number {
   return Date.parse(lstart.replace(/\s+/g, ' ').trim());
 }
 
+/**
+ * Linux: whether the pid is Vigil. That is a program at or inside one of
+ * Vigil's own paths (a .deb install folder, the AppImage file), or Vigil
+ * running from its approved AppImage's mount (selfImage.ts). Who started the process doesn't count: programs Vigil
+ * starts from anywhere else, such as connectors, are not Vigil.
+ */
+function isSelf(sys: System, pid: number, exe: string, self: ProcessTarget['self']): boolean {
+  if (sys.platform !== 'linux' || !self) return false;
+  if (underSelfRoot(selfRoots(self.paths, false), exe, false)) return true;
+  return runsFromSelfImage(sys, pid, self.images);
+}
+
 async function checkTarget(
   sys: System,
   pid: number,
   expect: ProcessTarget,
 ): Promise<ProcessIdentity> {
-  if (pid <= 1 || pid === process.pid)
+  if (pid <= 1 || pid === sys.selfPid())
     throw new ActionError('refused', 'that process cannot be touched');
   const id = await identifyProcess(sys, pid);
   if (!id) throw new ActionError('not_found', `process ${pid} is not running`);
@@ -78,6 +94,8 @@ async function checkTarget(
       );
     }
   }
+  if (isSelf(sys, pid, id.path, expect.self))
+    throw new ActionError('refused', `${id.path} is part of Vigil`);
   if (isProtectedProcess(id.path, sys.platform))
     throw new ActionError(
       'refused',

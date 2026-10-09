@@ -2,8 +2,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { app, dialog, Notification, powerMonitor, safeStorage, shell } from 'electron';
-import { listDigest } from '@vigil/detection/fastpath';
-import { HelperCallError } from '@vigil/helper/client';
 import { z } from 'zod';
 import type { HelperInstallResult } from '../shared/ipc.js';
 import { AgentService } from './agents/service.js';
@@ -11,23 +9,20 @@ import { AiBridge } from './ai.js';
 import { Store } from './db/store.js';
 import { demoInstalled, seedAgentsDemo, seedDemo, startDemoFeed } from './demo.js';
 import { seedUsageDemo } from './usage-demo.js';
-import {
-  Detector,
-  type HelperSync,
-  type HelperSyncOptions,
-  type HelperSyncOutcome,
-} from './detection.js';
+import { Detector } from './detection.js';
 import {
   helperBundleDir,
   helperInstallCommand,
   helperMatch,
   runHelperScript,
+  unlessDemo,
 } from './helper-install.js';
 import { HelperLink } from './helper.js';
+import { HelperSyncer } from './helper-sync.js';
 import { registerIpc } from './ipc.js';
 import { systemProbe } from './onboarding/checks.js';
 import { demoProbe } from './onboarding/demo.js';
-import { KeyStore } from './onboarding/keys.js';
+import { FeedKeyStore, KeyStore, type Cipher } from './onboarding/keys.js';
 import { linuxDistro, type LinuxDistro } from './onboarding/plan.js';
 import { OnboardingService } from './onboarding/service.js';
 import { Connectors, ConnectorRecord } from './pack/connectors.js';
@@ -36,7 +31,14 @@ import { PackMemory } from './pack/memory.js';
 import { PackService } from './pack/service.js';
 import { seedPackDemo } from './pack/demo.js';
 import { PowerPolicy } from './power.js';
-import { HEALTH_CHECK_MS, macProbe, reportHealth, type HelperSensors } from './sensor-health.js';
+import { hashSelf, selfPaths } from './self-path.js';
+import {
+  AwakeClock,
+  HEALTH_CHECK_MS,
+  macProbe,
+  reportHealth,
+  type HelperSensors,
+} from './sensor-health.js';
 import { VigilCore } from './service.js';
 import { UpdateChecker } from './updates.js';
 import { wantsX11 } from './display.js';
@@ -101,11 +103,24 @@ function start(): void {
   const helper = new HelperLink();
   const core = new VigilCore(store, helper, true);
   const demo = !app.isPackaged && !!process.env['VIGIL_DEMO'];
-  // The .app bundle when packaged; the Electron binary in development.
-  const selfPaths = [app.isPackaged ? join(process.execPath, '../../..') : process.execPath];
+  // The .app bundle or install folder when packaged; the Electron binary in development.
+  const self = selfPaths(process.execPath, process.platform, app.isPackaged, process.env);
+  // API keys, feed keys and connector secrets: encrypted with a key held in the Keychain.
+  const cipher: Cipher = {
+    available: () => safeStorage.isEncryptionAvailable(),
+    encrypt: (s) => safeStorage.encryptString(s),
+    decrypt: (b) => safeStorage.decryptString(b),
+  };
+  // Accepted limit: on Linux (GNOME keyring and similar) safeStorage's key is open to any
+  // app running as the same user, so this does not keep the abuse.ch key from them. That
+  // is the platform's limit, and the key is for a free feed, so it is stored the same way.
+  const feedKeys = new FeedKeyStore(join(dataDir, 'feed-keys.json'), cipher);
   const detector = new Detector(db, store, core.alerts, (e, o) => core.ingest(e, o), {
     installedAt: core.installedAt(),
-    selfPaths,
+    selfPaths: self.app,
+    helperSelf: self.helper,
+    // URLhaus and MalwareBazaar send the user's abuse.ch key once they add one.
+    feeds: { keys: (name) => feedKeys.get(name) },
     // What Vigil itself starts (its AI helpers) is tagged vigil-self, never a watched agent.
     selfPid: process.pid,
     // The tracker reports to the agent service, created just below.
@@ -130,20 +145,32 @@ function start(): void {
     userData: dataDir,
     // For the vigil_status tool (Vigil's read-only tools for the user's own agents).
     status: () => core.status(),
+    // Why the explainer or labeller isn't reaching an AI, for the Agents page.
+    heldBack: (id) => ai.heldBack(id),
     ...(devHelperDir ? { devHelperDir } : {}),
     // The demo shows a fixed set of agents rather than this Mac's.
     ...(demo ? { readPs: async () => [], statInstall: demoInstalled } : {}),
   });
   const windows = new Windows();
-  const probe = macProbe(
-    (source) => store.lastEventAt(source),
-    () => helper.state,
-    async () => (await helper.query<{ sensors?: HelperSensors }>('helper.status'))?.sensors ?? null,
-  );
+  // Sensors can't report while Vigil is closed or the computer sleeps, so a
+  // gap from then is not a quiet sensor.
+  const awake = new AwakeClock(Date.now());
+  powerMonitor.on('suspend', () => awake.suspend());
+  powerMonitor.on('resume', () => awake.resume());
+  const probe = {
+    ...macProbe(
+      (source) => store.lastEventAt(source),
+      () => helper.state,
+      async () =>
+        (await helper.query<{ sensors?: HelperSensors }>('helper.status'))?.sensors ?? null,
+    ),
+    awakeMs: (since: number) => awake.awakeMs(since),
+  };
 
   // A development build installs the helper that `pnpm build:helper` made.
   const helperDir = () => helperBundleDir(process.resourcesPath, devHelperDir);
-  core.helperInstallable = HELPER_PLATFORMS.has(process.platform) && helperDir() !== null;
+  // The demo offers no helper buttons (see unlessDemo).
+  core.helperInstallable = !demo && HELPER_PLATFORMS.has(process.platform) && helperDir() !== null;
   // Santa's configuration profile comes from the helper, which holds the sync
   // server's certificate. Setup offers it once it has been written here.
   const santaProfilePath = join(dataDir, 'Vigil Santa.mobileconfig');
@@ -178,28 +205,43 @@ function start(): void {
     return r;
   };
 
-  const keys = new KeyStore(join(dataDir, 'api-keys.json'), {
-    available: () => safeStorage.isEncryptionAvailable(),
-    encrypt: (s) => safeStorage.encryptString(s),
-    decrypt: (b) => safeStorage.decryptString(b),
-  });
+  const installHelper = unlessDemo(demo, async () =>
+    afterHelperScript(
+      await runHelperScript(core.helperOutdated ? 'update' : 'install', helperDir()),
+    ),
+  );
+
+  const keys = new KeyStore(join(dataDir, 'api-keys.json'), cipher);
   const setup: OnboardingService = new OnboardingService({
     store,
     keys,
     ...(demo
       ? { probe: demoProbe(), supported: true }
       : {
-          probe: systemProbe(undefined, async () => {
-            if (await helper.ping()) return true;
-            // Just installed: connect now rather than on the next retry.
-            await helper.tryConnect();
-            return helper.ping();
-          }),
+          probe: systemProbe(
+            undefined,
+            async () => {
+              if (await helper.ping()) return true;
+              // Just installed: connect now rather than on the next retry.
+              await helper.tryConnect();
+              return helper.ping();
+            },
+            // The labelling model set in AI settings; `ai` is created below, and checks run later.
+            () => {
+              try {
+                return ai.settings().classifier.model;
+              } catch {
+                return undefined;
+              }
+            },
+          ),
         }),
     // Setup's Codex step can use the user's own Codex sign-in (set up below).
     ...(demo
       ? {}
       : { codex: { status: () => ai.codexStatus(), share: () => ai.shareCodexSignIn() } }),
+    // The helper step's button: the same password dialog as Home's. None in the demo.
+    ...(demo ? {} : { installHelper }),
     // The wizard's helper and Santa steps, once this build can install them.
     plan: () => {
       const command = helperInstallCommand(helperDir());
@@ -226,9 +268,11 @@ function start(): void {
     mode: () => setup.mode(),
     dataDir,
     isBusy: () => power.isBusy(),
+    busyReason: () => power.busyReason(),
     openExternal: (url) => shell.openExternal(url),
   });
   if (!demo) core.usage.setLimitsSource(() => ai.limits());
+  core.aiNotice = () => ai.offNotice();
   ai.on('changed', () => windows.broadcast('changed'));
   ai.explainAlertsFrom(core);
   ai.labelEventsFrom(core);
@@ -239,6 +283,7 @@ function start(): void {
   const updates = new UpdateChecker({
     current: app.getVersion(),
     arch: process.arch,
+    platform: process.platform,
     load: () => store.getSetting('updates', z.unknown(), {}),
     save: (s) => store.setSetting('updates', s),
     openExternal: (url) => shell.openExternal(url),
@@ -267,11 +312,6 @@ function start(): void {
       windows.broadcast('pack');
     }, 150);
   };
-  const cipher = {
-    available: () => safeStorage.isEncryptionAvailable(),
-    encrypt: (s: string) => safeStorage.encryptString(s),
-    decrypt: (b: Buffer) => safeStorage.decryptString(b),
-  };
   const connectors = new Connectors({
     load: () => store.getSetting('pack.connectors', z.array(ConnectorRecord), []),
     save: (records) => store.setSetting('pack.connectors', records),
@@ -279,7 +319,7 @@ function start(): void {
     cipher,
     onChange: pushPack,
     // Connectors run the user's programs: watched as connectors, never as Vigil.
-    selfPaths,
+    selfPaths: self.app,
     spawned: (pid, running) =>
       running ? detector.tracker.connectorStarted(pid) : detector.tracker.connectorStopped(pid),
   });
@@ -288,7 +328,7 @@ function start(): void {
     save: (key, value) => store.setSetting(key, value),
     ai: ai.packAi(),
     vigilTools: agents.packTools(),
-    preflight: (req) => agents.packPreflight(req),
+    preflight: (req, opts) => agents.packPreflight(req, opts),
     connectors,
     scheduler: core.scheduler,
     isBusy: () => power.isBusy(),
@@ -303,22 +343,12 @@ function start(): void {
     seedPackDemo(pack, connectors, join(app.getAppPath(), 'src/main/pack/fixtures/demo-mcp.mjs'));
   app.on('before-quit', () => void connectors.closeAll());
 
-  registerIpc(
-    core,
-    windows,
-    setup,
-    ai,
-    updates,
-    agents,
-    { service: pack, connectors },
-    {
-      install: async () =>
-        afterHelperScript(
-          await runHelperScript(core.helperOutdated ? 'update' : 'install', helperDir()),
-        ),
-      uninstall: async () => afterHelperScript(await runHelperScript('uninstall', helperDir())),
-    },
-  );
+  registerIpc(core, windows, setup, ai, updates, agents, { service: pack, connectors }, feedKeys, {
+    install: installHelper,
+    uninstall: unlessDemo(demo, async () =>
+      afterHelperScript(await runHelperScript('uninstall', helperDir())),
+    ),
+  });
   windows.createTray();
   windows.applyTheme(core.theme(), core.appearance());
   // After start-up settles, so the menu-bar item appears first.
@@ -364,48 +394,32 @@ function start(): void {
   // Sensor events arrive through the helper, which reads Santa's and osquery's logs as root.
   helper.on('event', (e) => void core.handleEvent(e));
   const checkHealth = () => reportHealth(core.sensors, probe);
-  // Re-sent on every connection and whenever the rules, exceptions or lists change.
-  let helperRulesSent: string | undefined;
-  // A set the user declined to approve (a loosening needs their password). Not
-  // asked again until the rules change, so the health timer never re-prompts.
-  let helperRulesDeclined: string | undefined;
+  // An AppImage's programs are hashed once, in the background. The helper
+  // gets them with the image in its first self grant, so a new image asks for
+  // the password once rather than twice.
+  const selfHashed = self.mount
+    ? hashSelf(self.mount)
+        .then((hashes) => core.detector?.setSelfHashes(hashes))
+        .catch((err: unknown) => console.warn('[self] could not hash Vigil’s programs:', err))
+    : Promise.resolve();
   // The helper runs the blocking rules it can on its own, so blocks happen
-  // even while the app is closed, and hands Santa the pre-launch ones.
-  let helperRulesSync: Promise<unknown> = Promise.resolve();
-  const syncHelperRules: HelperSync = (opts = {}) => {
-    const next = helperRulesSync.then(() => sendHelperRules(opts));
-    helperRulesSync = next;
-    return next;
-  };
-  const sendHelperRules = async (opts: HelperSyncOptions): Promise<HelperSyncOutcome> => {
-    if (!core.detector) return 'unavailable';
-    const set = core.detector.helperRules();
-    const lists = Object.entries(set.lists).map(([l, entries]) => [l, listDigest(entries)]);
-    const key = JSON.stringify({ ...set, lists });
-    if (key === helperRulesSent) return 'applied';
-    if (key === helperRulesDeclined && !opts.byUser) return 'declined';
-    try {
-      const how = opts.hold ? { hold: true, ...(opts.onHeld ? { onHeld: opts.onHeld } : {}) } : {};
-      if (!(await helper.syncRules(set, how))) return 'unavailable';
-      helperRulesSent = key;
-      return 'applied';
-    } catch (err) {
-      if (err instanceof HelperCallError && err.code === 'refused') {
-        helperRulesDeclined = key;
-        return 'declined';
-      }
-      console.warn('[helper rules] could not update the helper:', err);
-      return 'unavailable';
-    }
-  };
+  // even while the app is closed, and hands Santa the pre-launch ones. Re-sent
+  // on every connection and whenever the rules, exceptions or lists change;
+  // what is Vigil's own goes apart from them, so its password dialog never
+  // holds them up.
+  const helperSync = new HelperSyncer({
+    link: helper,
+    rules: () => core.detector?.helperRules(),
+    ready: selfHashed,
+    log: (msg, err) => console.warn(msg, err),
+  });
+  const syncHelperRules = helperSync.sync;
   if (core.detector) core.detector.syncHelper = syncHelperRules;
   helper.on('state', (state) => {
     void checkHealth();
     if (state === 'connected') {
       void saveSantaProfile();
-      helperRulesSent = undefined;
-      helperRulesDeclined = undefined;
-      void syncHelperRules();
+      helperSync.connected();
     }
   });
   if (HELPER_PLATFORMS.has(process.platform)) {
@@ -444,7 +458,7 @@ function start(): void {
   }
   if (perf)
     Object.assign(globalThis, {
-      vigil: { core, windows, power, agents, syncHelperRules, readyAt: Date.now() },
+      vigil: { core, windows, power, agents, syncHelperRules, helperSync, readyAt: Date.now() },
     });
   // First run opens setup; after that Vigil starts quietly in the menu bar.
   else if (!setup.finished()) windows.openMain('setup');

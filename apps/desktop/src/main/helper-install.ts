@@ -356,7 +356,7 @@ export function adminScriptArgs(args: string[], kind: keyof typeof PROMPTS): str
 export type RunFile = (
   file: string,
   args: string[],
-) => Promise<{ code: number; stdout: string; stderr: string }>;
+) => Promise<{ code: number; stdout: string; stderr: string; missing?: true }>;
 
 const runFile: RunFile = (file, args) =>
   new Promise((resolve) =>
@@ -366,11 +366,18 @@ const runFile: RunFile = (file, args) =>
         code: err ? (typeof err.code === 'number' ? err.code : 1) : 0,
         stdout: String(stdout),
         stderr: String(stderr),
+        // The program itself isn't on this computer (no pkexec, say).
+        ...(err?.code === 'ENOENT' ? { missing: true as const } : {}),
       }),
     ),
   );
 
 export const PKEXEC = '/usr/bin/pkexec';
+
+const FROM_TERMINAL = {
+  install: 'Copy the install command and run it in a terminal instead.',
+  uninstall: 'Run linux/uninstall.sh from Vigil’s helper folder with sudo instead.',
+} as const;
 
 /**
  * Linux: run the script as root through pkexec, which shows the desktop's own
@@ -394,9 +401,24 @@ async function runWithPkexec(
       ...elevatedArgs(stage, scriptFor(kind, 'linux'), manifest),
     ]);
     if (out.code === 0) return { ok: true };
-    // pkexec exits 126 when the password dialog is closed, 127 when not allowed.
+    if (out.missing) {
+      return {
+        ok: false,
+        error: `This computer has no pkexec, so Vigil can’t ask for your password. ${FROM_TERMINAL[kind]}`,
+      };
+    }
+    // pkexec exits 126 when the password dialog is closed, 127 when not allowed
+    // or when no polkit agent is running to show the dialog.
     if (out.code === 126) return { ok: false, error: 'cancelled' };
-    if (out.code === 127) return { ok: false, error: 'Your account isn’t allowed to do this' };
+    if (out.code === 127 && /authentication agent/i.test(out.stderr)) {
+      return {
+        ok: false,
+        error: `No password dialog could open: nothing on this desktop answers polkit. ${FROM_TERMINAL[kind]}`,
+      };
+    }
+    if (out.code === 127 && (/not authorized/i.test(out.stderr) || !out.stderr.trim())) {
+      return { ok: false, error: 'Your account isn’t allowed to do this' };
+    }
     const msg = out.stderr.trim().split('\n').at(-1)?.trim();
     return { ok: false, error: msg || `The ${kind} script failed` };
   } finally {
@@ -419,13 +441,31 @@ export async function runHelperScript(
   }
   if (!dir) return { ok: false, error: 'This build of Vigil does not include the helper' };
   const script = kind === 'uninstall' ? 'uninstall' : 'install';
-  let manifest: [string, string][];
+  let r: HelperInstallResult;
   try {
-    if (platform === 'linux') return await runWithPkexec(script, dir, run);
-    manifest = checkedManifest(dir, script, 'darwin');
+    r =
+      platform === 'linux'
+        ? await runWithPkexec(script, dir, run)
+        : await viaOsascript(kind, dir, run);
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+  // When the password-dialog route fails, the same install works from a terminal.
+  const command = script === 'install' ? helperInstallCommand(dir, platform) : undefined;
+  return !r.ok && r.error !== 'cancelled' && command ? { ...r, command } : r;
+}
+
+/**
+ * macOS: run the script as root through osascript's administrator dialog.
+ * Root runs only its own checked copy of the scripts (see ELEVATED_ENTRY).
+ */
+async function viaOsascript(
+  kind: 'install' | 'update' | 'uninstall',
+  dir: string,
+  run: RunFile,
+): Promise<HelperInstallResult> {
+  const script = kind === 'uninstall' ? 'uninstall' : 'install';
+  const manifest = checkedManifest(dir, script, 'darwin');
   const out = await run(
     '/usr/bin/osascript',
     adminScriptArgs(elevatedArgs(dir, scriptFor(script, 'darwin'), manifest), kind),
@@ -438,4 +478,17 @@ export async function runHelperScript(
     .replace(/ \(-?\d+\)\s*$/, '')
     .trim();
   return { ok: false, error: msg || `The ${script} script failed` };
+}
+
+/**
+ * The demo (VIGIL_DEMO) shows made-up data on a real computer: its helper
+ * buttons must never run the real install or uninstall script as root.
+ */
+export function unlessDemo(
+  demo: boolean,
+  run: () => Promise<HelperInstallResult>,
+): () => Promise<HelperInstallResult> {
+  return demo
+    ? async () => ({ ok: false, error: 'The demo doesn’t install or remove the helper' })
+    : run;
 }

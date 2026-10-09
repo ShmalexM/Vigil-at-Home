@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import {
@@ -33,6 +34,7 @@ import {
   type EventHistory,
   type FeedImporterOptions,
   type AnalyzeRunner,
+  type CheckOptions,
   type FeedStatus,
   type FlaggedEvent,
   type Proposal,
@@ -46,8 +48,9 @@ import { fastPathRules, isAppOnlyField } from '@vigil/detection/fastpath';
 import { userOrigin } from '@vigil/detection/user';
 import type { EventOutcome } from '../shared/ipc.js';
 import type { AlertService } from './alerts.js';
-import type { Store } from './db/store.js';
+import type { EventBodyRow, Store } from './db/store.js';
 import type { HelperRuleSet } from './helper.js';
+import type { HelperSelf } from './self-path.js';
 
 const KEY_REVIEW = 'detection.review';
 
@@ -64,6 +67,11 @@ export const FEED_CHECK_MS = 30 * 60 * 1000;
  * on the next sync.
  */
 export type HelperSyncOutcome = 'applied' | 'declined' | 'unavailable';
+
+/** A checked mode change: done (with the override it replaced) or refused in this mode. */
+export type QuietOutcome =
+  { ok: true; prior: RuleMode | null; token: string } | { ok: false; mode: RuleMode };
+export type UndoQuietOutcome = { ok: true } | { ok: false; mode: RuleMode };
 
 /**
  * How to send the helper its rules. `hold`: let the next password dialog ask
@@ -93,6 +101,8 @@ export interface DetectorOptions {
   installedAt: number;
   /** Vigil's own executable, which the safety floor never touches. */
   selfPaths: string[];
+  /** What the helper is told instead, when it differs (an AppImage's mount changes every launch). */
+  helperSelf?: HelperSelf;
   feeds?: FeedImporterOptions;
   now?: () => number;
   /** Vigil's own pid: its process tree is tagged `vigil-self` (its AI helpers). */
@@ -131,12 +141,18 @@ export class Detector {
   private reviewer: RuleReviewer | undefined;
   private checkedByKind = new Map<string, number>();
   private readonly now: () => number;
-  private readonly selfPaths: string[];
+  /** What is Vigil's own, as the helper's safety floor sees it. */
+  private readonly helperSelf: HelperSelf;
   /** Set by the app: sends the helper its copy after rules, modes or exceptions change. */
   syncHelper: HelperSync | undefined;
   /** User changes one at a time, so undoing a declined one can't undo another. */
   private changing: Promise<unknown> = Promise.resolve();
   private waiting = 0;
+  /** The last quiet of each rule: what undoing it puts back, and the state it left. */
+  private readonly quieted = new Map<
+    string,
+    { token: string; stamp: string; prior: RuleMode | null }
+  >();
 
   constructor(
     private readonly db: DatabaseSync,
@@ -146,7 +162,7 @@ export class Detector {
     opts: DetectorOptions,
   ) {
     this.now = opts.now ?? Date.now;
-    this.selfPaths = opts.selfPaths;
+    this.helperSelf = opts.helperSelf ?? { paths: opts.selfPaths, images: [], hashes: [] };
     // Detection keeps its state in det_* tables in the same database. Replay
     // history reads the app's own event table rather than keeping a second copy.
     this.stores = { ...sqliteStores(db), history: appHistory(store) };
@@ -252,14 +268,14 @@ export class Detector {
   private *flagged(from: number, to: number): Iterable<FlaggedEvent> {
     const rows = this.db
       .prepare(
-        `SELECT body, label FROM events
+        `SELECT body, args, label FROM events
          WHERE ts >= ? AND ts <= ? AND matched = 0 AND label IS NOT NULL
            AND json_extract(label, '$.label') IN ('unusual', 'suspicious')
          ORDER BY ts DESC LIMIT 2000`,
       )
-      .iterate(from, to) as Iterable<{ body: string; label: string }>;
+      .iterate(from, to) as Iterable<EventBodyRow & { label: string }>;
     for (const r of rows) {
-      const e = JSON.parse(r.body) as SensorEvent;
+      const e = this.store.event(r);
       const l = JSON.parse(r.label) as { label: 'unusual' | 'suspicious'; reason?: string };
       const f: FlaggedEvent = { kind: e.kind, subject: flaggedSubject(e), label: l.label };
       if (l.reason) f.reason = l.reason;
@@ -291,7 +307,7 @@ export class Detector {
    * free: the tracker only says which agent session asked (attribution), and
    * `engine.check` leaves no trace. Rules decide deny, ask or nothing; never allow.
    */
-  preflight(req: PreflightRequest): PreflightResult {
+  preflight(req: PreflightRequest, opts?: CheckOptions): PreflightResult {
     const ts = this.now();
     const found = req.ppid !== undefined ? this.tracker.lookup(req.ppid) : undefined;
     const event = toolRequestEvent(req, {
@@ -299,7 +315,7 @@ export class Detector {
       ts,
       ...(found?.tag ? { tag: found.tag } : {}),
     });
-    const detections = this.engine.check(event);
+    const detections = this.engine.check(event, opts);
     const reply = decide(detections, (id) => this.engine.getRule(id)?.name ?? id);
     return { reply, event, detections };
   }
@@ -398,12 +414,23 @@ export class Detector {
     return { ...value, helper };
   }
 
+  /** One rule the engine runs, with the mode it actually applies (the user's choice included). */
+  rule(id: string): Rule | undefined {
+    const r = this.engine.getRule(id);
+    return r ? { ...coreRule(r), mode: this.engine.modeOf(r) } : undefined;
+  }
+
   /** Every rule the engine runs, with the mode it actually applies. */
-  rules(): Array<{ rule: Rule; mode: RuleMode }> {
-    return this.engine.listRules().map(({ effectiveMode, ...r }) => ({
-      rule: coreRule(r as DetectionRule),
-      mode: effectiveMode,
-    }));
+  rules(): Array<{ rule: Rule; mode: RuleMode; learningUntil?: number }> {
+    const now = this.now();
+    return this.engine.listRules().map(({ effectiveMode, ...r }) => {
+      const learningUntil = this.engine.learningEnds(r.id, now);
+      return {
+        rule: coreRule(r as DetectionRule),
+        mode: effectiveMode,
+        ...(learningUntil !== undefined ? { learningUntil } : {}),
+      };
+    });
   }
 
   /**
@@ -427,9 +454,20 @@ export class Detector {
     return {
       rules,
       exceptions,
-      selfPaths: this.selfPaths,
+      selfPaths: this.helperSelf.paths,
+      selfImages: this.helperSelf.images,
+      selfHashes: this.helperSelf.hashes,
       lists: Object.fromEntries(lists.map((l) => [l, this.stores.lists.entries(l)])),
     };
+  }
+
+  /**
+   * The sha256 of the programs inside Vigil's AppImage, hashed after
+   * start-up: no rule here or in the helper may block one of them.
+   */
+  setSelfHashes(hashes: readonly string[]): void {
+    this.helperSelf.hashes = [...hashes];
+    this.engine.setSelfHashes(hashes);
   }
 
   hasRule(id: string): boolean {
@@ -444,6 +482,58 @@ export class Detector {
     return this.change(() => this.feedback.setMode(id, mode, userOrigin('rules-screen'))).then(
       (r) => r.helper,
     );
+  }
+
+  /**
+   * "Only log this rule" from an alert: Alert to Shadow, checked against the
+   * mode in force when the change applies (after any change still waiting on
+   * the password), not the one the screen showed. Any other mode is refused
+   * unchanged, so this never turns a blocking rule down. On success it gives
+   * the override the rule had before (null: none) and a token for `undoQuiet`,
+   * which keeps that override here rather than taking it back from the screen.
+   */
+  async quiet(id: string): Promise<{ value: QuietOutcome; helper: HelperSyncOutcome }> {
+    return this.change((): QuietOutcome => {
+      const rule = this.engine.getRule(id);
+      if (!rule) throw new Error(`No rule ${id}`);
+      const mode = this.engine.modeOf(rule);
+      if (mode !== 'alert') return { ok: false, mode };
+      const prior = this.engine.modeOverride(id) ?? null;
+      this.feedback.setMode(id, 'shadow', userOrigin('alert'));
+      // Bound to this rule and this one quiet, so it undoes nothing else.
+      const token = `${id}:${randomUUID()}`;
+      this.quieted.set(id, { token, stamp: this.stamp(id), prior });
+      return { ok: true, prior, token };
+    });
+  }
+
+  /**
+   * Undo `quiet`: put back exactly the override it replaced, or none. Only
+   * while nothing about the rule has changed since, not even a change and
+   * back or a new version: otherwise refused, so it can't overwrite (or
+   * weaken) a newer choice.
+   */
+  async undoQuiet(
+    id: string,
+    token: string,
+  ): Promise<{ value: UndoQuietOutcome; helper: HelperSyncOutcome }> {
+    return this.change((): UndoQuietOutcome => {
+      const rule = this.engine.getRule(id);
+      if (!rule) throw new Error(`No rule ${id}`);
+      const done = this.quieted.get(id);
+      if (!done || done.token !== token || done.stamp !== this.stamp(id)) {
+        return { ok: false, mode: this.engine.modeOf(rule) };
+      }
+      this.quieted.delete(id);
+      if (done.prior === null) this.feedback.clearMode(id, userOrigin('alert'));
+      else this.feedback.setMode(id, done.prior, userOrigin('alert'));
+      return { ok: true };
+    });
+  }
+
+  /** Which state of a rule a quiet left: its revision in the engine and its version. */
+  private stamp(id: string): string {
+    return `${this.engine.revision(id)}:${this.engine.getRule(id)?.version ?? 'gone'}`;
   }
 
   /**
@@ -502,11 +592,11 @@ export class Detector {
     const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
     for (const r of this.engine.allRules()) if (!s.rules.has(r.id)) this.engine.removeRule(r.id);
     for (const [id, r] of s.rules) if (!same(this.engine.getRule(id), r)) this.engine.upsertRule(r);
+    // Through the engine, so its revision counts the rollback as a change.
     for (const [id, mode] of s.modes) {
-      const st = this.stores.ruleState.get(id);
-      if (st?.mode === mode) continue;
-      const { mode: _m, ...rest } = st ?? { ruleId: id, fired: 0 };
-      this.stores.ruleState.put(mode === undefined ? rest : { ...rest, mode });
+      if (this.stores.ruleState.get(id)?.mode === mode) continue;
+      if (mode === undefined) this.engine._clearMode(id);
+      else this.engine._setMode(id, mode);
     }
     const ts = this.now();
     const saved = new Map(this.stores.rules.list().map((r) => [r.id, r]));

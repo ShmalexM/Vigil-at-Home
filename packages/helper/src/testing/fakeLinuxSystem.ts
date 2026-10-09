@@ -16,10 +16,21 @@ export class FakeLinuxSystem implements System {
   readonly rules: FakeRule[] = [];
   /** Units that are running, as "<scope> <unit>" with scope "system" or "user:<name>". */
   readonly active = new Set<string>();
+  /** `systemctl show` output by unit; a unit not listed reports only its own name. */
+  readonly shown = new Map<string, string>();
   tableExists = false;
   fagenrulesFails = false;
   private nextHandle = 2;
   console: number | undefined = 1000;
+  /**
+   * The helper's pid in this fake. Fixed, so the fake pids tests use never
+   * collide with the test runner's real pid.
+   */
+  pid = 999_999;
+
+  selfPid(): number {
+    return this.pid;
+  }
 
   async run(bin: BinaryName, args: string[], opts: { input?: string } = {}): Promise<RunResult> {
     this.runs.push({ bin, args, input: opts.input });
@@ -48,6 +59,8 @@ export class FakeLinuxSystem implements System {
           case 'start':
             this.active.add(`${user} ${unit}`);
             return ok();
+          case 'show':
+            return ok(this.shown.get(unit) ?? `Id=${unit}\nNames=${unit}\nExecStart=\n`);
           case 'daemon-reload':
           case 'restart':
           case 'try-restart':
@@ -113,6 +126,41 @@ export class FakeLinuxSystem implements System {
 
   procExe(pid: number): string | undefined {
     return this.processes.get(pid)?.path;
+  }
+
+  /** /proc/self/mountinfo. */
+  mounts = '';
+  /** Files by path, with their `fileId` (device:inode). */
+  readonly files = new Map<string, string>();
+  /** Open files by pid, as `[fd, link]`. */
+  readonly fds = new Map<number, [number, string][]>();
+  /** Start times by pid, in clock ticks. */
+  readonly starts = new Map<number, number>();
+
+  mountInfo(): string {
+    return this.mounts;
+  }
+
+  procPids(): number[] {
+    return [...this.processes.keys()];
+  }
+
+  procFds(pid: number): [number, string][] {
+    return this.fds.get(pid) ?? [];
+  }
+
+  procStart(pid: number): number | undefined {
+    return this.starts.get(pid);
+  }
+
+  fileId(path: string): string | undefined {
+    const m = /^\/proc\/(\d+)\/(exe|fd\/(\d+))$/.exec(path);
+    if (!m) return this.files.get(path);
+    const pid = Number(m[1]);
+    const target = m[3]
+      ? this.procFds(pid).find(([n]) => n === Number(m[3]))?.[1]
+      : this.processes.get(pid)?.path;
+    return target === undefined ? undefined : this.files.get(target);
   }
 
   signal(pid: number, signal: 'SIGSTOP' | 'SIGCONT' | 'SIGKILL'): void {

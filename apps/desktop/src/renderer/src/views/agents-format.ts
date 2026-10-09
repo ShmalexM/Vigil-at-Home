@@ -12,6 +12,8 @@ export const VIGIL_CONNECTOR = 'vigil-connector';
 
 const SESSION = /^[0-9a-f]{16}$/;
 const AGENT = /^[a-z0-9][a-z0-9-]{0,39}$/;
+/** A rule id, as @vigil/core's Rule schema allows. */
+const RULE = /^[a-z0-9][a-z0-9._-]{0,99}$/;
 
 /**
  * `agents/<id>` opens an agent and `agents/<id>_<session>` one of its
@@ -39,7 +41,12 @@ export function activityRoute(filter: { agent: string } | { session: string }): 
 export function parseActivityParam(param: string | undefined): {
   agent?: string;
   session?: string;
+  rule?: string;
 } {
+  if (param?.startsWith('rule-')) {
+    const id = param.slice('rule-'.length);
+    return RULE.test(id) ? { rule: id } : {};
+  }
   if (param?.startsWith('agent-')) {
     const id = param.slice('agent-'.length);
     return AGENT.test(id) ? { agent: id } : {};

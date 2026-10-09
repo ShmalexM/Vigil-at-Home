@@ -19,6 +19,7 @@ import {
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { EventGroup, EventLabel, EventOutcome, EventView } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
+import { liveLoader } from '../live';
 import { useToast } from '../components/Toasts';
 import { AgentField, toolRequestFields } from '../components/ToolRequestFields';
 import { Button, Card, Chip, Segmented, StatusMark } from '../components/ui';
@@ -26,8 +27,10 @@ import { realProcess } from '../evidence';
 import { actorLabel, clock, describeAction, describeEvent, timeAgo, timeOfDay } from '../format';
 import { matchText } from '../rule-modes';
 import { parseActivityParam, VIGIL_CONNECTOR, VIGIL_SELF } from './agents-format';
+import { appendOlder } from './activity-rows';
 import { PageHead } from './AppShell';
 import { onRovingKeyDown } from '../components/roving';
+import { computer, onLinux } from '../platform';
 
 const UNDOABLE = new Set([
   'process.suspend',
@@ -73,7 +76,7 @@ export function ActivityView({
 }) {
   const [tab, setTab] = useState<Tab>('sees');
   const filter = parseActivityParam(selected);
-  const filtered = !!(filter.agent || filter.session);
+  const filtered = !!(filter.agent || filter.session || filter.rule);
   const links = useAgentLinks(go);
   // A link to an agent's activity always lands on the feed.
   useEffect(() => {
@@ -83,7 +86,7 @@ export function ActivityView({
     <div className="page">
       <PageHead
         title="Activity"
-        purpose="Everything Vigil looks at on this Mac, what its rules made of it, and every action it took."
+        purpose={`Everything Vigil looks at on this ${computer}, what its rules made of it, and every action it took.`}
       />
       <div className="tabs" role="tablist" onKeyDown={onRovingKeyDown}>
         <button
@@ -105,7 +108,7 @@ export function ActivityView({
           What Vigil did
         </button>
       </div>
-      {tab === 'sees' ? <EventFeed filter={filter} links={links} /> : <ActionLog />}
+      {tab === 'sees' ? <EventFeed filter={filter} links={links} /> : <ActionLog go={go} />}
     </div>
   );
 }
@@ -118,7 +121,7 @@ const GROUPS: { value: EventGroup | 'all'; label: string }[] = [
   { value: 'network', label: 'Network' },
   { value: 'files', label: 'Files' },
   { value: 'startup', label: 'Startup & extensions' },
-  { value: 'system', label: 'macOS alerts' },
+  { value: 'system', label: onLinux ? 'System alerts' : 'macOS alerts' },
   { value: 'agents', label: 'Agent requests' },
 ];
 
@@ -126,12 +129,15 @@ const PAGE = 100;
 
 /** Matches TEXT_SEARCH_WINDOW_MS in shared/ipc.ts (not imported, to keep zod out of the renderer). */
 const SEARCH_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Match EVENT_STATS_TTL_MS and EVENT_PROGRAMS_TTL_MS in main/service.ts. */
+const STATS_TTL_MS = 5_000;
+const PROGRAMS_TTL_MS = 60_000;
 
 function EventFeed({
   filter,
   links,
 }: {
-  filter: { agent?: string; session?: string };
+  filter: { agent?: string; session?: string; rule?: string };
   links: AgentLinks;
 }) {
   const [group, setGroup] = useState<EventGroup | 'all'>('all');
@@ -139,6 +145,8 @@ function EventFeed({
   const [text, setText] = useState('');
   const [paused, setPaused] = useState(false);
   const [rows, setRows] = useState<EventView[]>();
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
   const [more, setMore] = useState(false);
   /** With a search: how far back it has looked so far. */
   const [searchedTo, setSearchedTo] = useState<number>();
@@ -152,40 +160,64 @@ function EventFeed({
     ...(text.trim() ? { text: text.trim() } : {}),
     ...(filter.agent ? { agent: filter.agent } : {}),
     ...(filter.session ? { agentSession: filter.session } : {}),
+    ...(filter.rule ? { rule: filter.rule } : {}),
     limit: PAGE,
   };
   const queryRef = useRef(query);
   queryRef.current = query;
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
+  /** The filters the rows on screen were loaded for. */
+  const rowsKey = useRef<string>(undefined);
 
-  const load = useRef(() => {
-    const from = Date.now();
-    void vigil.listEvents(queryRef.current).then((r) => {
-      setRows(r);
-      setMore(r.length === PAGE);
-      setSearchedTo(queryRef.current.text ? from - SEARCH_WINDOW_MS : undefined);
-      setWaiting(0);
-    });
-  }).current;
+  // One load in flight at a time: a busy Mac sends a batch every second, and
+  // a text search over a day of its events can take longer than that.
+  const feed = useRef(
+    liveLoader(
+      async () => {
+        const from = Date.now();
+        const q = queryRef.current;
+        return { r: await vigil.listEvents(q), from, text: !!q.text, key: JSON.stringify(q) };
+      },
+      ({ r, from, text, key }) => {
+        rowsKey.current = key;
+        setRows(r);
+        setMore(r.length === PAGE);
+        setSearchedTo(text ? from - SEARCH_WINDOW_MS : undefined);
+        setWaiting(0);
+      },
+    ),
+  ).current;
+  const load = feed.reload;
 
   // Reload when the filters change (search waits for typing to settle).
   const key = JSON.stringify(query);
   useEffect(() => {
-    const t = setTimeout(load, text ? 250 : 0);
+    // New filters: an answer still on its way for the old ones never lands,
+    // even one that arrives while the new search waits for typing to settle.
+    feed.invalidate();
+    const t = setTimeout(feed.reload, text ? 250 : 0);
     return () => clearTimeout(t);
-  }, [key, load, text]);
+  }, [key, feed, text]);
 
-  // New events arrive in batches at most once a second.
-  useEffect(
-    () =>
-      vigil.on('events', (n) => {
-        reloadStats();
-        if (pausedRef.current) setWaiting((w) => w + n);
-        else load();
-      }),
-    [load, reloadStats],
-  );
+  // New events arrive in batches at most once a second. Main reuses the
+  // counts for a few seconds and the programs number for a minute, so they
+  // are asked for again once each has expired after the last batch:
+  // otherwise a quiet Mac would keep showing numbers from before it.
+  useEffect(() => {
+    let again: ReturnType<typeof setTimeout>[] = [];
+    const off = vigil.on('events', (n) => {
+      reloadStats();
+      again.forEach(clearTimeout);
+      again = [STATS_TTL_MS, PROGRAMS_TTL_MS].map((ms) => setTimeout(reloadStats, ms + 250));
+      if (pausedRef.current) setWaiting((w) => w + n);
+      else load();
+    });
+    return () => {
+      off();
+      again.forEach(clearTimeout);
+    };
+  }, [load, reloadStats]);
 
   // A search looks back one day at a time, so it never scans the whole history at once.
   const searching = searchedTo !== undefined;
@@ -193,27 +225,45 @@ function EventFeed({
   const canSearchBack = searching && !more && searchedTo > oldestKept;
 
   const older = async () => {
-    const last = rows?.at(-1);
-    const before = more && last ? last.event.ts : searchedTo;
+    const q = queryRef.current;
+    // The rows on screen are still the previous filters' until the new ones load.
+    if (rowsKey.current !== JSON.stringify(q)) return;
+    const last = more ? rows?.at(-1) : undefined;
+    const before = last ? last.event.ts : searchedTo;
     if (before === undefined) return;
-    const r = await vigil.listEvents({ ...queryRef.current, before });
-    setRows([...(rows ?? []), ...r]);
+    const current = feed.guard();
+    const r = await vigil.listEvents({
+      ...q,
+      before,
+      ...(last ? { beforeId: last.event.id } : {}),
+    });
+    // Filters changed while it loaded: these rows belong to the old ones.
+    if (!current()) return;
+    // A live refresh may have replaced the rows meanwhile: add the older page
+    // after the row it was asked from, in whatever rows are current. If that
+    // row has scrolled off the newest page, the page no longer joins on.
+    const joined = appendOlder(rowsRef.current ?? [], r, last?.event.id);
+    if (!joined) return;
+    setRows(joined);
     setMore(r.length === PAGE);
     if (searching) setSearchedTo(before - SEARCH_WINDOW_MS);
   };
 
-  const empty = stats && stats.newest === null;
+  // Rows on screen win over numbers that may be a few seconds old.
+  const newest = Math.max(stats?.newest ?? 0, rows?.[0]?.event.ts ?? 0) || null;
+  const empty = stats && newest === null;
 
   return (
     <div className="col" style={{ gap: 16 }}>
       <div className="stat-strip">
-        <Stat label="Events in the last hour" value={stats?.lastHour ?? 0} />
-        <Stat label="Programs started" value={stats?.programsLastHour ?? 0} />
-        <Stat label="Matched a rule" value={stats?.matchedLastHour ?? 0} />
+        {/* Until the numbers arrive, say so rather than show a zero that isn't true. */}
+        <Stat label="Events in the last hour" value={count(stats?.lastHour)} />
+        <Stat label="Programs started" value={count(stats?.programsLastHour)} />
+        <Stat label="Matched a rule" value={count(stats?.matchedLastHour)} />
         <Stat
           label="Latest event"
-          value={stats?.newest ? timeAgo(stats.newest) : 'None yet'}
-          live={!paused && !!stats?.newest}
+          value={!stats ? '…' : newest ? timeAgo(newest) : 'None yet'}
+          live={!paused && !!newest}
         />
       </div>
 
@@ -237,9 +287,13 @@ function EventFeed({
             onChange={(e) => setText(e.target.value)}
           />
         </label>
-        {(filter.agent || filter.session) && (
+        {(filter.agent || filter.session || filter.rule) && (
           <span className="chip accent filter-chip">
-            {filter.agent ? `Agent: ${links.nameOf(filter.agent)}` : 'One agent session'}
+            {filter.rule
+              ? `Rule: ${ruleName(rows, filter.rule)}`
+              : filter.agent
+                ? `Agent: ${links.nameOf(filter.agent)}`
+                : 'One agent session'}
             <button
               type="button"
               aria-label="Show every event"
@@ -277,8 +331,9 @@ function EventFeed({
             </span>
             <span className="t-h3">Nothing to show yet</span>
             <span className="t-small" style={{ maxWidth: 440 }}>
-              Vigil sees programs starting, network connections and new startup items once Santa and
-              osquery are installed. Everything it sees will show up here as it happens.
+              Vigil sees programs starting, network connections and new startup items once{' '}
+              {onLinux ? 'osquery and the Vigil helper are' : 'Santa and osquery are'} installed.
+              Everything it sees will show up here as it happens.
             </span>
           </div>
         ) : rows && rows.length === 0 && !canSearchBack ? (
@@ -309,13 +364,24 @@ function EventFeed({
       </Card>
 
       <span className="t-small">
-        Events stay on this Mac for {stats?.retentionDays ?? 30} days, except ones an alert points
-        to. When you use the AI, it gets a summary with your name and home folder removed, never
-        this raw feed.
+        Events stay on this {computer} for {stats?.retentionDays ?? 30} days, except ones an alert
+        points to. When you use the AI, it gets a summary with your name and home folder removed,
+        never this raw feed.
       </span>
     </div>
   );
 }
+
+/** A rule's name from the feed's own matches, so the filter chip needs no rule list. */
+function ruleName(rows: EventView[] | undefined, id: string): string {
+  for (const r of rows ?? []) {
+    const m = r.outcome?.matches.find((x) => x.ruleId === id);
+    if (m) return m.ruleName;
+  }
+  return id;
+}
+
+const count = (n: number | undefined) => (n === undefined ? '…' : n.toLocaleString());
 
 function Stat({ label, value, live }: { label: string; value: ReactNode; live?: boolean }) {
   return (
@@ -532,11 +598,31 @@ function EventFields({
   }
   fields.push([
     'Rules',
-    outcome
-      ? outcome.matches.length
-        ? matchText(outcome, tool, ', ')
-        : `Checked by ${outcome.checked}, none matched`
-      : 'Not checked by any rule',
+    outcome ? (
+      outcome.matches.length ? (
+        links.go ? (
+          <span key="rules" className="row" style={{ flexWrap: 'wrap', gap: 6 }}>
+            {outcome.matches.map((m) => (
+              <button
+                key={m.ruleId}
+                type="button"
+                className="more-link"
+                title={`Open the rule ${m.ruleName}`}
+                onClick={() => links.go?.(`rules/${m.ruleId}`)}
+              >
+                {matchText({ checked: outcome.checked, matches: [m] }, tool, '')}
+              </button>
+            ))}
+          </span>
+        ) : (
+          matchText(outcome, tool, ', ')
+        )
+      ) : (
+        `Checked by ${outcome.checked}, none matched`
+      )
+    ) : (
+      'Not checked by any rule'
+    ),
   ]);
   return (
     <dl className="feed-fields">
@@ -565,7 +651,7 @@ function signingLabel(s: string, team?: string): string {
 
 // ---------------------------------------------------------------- what Vigil did
 
-function ActionLog() {
+function ActionLog({ go }: { go?: ((route: string) => void) | undefined }) {
   const [actions] = useLive(() => vigil.listActions());
   const toast = useToast();
   return (
@@ -594,6 +680,16 @@ function ActionLog() {
               {r.result?.error ? ` · ${r.result.error}` : ''}
             </span>
           </div>
+          {r.alertId && go && (
+            <button
+              type="button"
+              className="more-link nowrap"
+              title="Open the alert this action answered"
+              onClick={() => go(`alerts/${r.alertId}`)}
+            >
+              Alert
+            </button>
+          )}
           <Chip tone={r.actor === 'user' ? 'accent' : r.actor === 'ai' ? 'ai' : undefined}>
             {actorLabel(r.actor)}
           </Chip>
@@ -605,8 +701,13 @@ function ActionLog() {
               size="sm"
               kind="ghost"
               onClick={async () => {
-                await vigil.undoAction(r.id);
-                toast({ text: `Undone: ${describeAction(r.action)}` });
+                const out = await vigil.undoAction(r.id);
+                toast({
+                  text:
+                    out.status === 'done'
+                      ? `Undone: ${describeAction(r.action)}`
+                      : `Couldn’t undo: ${describeAction(r.action)}. It’s still in force.`,
+                });
               }}
             >
               Undo

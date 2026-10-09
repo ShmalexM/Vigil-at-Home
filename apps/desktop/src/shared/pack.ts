@@ -96,6 +96,10 @@ export interface DogReport {
   }[];
   /** The AI that ran it. */
   provider?: string;
+  /** It failed after a run that failed too, so the next try waits a whole period. */
+  retry?: boolean;
+  /** The run used a tool, or read a report that did: the summary could hold anyone's text. */
+  tainted?: boolean;
 }
 
 /** Vigil's built-in AI helpers, shown as pack dogs. Their jobs and tools are fixed. */
@@ -115,6 +119,22 @@ export interface Dog {
   enabled: boolean;
   createdBy: 'you' | 'lead';
   createdAt: number;
+  /**
+   * The job could hold someone else's text: it was written by a change from
+   * an older Lead dog answer that read outside text. Cleared when the person
+   * edits the job, or a later change from the acting path (which reads none)
+   * writes it. A pack dog saved before this was recorded counts as tainted.
+   * The acting path sees a tainted job only as `job:<dogId>`.
+   */
+  jobTainted?: boolean;
+  /**
+   * The name could hold someone else's text: it came from a change from an
+   * older Lead dog answer that read outside text. Cleared when the person
+   * names the dog themselves. Saved before this was recorded, it counts as
+   * tainted unless it is the built-in name. Prompts then name the dog by its
+   * id only; a name the person types is mapped to that id by exact match.
+   */
+  nameTainted?: boolean;
   lastReport?: DogReport;
 }
 
@@ -132,6 +152,9 @@ export interface LeadAction {
   status: 'pending' | 'done' | 'declined' | 'failed';
   /** Why it waits, or why it failed. */
   note?: string;
+  /** Its name and job could hold outside text: set only on changes saved by older versions. */
+  nameTainted?: boolean;
+  jobTainted?: boolean;
 }
 
 export interface ChatMessage {
@@ -144,6 +167,14 @@ export interface ChatMessage {
   memory?: MemoryChange[];
   /** Tools the Lead dog used while answering. */
   used?: string[];
+  /**
+   * It could hold someone else's text: a reading-path answer (which may read
+   * tool results, reports, jobs and remembered facts), or an older answer
+   * that read any. The person's own messages and acting-path answers are
+   * clean. Saved before this was recorded, a Lead dog message counts as
+   * tainted. The acting path sees a tainted answer only as `answer-<n>`.
+   */
+  tainted?: boolean;
   failed?: boolean;
 }
 
@@ -156,7 +187,7 @@ export interface ToolApproval {
   toolTitle: string;
   /** The arguments, redacted and cut short, as the user sees them. */
   args: string;
-  why: 'mode' | 'always-ask' | 'rule' | 'judged-risky' | 'no-judge';
+  why: 'mode' | 'always-ask' | 'rule' | 'outside-text' | 'judged-risky' | 'no-judge';
   /** The rule's or the judge's reason, when there is one. */
   reason?: string;
 }
@@ -285,13 +316,22 @@ export interface MemoryEntry {
   /** The chat message it came from. */
   source?: string;
   added: number;
+  /**
+   * It could hold someone else's text: it came from an answer that read a
+   * tool's output or a dog's report, even if the person then said yes to it.
+   * Entries saved before this was recorded count as tainted.
+   */
+  tainted?: boolean;
 }
 
 /**
- * A change the Lead dog asked for in the pack's memory. Applied straight
- * away only when that answer rested on the person's own words alone (no tool
- * was used); otherwise it waits on a "Remember this?" card, because text an
- * alert or a connector returned could be written by anyone.
+ * A change the Lead dog's acting path asked for in the pack's memory. The
+ * acting path reads no outside text, so the change applies straight away,
+ * except that it waits on a "Remember this?" or "Forget this?" card when the
+ * turn also went down the reading path, leans on or cites a reference,
+ * follows an answer that read outside text, the fact replaces one the
+ * person's message doesn't name word for word, or it forgets a fact that
+ * could hold outside text.
  */
 export interface MemoryChange {
   id: string;
@@ -304,6 +344,8 @@ export interface MemoryChange {
   replaces?: string;
   status: 'pending' | 'done' | 'declined' | 'failed';
   note?: string;
+  /** The fact could hold outside text and stays tainted if kept. Cards saved before this was recorded count. */
+  tainted?: boolean;
 }
 
 export const MemoryInput = z.object({ fact: MemoryFact, topic: MemoryTopic });
@@ -393,15 +435,23 @@ export interface DogNote {
   lookedAt: string[];
   answer: string;
   reasons: string[];
+  /**
+   * Set when part of the answer came from reading outside text (a report, a
+   * connector's output). That part, and `readReasons`, may hold anyone's words,
+   * so they are shown as what the dog read, not as its own reasoning.
+   */
+  fromOutside?: boolean;
+  readReasons?: string[];
   thinking?: string;
   provider?: string;
   model?: string;
 }
 
-export type DogNoteInput = Omit<DogNote, 'id' | 'at' | 'lookedAt' | 'reasons'> & {
+export type DogNoteInput = Omit<DogNote, 'id' | 'at' | 'lookedAt' | 'reasons' | 'readReasons'> & {
   lookedAt?: string[];
 
   reasons?: string[];
+  readReasons?: string[];
 };
 
 export const NoteSubject = z.object({

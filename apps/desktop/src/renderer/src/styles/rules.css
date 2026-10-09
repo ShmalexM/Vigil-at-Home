@@ -88,3 +88,50 @@
     flex-basis: 260px;
   }
 }
+/* "Pops up": which rules interrupt, so a noisy one is easy to spot. */
+.rule-interrupts {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--tx2);
+  white-space: nowrap;
+}
+.rule-row {
+  scroll-margin-top: 48px;
+}
+/* A rule's row opens to show its mode control and editor. */
+.rule-head {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  padding: 0;
+  cursor: pointer;
+}
+.rule-head > svg {
+  flex: none;
+  color: var(--tx2);
+}
+.rule-controls {
+  flex-wrap: wrap;
+  border-top: 1px solid var(--ln0);
+  padding-top: 10px;
+}
+.rule-meta {
+  flex: none;
+  flex-wrap: nowrap;
+}
+@media (max-width: 1100px) {
+  .rule-meta {
+    margin-left: auto;
+  }
+}
+/* An example, not a value: dimmer and italic so it never reads as filled in. */
+.field::placeholder {
+  color: var(--tx3);
+  font-style: italic;
+  opacity: 1;
+}

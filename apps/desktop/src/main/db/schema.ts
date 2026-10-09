@@ -118,4 +118,16 @@ export const migrations: string[] = [
   ALTER TABLE events ADD COLUMN agent_id TEXT;
   CREATE INDEX events_agent_ts ON events (agent_id, ts) WHERE agent_id IS NOT NULL;
   `,
+  // Command-line arguments stored once each (db/arg-dictionary.ts). A launch
+  // no rule matched keeps its arguments in events.args as a packed list of
+  // their ids, and its body leaves them out. Older rows keep theirs in body.
+  `
+  CREATE TABLE arg_strings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    value TEXT NOT NULL UNIQUE,
+    last_ts INTEGER NOT NULL
+  );
+  CREATE INDEX arg_strings_last_ts ON arg_strings (last_ts);
+  ALTER TABLE events ADD COLUMN args BLOB;
+  `,
 ];

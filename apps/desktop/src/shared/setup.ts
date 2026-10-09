@@ -52,8 +52,54 @@ export const ApiKeyInput = z.object({
 });
 export type ApiKeyInput = z.input<typeof ApiKeyInput>;
 
+/** Keys for threat feeds that take one (FeedSource.auth in @vigil/detection). */
+export const FeedKeyName = z.enum(['abusech']);
+export type FeedKeyName = z.infer<typeof FeedKeyName>;
+
+export const FeedKey = z
+  .string()
+  .trim()
+  .min(16, 'That looks too short for an Auth-Key')
+  .max(256)
+  .regex(/^[A-Za-z0-9_-]+$/, 'Paste just the key: letters and digits, no spaces');
+
+/** One feed that takes a key, as Settings lists it. */
+export interface KeyedFeedView {
+  name: string;
+  /** Refused without a key, so off until one is added. Each feed is reported on its own. */
+  needsKey: boolean;
+}
+
+/** Which feed keys are saved. The keys themselves never leave main. */
+export interface FeedKeysView {
+  saved: Record<FeedKeyName, boolean>;
+  /** False when the Keychain or keyring isn't available, so keys can't be saved. */
+  canSave: boolean;
+  /** The feeds that take the abuse.ch key; empty while detection isn't running. */
+  feeds: KeyedFeedView[];
+}
+
+/** The abuse.ch feeds out of the importer's status, each with its own needs-key state. */
+export function keyedFeeds(
+  statuses: readonly { name: string; keyName?: FeedKeyName; needsKey?: boolean }[],
+): KeyedFeedView[] {
+  return statuses
+    .filter((s) => s.keyName === 'abusech')
+    .map((s) => ({ name: s.name, needsKey: !!s.needsKey }));
+}
+
+/** The one line under the abuse.ch key: it only names a feed as off when that feed is. */
+export function feedKeyNote(view: FeedKeysView): string {
+  if (view.saved.abusech)
+    return 'URLhaus and MalwareBazaar send your key. It is free for non-commercial use.';
+  const off = view.feeds.filter((f) => f.needsKey).map((f) => f.name);
+  if (off.length)
+    return `${off.join(' and ')} ${off.length === 1 ? 'is' : 'are'} off until you add a free abuse.ch Auth-Key.`;
+  return 'Optional: abuse.ch may start requiring a free key for URLhaus and MalwareBazaar. Adding one keeps those feeds working.';
+}
+
 /** A one-click fix a step offers besides its commands. */
-export const SetupAction = z.enum(['codex-share']);
+export const SetupAction = z.enum(['codex-share', 'helper-install']);
 export type SetupAction = z.infer<typeof SetupAction>;
 
 export interface SetupStepView {

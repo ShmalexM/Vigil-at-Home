@@ -2,7 +2,13 @@ import { cpus, totalmem } from 'node:os';
 import type { ProcessRef, SensorEvent } from '@vigil/core';
 import { z } from 'zod';
 import type { JevAnswer, JevClient } from './providers/jev.js';
-import { LOCAL_PROVIDERS } from './types.js';
+import { LOCAL_PROVIDERS, MONTHLY_CAP_HELD } from './types.js';
+
+/** A busy Mac still gets one labelling batch this often. */
+export const DEFAULT_MAX_BUSY_WAIT_MS = 30 * 60_000;
+
+/** A runner's reasons for a run that reached no AI. */
+const NOT_RUN = new Set(['no_provider', 'quota']);
 import type { AiRunner } from './runner.js';
 
 /**
@@ -44,6 +50,25 @@ export function pickClassifierModel(
   const names = new Set(installed.flatMap((m) => [m.name, m.name.replace(/:latest$/, '')]));
   const list = memoryBytes < SMALL_BELOW ? CLASSIFIER_MODELS.small : CLASSIFIER_MODELS.regular;
   return list.find((m) => names.has(m));
+}
+
+/**
+ * The model the event labeller will use, or nothing: the one set in
+ * settings (`classifier.model`) when it's installed, otherwise
+ * {@link pickClassifierModel}. createAi wires the labeller this way, and
+ * setup's check calls this so the two can't disagree.
+ */
+export function classifierModelChoice(
+  installed: ReadonlyArray<{ name: string }>,
+  override?: string,
+  memoryBytes: number = totalmem(),
+): string | undefined {
+  if (override) {
+    return installed.some((m) => m.name === override || m.name === `${override}:latest`)
+      ? override
+      : undefined;
+  }
+  return pickClassifierModel(installed, memoryBytes);
 }
 
 /** Ollama settings that keep a small model light: short context, half the cores, unloaded soon. */
@@ -173,6 +198,23 @@ export interface EventClassifierOptions {
   readonly cpuThreads?: number;
   /** The app says when the Mac is busy or on low battery; labelling then waits. */
   readonly isBusy?: () => boolean;
+  /**
+   * Longest labelling waits on a busy Mac: after this, one batch goes anyway
+   * (still inside the hourly budgets), so a Mac that is always busy, say one
+   * running coding agents all day, is labelled slowly rather than never.
+   */
+  readonly maxBusyWaitMs?: number;
+  /**
+   * Why the Mac is busy, when it is. Only 'load' (the Mac is merely busy)
+   * gives way after `maxBusyWaitMs`; 'power' (battery, heat, sleep) always
+   * holds labelling. Without it, `isBusy` holds labelling with no limit.
+   */
+  readonly busyReason?: () => 'power' | 'load' | undefined;
+  /**
+   * When a batch last went out, kept by the caller so a rebuilt classifier
+   * doesn't restart the busy wait.
+   */
+  readonly clock?: { lastSentAt?: number };
   readonly deadlineMs?: number;
   readonly now?: () => number;
   /** A candidate prompt in place of LABEL_INSTRUCTIONS (benchmark only). */
@@ -188,6 +230,10 @@ export function createEventClassifier(options: EventClassifierOptions) {
   const now = options.now ?? Date.now;
   const sent: number[] = [];
   const cpu: Array<{ at: number; seconds: number }> = [];
+  const maxBusyWaitMs = options.maxBusyWaitMs ?? DEFAULT_MAX_BUSY_WAIT_MS;
+  /** When a batch last went out, or when labelling started. */
+  const clock = options.clock ?? {};
+  clock.lastSentAt ??= now();
 
   return {
     async classify(events: readonly SensorEvent[]): Promise<ClassifyResult> {
@@ -195,7 +241,13 @@ export function createEventClassifier(options: EventClassifierOptions) {
       const deferred = events.slice(options.maxEventsPerBatch).map((e) => e.id);
       if (batch.length === 0) return { ok: true, labels: [], deferred };
       const all = events.map((e) => e.id);
-      if (options.isBusy?.()) return { ok: false, reason: 'busy', deferred: all };
+      const busy = options.busyReason
+        ? options.busyReason()
+        : options.isBusy?.()
+          ? 'power'
+          : undefined;
+      if (busy === 'power' || (busy === 'load' && now() - clock.lastSentAt! < maxBusyWaitMs))
+        return { ok: false, reason: 'busy', deferred: all };
       const hourAgo = now() - 3_600_000;
       while (sent.length > 0 && sent[0]! < hourAgo) sent.shift();
       while (cpu.length > 0 && cpu[0]!.at < hourAgo) cpu.shift();
@@ -206,6 +258,7 @@ export function createEventClassifier(options: EventClassifierOptions) {
       )
         return { ok: false, reason: 'budget', deferred: all };
       sent.push(now());
+      clock.lastSentAt = now();
 
       const ids = new Set(batch.map((e) => e.id));
       const labels = new Map<string, LabelledEvent>();
@@ -263,7 +316,11 @@ export function createEventClassifier(options: EventClassifierOptions) {
         detail = await labelWith(options.first);
         if (detail === undefined) return done();
       }
-      if (options.jev && (await (options.jevAllowed?.() ?? Promise.resolve(true)))) {
+      const jevAllowed = options.jev
+        ? await (options.jevAllowed?.() ?? Promise.resolve(true))
+        : false;
+      if (options.jev && !jevAllowed) detail = MONTHLY_CAP_HELD;
+      if (options.jev && jevAllowed) {
         const jev = await options.jev.label(batch.map((e) => ({ id: e.id, line: eventLine(e) })));
         if (jev.ok) {
           for (const a of jev.answers) if (ids.has(a.id)) labels.set(a.id, fromJev(a));
@@ -273,8 +330,15 @@ export function createEventClassifier(options: EventClassifierOptions) {
       }
       if (!options.runner)
         return { ok: false, reason: 'failed', deferred: all, detail: detail ?? 'No model set up.' };
-      detail = await labelWith(options.runner);
-      if (detail !== undefined) return { ok: false, reason: 'failed', deferred: all, detail };
+      const failed = await labelWith(options.runner);
+      if (failed !== undefined)
+        return {
+          ok: false,
+          reason: 'failed',
+          deferred: all,
+          // Jev held back by the cap matters more than a local model that isn't there.
+          detail: detail === MONTHLY_CAP_HELD && NOT_RUN.has(failed) ? detail : failed,
+        };
       return done();
     },
   };

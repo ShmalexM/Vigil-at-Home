@@ -1,6 +1,16 @@
-import type { Alert, SensorEvent } from '@vigil/core';
-import { Bell, BookOpen, RotateCcw, Sparkles } from 'lucide-react';
+import type { Alert, RuleMode, SensorEvent } from '@vigil/core';
+import {
+  Activity,
+  Bell,
+  BookOpen,
+  Copy,
+  ListChecks,
+  RotateCcw,
+  Sparkles,
+  VolumeX,
+} from 'lucide-react';
 import { Fragment, useEffect, useRef, useState } from 'react';
+import type { AlertDetail as AlertDetailT } from '../../../shared/ipc';
 import { useLive, vigil } from '../api';
 import { DecisionControls, type Decided } from '../components/Decision';
 import { NotebookSheet } from '../components/Notebook';
@@ -11,7 +21,8 @@ import { toolRequestFields } from '../components/ToolRequestFields';
 import { Button, Card, Chip, SectionHead, SeverityMark, StatusMark } from '../components/ui';
 import { evidenceSub, isHookRequest, realProcess, STOPPED_ANSWER } from '../evidence';
 import { actorLabel, clock, describeAction, describeEvent, seenTimes, timeAgo } from '../format';
-import { modeLabel } from '../rule-modes';
+import { helperNote, PASSWORD_CANCELLED } from '../format';
+import { modeLabel, quieterMode } from '../rule-modes';
 import { ExcludeFromAlert } from '../components/ExcludeFromAlert';
 import { useAgentLinks, type AgentLinks } from './Activity';
 import { PageHead } from './AppShell';
@@ -28,6 +39,9 @@ export function AlertsView({
   const [tab, setTab] = useState<'open' | 'resolved'>('open');
   const [open] = useLive(() => vigil.listAlerts('open'));
   const [resolved] = useLive(() => vigil.listAlerts('resolved'));
+  // The lists hold the newest alerts only; the tabs count them all.
+  const [counts] = useLive(() => vigil.alertCounts());
+  const total = counts?.[tab];
   const list = (tab === 'open' ? open : resolved) ?? [];
   const current = shownAlert(selected, list);
 
@@ -57,7 +71,7 @@ export function AlertsView({
           tabIndex={tab === 'open' ? 0 : -1}
           onClick={() => setTab('open')}
         >
-          Open <span className="count">{open?.length ?? 0}</span>
+          Open <span className="count">{counts?.open ?? open?.length ?? 0}</span>
         </button>
         <button
           type="button"
@@ -66,9 +80,10 @@ export function AlertsView({
           tabIndex={tab === 'resolved' ? 0 : -1}
           onClick={() => setTab('resolved')}
         >
-          Resolved <span className="count">{resolved?.length ?? 0}</span>
+          Resolved <span className="count">{counts?.resolved ?? resolved?.length ?? 0}</span>
         </button>
       </div>
+      {tab === 'open' && <StaleBanner />}
       <div className="split">
         <div className="list split-list scroll">
           {list.length === 0 && (
@@ -80,6 +95,11 @@ export function AlertsView({
                 {tab === 'open' ? 'No open alerts' : 'Nothing resolved yet'}
               </span>
             </div>
+          )}
+          {total !== undefined && total > list.length && list.length > 0 && (
+            <span className="t-small list-note">
+              Showing the newest {list.length} of {total.toLocaleString()}.
+            </span>
           )}
           {pileUp(list).map((r) => {
             const a = r.kind === 'alert' ? r.alert : r.alerts[0]!;
@@ -99,6 +119,44 @@ export function AlertsView({
           {current ? <AlertDetailView id={current} go={go} /> : null}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Open alerts a rule no longer raises: an update or an exclusion made the
+ * rule quieter after they came in. One tap closes them; nothing is held
+ * back by them, and the rules learn nothing from it.
+ */
+function StaleBanner() {
+  const [stale] = useLive(() => vigil.staleAlerts());
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  if (!stale?.length) return null;
+  const n = stale.length;
+  return (
+    <div className="attn accent">
+      <span className="grow">
+        {n} open {n === 1 ? 'alert is' : 'alerts are'} no longer flagged by{' '}
+        {n === 1 ? 'its rule' : 'their rules'}: a rule update or an exclusion now lets{' '}
+        {n === 1 ? 'it' : 'them'} off.
+      </span>
+      <Button
+        size="sm"
+        kind="primary"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          try {
+            const done = await vigil.clearStale(stale);
+            toast({ text: `Closed ${done} ${done === 1 ? 'alert' : 'alerts'}` });
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        Close {n === 1 ? 'it' : `all ${n}`}
+      </Button>
     </div>
   );
 }
@@ -286,24 +344,41 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
       )}
 
       <Card>
-        <SectionHead title="Evidence" sub={evidenceSub(events)} />
+        <SectionHead
+          title="Evidence"
+          sub={evidenceSub(events)}
+          right={
+            <div className="row" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              <span className="t-small">
+                Review before sharing: command lines can contain secrets.
+              </span>
+              <Button
+                size="sm"
+                kind="ghost"
+                icon={<Copy size={13} />}
+                title="Copy the alert, its events and what was done, as JSON. Your user and computer names are hidden, and so is any command line that looks like it holds a secret. It can still miss one."
+                onClick={async () => {
+                  try {
+                    const json = await vigil.alertEvidence(alert.id);
+                    if (!json) throw new Error('gone');
+                    await navigator.clipboard.writeText(json);
+                    toast({ text: 'Copied the evidence as JSON. Review it before sharing.' });
+                  } catch {
+                    toast({ text: 'Couldn’t copy to the clipboard' });
+                  }
+                }}
+              >
+                Copy
+              </Button>
+            </div>
+          }
+        />
         {events.map((e) => (
           <EventBlock key={e.id} event={e} links={links} />
         ))}
       </Card>
 
-      {rule && (
-        <Card tight>
-          <div className="row">
-            <span className="t-label">Rule</span>
-            <span className="grow t-h3">{rule.name}</span>
-            <Chip>{modeLabel(rule, rule.mode)}</Chip>
-            <Chip>{rule.fidelity} fidelity</Chip>
-            {rule.origin === 'ai' && <Chip tone="ai">AI-drafted</Chip>}
-          </div>
-          <span className="t-small">{rule.description}</span>
-        </Card>
-      )}
+      {rule && <RuleCard alert={alert} rule={rule} go={go} />}
 
       {events[0] && (
         <ExcludeFromAlert
@@ -314,6 +389,97 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
         />
       )}
     </div>
+  );
+}
+
+/** How the alert reached the user, as its notify level says. */
+const REACHED: Record<Alert['notify'], { text: string; title: string }> = {
+  popup: { text: 'Popped up', title: 'This alert showed a popup' },
+  badge: { text: 'Badge only', title: 'This alert added to the menu-bar badge, without a popup' },
+  silent: { text: 'Quiet', title: 'This alert only landed here: no popup, no badge' },
+};
+
+/**
+ * The rule behind an alert: a link to it, how its alert reached the user,
+ * and, for a rule that alerts too often, the way to turn it down to Shadow
+ * (Record), where its matches still show in Activity.
+ */
+function RuleCard({
+  alert,
+  rule,
+  go,
+}: {
+  alert: Alert;
+  rule: NonNullable<AlertDetailT['rule']>;
+  go: (r: string) => void;
+}) {
+  const toast = useToast();
+  const quieter = quieterMode(rule);
+  const reached = REACHED[alert.notify];
+  // The main process checks the mode when it applies the change, so a card
+  // drawn before another change (say, to Block) can't turn that rule down.
+  const refused = (mode: RuleMode) =>
+    toast({
+      text: `${rule.name} is set to ${modeLabel(rule, mode)} now, so it was left as it is.`,
+    });
+  const quiet = async () => {
+    if (!quieter) return;
+    const result = await vigil.quietRule(rule.id);
+    if (!result.ok) return refused(result.mode);
+    if (result.helper === 'declined') {
+      toast({ text: `${rule.name}: ${PASSWORD_CANCELLED}` });
+      return;
+    }
+    toast({
+      text: `${rule.name}: ${modeLabel(rule, quieter)}. It stops alerting and keeps logging matches in Activity.${helperNote(result.helper)}`,
+      undo: () =>
+        void vigil.undoQuietRule(rule.id, result.token).then((undone) => {
+          if (!undone.ok) refused(undone.mode);
+        }),
+    });
+  };
+  return (
+    <Card tight>
+      <div className="row" style={{ flexWrap: 'wrap' }}>
+        <span className="t-label">Rule</span>
+        <span className="grow t-h3">{rule.name}</span>
+        <Chip>{modeLabel(rule, rule.mode)}</Chip>
+        <Chip>{rule.fidelity} fidelity</Chip>
+        <Chip title={reached.title}>{reached.text}</Chip>
+        {rule.origin === 'ai' && <Chip tone="ai">AI-drafted</Chip>}
+      </div>
+      <span className="t-small">{rule.description}</span>
+      <div className="row" style={{ flexWrap: 'wrap' }}>
+        <Button
+          size="sm"
+          kind="ghost"
+          icon={<ListChecks size={13} />}
+          onClick={() => go(`rules/${rule.id}`)}
+        >
+          Open rule
+        </Button>
+        <Button
+          size="sm"
+          kind="ghost"
+          icon={<Activity size={13} />}
+          title="Every event this rule matched, newest first"
+          onClick={() => go(`activity/rule-${rule.id}`)}
+        >
+          Its matches in Activity
+        </Button>
+        {quieter && (
+          <Button
+            size="sm"
+            kind="ghost"
+            icon={<VolumeX size={13} />}
+            title={`Too noisy? ${modeLabel(rule, quieter)} only logs what this rule matches; it raises no alert.`}
+            onClick={() => void quiet()}
+          >
+            Only log this rule
+          </Button>
+        )}
+      </div>
+    </Card>
   );
 }
 

@@ -1,8 +1,11 @@
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { hostname, userInfo } from 'node:os';
 import { z } from 'zod';
 import {
   canChangeMode,
   type Alert,
+  type Rule,
   type RuleMode,
   type SensorEvent,
   type UserDecision,
@@ -14,13 +17,18 @@ import {
   type AlertDetail,
   type EventOutcome,
   type EventStats,
+  type QuietRuleResult,
+  type UndoQuietRuleResult,
   type RuleModeResult,
   type RuleView,
   type StatusView,
 } from '../shared/ipc.js';
 import { isNoticed } from '../shared/attention.js';
+import { untouched } from '../shared/piles.js';
 import { DEFAULT_APPEARANCE, type AppearanceSettings } from '../shared/themes.js';
 import { AlertService, type DecisionInput } from './alerts.js';
+import { evidenceOf } from './evidence-export.js';
+import { redactEvidence } from './evidence-redact.js';
 import { EventLog } from './events.js';
 import { BATTERY_SLOWDOWN, type PowerMode } from './power.js';
 import type { Store } from './db/store.js';
@@ -28,12 +36,21 @@ import { FEED_CHECK_MS, type Detector } from './detection.js';
 import { RuleEditing } from './rule-editing.js';
 import type { ActionExecutor } from './executor.js';
 import { Scheduler } from './scheduler.js';
+import { reportFeedHealth } from './sensor-health.js';
 import { SensorRegistry } from './sensors.js';
 import { computeStatus } from './status.js';
 import { TEST_RULE } from './test-alert.js';
 import { WORTH_A_LOOK_RULE } from './worth-a-look.js';
 import { UsageService } from './usage.js';
 
+/** How long staleAlerts' answer stands while no open alert changes. */
+const STALE_TTL_MS = 60_000;
+/** Open alerts looked at for staleAlerts, newest first. */
+const STALE_SCAN_LIMIT = 2000;
+/** How long the Activity strip's counts are reused (see eventStats). */
+export const EVENT_STATS_TTL_MS = 5_000;
+/** How long its distinct-programs number is reused: it reads every launch of the hour. */
+export const EVENT_PROGRAMS_TTL_MS = 60_000;
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 /** The feed hears about new events at most this often, however fast they arrive. */
@@ -70,6 +87,8 @@ export class VigilCore {
   helperInstallable = false;
   /** Set when the installed helper isn't the one this build ships. */
   helperOutdated = false;
+  /** Why the AI can't work because of its switches (set by the app from AiBridge). */
+  aiNotice: (() => string | undefined) | undefined;
   /** Emits `events` (count) at most once per FEED_BATCH_MS while events arrive. */
   readonly feed = new EventEmitter<{ events: [number] }>();
   /** Vigil's AI runs and plan limits, for the Usage page. */
@@ -95,6 +114,12 @@ export class VigilCore {
     this.usage = new UsageService(store, now);
     this.events = new EventLog(store, {
       onError: (err) => console.error('[events] write failed:', err),
+      // Numbers that say there are no events must not outlive the first
+      // ones: the page would show "Nothing to show yet" over a full feed.
+      onStored: () => {
+        if (this.statsCache?.stats.newest === null) this.statsCache = undefined;
+        if (this.programsCache?.n === 0) this.programsCache = undefined;
+      },
     });
     this.scheduler = new Scheduler({
       onError: (name, err) => console.error(`[scheduler] ${name} failed:`, err),
@@ -115,6 +140,8 @@ export class VigilCore {
             if (r.status === 'failed')
               console.warn(`[feeds] ${r.sourceId}: ${r.error ?? 'failed'}`);
           }
+          // A feed whose update was refused shows as one quiet line under Protection.
+          reportFeedHealth(this.sensors, feeds.status());
         },
         true,
       );
@@ -238,16 +265,73 @@ export class VigilCore {
   }
 
   /**
+   * Open alerts that a rule's exclusion, or the user's exception, now lets
+   * off: raised before that exclusion existed (an update made the rule
+   * quieter, or the user excluded the same thing from another alert). Only
+   * alerts that can be closed without asking count (untouched: nothing
+   * held back, no action taken or suggested, and no rule suggestion waiting
+   * in the proposals table), and only when the rule excuses
+   * every event the alert points to.
+   */
+  staleAlerts(): string[] {
+    const engine = this.detector?.engine;
+    if (!engine) return [];
+    // The page asks on every change; recount only when an open alert changed,
+    // or now and then for a rule or exclusion edited meanwhile.
+    const mark = this.store.openAlertsMark();
+    const now = this.now();
+    const c = this.staleCache;
+    if (c && c.mark === mark && now - c.at < STALE_TTL_MS) return c.ids;
+    const out: string[] = [];
+    for (const a of this.store.listAlerts({ status: 'open', limit: STALE_SCAN_LIMIT })) {
+      if (!untouched(a) || this.store.hasPendingProposal(a.id)) continue;
+      const events = this.store.getEvents(a.eventIds);
+      if (events.length === 0) continue;
+      if (events.every((e) => engine.excuses(a.ruleId, e))) out.push(a.id);
+    }
+    this.staleCache = { mark, at: now, ids: out };
+    return out;
+  }
+
+  private staleCache: { mark: string; at: number; ids: string[] } | undefined;
+
+  /**
+   * Close the given alerts that {@link staleAlerts} still names. Like
+   * clearNoticed it teaches the rules nothing: the exclusion already says it.
+   */
+  async clearStale(ids: readonly string[]): Promise<number> {
+    this.staleCache = undefined;
+    const stale = new Set(this.staleAlerts());
+    let cleared = 0;
+    for (const id of new Set(ids)) {
+      if (!stale.has(id)) continue;
+      await this.alerts.decide(id, {
+        verdict: 'expected',
+        release: false,
+        note: 'Its rule no longer flags this',
+      });
+      cleared++;
+    }
+    return cleared;
+  }
+
+  /**
    * "Those were me" on the Noticed list. Only alerts that are still Noticed
    * (shared/attention.ts) are cleared, so this can never release a block or
    * dismiss something that asked for a decision. It doesn't teach the rules
-   * either: one tap on a pile shouldn't quietly turn a rule off.
+   * either: one tap on a pile shouldn't quietly turn a rule off. With
+   * `upTo`, an alert last seen after it is left too, checked again just
+   * before each one is cleared, so a repeat folded in mid-clear keeps it.
    */
-  async clearNoticed(ids: readonly string[]): Promise<number> {
+  async clearNoticed(ids: readonly string[], upTo?: number): Promise<number> {
     let cleared = 0;
     for (const id of new Set(ids)) {
       const alert = this.store.getAlert(id);
-      if (!alert || !isNoticed(alert)) continue;
+      // One with an action taken or a suggestion waiting (the AI's or a rule's) stays
+      // for a look of its own, so a bulk tap never quietly expires a suggestion.
+      if (!alert || !isNoticed(alert) || !untouched(alert)) continue;
+      if (this.store.hasPendingProposal(id)) continue;
+      if (upTo !== undefined && (alert.repeats?.lastAt ?? alert.createdAt) > upTo) continue;
       await this.alerts.decide(id, {
         verdict: 'expected',
         release: false,
@@ -258,17 +342,54 @@ export class VigilCore {
     return cleared;
   }
 
+  /**
+   * "Those were me" for every Noticed alert, not only the newest the lists
+   * loaded. Only alerts last seen by `at`, when the user opened the confirm,
+   * are cleared, so anything that turned up while they read it stays, a
+   * repeat folded into an older alert included.
+   */
+  async clearNoticedUpTo(at: number): Promise<number> {
+    const ids = this.store
+      .listAlerts({ status: 'open', limit: -1 })
+      .filter((a) => isNoticed(a) && untouched(a) && (a.repeats?.lastAt ?? a.createdAt) <= at)
+      .map((a) => a.id);
+    return this.clearNoticed(ids, at);
+  }
+
+  private statsCache: { at: number; stats: EventStats } | undefined;
+  private programsCache: { at: number; n: number } | undefined;
+
+  /**
+   * The Activity strip's numbers. A busy Mac stores 200,000 events an hour
+   * while the page asks again with every batch of events, about once a
+   * second, so the counts are at most {@link EVENT_STATS_TTL_MS} old and the
+   * costly distinct-programs number at most {@link EVENT_PROGRAMS_TTL_MS}.
+   */
   eventStats(): EventStats {
-    return {
-      ...this.store.eventStats(this.now() - HOUR),
+    const now = this.now();
+    if (this.statsCache && now - this.statsCache.at < EVENT_STATS_TTL_MS) {
+      return this.statsCache.stats;
+    }
+    const since = now - HOUR;
+    if (!this.programsCache || now - this.programsCache.at >= EVENT_PROGRAMS_TTL_MS) {
+      this.programsCache = { at: now, n: this.store.programsSince(since) };
+    }
+    const stats = {
+      ...this.store.eventCounts(since),
+      programsLastHour: this.programsCache.n,
       retentionDays: EVENT_RETENTION_DAYS,
     };
+    this.statsCache = { at: now, stats };
+    return stats;
   }
 
   status(): StatusView {
-    const s = computeStatus(this.store.listAlerts({ status: 'open' }), this.sensors.list());
+    // Counted over every open alert, not the newest 200 the lists load, so Home,
+    // the menu bar and the badge agree however many have piled up.
+    const s = { ...computeStatus([], this.sensors.list()), ...this.store.openAlertCounts() };
     const today = startOfDay(this.now());
     const alertView = this.alertView();
+    const aiOff = this.aiNotice?.();
     return {
       ...s,
       alertView,
@@ -282,13 +403,15 @@ export class VigilCore {
       dryRun: this.executor.simulated ?? this.dryRun,
       helperInstallable: this.helperInstallable,
       helperOutdated: this.helperOutdated,
+      ...(aiOff ? { aiOff } : {}),
     };
   }
 
   alertDetail(id: string): AlertDetail | null {
     const alert = this.store.getAlert(id);
     if (!alert) return null;
-    const rule = this.store.getRule(alert.ruleId);
+    // Pack rules live in the engine, not the rules table; its mode is the one in force.
+    const rule = this.detector?.rule(alert.ruleId) ?? this.store.getRule(alert.ruleId);
     return {
       alert,
       events: this.store.getEvents(alert.eventIds),
@@ -298,11 +421,36 @@ export class VigilCore {
     };
   }
 
+  /**
+   * The alert as JSON for a bug report, a note or another tool. A command
+   * line that might hold a secret is withheld whole; other text goes through
+   * the same redaction as data sent to a model (home folders, keys, tokens,
+   * emails); and this computer's user and host names are hidden at any
+   * length (evidence-redact.ts).
+   * It exports only the fields evidence-export.ts picks, so neither an event's
+   * raw sensor record nor an internal key such as a repeat's goes out.
+   */
+  alertEvidence(id: string): string | null {
+    const d = this.alertDetail(id);
+    if (!d) return null;
+    return JSON.stringify(redactEvidence(evidenceOf(d), this.evidenceRedaction()), null, 2);
+  }
+
+  /** Whose names the copied evidence hides. Overridable for tests. */
+  evidenceRedaction = (): { username?: string; hostname?: string } => {
+    try {
+      return { username: userInfo().username, hostname: hostname() };
+    } catch {
+      return { hostname: hostname() };
+    }
+  };
+
   rules(): RuleView[] {
     const counts = this.store.ruleMatchCounts(this.now() - RULE_REVIEW_DAYS * DAY);
-    const engine = (this.detector?.rules() ?? []).map(({ rule, mode }) => ({
+    const engine = (this.detector?.rules() ?? []).map(({ rule, mode, learningUntil }) => ({
       rule: { ...rule, mode },
       matches: counts.get(rule.id) ?? 0,
+      ...(learningUntil !== undefined ? { learningUntil } : {}),
     }));
     const own = this.store
       .listRules()
@@ -336,9 +484,61 @@ export class VigilCore {
     const rule = this.store.getRule(id);
     if (!rule) throw new Error(`No rule ${id}`);
     if (!canChangeMode('user', rule.mode, mode)) throw new Error('Not allowed');
+    this.ownQuieted.delete(id);
     const next = { ...rule, mode, updatedAt: this.now() };
     this.store.upsertRule(next);
     return { rule: next, helper: 'applied' };
+  }
+
+  /**
+   * "Only log this rule" from an alert: Alert to Shadow, only if the rule is
+   * in Alert when the change applies. Refused, with the mode, in any other
+   * mode (another change may have made it block since the card drew). The
+   * result carries the override it replaced and a token for `undoQuietRule`.
+   */
+  async quietRule(id: string): Promise<QuietRuleResult> {
+    if (this.detector?.hasRule(id)) {
+      const { value, helper } = await this.detector.quiet(id);
+      if (!value.ok) return value;
+      return { ok: true, prior: value.prior, token: value.token, rule: this.ruleNow(id), helper };
+    }
+    const rule = this.store.getRule(id);
+    if (!rule) throw new Error(`No rule ${id}`);
+    if (rule.mode !== 'alert') return { ok: false, mode: rule.mode };
+    this.store.upsertRule({ ...rule, mode: 'shadow', updatedAt: this.now() });
+    const after = this.store.getRule(id)!;
+    const token = randomUUID();
+    this.ownQuieted.set(id, { token, after: JSON.stringify(after) });
+    return { ok: true, prior: 'alert', token, rule: after, helper: 'applied' };
+  }
+
+  /** Undo `quietRule`, only while nothing about the rule has changed since. */
+  async undoQuietRule(id: string, token: string): Promise<UndoQuietRuleResult> {
+    if (this.detector?.hasRule(id)) {
+      const { value, helper } = await this.detector.undoQuiet(id, token);
+      if (!value.ok) return value;
+      return { ok: true, rule: this.ruleNow(id), helper };
+    }
+    const rule = this.store.getRule(id);
+    if (!rule) throw new Error(`No rule ${id}`);
+    const done = this.ownQuieted.get(id);
+    if (!done || done.token !== token || done.after !== JSON.stringify(rule)) {
+      return { ok: false, mode: rule.mode };
+    }
+    this.ownQuieted.delete(id);
+    // A rule of the user's own has no override: its mode is the rule's, and it was Alert.
+    this.store.upsertRule({ ...rule, mode: 'alert', updatedAt: this.now() });
+    return { ok: true, rule: this.store.getRule(id)!, helper: 'applied' };
+  }
+
+  /** The user's own rules' last quiet: its token and the rule as it left it. */
+  private readonly ownQuieted = new Map<string, { token: string; after: string }>();
+
+  /** An engine rule in the mode it runs in. */
+  private ruleNow(id: string): Rule {
+    const view = this.detector?.rules().find((r) => r.rule.id === id);
+    if (!view) throw new Error(`No rule ${id}`);
+    return { ...view.rule, mode: view.mode };
   }
 
   /** First launch on this Mac, recorded once. "First seen" rules learn for a week after it. */

@@ -232,3 +232,6 @@
   border-radius: var(--radius-lg);
   background: var(--bg2);
 }
+.usage-failed {
+  color: var(--fair);
+}

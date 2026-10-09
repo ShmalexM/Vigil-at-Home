@@ -39,6 +39,7 @@ import {
   PREFLIGHT_SOCKET_TOOL,
   compileAgentMatchers,
   type AgentRecord,
+  type CheckOptions,
   type Detection,
   type PsRow,
   type SessionStart,
@@ -59,6 +60,8 @@ import {
   type PreflightStatus,
   type SaveAgentResult,
   type TreeNode,
+  type HelperHeld,
+  type VigilHelperId,
   type VigilHelperView,
 } from '../../shared/agents.js';
 import {
@@ -83,7 +86,7 @@ import {
 } from './endpoint.js';
 import { hookFiles, hookSnippet, mcpSnippet } from './hook-snippet.js';
 import { processTableReader } from './ps.js';
-import { VigilTools, type RuleFacts, type StatusFacts } from './tools.js';
+import { VigilTools, type RuleFacts, type StatusFacts, type VigilToolsSource } from './tools.js';
 
 const KEY_PREFS = 'agents.prefs';
 const KEY_HOOK = 'agents.hook';
@@ -206,6 +209,8 @@ export interface AgentServiceDeps {
   userData: string;
   /** The app's protection status, for the vigil_status tool. */
   status?: () => StatusView;
+  /** Why a built-in helper keeps trying without reaching an AI (AiBridge.heldBack). */
+  heldBack?: (id: VigilHelperId) => HelperHeld | undefined;
   now?: () => number;
   /** A development build's helper folder (build/helper/dev-<arch>). */
   devHelperDir?: string;
@@ -259,7 +264,10 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
   private cachedPrefs: AgentPrefs | undefined;
   private hook: HookState;
   private hookSavedAt = 0;
+  /** Over MCP, for the user's own agents. */
   private readonly tools: VigilTools;
+  /** For the pack, which also sees Vigil's answers to tool requests. */
+  private readonly packView: VigilTools;
   private toolUse: ToolUse;
   private toolUseSavedAt = 0;
   /** Tools calls refused because the tools were off, since start. */
@@ -309,7 +317,7 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
       onTamper: (why) => setImmediate(() => this.socketTampered(why)),
       log: this.log,
     });
-    this.tools = new VigilTools({
+    const source: VigilToolsSource = {
       now: this.now,
       status: () => this.statusFacts(),
       alerts: (opts) => o.store.listAlerts(opts),
@@ -323,7 +331,9 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
       agents: () => this.listAgents(),
       agentSessions: (id, limit) => o.store.listAgentSessions(id, undefined, limit),
       agentSession: (id, rows) => this.sessionDetail(id, rows, rows),
-    });
+    };
+    this.tools = new VigilTools(source);
+    this.packView = new VigilTools(source, { verdicts: true });
   }
 
   /**
@@ -581,28 +591,31 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
     const stats = this.o.store.aiRunStats(this.now() - 7 * DAY);
     return HELPERS.map(({ purpose, ...h }) => {
       const s = stats.get(purpose);
+      const held = this.o.heldBack?.(h.id);
       return {
         ...h,
         providers: [...h.providers],
         tools: [...h.tools],
         ...(s ? { lastRunAt: s.lastAt } : {}),
         runs7d: s?.runs ?? 0,
+        ...(held ? { held } : {}),
       };
     });
   }
 
   /**
    * Vigil's read-only tools, for the pack's own dogs (pack.ts). Same tools,
-   * redaction and caps as the user's agents get over MCP; this path doesn't
-   * depend on that opt-in, because the pack runs inside Vigil.
+   * redaction and caps as the user's agents get over MCP, plus Vigil's answer
+   * to each tool request; this path doesn't depend on that opt-in, because
+   * the pack runs inside Vigil.
    */
   packTools(): {
     list: () => ReturnType<VigilTools['list']>;
     call: (name: string, args: Record<string, unknown>) => ToolsReply;
   } {
     return {
-      list: () => this.tools.list({ pack: true }),
-      call: (n, a) => this.tools.call(n, a, { pack: true }),
+      list: () => this.packView.list({ pack: true }),
+      call: (n, a) => this.packView.call(n, a, { pack: true }),
     };
   }
 
@@ -611,8 +624,8 @@ export class AgentService extends EventEmitter<{ changed: []; activity: [] }> {
    * watched agent's hook: deny, ask or none. Nothing is recorded, and the
    * answer can only make the gate stricter.
    */
-  packPreflight(req: PreflightRequest): PreflightReply {
-    return this.o.detector.preflight(req).reply;
+  packPreflight(req: PreflightRequest, opts?: CheckOptions): PreflightReply {
+    return this.o.detector.preflight(req, opts).reply;
   }
 
   /**

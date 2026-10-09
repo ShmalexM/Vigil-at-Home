@@ -71,10 +71,11 @@ import {
   watching,
 } from './agents-format';
 import { PageHead } from './AppShell';
+import { computer } from '../platform';
 
 type Tab = 'mac' | 'policy' | 'helpers';
 const TABS: { id: Tab; label: string }[] = [
-  { id: 'mac', label: 'On this Mac' },
+  { id: 'mac', label: `On this ${computer}` },
   { id: 'policy', label: 'Tool policy' },
   { id: 'helpers', label: 'Vigil’s AI helpers' },
 ];
@@ -131,7 +132,7 @@ export function AgentsView({
     <div className="page agents">
       <PageHead
         title="Agents"
-        purpose="The AI agents on this Mac, what they start, and the steps they ask about. Rules decide what is asked or stopped. AI only explains or suggests."
+        purpose={`The AI agents on this ${computer}, what they start, and the steps they ask about. Rules decide what is asked or stopped. AI only explains or suggests.`}
         right={
           shown === 'mac' && !id ? (
             <Button size="sm" icon={<Plus size={14} />} onClick={() => setAdding(true)}>
@@ -234,7 +235,7 @@ function OnThisMac({
           <span className="empty-icon">
             <Bot size={20} />
           </span>
-          <span className="t-h3">No AI agents seen on this Mac yet</span>
+          <span className="t-h3">No AI agents seen on this {computer} yet</span>
           <span className="t-small" style={{ maxWidth: 460 }}>
             Vigil recognises Claude Code, Codex, Copilot, Gemini, Cursor and others as soon as they
             run. It tags what command-line agents and agent apps start. Editors start unwatched, and
@@ -259,8 +260,8 @@ function OnThisMac({
             {showOthers ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
             <span className="t-h3">Other agents Vigil knows</span>
             <span className="t-small grow">
-              {plural(others.length, 'agent')} not found on this Mac. Vigil recognises one the
-              moment it runs, and watches what it starts if its switch is On.
+              {plural(others.length, 'agent')} not found on this {computer}. Vigil recognises one
+              the moment it runs, and watches what it starts if its switch is On.
             </span>
           </button>
           {showOthers && others.map((a) => <AgentLine key={a.id} agent={a} go={go} />)}
@@ -1128,6 +1129,11 @@ function Helpers({ go }: { go: (route: string) => void }) {
               <dt>Last 7 days</dt>
               <dd>{plural(h.runs7d, 'run')}</dd>
             </dl>
+            {h.held && (
+              <span className="t-small" role="status">
+                {h.held.why}, so it hasn’t reached an AI since {clock(h.held.since)}.
+              </span>
+            )}
           </Card>
         ))}
       </div>

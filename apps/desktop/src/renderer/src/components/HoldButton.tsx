@@ -17,6 +17,7 @@ export function HoldButton({
   size,
   full,
   disabled,
+  calm,
 }: {
   label: string;
   doneLabel?: string;
@@ -26,6 +27,8 @@ export function HoldButton({
   size?: 'sm' | 'lg';
   full?: boolean;
   disabled?: boolean;
+  /** For a hold that only closes alerts and releases nothing: accent, not red. */
+  calm?: boolean;
 }) {
   const [state, setState] = useState<HoldState>('idle');
   const confirm = useRef(onConfirm);
@@ -47,7 +50,7 @@ export function HoldButton({
   return (
     <button
       type="button"
-      className={`btn hold ${state} ${size ?? ''} ${full ? 'full' : ''}`}
+      className={`btn hold ${calm ? 'calm' : ''} ${state} ${size ?? ''} ${full ? 'full' : ''}`}
       aria-label={`${label}. Press and hold to confirm.`}
       disabled={disabled}
       onPointerDown={(e) => {

@@ -12,7 +12,7 @@ import type { SensorEvent } from '@vigil/sensors';
 import type { HelperCommand, HelperResponse } from './protocol.js';
 import type { HelperRan } from './fastpath.js';
 import { approvalAppleScript, pkexecArgs } from './approval.js';
-import { defaultPaths } from './config.js';
+import { ADMIN_ENV, defaultPaths } from './config.js';
 import { hostPlatform, type Platform } from './platform.js';
 
 export class HelperCallError extends Error {
@@ -36,6 +36,8 @@ export function osascriptApprover(helperExecutable = defaultPaths().helperExecut
       execFile(
         '/usr/bin/osascript',
         ['-e', approvalAppleScript(helperExecutable, [nonce, ...also], prompt)],
+        // The approve command runs as root; give it none of the session's environment.
+        { env: ADMIN_ENV },
         (err) => resolve(!err),
       );
     });
@@ -148,6 +150,17 @@ export class HelperClient {
       resp = await this.send(command, resp.nonce);
     }
     return result<T>(resp);
+  }
+
+  /**
+   * Send a command, but never show the password dialog for it: resolves
+   * `needsApproval` if the helper wants the password, and the command is not
+   * carried out.
+   */
+  async attempt<T = unknown>(command: HelperCommand): Promise<{ result: T } | 'needsApproval'> {
+    const resp = await this.send(command);
+    if (!resp.ok && 'needsApproval' in resp) return 'needsApproval';
+    return { result: result<T>(resp) };
   }
 
   /**

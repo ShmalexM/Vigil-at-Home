@@ -53,6 +53,9 @@ import type { UsageLimitsView, UsageReport } from './usage.js';
 import {
   ApiKeyInput,
   ApiKeyProvider,
+  FeedKey,
+  FeedKeyName,
+  type FeedKeysView,
   SettingsPane,
   SetupAction,
   SetupMode,
@@ -141,11 +144,15 @@ export const EventQuery = z.object({
   text: z.string().max(200).optional(),
   /** Page backwards from this timestamp. */
   before: z.number().int().optional(),
+  /** With `before`: the id of the last event shown, for events sharing its ts. */
+  beforeId: z.string().min(1).max(128).optional(),
   limit: z.number().int().min(1).max(500).optional(),
   /** Only events from this agent's sessions. */
   agent: AgentId.optional(),
   /** Only events from one agent session. */
   agentSession: AgentSessionId.optional(),
+  /** Only events this rule matched, in any mode. */
+  rule: z.string().min(1).max(100).optional(),
 });
 export type EventQuery = z.infer<typeof EventQuery>;
 
@@ -186,14 +193,22 @@ export const calls = {
   getStatus: z.tuple([]),
   listAlerts: z.tuple([z.enum(['open', 'resolved']).optional()]),
   getAlertDetail: z.tuple([Id]),
+  alertEvidence: z.tuple([Id]),
   decide: z.tuple([Id, DecisionInput]),
   reopen: z.tuple([Id]),
   clearNoticed: z.tuple([z.array(Id).min(1).max(500)]),
+  staleAlerts: z.tuple([]),
+  alertCounts: z.tuple([]),
+  clearStale: z.tuple([z.array(Id).min(1).max(2000)]),
+  /** Every Noticed alert raised up to this time (when the user opened the confirm). */
+  clearNoticedUpTo: z.tuple([z.number().int().nonnegative()]),
   undoAction: z.tuple([Id]),
   approveProposal: z.tuple([Id]),
   rejectProposal: z.tuple([Id]),
   listRules: z.tuple([]),
   setRuleMode: z.tuple([z.string(), RuleMode]),
+  quietRule: z.tuple([z.string()]),
+  undoQuietRule: z.tuple([z.string(), z.string().min(1).max(200)]),
   getRuleEditor: z.tuple([RuleId]),
   previewRule: z.tuple([RuleJson]),
   saveRule: z.tuple([RuleJson]),
@@ -231,6 +246,10 @@ export const calls = {
   restartSetup: z.tuple([]),
   saveApiKey: z.tuple([ApiKeyInput]),
   clearApiKey: z.tuple([ApiKeyProvider]),
+  /** Keys for threat feeds that need one, such as abuse.ch's Auth-Key. Only whether one is saved comes back. */
+  getFeedKeys: z.tuple([]),
+  saveFeedKey: z.tuple([FeedKeyName, FeedKey]),
+  clearFeedKey: z.tuple([FeedKeyName]),
   openSettingsPane: z.tuple([SettingsPane]),
   installHelper: z.tuple([]),
   uninstallHelper: z.tuple([]),
@@ -242,6 +261,7 @@ export const calls = {
   getAi: z.tuple([]),
   /** The saved AI switches only, without probing the vendors' CLIs. */
   getAiPrefs: z.tuple([]),
+  turnAiBackOn: z.tuple([]),
   setAiPrefs: z.tuple([AiPrefsPatch]),
   /** The user asked for an explanation of this alert (may use their Claude plan). */
   explainAlert: z.tuple([Id]),
@@ -254,6 +274,7 @@ export const calls = {
   setUpdateAuto: z.tuple([z.boolean()]),
   dismissUpdate: z.tuple([]),
   downloadUpdate: z.tuple([]),
+  openUpdateNotes: z.tuple([]),
   // Agents (main/agents).
   listAgents: z.tuple([]),
   listAgentNames: z.tuple([]),
@@ -331,6 +352,8 @@ export interface StatusView {
   needsYou: number;
   /** Open alerts Vigil only noticed; they don't badge or lower the level. */
   noticed: number;
+  /** Of those, the ones "Those were me" closes: nothing taken, held or suggested on them. */
+  noticedClearable: number;
   reasons: string[];
   watch: WatchSummary;
   /** The user's Show me less / Show me more choice. */
@@ -344,12 +367,16 @@ export interface StatusView {
   helperInstallable: boolean;
   /** True when the installed helper is older than (or not) the one this build ships. */
   helperOutdated: boolean;
+  /** Why the AI can't work because of its switches, for one quiet line on Home. */
+  aiOff?: string;
 }
 
 export interface HelperInstallResult {
   ok: boolean;
   /** Set when it failed; "cancelled" when the user closed the password dialog. */
   error?: string;
+  /** A failed install: the command that does the same from a terminal. */
+  command?: string;
 }
 
 export interface AlertDetail {
@@ -373,10 +400,28 @@ export interface RuleModeResult {
   helper: HelperOutcome;
 }
 
+/**
+ * "Only log this rule": done, with the override it replaced (null: the rule
+ * ran in its own mode) and a token for its undo, or refused, with the mode the
+ * rule is in, because that changed since the screen drew it.
+ */
+export type QuietRuleResult =
+  | { ok: true; prior: RuleMode | null; token: string; rule: Rule; helper: HelperOutcome }
+  | { ok: false; mode: RuleMode };
+
+/** Its undo: done, or refused because the rule changed since (the mode it is in now). */
+export type UndoQuietRuleResult =
+  { ok: true; rule: Rule; helper: HelperOutcome } | { ok: false; mode: RuleMode };
+
 export interface RuleView {
   rule: Rule;
   /** Matches in the last 14 days (the detection engine's replay window), all modes. */
   matches: number;
+  /**
+   * Set while the rule compares against a baseline Vigil is still learning:
+   * until then it only records, whatever its mode says.
+   */
+  learningUntil?: number;
 }
 
 /** Everything the rule editor shows for one rule. */
@@ -547,6 +592,9 @@ export interface SettingsView {
   commit: string;
   /** The sidebar's Advanced group was left open. */
   showAdvanced: boolean;
+  /** process.platform and process.arch, for About and bug reports. */
+  platform: string;
+  arch: string;
 }
 
 /** Return types, one per call. */
@@ -554,15 +602,26 @@ export interface CallResults {
   getStatus: StatusView;
   listAlerts: Alert[];
   getAlertDetail: AlertDetail | null;
+  /** The alert's evidence as redacted JSON, to paste elsewhere (VigilCore.alertEvidence). */
+  alertEvidence: string | null;
   decide: Alert;
   reopen: Alert;
   /** How many of the given alerts were cleared. */
   clearNoticed: number;
+  /** Open alerts a rule's exclusion now lets off (VigilCore.staleAlerts). */
+  staleAlerts: string[];
+  /** Every alert by status, beyond the newest that listAlerts returns. */
+  alertCounts: { open: number; resolved: number };
+  /** How many of them were closed. */
+  clearStale: number;
+  clearNoticedUpTo: number;
   undoAction: ActionRecord;
   approveProposal: ActionRecord;
   rejectProposal: void;
   listRules: RuleView[];
   setRuleMode: RuleModeResult;
+  quietRule: QuietRuleResult;
+  undoQuietRule: UndoQuietRuleResult;
   getRuleEditor: RuleEditorView | null;
   previewRule: RuleCheck;
   saveRule: RuleCheck;
@@ -598,6 +657,9 @@ export interface CallResults {
   restartSetup: void;
   saveApiKey: SetupView;
   clearApiKey: SetupView;
+  getFeedKeys: FeedKeysView;
+  saveFeedKey: FeedKeysView;
+  clearFeedKey: FeedKeysView;
   openSettingsPane: void;
   installHelper: HelperInstallResult;
   uninstallHelper: HelperInstallResult;
@@ -605,6 +667,7 @@ export interface CallResults {
   getUsageLimits: UsageLimitsView;
   getAi: AiView;
   getAiPrefs: AiView['prefs'];
+  turnAiBackOn: AiView['prefs'];
   setAiPrefs: AiView['prefs'];
   explainAlert: AiActionResult;
   signInAi: AiActionResult;
@@ -615,6 +678,7 @@ export interface CallResults {
   setUpdateAuto: void;
   dismissUpdate: void;
   downloadUpdate: void;
+  openUpdateNotes: void;
   listAgents: AgentView[];
   /** The registry only, without listAgents' stats. */
   listAgentNames: Pick<AgentView, 'id' | 'name' | 'status'>[];

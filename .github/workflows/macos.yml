@@ -96,7 +96,7 @@ jobs:
         working-directory: apps/desktop
         run: node scripts/build-helper.mjs --dev
       - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
+        run: npm install -g @anthropic-ai/claude-code@2.1.281
       - name: Check pre-flight and Vigil's tools with Claude Code
         working-directory: apps/desktop
         run: node e2e/agents.e2e.mjs agents-results

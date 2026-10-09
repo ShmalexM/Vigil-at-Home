@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { isRelease, type Action, type ActionResult, type SensorEvent } from '@vigil/core';
+import type { SelfImage } from '@vigil/core/self';
 import {
   LIST_PART_MAX,
   defaultPaths,
@@ -18,6 +19,14 @@ export type HelperState = 'not_installed' | 'not_running' | 'connected';
 
 /** How often to look for the helper while it isn't connected. */
 export const HELPER_RETRY_MS = 15_000;
+/** The longest wait between tries while the helper keeps failing. */
+export const HELPER_RETRY_MAX_MS = 2 * 60_000;
+/**
+ * A second drop this soon after the last one is a helper that keeps failing
+ * (crash-looping, or answering some calls and not others), not a blip: it
+ * shows as not running and is retried with backoff.
+ */
+export const HELPER_FLAP_WINDOW_MS = 3 * 60_000;
 const QUERY_TIMEOUT_MS = 5_000;
 const ACTION_TIMEOUT_MS = 15_000;
 const RELEASE_TIMEOUT_MS = 3 * 60_000;
@@ -31,7 +40,35 @@ export interface HelperRuleSet {
   rules: DetectionRule[];
   exceptions: z.infer<typeof RuleExceptionSchema>[];
   selfPaths: string[];
+  /** Linux AppImage: the image by device and inode, and its programs' sha256. */
+  selfImages?: SelfImage[];
+  selfHashes?: string[];
   lists: Record<string, string[]>;
+}
+
+/** What is Vigil's own, as the helper takes it in a self grant. */
+export type HelperSelfSet = Pick<HelperRuleSet, 'selfPaths' | 'selfImages' | 'selfHashes'>;
+
+/** The self set within a rule set. */
+export function selfOf(set: HelperSelfSet): HelperSelfSet {
+  return {
+    selfPaths: set.selfPaths,
+    ...(set.selfImages?.length ? { selfImages: set.selfImages } : {}),
+    ...(set.selfHashes?.length ? { selfHashes: set.selfHashes } : {}),
+  };
+}
+
+/**
+ * Whether `err` is a helper from before self.grant refusing a command it
+ * doesn't know: self.grant itself (`kind`), or rules sent without the self
+ * set it still requires (`selfPaths`).
+ */
+export function fromOlderHelper(err: unknown, field: 'kind' | 'selfPaths'): boolean {
+  return (
+    err instanceof HelperCallError &&
+    err.code === 'invalid' &&
+    err.message.startsWith(`bad command: ${field} `)
+  );
 }
 
 export interface HelperRulesOutcome {
@@ -39,9 +76,12 @@ export interface HelperRulesOutcome {
   preexec: PreexecOutcome | null;
 }
 
+/** The helper's socket is open but it didn't answer in time. */
+class HelperTimeout extends Error {}
+
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error('The Vigil helper did not answer')), ms);
+    const t = setTimeout(() => reject(new HelperTimeout('The Vigil helper did not answer')), ms);
     p.then(
       (v) => (clearTimeout(t), resolve(v)),
       (e: unknown) => (clearTimeout(t), reject(e instanceof Error ? e : new Error(String(e)))),
@@ -70,6 +110,9 @@ export class HelperLink
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
   private connecting = false;
+  /** When the connection last dropped, and how many drops came close together since. */
+  private lastDropAt = -Infinity;
+  private failures = 0;
   state: HelperState = 'not_installed';
   /** The last event received, so a reconnect only replays what was missed. */
   private lastEventId: string | undefined;
@@ -129,10 +172,14 @@ export class HelperLink
         isRelease(action) ? RELEASE_TIMEOUT_MS : ACTION_TIMEOUT_MS,
       );
       if (!out) throw new Error('No answer from the Vigil helper');
-      return { at: Date.now(), ...(out.quarantineId ? { quarantineId: out.quarantineId } : {}) };
+      return {
+        at: Date.now(),
+        simulated: false,
+        ...(out.quarantineId ? { quarantineId: out.quarantineId } : {}),
+      };
     } catch (err) {
       if (!(err instanceof HelperCallError) || /connection closed/.test(err.message)) {
-        this.dropped(client);
+        this.dropped(client, err);
       }
       const error =
         err instanceof HelperCallError && err.code === 'refused'
@@ -152,7 +199,7 @@ export class HelperLink
       return await withTimeout(client.call<T>({ kind }), QUERY_TIMEOUT_MS);
     } catch (err) {
       // A closed or hung connection: drop it and start reconnecting.
-      this.dropped(client);
+      this.dropped(client, err);
       throw err;
     }
   }
@@ -164,12 +211,17 @@ export class HelperLink
    * helper asks for the admin password first; a cancelled dialog throws a
    * HelperCallError with code refused and leaves the helper's rules as they were.
    * With `hold`, that password is asked for by the next dialog instead (a
-   * release's) or by approveHeld().
+   * release's) or by approveHeld(). With `ask: false` no dialog is shown:
+   * a sync that needs the password resolves 'needs_password' and changes nothing.
+   *
+   * Vigil's own programs go to the helper apart from the rules (grantSelf).
+   * `withSelf` sends them with the rules instead, for a helper from before
+   * self.grant.
    */
   async syncRules(
     set: HelperRuleSet,
-    opts: { hold?: boolean; onHeld?: () => void } = {},
-  ): Promise<HelperRulesOutcome | null> {
+    opts: { hold?: boolean; onHeld?: () => void; ask?: boolean; withSelf?: boolean } = {},
+  ): Promise<HelperRulesOutcome | 'needs_password' | null> {
     const client = this.client;
     if (!client) return null;
     try {
@@ -180,16 +232,27 @@ export class HelperLink
         kind: 'detection.sync' as const,
         rules: set.rules,
         exceptions: set.exceptions,
-        selfPaths: set.selfPaths,
+        // Only an AppImage names images and hashes; a helper from before them refuses unknown fields.
+        ...(opts.withSelf ? selfOf(set) : {}),
         lists: digests,
       };
-      const out = await withTimeout(
-        opts.hold
-          ? client.hold<HelperRulesOutcome>(sync, opts.onHeld)
-          : client.call<HelperRulesOutcome>(sync),
-        // A sync that loosens the rules waits on the admin password, like a release.
-        RELEASE_TIMEOUT_MS,
-      );
+      let out: HelperRulesOutcome;
+      if (opts.ask === false) {
+        const tried = await withTimeout(
+          client.attempt<HelperRulesOutcome>(sync),
+          ACTION_TIMEOUT_MS,
+        );
+        if (tried === 'needsApproval') return 'needs_password';
+        out = tried.result;
+      } else {
+        out = await withTimeout(
+          opts.hold
+            ? client.hold<HelperRulesOutcome>(sync, opts.onHeld)
+            : client.call<HelperRulesOutcome>(sync),
+          // A sync that loosens the rules waits on the admin password, like a release.
+          RELEASE_TIMEOUT_MS,
+        );
+      }
       for (const name of out.needLists) {
         const entries = [...new Set(set.lists[name] ?? [])];
         const parts = Math.max(1, Math.ceil(entries.length / LIST_PART_MAX));
@@ -209,7 +272,27 @@ export class HelperLink
       }
       return out;
     } catch (err) {
-      if (!(err instanceof HelperCallError)) this.dropped(client);
+      if (!(err instanceof HelperCallError)) this.dropped(client, err);
+      throw err;
+    }
+  }
+
+  /**
+   * Tell the helper what is Vigil's own, so its rules never pause, kill or
+   * block it. Anything new needs the admin password, so this can wait on the
+   * dialog for as long as it stays open; nothing else waits on it. Resolves
+   * 'unsupported' from a helper from before self.grant, null while unconnected.
+   */
+  async grantSelf(set: HelperSelfSet): Promise<'applied' | 'declined' | 'unsupported' | null> {
+    const client = this.client;
+    if (!client) return null;
+    try {
+      // No timeout: the dialog may stay open, and a lost connection settles it.
+      await client.call({ kind: 'self.grant', ...selfOf(set) });
+      return 'applied';
+    } catch (err) {
+      if (fromOlderHelper(err, 'kind')) return 'unsupported';
+      if (err instanceof HelperCallError && err.code === 'refused') return 'declined';
       throw err;
     }
   }
@@ -244,7 +327,7 @@ export class HelperLink
     this.emit('state', s);
   }
 
-  /** Try once now; on failure, try again after HELPER_RETRY_MS. */
+  /** Try once now; on failure, try again after HELPER_RETRY_MS (longer while it keeps failing). */
   async tryConnect(): Promise<void> {
     if (this.stopped || this.client || this.connecting) return;
     clearTimeout(this.timer);
@@ -260,10 +343,20 @@ export class HelperLink
         client.close();
         return;
       }
-      this.client = client;
       client.onEvent((e, ran) => this.received(e, ran));
-      await client.subscribe(this.lastEventId);
-      this.setState('connected');
+      // A helper that accepts the connection but never answers counts as not
+      // running, rather than leaving the link stuck mid-connect.
+      try {
+        await withTimeout(client.subscribe(this.lastEventId), QUERY_TIMEOUT_MS);
+      } catch (err) {
+        client.close();
+        throw err;
+      }
+      this.client = client;
+      // After a quiet reconnect the state hasn't changed, but listeners still
+      // need to hear of the new connection (to send the rules again).
+      if (this.state === 'connected') this.emit('state', 'connected');
+      else this.setState('connected');
     } catch {
       this.client = undefined;
       this.setState('not_running');
@@ -294,7 +387,11 @@ export class HelperLink
     for (const r of ran) {
       const at = typeof r.at === 'number' ? r.at : now;
       const result: ActionResult = r.outcome
-        ? { at, ...(r.outcome.quarantineId ? { quarantineId: r.outcome.quarantineId } : {}) }
+        ? {
+            at,
+            simulated: false,
+            ...(r.outcome.quarantineId ? { quarantineId: r.outcome.quarantineId } : {}),
+          }
         : { at, error: r.error ?? 'The Vigil helper could not do this' };
       const key = JSON.stringify(r.action);
       const entry = this.helperRan.get(key);
@@ -312,10 +409,27 @@ export class HelperLink
     return result;
   }
 
-  private dropped(client: HelperClient): void {
+  /**
+   * A connection that closed once is tried again at once before anything
+   * changes on screen, so a one-off blip (a helper restart) never shows the
+   * helper as stopped. A helper that didn't answer, or a second drop within
+   * HELPER_FLAP_WINDOW_MS, is not a blip: it shows as not running and is
+   * retried with backoff, so a wedged or crash-looping helper never reads as
+   * fine and isn't hammered with reconnects.
+   */
+  private dropped(client: HelperClient, why?: unknown): void {
     if (this.client !== client) return;
     this.client = undefined;
     client.close();
+    const now = Date.now();
+    const again = now - this.lastDropAt < HELPER_FLAP_WINDOW_MS;
+    this.lastDropAt = now;
+    if (!again) this.failures = 0;
+    if (!again && !(why instanceof HelperTimeout)) {
+      void this.tryConnect();
+      return;
+    }
+    this.failures++;
     this.setState(existsSync(this.socket) ? 'not_running' : 'not_installed');
     this.retry();
   }
@@ -323,7 +437,11 @@ export class HelperLink
   private retry(): void {
     if (this.stopped) return;
     clearTimeout(this.timer);
-    this.timer = setTimeout(() => void this.tryConnect(), HELPER_RETRY_MS);
+    const wait = Math.min(
+      HELPER_RETRY_MS * 2 ** Math.max(0, this.failures - 1),
+      HELPER_RETRY_MAX_MS,
+    );
+    this.timer = setTimeout(() => void this.tryConnect(), wait);
     this.timer.unref?.();
   }
 }

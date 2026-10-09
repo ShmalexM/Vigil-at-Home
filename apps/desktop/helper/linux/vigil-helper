@@ -2,7 +2,9 @@
 # The Vigil helper: Node and the bundled helper, both root-owned. linux/install.sh
 # keeps each version in vigil-helper.d/versions/<id> and points
 # vigil-helper.d/current at one. Read the link once, so node and helper.mjs
-# always come from the same version.
+# always come from the same version. Node starts with an empty environment so
+# nothing from the user's session (NODE_OPTIONS and the like) carries into Node
+# running as root.
 D=/usr/libexec/vigil-helper.d
 V=$(readlink "$D/current") || { echo "The Vigil helper isn't installed: $D/current is missing." >&2; exit 1; }
 case $V in
@@ -10,4 +12,4 @@ case $V in
   versions/*) ;;
   *) echo "Unexpected $D/current: $V" >&2; exit 1 ;;
 esac
-exec "$D/$V/node" "$D/$V/helper.mjs" "$@"
+exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "$D/$V/node" "$D/$V/helper.mjs" "$@"

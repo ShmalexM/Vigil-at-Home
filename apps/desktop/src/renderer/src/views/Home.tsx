@@ -1,10 +1,18 @@
-import { CircleCheck, Eye, TriangleAlert } from 'lucide-react';
+import {
+  ChevronRight,
+  CircleCheck,
+  Copy,
+  Eye,
+  History as HistoryIcon,
+  TriangleAlert,
+} from 'lucide-react';
 import { useState } from 'react';
-import { useLive, vigil } from '../api';
+import { useClock, useLive, vigil } from '../api';
 import { homeMood } from '../components/AskScout';
 import { NeedsYouLine, needsRows, NoticedList, pileLine, WatchLine } from '../components/Attention';
 import { Dog } from '../components/Dog';
 import { NotebookSheet } from '../components/Notebook';
+import { useToast } from '../components/Toasts';
 import { Card, Chip, LevelPill, SectionHead, SeverityMark, StatusMark } from '../components/ui';
 import { timeAgo } from '../format';
 import { isNoticed, needsDecision } from '../../../shared/attention';
@@ -13,6 +21,7 @@ import { diaryLines, pileWords, SCOUT_PILE_MIN, type PackView } from '../../../s
 import { leadChat } from '../lead-chat';
 import { PageHead } from './AppShell';
 import { usePack } from './Pack';
+import { computer } from '../platform';
 
 const levelSentence = {
   good: 'Protection is on.',
@@ -20,7 +29,14 @@ const levelSentence = {
   poor: 'Protection has stopped.',
 };
 
+/** "Santa, osquery and the Vigil helper", from the layers this computer has. */
+export function layerNames(names: string[]): string {
+  const n = names.map((x) => (x === 'Vigil helper' ? 'the Vigil helper' : x));
+  return n.length < 2 ? (n[0] ?? 'its layers') : `${n.slice(0, -1).join(', ')} and ${n.at(-1)}`;
+}
+
 export function HomeView({ go }: { go: (r: string) => void }) {
+  useClock();
   const [status] = useLive(() => vigil.getStatus());
   const [alerts] = useLive(() => vigil.listAlerts('open'));
   const allNeeds = needsRows((alerts ?? []).filter(needsDecision));
@@ -37,13 +53,19 @@ export function HomeView({ go }: { go: (r: string) => void }) {
   const lead = pack?.dogs.find((d) => d.role === 'lead');
   // Ears up for a decision, or for protection that has stopped; a layer that
   // was never installed is the status line's to explain, not a reason to fret.
+  const showLayers = () => {
+    const el = document.getElementById('home-layers') as HTMLDetailsElement | null;
+    if (!el) return;
+    el.open = true;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
   const scout = homeMood(pack, !!status && (status.needsYou > 0 || status.level === 'poor'));
 
   return (
     <div className="page">
       <PageHead
         title="Home"
-        purpose="How your Mac is doing, and anything that needs your decision."
+        purpose={`How your ${computer} is doing, and anything that needs your decision.`}
       />
 
       {status && (
@@ -69,16 +91,28 @@ export function HomeView({ go }: { go: (r: string) => void }) {
           {status.needsYou > 0 && <NeedsYouLine count={status.needsYou} />}
           <div className="row spread" style={{ flexWrap: 'wrap' }}>
             <WatchLine watch={status.watch} />
-            <button type="button" className="btn sm ghost" onClick={() => go('history')}>
-              What Vigil handled
+            <button
+              type="button"
+              className="btn sm ghost"
+              title="Everything Vigil blocked, paused or closed in the last 30 days"
+              onClick={() => go('history')}
+            >
+              <HistoryIcon size={14} aria-hidden />
+              See what Vigil handled
+              <ChevronRight size={14} aria-hidden />
             </button>
           </div>
           {status.reasons.length > 0 && (
-            <ul className="reasons">
-              {status.reasons.map((r) => (
-                <li key={r}>{r}</li>
-              ))}
-            </ul>
+            // One line: the Protection card below lists every layer, so the list isn't repeated here.
+            <div className="row wrap home-why" style={{ gap: 8 }}>
+              <span>
+                {status.reasons[0]}
+                {status.reasons.length > 1 && ` and ${status.reasons.length - 1} more`}.
+              </span>
+              <button type="button" className="btn sm ghost" onClick={showLayers}>
+                See the layers
+              </button>
+            </div>
           )}
           <details className="level-rules">
             <summary>How is this worked out?</summary>
@@ -90,10 +124,19 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               ))}
             </ul>
             <p className="t-small">
-              The level is only about protection: Santa, osquery and the Vigil helper. Alerts
-              waiting on you are counted separately, so they never make protection look broken.
+              The level is only about protection: {layerNames(status.sensors.map((s) => s.name))}.
+              Alerts waiting on you are counted separately, so they never make protection look
+              broken.
             </p>
           </details>
+          {status.aiOff && (
+            <div className="row" style={{ flexWrap: 'wrap', gap: 8 }} role="status">
+              <span className="t-small grow">{status.aiOff}.</span>
+              <button type="button" className="btn sm ghost" onClick={() => go('settings/ai')}>
+                Open AI settings
+              </button>
+            </div>
+          )}
           {status.dryRun && (
             <div className="attn fair">
               <TriangleAlert size={17} />
@@ -169,7 +212,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
 
       <Card>
         <SectionHead title="Protection" sub="The layers that watch and block" />
-        <details className="layers" open={!allRunning}>
+        <details id="home-layers" className="layers" open={!allRunning}>
           <summary className="row t-small">
             {allRunning ? (
               <>
@@ -207,6 +250,17 @@ export function HomeView({ go }: { go: (r: string) => void }) {
                       {s.note}
                     </span>
                   )}
+                  {(s.state === 'not_installed' || s.state === 'down') &&
+                    !(s.id === 'helper' && status.helperInstallable) && (
+                      <button
+                        type="button"
+                        className="btn sm"
+                        title="Setup shows the commands and checks the result"
+                        onClick={() => go('setup')}
+                      >
+                        {s.state === 'down' ? 'How to restart' : 'Set up'}
+                      </button>
+                    )}
                   {s.id === 'helper' &&
                     (s.state !== 'ok' || status.helperOutdated) &&
                     status.helperInstallable && (
@@ -229,13 +283,20 @@ export function HomeView({ go }: { go: (r: string) => void }) {
 
       {status && noticed.length > 0 && status.alertView === 'more' && (
         <Card>
-          <NoticedList alerts={noticed} view="more" open={(id) => go(`alerts/${id}`)} limit={8} />
+          <NoticedList
+            alerts={noticed}
+            total={status.noticed}
+            clearable={status.noticedClearable}
+            view="more"
+            open={(id) => go(`alerts/${id}`)}
+            limit={8}
+          />
         </Card>
       )}
       {status && noticed.length > 0 && status.alertView === 'less' && (
         <button type="button" className="row t-small noticed-hint" onClick={() => go('history')}>
           <Eye size={14} />
-          Vigil also noticed {noticed.length === 1 ? 'one thing' : `${noticed.length} things`},
+          Vigil also noticed {status.noticed === 1 ? 'one thing' : `${status.noticed} things`},
           probably you. Nothing was blocked. See History.
         </button>
       )}
@@ -246,13 +307,16 @@ export function HomeView({ go }: { go: (r: string) => void }) {
 /** Installs or updates the helper through the system's own password dialog. */
 function InstallHelper({ kind }: { kind: 'install' | 'reinstall' | 'update' }) {
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ text: string; command?: string } | null>(null);
+  const toast = useToast();
   const run = async () => {
     setBusy(true);
     setError(null);
     const r = await vigil.installHelper();
     setBusy(false);
-    if (!r.ok && r.error !== 'cancelled') setError(r.error ?? 'Install failed');
+    if (!r.ok && r.error !== 'cancelled') {
+      setError({ text: r.error ?? 'Install failed', ...(r.command ? { command: r.command } : {}) });
+    }
   };
   return (
     <>
@@ -276,9 +340,26 @@ function InstallHelper({ kind }: { kind: 'install' | 'reinstall' | 'update' }) {
             ]}
       </button>
       {error && (
-        <span className="t-small" style={{ color: 'var(--poor)', textAlign: 'right' }}>
-          {error}
+        <span
+          className="t-small"
+          role="alert"
+          style={{ color: 'var(--poor)', textAlign: 'right', maxWidth: 360 }}
+        >
+          {error.text}
         </span>
+      )}
+      {error?.command && (
+        <button
+          type="button"
+          className="btn sm ghost"
+          title={error.command}
+          onClick={async () => {
+            await navigator.clipboard.writeText(error.command!);
+            toast({ text: 'Copied. Paste it into a terminal; it asks for your password.' });
+          }}
+        >
+          <Copy size={14} /> Copy terminal command
+        </button>
       )}
     </>
   );

@@ -43,6 +43,8 @@ interface CompiledRule {
   rule: DetectionRule;
   condition: CompiledCondition;
   exclusions: CompiledCondition[];
+  /** The fields each exclusion reads, in the same order. */
+  exclusionFields: Set<string>[];
   usesBaseline: boolean;
   thresholdKey: FieldGetter[] | undefined;
   dedupeKey: FieldGetter[];
@@ -70,6 +72,36 @@ const DEFAULT_DEDUPE_KEYS = [
 const MAX_WINDOW_ENTRIES = 20_000;
 const MODE_RANK: Record<RuleMode, number> = { disabled: 0, shadow: 1, alert: 2, block: 3 };
 
+/** For `check`. */
+export interface CheckOptions {
+  /**
+   * Exclusions that read any of these fields, and exceptions that match on
+   * any of them, are not applied: only the rule's own condition decides.
+   * For a check against a lookalike of the real value (the pack checks a
+   * connector call by its name as well as its id), so that a skip written
+   * for the lookalike never lifts a rule. It can only add matches.
+   */
+  noSkipsOn?: readonly string[];
+}
+
+/** Every field a condition reads, at any depth. */
+function fieldsOf(cond: unknown): Set<string> {
+  const out = new Set<string>();
+  const walk = (v: unknown): void => {
+    if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === 'object')
+      for (const [k, x] of Object.entries(v)) {
+        if (k === 'field' && typeof x === 'string') out.add(x);
+        // A firstSeen key lists field names.
+        else if (k === 'key' && Array.isArray(x))
+          x.forEach((f) => typeof f === 'string' && out.add(f));
+        else walk(x);
+      }
+  };
+  walk(cond);
+  return out;
+}
+
 export class RuleCompileError extends Error {
   constructor(
     readonly ruleId: string,
@@ -92,6 +124,7 @@ export function compileRule(
       rule,
       condition,
       exclusions,
+      exclusionFields: rule.exclusions.map(fieldsOf),
       usesBaseline: condition.firstSeen.length > 0,
       thresholdKey: rule.threshold?.groupBy?.map(compileField) ?? (rule.threshold ? [] : undefined),
       dedupeKey: (rule.dedupe?.key ?? []).map(compileField),
@@ -173,6 +206,7 @@ function notifyFor(rule: DetectionRule, mode: RuleMode): NotifyLevel {
 export class DetectionEngine {
   private byKind = new Map<DetectionEventKind, CompiledRule[]>();
   private byId = new Map<string, CompiledRule>();
+  private readonly revisions = new Map<string, number>();
   /** Baseline scopes to learn per event kind. */
   private learnByKind = new Map<DetectionEventKind, FirstSeenSpec[]>();
   private readonly safety: SafetyFloor;
@@ -203,6 +237,11 @@ export class DetectionEngine {
     this.loadRules(rules);
   }
 
+  /** The sha256 of Vigil's own programs, which no rule may block (see SafetyConfig). */
+  setSelfHashes(hashes: readonly string[]): void {
+    this.safety.setSelfHashes(hashes);
+  }
+
   /** Replace the whole rule set. Throws RuleCompileError before changing anything. */
   loadRules(rules: Array<DetectionRuleInput | DetectionRule>): void {
     const compiled = rules.map((r) => compileRule(r, this.defaultDedupeWindowSec));
@@ -213,18 +252,35 @@ export class DetectionEngine {
     }
     this.byId = new Map(compiled.map((c) => [c.rule.id, c]));
     this.reindex();
+    for (const id of ids) this.bump(id);
   }
 
   upsertRule(rule: DetectionRuleInput | DetectionRule): DetectionRule {
     const c = compileRule(rule, this.defaultDedupeWindowSec);
     this.byId.set(c.rule.id, c);
     this.reindex();
+    this.bump(c.rule.id);
     return c.rule;
   }
 
   removeRule(ruleId: string): void {
     this.byId.delete(ruleId);
     this.reindex();
+    this.bump(ruleId);
+  }
+
+  /**
+   * How many times a rule or its mode has changed in this engine: any save,
+   * removal, mode change or cleared override counts, even one to the same
+   * value. An undo compares it to tell "nothing changed since" from "changed
+   * and changed back".
+   */
+  revision(ruleId: string): number {
+    return this.revisions.get(ruleId) ?? 0;
+  }
+
+  private bump(ruleId: string): void {
+    this.revisions.set(ruleId, this.revision(ruleId) + 1);
   }
 
   getRule(ruleId: string): DetectionRule | undefined {
@@ -240,6 +296,16 @@ export class DetectionEngine {
     return [...this.byId.values()].map((c) => ({ ...c.rule, effectiveMode: this.modeOf(c.rule) }));
   }
 
+  /**
+   * Until when a rule only records, whatever its mode, because it compares
+   * against a baseline Vigil is still learning. Undefined once learned, or for
+   * a rule that has no baseline.
+   */
+  learningEnds(ruleId: string, now: number): number | undefined {
+    const c = this.byId.get(ruleId);
+    return c?.usesBaseline && now < this.learningUntil ? this.learningUntil : undefined;
+  }
+
   modeOf(rule: DetectionRule): RuleMode {
     return this.stores.ruleState.get(rule.id)?.mode ?? rule.mode;
   }
@@ -252,6 +318,24 @@ export class DetectionEngine {
   _setMode(ruleId: string, mode: RuleMode): void {
     const prev = this.stores.ruleState.get(ruleId) ?? { ruleId, fired: 0 };
     this.stores.ruleState.put({ ...prev, mode });
+    this.bump(ruleId);
+  }
+
+  /** The user's override of a rule's mode, or undefined when it runs in its own mode. */
+  modeOverride(ruleId: string): RuleMode | undefined {
+    return this.stores.ruleState.get(ruleId)?.mode;
+  }
+
+  /**
+   * Drop a rule's override, so it runs in its own mode again (and follows a
+   * pack update to it). Package-internal, like `_setMode`.
+   */
+  _clearMode(ruleId: string): void {
+    const prev = this.stores.ruleState.get(ruleId);
+    if (prev?.mode === undefined) return;
+    const { mode: _mode, ...rest } = prev;
+    this.stores.ruleState.put(rest);
+    this.bump(ruleId);
   }
 
   private reindex(): void {
@@ -298,13 +382,29 @@ export class DetectionEngine {
    * chain rule matches only once its earlier steps are already done (the
    * check never advances a chain).
    */
-  check(e: DetectionEvent): Detection[] {
+  check(e: DetectionEvent, opts: CheckOptions = {}): Detection[] {
     const out: Detection[] = [];
+    const ignore = new Set(opts.noSkipsOn ?? []);
     for (const c of this.byKind.get(e.kind) ?? []) {
-      const d = this.evaluateRule(c, e, true);
+      const d = this.evaluateRule(c, e, true, ignore);
       if (d) out.push(d);
     }
     return out;
+  }
+
+  /**
+   * Whether this rule, as it is now, lets the event off: its condition still
+   * fits, but one of its exclusions or the user's exceptions covers it. For
+   * an open alert raised before an exclusion existed. Only an exclusion
+   * counts, never a condition that no longer fits: a chain or a threshold
+   * can't be replayed from one event, so "doesn't match" would be a guess.
+   * Touches no state.
+   */
+  excuses(ruleId: string, e: DetectionEvent): boolean {
+    const c = this.byId.get(ruleId);
+    if (!c || !c.rule.eventKinds.includes(e.kind)) return false;
+    if (!c.condition.test(e, this.state)) return false;
+    return c.exclusions.some((x) => x.test(e, this.state)) || this.isExcepted(ruleId, e);
   }
 
   /** Resolve the rule's response templates, dropping any the safety floor refuses. */
@@ -332,8 +432,16 @@ export class DetectionEngine {
     return actions;
   }
 
-  /** @param dry for `check`: decide only, touching no state. */
-  private evaluateRule(c: CompiledRule, e: DetectionEvent, dry = false): Detection | undefined {
+  /**
+   * @param dry for `check`: decide only, touching no state.
+   * @param ignore fields whose exclusions and exceptions are not applied (CheckOptions).
+   */
+  private evaluateRule(
+    c: CompiledRule,
+    e: DetectionEvent,
+    dry = false,
+    ignore: ReadonlySet<string> = new Set(),
+  ): Detection | undefined {
     const { rule } = c;
     let mode = this.modeOf(rule);
     if (mode === 'disabled') return undefined;
@@ -349,8 +457,13 @@ export class DetectionEngine {
       if (!rule.eventKinds.includes(e.kind)) return undefined;
     }
     if (!c.condition.test(e, this.state)) return undefined;
-    if (c.exclusions.some((x) => x.test(e, this.state))) return undefined;
-    if (this.isExcepted(rule.id, e)) return undefined;
+    if (
+      c.exclusions.some(
+        (x, i) => ![...c.exclusionFields[i]!].some((f) => ignore.has(f)) && x.test(e, this.state),
+      )
+    )
+      return undefined;
+    if (this.isExcepted(rule.id, e, ignore)) return undefined;
 
     if (rule.threshold && c.thresholdKey) {
       const g = c.thresholdKey.length ? keyOf(c.thresholdKey, e) : '';
@@ -496,10 +609,15 @@ export class DetectionEngine {
     return !!st && e.ts - st.start <= seq.windowMs && st.done >= seq.steps.length;
   }
 
-  private isExcepted(ruleId: string, e: DetectionEvent): boolean {
+  private isExcepted(
+    ruleId: string,
+    e: DetectionEvent,
+    ignore: ReadonlySet<string> = new Set(),
+  ): boolean {
     for (const ex of this.stores.exceptions.forRule(ruleId)) {
       const entries = Object.entries(ex.match);
       if (entries.length === 0) continue;
+      if (entries.some(([field]) => ignore.has(field))) continue;
       const all = entries.every(([field, want]) => {
         const v = compileField(field)(e);
         if (v === undefined) return false;
