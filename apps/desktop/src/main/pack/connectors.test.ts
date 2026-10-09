@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { redactValue } from '@vigil/ai/redact';
+import { WITHHELD } from '@vigil/ai/redact';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Connectors, type ConnectorRecord } from './connectors.js';
 
@@ -138,9 +138,8 @@ describe('connectors', () => {
     c.add({ kind: 'http', name: 'Leaky', url: 'https://mcp.example.test/mcp' });
     const out = await c.call('leaky', 'read', {});
     expect(out).not.toMatch(/sk-ant-|abcdefghijklmnop|someone@|alex/);
-    expect(out).toContain('Bearer <token>');
-    expect(out).toContain('<email>');
-    expect(out).toContain('/Users/<user>/notes.txt');
+    // A secret that can't be cut out exactly withholds the whole field.
+    expect(out).toBe(WITHHELD);
   });
 
   /** A hub whose one connector answers `result` to every call. */
@@ -166,24 +165,19 @@ describe('connectors', () => {
     expect(out).toMatch(/^\{"rows":\[\{"key":/);
   });
 
-  const KEY_AWARE =
-    JSON.stringify(redactValue({ token: 'plainValue9' }, {})) !== '{"token":"plainValue9"}';
-  it.skipIf(!KEY_AWARE)(
-    '[needs #133’s redactor] withholds a {"token"} value in a reply, as text or structured',
-    async () => {
-      const token = ['tok', 'Plain', 'Value9'].join('');
-      const asText = await answering({
-        content: [{ type: 'text', text: JSON.stringify({ token }) }],
-      }).call('leaky', 'read', {});
-      const structured = await answering({ content: [], structuredContent: { token } }).call(
-        'leaky',
-        'read',
-        {},
-      );
-      expect(asText).not.toContain(token);
-      expect(structured).not.toContain(token);
-    },
-  );
+  it('withholds a {"token"} value in a reply, as text or structured', async () => {
+    const token = ['tok', 'Plain', 'Value9'].join('');
+    const asText = await answering({
+      content: [{ type: 'text', text: JSON.stringify({ token }) }],
+    }).call('leaky', 'read', {});
+    const structured = await answering({ content: [], structuredContent: { token } }).call(
+      'leaky',
+      'read',
+      {},
+    );
+    expect(asText).not.toContain(token);
+    expect(structured).not.toContain(token);
+  });
 
   it('refuses a command inside Vigil’s own app, even through a link', () => {
     const { c, dir } = hub({ selfPaths: [process.execPath] });

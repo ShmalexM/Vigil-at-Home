@@ -8,11 +8,13 @@
 // safe. The format is defined in Santa's
 // Source/santad/Logs/EndpointSecurity/Serializers/BasicString.mm.
 
-import { createHash } from 'node:crypto';
 import type { EventOfKind, FileOp, SensorEvent } from '@vigil/core';
 import { defined, nonEmpty, num, pidOf, type ProcessRef } from '../types.js';
 import { santaSigning } from '../signing.js';
+import { lineEventId } from '../eventId.js';
 
+/** A timestamp in UTC or with its offset, which reads the same in every time zone. */
+const ZONED_RE = /(?:Z|[+-]\d\d:?\d\d)$/i;
 const LINE_RE = /^\[([^\]]+)\]\s+\S+\s+santad:\s+(action=.*)$/;
 
 export type SantaLogFields = Record<string, string>;
@@ -28,12 +30,12 @@ export function unescapeSantaValue(value: string): string {
 }
 
 /** The timestamp and the `action=...` part of a Santa line, or undefined if it isn't one. */
-function splitSantaLine(line: string): { ts: number; body: string } | undefined {
+function splitSantaLine(line: string): { ts: number; zoned: boolean; body: string } | undefined {
   const trimmed = line.trimEnd();
   const m = LINE_RE.exec(trimmed);
-  if (m) return { ts: Date.parse(m[1]!), body: m[2]! };
+  if (m) return { ts: Date.parse(m[1]!), zoned: ZONED_RE.test(m[1]!), body: m[2]! };
   // Lines without the timestamp prefix (e.g. forwarded from syslog).
-  if (trimmed.startsWith('action=')) return { ts: Number.NaN, body: trimmed };
+  if (trimmed.startsWith('action=')) return { ts: Number.NaN, zoned: false, body: trimmed };
   return undefined;
 }
 
@@ -84,10 +86,6 @@ const MAPPED_ACTIONS: ReadonlySet<string> = new Set([
 function actionOf(body: string): string {
   const end = body.indexOf('|');
   return unescapeSantaValue(body.slice('action='.length, end < 0 ? undefined : end));
-}
-
-function eventId(line: string): string {
-  return 'santa-log:' + createHash('sha256').update(line).digest('hex').slice(0, 32);
 }
 
 type Mechanism = EventOfKind<'persistence'>['mechanism'];
@@ -157,7 +155,14 @@ export function santaLogLineToEvent(
   if (!split || !MAPPED_ACTIONS.has(actionOf(split.body))) return undefined;
   const f = parseFields(split.body);
   const ts = Number.isFinite(split.ts) ? split.ts : now();
-  const base = { id: eventId(line), ts, source: 'santa' as const, raw: f };
+  const base = {
+    // Only a time that means the same everywhere goes into the id, so a line
+    // read again after a time zone change gets the same id.
+    id: lineEventId('santa-log:', line, split.zoned && Number.isFinite(split.ts) ? ts : undefined),
+    ts,
+    source: 'santa' as const,
+    raw: f,
+  };
 
   switch (f.action) {
     case 'EXEC': {

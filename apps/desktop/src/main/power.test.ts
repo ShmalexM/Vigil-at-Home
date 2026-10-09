@@ -45,4 +45,19 @@ describe('PowerPolicy', () => {
     emit('on-battery');
     expect(p.isBusy()).toBe(true);
   });
+
+  it('says whether it is busy from power (battery, heat) or only from load', () => {
+    let load = 0.95;
+    const { source, emit } = fakeSource();
+    const p = new PowerPolicy(source, () => load);
+    expect(p.busyReason()).toBe('load');
+    load = 0.1;
+    expect(p.busyReason()).toBeUndefined();
+    emit('on-battery');
+    expect(p.busyReason()).toBe('power');
+    emit('on-ac');
+    emit('thermal-state-change', { state: 'serious' });
+    load = 0.95;
+    expect(p.busyReason()).toBe('power');
+  });
 });

@@ -131,10 +131,24 @@ function NoteEntry({ note: n, who }: { note: DogNote; who?: string | undefined }
         </Field>
       )}
       <Field label={n.ok ? 'Answered' : 'What happened'}>{n.answer}</Field>
+      {n.fromOutside && (
+        <p className="t-small muted">
+          Part of this answer came from what it read, which anyone could have written.
+        </p>
+      )}
       {n.reasons.length > 0 && (
         <Field label="Reasons given">
           <ul className="note-reasons">
             {n.reasons.map((r, i) => (
+              <li key={i}>{r}</li>
+            ))}
+          </ul>
+        </Field>
+      )}
+      {n.readReasons && n.readReasons.length > 0 && (
+        <Field label="From what it read">
+          <ul className="note-reasons">
+            {n.readReasons.map((r, i) => (
               <li key={i}>{r}</li>
             ))}
           </ul>

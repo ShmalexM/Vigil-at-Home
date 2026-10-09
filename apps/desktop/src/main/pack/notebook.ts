@@ -65,11 +65,9 @@ export class Notebook {
       ...(input.subject ? { subject: input.subject } : {}),
       lookedAt: (input.lookedAt ?? []).slice(0, LIST).map((s) => clip(redactText(s), 300)),
       answer: clip(redactText(input.answer)),
-      reasons: (input.reasons ?? [])
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .slice(0, LIST)
-        .map((s) => clip(redactText(s), 600)),
+      reasons: reasonList(input.reasons),
+      ...(input.fromOutside ? { fromOutside: true } : {}),
+      ...(input.readReasons?.length ? { readReasons: reasonList(input.readReasons) } : {}),
       ...(input.thinking ? { thinking: clip(redactText(input.thinking), 4000) } : {}),
       ...(input.provider ? { provider: input.provider } : {}),
       ...(input.model ? { model: input.model } : {}),
@@ -192,6 +190,7 @@ function scrub(n: DogNote): DogNote {
     lookedAt: n.lookedAt.map(redactText),
     answer: redactText(n.answer),
     reasons: n.reasons.map(redactText),
+    ...(n.readReasons ? { readReasons: n.readReasons.map(redactText) } : {}),
     ...(n.thinking !== undefined ? { thinking: redactText(n.thinking) } : {}),
     ...(n.calls
       ? {
@@ -226,4 +225,12 @@ function usage(u: NoteUsage): NoteUsage {
 function clip(s: string, n = TEXT): string {
   const t = s.trim();
   return t.length > n ? `${t.slice(0, n - 1)}…` : t;
+}
+
+function reasonList(list: readonly string[] | undefined): string[] {
+  return (list ?? [])
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, LIST)
+    .map((s) => clip(redactText(s), 600));
 }

@@ -291,12 +291,45 @@ describe('VigilTools', () => {
     expect(events.length).toBeLessThan(MAX_ROWS);
     // Each long string is clipped too.
     expect(events[0]!.command.length).toBeLessThanOrEqual(1000);
-    expect(events[0]!.answer).toBe('ask');
+    expect(events[0]).not.toHaveProperty('answer');
+    expect(events[0]).not.toHaveProperty('rules');
 
     const s = ok(tools.call('get_agent_session', { id: SESSION }));
     expect(s['tree']).toHaveLength(MAX_ROWS);
     expect(s['events']).toHaveLength(MAX_ROWS);
     expect(s['more']).toBe(true);
+  });
+
+  it("shows Vigil's answer to a tool request to the pack only", () => {
+    const request: SensorEvent = {
+      id: 't1',
+      ts: NOW,
+      source: 'vigil',
+      kind: 'agent.tool_request',
+      tool: 'Bash',
+      command: 'cat ~/.aws/credentials',
+      agent: { host: 'claude-code', id: 'claude-code', session: SESSION },
+    };
+    const src = source({
+      searchEvents: () => ({ views: [view(request), view(exec(1, 'cat x'))], partial: false }),
+    });
+    const rows = (tools: VigilTools) =>
+      ok(tools.call('search_events', {}))['events'] as Array<Record<string, unknown>>;
+    const [mcpRequest, mcpExec] = rows(new VigilTools(src));
+    expect(mcpRequest).not.toHaveProperty('answer');
+    expect(mcpRequest).not.toHaveProperty('rules');
+    // Other events still say which rules they matched.
+    expect(mcpExec).toHaveProperty('rules');
+    const [packRequest] = rows(new VigilTools(src, { verdicts: true }));
+    expect(packRequest).toMatchObject({
+      answer: 'ask',
+      rules: [{ rule: 'Agent read a secret', mode: 'alert' }],
+    });
+    // Nor can a search for matched events tell them apart.
+    const matched = (tools: VigilTools) =>
+      (ok(tools.call('search_events', { matched: true }))['events'] as unknown[]).length;
+    expect(matched(new VigilTools(src))).toBe(1);
+    expect(matched(new VigilTools(src, { verdicts: true }))).toBe(2);
   });
 
   it('redacts home folders and secrets as Vigil’s own AI gets them', () => {
@@ -328,7 +361,9 @@ describe('VigilTools', () => {
       expect(text).not.toContain('sk-ant-');
     }
     expect(results[1]).toContain('/Users/<user>/.aws/credentials');
-    expect(results[2]).toContain('<api-key>');
+    // A secret in a command's arguments withholds the whole list.
+    expect(results[2]).toContain('[withheld: may contain a secret]');
+    expect(results[2]).not.toContain('Authorization');
     expect(results[4]).toContain('/Users/<user>/.local/share/claude');
   });
 

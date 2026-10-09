@@ -115,6 +115,41 @@ export class FakeLinuxSystem implements System {
     return this.processes.get(pid)?.path;
   }
 
+  /** /proc/self/mountinfo. */
+  mounts = '';
+  /** Files by path, with their `fileId` (device:inode). */
+  readonly files = new Map<string, string>();
+  /** Open files by pid, as `[fd, link]`. */
+  readonly fds = new Map<number, [number, string][]>();
+  /** Start times by pid, in clock ticks. */
+  readonly starts = new Map<number, number>();
+
+  mountInfo(): string {
+    return this.mounts;
+  }
+
+  procPids(): number[] {
+    return [...this.processes.keys()];
+  }
+
+  procFds(pid: number): [number, string][] {
+    return this.fds.get(pid) ?? [];
+  }
+
+  procStart(pid: number): number | undefined {
+    return this.starts.get(pid);
+  }
+
+  fileId(path: string): string | undefined {
+    const m = /^\/proc\/(\d+)\/(exe|fd\/(\d+))$/.exec(path);
+    if (!m) return this.files.get(path);
+    const pid = Number(m[1]);
+    const target = m[3]
+      ? this.procFds(pid).find(([n]) => n === Number(m[3]))?.[1]
+      : this.processes.get(pid)?.path;
+    return target === undefined ? undefined : this.files.get(target);
+  }
+
   signal(pid: number, signal: 'SIGSTOP' | 'SIGCONT' | 'SIGKILL'): void {
     this.signals.push({ pid, signal });
     if (signal === 'SIGKILL') this.processes.delete(pid);

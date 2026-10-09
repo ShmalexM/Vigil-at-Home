@@ -11,6 +11,8 @@ export interface EventLogOptions {
   /** Events waiting beyond this are dropped (the disk is stuck); blocking is unaffected. */
   maxPending?: number;
   onError?: (err: unknown) => void;
+  /** After a batch is written. */
+  onStored?: () => void;
 }
 
 /**
@@ -65,6 +67,7 @@ export class EventLog {
     try {
       this.invalid += this.store.insertEvents(batch);
       this.retrying = false;
+      this.opts.onStored?.();
     } catch (err) {
       this.opts.onError?.(err);
       // A failed batch wrote nothing (one transaction), so it is tried once

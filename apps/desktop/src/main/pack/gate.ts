@@ -61,12 +61,16 @@ export function afterJudge(
 }
 
 /**
- * A change the Lead dog wants to make to the pack. An answer whose input
- * could hold someone else's text (it used a tool, or read a dog's report or
- * an earlier answer that did) only proposes; so does any change that hands a
- * dog a tool that can change things. Both hold in every mode. Otherwise: Ask
- * for approval: every change waits. Full access: all go ahead. Let AI
- * decide: adding, changing or running a dog goes ahead; retiring one waits.
+ * A change the Lead dog wants to make to the pack. Its arguments come from
+ * the acting path, which never reads outside text (PackService.say), so
+ * `tainted` is the bridge: the person's message leans on a report, an
+ * earlier answer or a remembered fact the acting path saw only as a
+ * reference, or the answer cites one. A tainted change, and one approved
+ * from an older answer that read outside text, only proposes, in every mode.
+ * Otherwise: Ask for approval: every change waits. Full access: all go ahead,
+ * a tool that can change things included, since the person asked for it.
+ * Let AI decide: adding, changing or running a dog goes ahead, unless it
+ * hands a dog a tool that can change things; retiring one waits.
  */
 export function gateAction(
   mode: PermissionMode,
@@ -74,9 +78,9 @@ export function gateAction(
   grantsWriteTool: boolean,
   tainted: boolean,
 ): 'apply' | 'ask' {
-  if (tainted || grantsWriteTool) return 'ask';
+  if (tainted) return 'ask';
   if (mode === 'full') return 'apply';
   if (mode === 'ask') return 'ask';
-  if (kind === 'retire') return 'ask';
+  if (grantsWriteTool || kind === 'retire') return 'ask';
   return 'apply';
 }

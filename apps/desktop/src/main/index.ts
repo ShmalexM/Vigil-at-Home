@@ -2,8 +2,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { app, dialog, Notification, powerMonitor, safeStorage, shell } from 'electron';
-import { listDigest } from '@vigil/detection/fastpath';
-import { HelperCallError } from '@vigil/helper/client';
 import { z } from 'zod';
 import type { HelperInstallResult } from '../shared/ipc.js';
 import { AgentService } from './agents/service.js';
@@ -11,12 +9,7 @@ import { AiBridge } from './ai.js';
 import { Store } from './db/store.js';
 import { demoInstalled, seedAgentsDemo, seedDemo, startDemoFeed } from './demo.js';
 import { seedUsageDemo } from './usage-demo.js';
-import {
-  Detector,
-  type HelperSync,
-  type HelperSyncOptions,
-  type HelperSyncOutcome,
-} from './detection.js';
+import { Detector } from './detection.js';
 import {
   helperBundleDir,
   helperInstallCommand,
@@ -24,6 +17,7 @@ import {
   runHelperScript,
 } from './helper-install.js';
 import { HelperLink } from './helper.js';
+import { HelperSyncer } from './helper-sync.js';
 import { registerIpc } from './ipc.js';
 import { systemProbe } from './onboarding/checks.js';
 import { demoProbe } from './onboarding/demo.js';
@@ -36,6 +30,7 @@ import { PackMemory } from './pack/memory.js';
 import { PackService } from './pack/service.js';
 import { seedPackDemo } from './pack/demo.js';
 import { PowerPolicy } from './power.js';
+import { hashSelf, selfPaths } from './self-path.js';
 import { HEALTH_CHECK_MS, macProbe, reportHealth, type HelperSensors } from './sensor-health.js';
 import { VigilCore } from './service.js';
 import { UpdateChecker } from './updates.js';
@@ -101,11 +96,12 @@ function start(): void {
   const helper = new HelperLink();
   const core = new VigilCore(store, helper, true);
   const demo = !app.isPackaged && !!process.env['VIGIL_DEMO'];
-  // The .app bundle when packaged; the Electron binary in development.
-  const selfPaths = [app.isPackaged ? join(process.execPath, '../../..') : process.execPath];
+  // The .app bundle or install folder when packaged; the Electron binary in development.
+  const self = selfPaths(process.execPath, process.platform, app.isPackaged, process.env);
   const detector = new Detector(db, store, core.alerts, (e, o) => core.ingest(e, o), {
     installedAt: core.installedAt(),
-    selfPaths,
+    selfPaths: self.app,
+    helperSelf: self.helper,
     // What Vigil itself starts (its AI helpers) is tagged vigil-self, never a watched agent.
     selfPid: process.pid,
     // The tracker reports to the agent service, created just below.
@@ -130,6 +126,8 @@ function start(): void {
     userData: dataDir,
     // For the vigil_status tool (Vigil's read-only tools for the user's own agents).
     status: () => core.status(),
+    // Why the explainer or labeller isn't reaching an AI, for the Agents page.
+    heldBack: (id) => ai.heldBack(id),
     ...(devHelperDir ? { devHelperDir } : {}),
     // The demo shows a fixed set of agents rather than this Mac's.
     ...(demo ? { readPs: async () => [], statInstall: demoInstalled } : {}),
@@ -226,9 +224,11 @@ function start(): void {
     mode: () => setup.mode(),
     dataDir,
     isBusy: () => power.isBusy(),
+    busyReason: () => power.busyReason(),
     openExternal: (url) => shell.openExternal(url),
   });
   if (!demo) core.usage.setLimitsSource(() => ai.limits());
+  core.aiNotice = () => ai.offNotice();
   ai.on('changed', () => windows.broadcast('changed'));
   ai.explainAlertsFrom(core);
   ai.labelEventsFrom(core);
@@ -279,7 +279,7 @@ function start(): void {
     cipher,
     onChange: pushPack,
     // Connectors run the user's programs: watched as connectors, never as Vigil.
-    selfPaths,
+    selfPaths: self.app,
     spawned: (pid, running) =>
       running ? detector.tracker.connectorStarted(pid) : detector.tracker.connectorStopped(pid),
   });
@@ -364,48 +364,32 @@ function start(): void {
   // Sensor events arrive through the helper, which reads Santa's and osquery's logs as root.
   helper.on('event', (e) => void core.handleEvent(e));
   const checkHealth = () => reportHealth(core.sensors, probe);
-  // Re-sent on every connection and whenever the rules, exceptions or lists change.
-  let helperRulesSent: string | undefined;
-  // A set the user declined to approve (a loosening needs their password). Not
-  // asked again until the rules change, so the health timer never re-prompts.
-  let helperRulesDeclined: string | undefined;
+  // An AppImage's programs are hashed once, in the background. The helper
+  // gets them with the image in its first self grant, so a new image asks for
+  // the password once rather than twice.
+  const selfHashed = self.mount
+    ? hashSelf(self.mount)
+        .then((hashes) => core.detector?.setSelfHashes(hashes))
+        .catch((err: unknown) => console.warn('[self] could not hash Vigil’s programs:', err))
+    : Promise.resolve();
   // The helper runs the blocking rules it can on its own, so blocks happen
-  // even while the app is closed, and hands Santa the pre-launch ones.
-  let helperRulesSync: Promise<unknown> = Promise.resolve();
-  const syncHelperRules: HelperSync = (opts = {}) => {
-    const next = helperRulesSync.then(() => sendHelperRules(opts));
-    helperRulesSync = next;
-    return next;
-  };
-  const sendHelperRules = async (opts: HelperSyncOptions): Promise<HelperSyncOutcome> => {
-    if (!core.detector) return 'unavailable';
-    const set = core.detector.helperRules();
-    const lists = Object.entries(set.lists).map(([l, entries]) => [l, listDigest(entries)]);
-    const key = JSON.stringify({ ...set, lists });
-    if (key === helperRulesSent) return 'applied';
-    if (key === helperRulesDeclined && !opts.byUser) return 'declined';
-    try {
-      const how = opts.hold ? { hold: true, ...(opts.onHeld ? { onHeld: opts.onHeld } : {}) } : {};
-      if (!(await helper.syncRules(set, how))) return 'unavailable';
-      helperRulesSent = key;
-      return 'applied';
-    } catch (err) {
-      if (err instanceof HelperCallError && err.code === 'refused') {
-        helperRulesDeclined = key;
-        return 'declined';
-      }
-      console.warn('[helper rules] could not update the helper:', err);
-      return 'unavailable';
-    }
-  };
+  // even while the app is closed, and hands Santa the pre-launch ones. Re-sent
+  // on every connection and whenever the rules, exceptions or lists change;
+  // what is Vigil's own goes apart from them, so its password dialog never
+  // holds them up.
+  const helperSync = new HelperSyncer({
+    link: helper,
+    rules: () => core.detector?.helperRules(),
+    ready: selfHashed,
+    log: (msg, err) => console.warn(msg, err),
+  });
+  const syncHelperRules = helperSync.sync;
   if (core.detector) core.detector.syncHelper = syncHelperRules;
   helper.on('state', (state) => {
     void checkHealth();
     if (state === 'connected') {
       void saveSantaProfile();
-      helperRulesSent = undefined;
-      helperRulesDeclined = undefined;
-      void syncHelperRules();
+      helperSync.connected();
     }
   });
   if (HELPER_PLATFORMS.has(process.platform)) {
@@ -444,7 +428,7 @@ function start(): void {
   }
   if (perf)
     Object.assign(globalThis, {
-      vigil: { core, windows, power, agents, syncHelperRules, readyAt: Date.now() },
+      vigil: { core, windows, power, agents, syncHelperRules, helperSync, readyAt: Date.now() },
     });
   // First run opens setup; after that Vigil starts quietly in the menu bar.
   else if (!setup.finished()) windows.openMain('setup');

@@ -29,6 +29,7 @@ import {
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { newId } from '@vigil/core';
+import { selfRoots, underSelfRoot } from '@vigil/detection';
 import { z } from 'zod';
 import { ConnectorInput, isSafeConnectorUrl, type ConnectorView } from '../../shared/pack.js';
 import type { Cipher } from '../onboarding/keys.js';
@@ -351,12 +352,11 @@ export class Connectors implements ConnectorHub {
 
   /** Refuse a command that is part of Vigil, which the safety floor would never block. */
   private assertNotVigil(command: string): void {
-    const selfPaths = (this.o.selfPaths ?? []).map((p) => p.toLowerCase().replace(/\/+$/, ''));
+    const selfPaths = selfRoots(this.o.selfPaths ?? []);
     if (selfPaths.length === 0) return;
     const path = whereIs(command);
     for (const candidate of path ? [path, realOr(path)] : []) {
-      const p = candidate.toLowerCase();
-      if (selfPaths.some((s) => p === s || p.startsWith(`${s}/`))) {
+      if (underSelfRoot(selfPaths, candidate)) {
         throw new Error('That program is part of Vigil. A connector has to run its own program.');
       }
     }
