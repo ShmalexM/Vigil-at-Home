@@ -291,12 +291,12 @@ export class HelperLink
           out = tried.result;
         } else {
           out = await withTimeout(
-          opts.hold
-            ? client.hold<HelperRulesOutcome>(sync, opts.onHeld)
-            : client.call<HelperRulesOutcome>(sync),
-          // A sync that loosens the rules waits on the admin password, like a release.
-          RELEASE_TIMEOUT_MS,
-        );
+            opts.hold
+              ? client.hold<HelperRulesOutcome>(sync, opts.onHeld)
+              : client.call<HelperRulesOutcome>(sync),
+            // A sync that loosens the rules waits on the admin password, like a release.
+            RELEASE_TIMEOUT_MS,
+          );
         }
         if (out.applied) {
           this.confirmedRules = rulesKey;
