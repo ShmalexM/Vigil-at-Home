@@ -25,6 +25,9 @@ export interface CheckResult {
 /** Shown on the Santa profile step until Santa first syncs its rules with its certificate. */
 export const SANTA_FIRST_SYNC = 'Waiting for Santa’s first sync';
 
+/** Shown on the Santa profile step while the helper can't be asked how Santa's syncs go. */
+export const SANTA_UNVERIFIED = 'Waiting for the Vigil helper to confirm Santa’s syncs';
+
 /** Shown when Santa syncs with Vigil on a profile that predates its client certificate. */
 export const SANTA_REINSTALL = 'Reinstall the Santa profile to finish securing Santa';
 
@@ -110,7 +113,10 @@ export const CHECKS: Record<CheckId, (p: Probe) => Promise<CheckResult>> = {
     // The helper has a client certificate for Santa but still serves it
     // without one: the installed profile is from before the certificate.
     const cert = await p.helperSanta?.().catch(() => null);
-    if (cert?.clientCertIssued && cert.clientCertRequired === false) {
+    // Without the helper's status nothing confirms Santa reaches Vigil: the
+    // step stays unverified rather than done.
+    if (!cert) return { ok: false, waiting: true, detail: SANTA_UNVERIFIED };
+    if (cert.clientCertIssued && cert.clientCertRequired === false) {
       return {
         ok: false,
         again: SANTA_REINSTALL,
@@ -121,12 +127,12 @@ export const CHECKS: Record<CheckId, (p: Probe) => Promise<CheckResult>> = {
     // Done only once Santa has synced its rules with its certificate: the
     // profile pointing at Vigil proves nothing about Santa reaching it.
     // Older helpers don't report it (undefined), and are taken at their word.
-    if (cert?.clientCertRequired && cert.lastAuthRuleSyncAt === null) {
+    if (cert.clientCertRequired && cert.lastAuthRuleSyncAt === null) {
       return { ok: false, waiting: true, detail: SANTA_FIRST_SYNC };
     }
     return {
       ok: true,
-      detail: cert?.clientCertRequired
+      detail: cert.clientCertRequired
         ? 'Santa gets its rules from Vigil, with its own certificate'
         : 'Santa gets its rules from Vigil',
     };

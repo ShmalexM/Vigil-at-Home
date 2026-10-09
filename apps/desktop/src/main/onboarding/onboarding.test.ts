@@ -3,7 +3,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { memoryStore } from '../testing.js';
-import { CHECKS, HELPER_SOCKET, SANTA_FIRST_SYNC, SANTA_REINSTALL, type Probe } from './checks.js';
+import {
+  CHECKS,
+  HELPER_SOCKET,
+  SANTA_FIRST_SYNC,
+  SANTA_REINSTALL,
+  SANTA_UNVERIFIED,
+  type Probe,
+} from './checks.js';
 import { KeyStore, type Cipher } from './keys.js';
 import {
   FAPOLICYD_ALLOW_RULES,
@@ -168,9 +175,10 @@ describe('checks', () => {
 
   it('accepts Santa synced with Vigil on this Mac only', async () => {
     const check = (server: string) =>
-      CHECKS['santa.profile'](
-        fakeMac({ bins: ['/usr/local/bin/santactl'], runs: santaOk(server) }),
-      );
+      CHECKS['santa.profile']({
+        ...fakeMac({ bins: ['/usr/local/bin/santactl'], runs: santaOk(server) }),
+        helperSanta: async () => ({}),
+      });
     expect((await check('https://127.0.0.1:47821/santa')).ok).toBe(true);
     expect((await check('https://localhost:47821')).ok).toBe(true);
     const other = await check('https://sync.example.com');
@@ -198,7 +206,27 @@ describe('checks', () => {
     });
     // An older helper says nothing about certificates: nothing to reinstall.
     expect((await check({})).ok).toBe(true);
-    expect((await check(null)).ok).toBe(true);
+  });
+
+  it('never counts the Santa profile step done without the helper’s status', async () => {
+    const mac = fakeMac({
+      bins: ['/usr/local/bin/santactl'],
+      runs: santaOk('https://127.0.0.1:47821/'),
+    });
+    const unverified = { ok: false, waiting: true, detail: SANTA_UNVERIFIED };
+    // No answer, a failed query, and no way to ask at all.
+    expect(await CHECKS['santa.profile']({ ...mac, helperSanta: async () => null })).toEqual(
+      unverified,
+    );
+    expect(
+      await CHECKS['santa.profile']({
+        ...mac,
+        helperSanta: async () => {
+          throw new Error('helper not running');
+        },
+      }),
+    ).toEqual(unverified);
+    expect(await CHECKS['santa.profile'](mac)).toEqual(unverified);
   });
 
   it('waits for Santa’s first rule sync with its certificate before the profile step is done', async () => {
