@@ -79,6 +79,13 @@ export interface ExecutorDeps {
    * paused or stopped, and its program never blocked by hash.
    */
   appPin?: AppPinStore;
+  /**
+   * The programs Vigil and its sensors run on (ownHashes.ts), hashed by the
+   * helper itself: no block by hash may name one.
+   */
+  ownHashes?: { ready(): Promise<void>; owner(identifier: string): string | undefined };
+  /** How long a block by hash waits for ownHashes' first pass (default OWN_HASHES_WAIT_MS). */
+  ownHashesWaitMs?: number;
   /** Re-pins the app a self grant covers, with the grant's password (appPin.ts). */
   repin?: {
     /** Before the password is asked for: the app the grant would pin (pinCandidate). */
@@ -98,6 +105,9 @@ export interface ActionOutcome {
   undoable: boolean;
   quarantineId?: string;
 }
+
+/** Longest a block by hash waits at startup for the helper to hash its own programs. */
+export const OWN_HASHES_WAIT_MS = 60_000;
 
 const RULE_TYPE: Record<string, RuleType> = {
   binary: 'BINARY',
@@ -129,6 +139,26 @@ export class Executor {
     const id = identifier.toLowerCase();
     if (this.self().hashes.includes(id)) return true;
     return pinnedHashes(this.d.appPin?.current()).includes(id);
+  }
+
+  /**
+   * The program of the helper's, a sensor's or the installed app's that
+   * blocking this hash would block, once the first pass over them is done
+   * (or after a while, with what is known by then).
+   */
+  private async ownProgram(identifier: string): Promise<string | undefined> {
+    const own = this.d.ownHashes;
+    if (!own) return undefined;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      own.ready(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, this.d.ownHashesWaitMs ?? OWN_HASHES_WAIT_MS);
+        timer.unref?.();
+      }),
+    ]);
+    clearTimeout(timer);
+    return own.owner(identifier);
   }
 
   /** The pin check for a process about to be paused or stopped; absent without a pin store. */
@@ -374,8 +404,12 @@ export class Executor {
 
   private async run(cmd: HelperCommand): Promise<unknown> {
     const { sys, journal } = this.d;
-    if (cmd.kind === 'santa.rule.set' && cmd.policy !== 'allow' && this.isOwnHash(cmd.identifier))
-      throw new ActionError('refused', 'that program is part of Vigil');
+    if (cmd.kind === 'santa.rule.set' && cmd.policy !== 'allow') {
+      if (this.isOwnHash(cmd.identifier))
+        throw new ActionError('refused', 'that program is part of Vigil');
+      const own = await this.ownProgram(cmd.identifier);
+      if (own) throw new ActionError('refused', `that is ${own}, which Vigil relies on`);
+    }
     if (sys.platform === 'linux' && cmd.kind.startsWith('santa.')) return this.runLinuxBlock(cmd);
     switch (cmd.kind) {
       case 'process.suspend': {
