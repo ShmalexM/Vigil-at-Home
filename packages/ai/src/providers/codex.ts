@@ -27,6 +27,12 @@ import { JsonRpcStdio } from './jsonRpcStdio.js';
 import { isSafeBaseUrl } from './openaiCompatible.js';
 import { verifyBinary } from './verifyBinary.js';
 
+/**
+ * A quick question to `codex app-server` (start-up, the account, plan limits).
+ * A server that doesn't answer in this time is killed, so none lingers.
+ */
+const RPC_QUICK_TIMEOUT_MS = 15_000;
+
 const execFileAsync = promisify(execFile);
 
 /** The Codex version these settings were checked against. */
@@ -298,11 +304,15 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
       cwd,
       handlers,
     );
-    await rpc.request('initialize', {
-      clientInfo: { name: 'vigil_at_home', title: 'Vigil at Home', version: '0.1.0' },
-      // Dynamic tools, which keep Vigil's tools in Vigil's process, are an experimental API.
-      capabilities: { experimentalApi: true, requestAttestation: false },
-    });
+    await rpc.request(
+      'initialize',
+      {
+        clientInfo: { name: 'vigil_at_home', title: 'Vigil at Home', version: '0.1.0' },
+        // Dynamic tools, which keep Vigil's tools in Vigil's process, are an experimental API.
+        capabilities: { experimentalApi: true, requestAttestation: false },
+      },
+      RPC_QUICK_TIMEOUT_MS,
+    );
     rpc.notify('initialized');
     return rpc;
   }
@@ -358,7 +368,7 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
         });
         const account = await rpc.request<{
           account: { type: string; email?: string | null } | null;
-        }>('account/read', {});
+        }>('account/read', {}, RPC_QUICK_TIMEOUT_MS);
         const canShare =
           !account.account &&
           (await canShareCodexSignIn(options.userCodexHome ?? DEFAULT_USER_CODEX_HOME));
@@ -469,11 +479,11 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
         });
         const { account } = await rpc.request<{
           account: { type: string; planType?: string } | null;
-        }>('account/read', {});
+        }>('account/read', {}, RPC_QUICK_TIMEOUT_MS);
         if (account?.type !== 'chatgpt') return undefined;
         const limits = await rpc.request<{
           rateLimits: Parameters<typeof usageFromSnapshot>[0] | null;
-        }>('account/rateLimits/read', {});
+        }>('account/rateLimits/read', {}, RPC_QUICK_TIMEOUT_MS);
         return {
           ...(account.planType ? { plan: account.planType } : {}),
           windows: limits.rateLimits ? usageFromSnapshot(limits.rateLimits) : [],

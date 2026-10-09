@@ -415,6 +415,63 @@ describe('FeedImporter', () => {
     expect(calls).toHaveLength(1);
   });
 
+  describe('shrink guard', () => {
+    const ips = (n: number) => Array.from({ length: n }, (_, i) => `45.9.${i}.1`).join('\n');
+    const seeded = async (seed: number) => {
+      let body = ips(seed);
+      const { fetch } = fakeFetch({ 'https://a.test/ips': () => ({ body }) });
+      const stores = memoryStores();
+      const imp = new FeedImporter(
+        [src({ id: 'a', url: 'https://a.test/ips' })],
+        stores.lists,
+        new MemoryFeedStateStore(),
+        { fetch },
+      );
+      expect((await imp.run({ force: true }))[0]!.status).toBe('updated');
+      expect(stores.lists.size('known_bad_ips')).toBe(seed);
+      const update = async (next: string) => {
+        body = next;
+        return (await imp.run({ force: true }))[0]!;
+      };
+      return { imp, stores, update };
+    };
+
+    for (const [seed, next] of [
+      [100, 10],
+      [100, 0],
+      [3, 0],
+      [100, 49],
+    ] as const) {
+      it(`refuses ${seed} -> ${next}, keeps the old list and marks the feed stale`, async () => {
+        const { imp, stores, update } = await seeded(seed);
+        const r = await update(next ? ips(next) : '<html>maintenance</html>');
+        expect(r).toMatchObject({ status: 'failed', entries: seed });
+        expect(r.error).toMatch(new RegExp(`shrank from ${seed} to ${next}`));
+        expect(stores.lists.size('known_bad_ips')).toBe(seed);
+        expect(imp.status()[0]).toMatchObject({ heldBack: true, stale: true, entries: seed });
+      });
+    }
+
+    it('accepts 100 -> 60 and 100 -> 50, and a later good update clears the hold', async () => {
+      const { imp, stores, update } = await seeded(100);
+      expect(await update(ips(60))).toMatchObject({ status: 'updated', entries: 60 });
+      expect(stores.lists.size('known_bad_ips')).toBe(60);
+      expect(imp.status()[0]).toMatchObject({ stale: false });
+      expect(imp.status()[0]!.heldBack).toBeUndefined();
+
+      await update('');
+      expect(imp.status()[0]).toMatchObject({ heldBack: true, stale: true });
+      expect(await update(ips(30))).toMatchObject({ status: 'updated', entries: 30 });
+      expect(imp.status()[0]!.heldBack).toBeUndefined();
+    });
+
+    it('fills an empty stored list', async () => {
+      const { stores, update } = await seeded(0);
+      expect(await update(ips(5))).toMatchObject({ status: 'updated', entries: 5 });
+      expect(stores.lists.size('known_bad_ips')).toBe(5);
+    });
+  });
+
   it('accumulates recent-only feeds and expires entries after retainDays', async () => {
     let body = sha('a');
     const { fetch } = fakeFetch({ 'https://h.test/recent': () => ({ body }) });

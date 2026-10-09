@@ -767,6 +767,13 @@ export class Store {
     );
   }
 
+  /** The AI providers Vigil's runs have used, oldest record kept or not. */
+  aiRunProviders(): string[] {
+    return (this.stmt('SELECT DISTINCT provider FROM ai_runs').all() as { provider: string }[]).map(
+      (r) => r.provider,
+    );
+  }
+
   pruneAiRuns(before: number): number {
     return Number(this.stmt('DELETE FROM ai_runs WHERE ts < ?').run(before).changes);
   }
@@ -1056,7 +1063,7 @@ export class Store {
     const rows = this.stmt(
       `SELECT json_extract(body, '$.purpose') AS purpose,
          SUM(CASE WHEN ts >= ? THEN 1 ELSE 0 END) AS runs, MAX(ts) AS lastAt
-       FROM ai_runs GROUP BY purpose`,
+       FROM ai_runs WHERE provider IS NOT NULL GROUP BY purpose`,
     ).all(since) as { purpose: string | null; runs: number; lastAt: number }[];
     return new Map(
       rows.flatMap((r) =>

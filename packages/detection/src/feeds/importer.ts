@@ -16,6 +16,12 @@ export interface FeedState {
   lastError?: string;
   /** The provider refused a request sent without a key (401/403); cleared by any other answer. */
   needsKey?: boolean;
+  /**
+   * The last update would have shrunk the stored list by more than half or
+   * emptied it, so it was refused and the old list kept. Cleared by the next
+   * accepted update (or "not modified").
+   */
+  heldBack?: boolean;
 }
 
 export interface FeedStateStore {
@@ -58,7 +64,8 @@ export interface FeedImporterOptions extends CleanOptions {
   maxEntries?: number;
   /**
    * A replace-mode feed that suddenly lists less than this share of what it
-   * listed before is treated as broken and its old entries are kept.
+   * listed before is treated as broken and its old entries are kept, at any
+   * list size. An update that would empty a stored list is always refused.
    */
   minShrinkRatio?: number;
   /**
@@ -91,7 +98,12 @@ export interface FeedStatus {
   keyName?: FeedKeyName;
   /** Refused without a key, so off until the user adds one. Its stored entries still count. */
   needsKey?: boolean;
-  /** No successful fetch for three intervals. Never set while the feed needs a key. */
+  /** Its last update was refused for shrinking the list too far; the old list is kept. */
+  heldBack?: boolean;
+  /**
+   * No successful fetch for three intervals, or the last update was held back.
+   * Never set while the feed needs a key.
+   */
   stale: boolean;
   nextDueAt: number;
 }
@@ -147,7 +159,7 @@ export class FeedImporter {
       timeoutMs: options.timeoutMs ?? 60_000,
       maxBytes: options.maxBytes ?? 64 * 1024 * 1024,
       maxEntries: options.maxEntries ?? 1_000_000,
-      minShrinkRatio: options.minShrinkRatio ?? 0.1,
+      minShrinkRatio: options.minShrinkRatio ?? 0.5,
     };
   }
 
@@ -221,11 +233,15 @@ export class FeedImporter {
         list: s.list,
         entries: Object.keys(st?.entries ?? {}).length,
         stale:
-          !needsKey && (!st?.fetchedAt || now - st.fetchedAt > 3 * s.intervalHours * 3_600_000),
+          !needsKey &&
+          (!!st?.heldBack ||
+            !st?.fetchedAt ||
+            now - st.fetchedAt > 3 * s.intervalHours * 3_600_000),
         nextDueAt: this.dueAt(s),
       };
       if (s.auth) out.keyName = s.auth.key;
       if (needsKey) out.needsKey = true;
+      if (st?.heldBack) out.heldBack = true;
       if (st?.fetchedAt !== undefined) out.fetchedAt = st.fetchedAt;
       // An error from before the feed was refused for want of a key is no longer news.
       if (st?.lastError !== undefined && !needsKey) out.lastError = st.lastError;
@@ -299,6 +315,8 @@ export class FeedImporter {
       if (res.status === 304) {
         const st: FeedState = { ...prev, fetchedAt: now, lastAttemptAt: now };
         delete st.lastError;
+        // Unchanged since the list that was accepted, so nothing is held back any more.
+        delete st.heldBack;
         this.state.put(st);
         return {
           sourceId: s.id,
@@ -328,15 +346,18 @@ export class FeedImporter {
     if (entries.length > this.opts.maxEntries)
       return fail(`feed lists more than ${this.opts.maxEntries} entries`);
 
+    // A replace-mode update that would cut the stored list by more than half, or empty it,
+    // looks like a broken download rather than real removals, whatever the list's size.
+    // An empty stored list is free to fill.
     const prevCount = Object.keys(prev.entries).length;
     if (
       s.retainDays === 0 &&
-      prevCount >= 50 &&
-      entries.length < prevCount * this.opts.minShrinkRatio
+      prevCount > 0 &&
+      (entries.length === 0 || entries.length < prevCount * this.opts.minShrinkRatio)
     ) {
-      return fail(
-        `feed shrank from ${prevCount} to ${entries.length} entries; keeping the old list`,
-      );
+      const error = `feed shrank from ${prevCount} to ${entries.length} entries; keeping the old list`;
+      this.state.put({ ...prev, lastAttemptAt: now, lastError: error, heldBack: true });
+      return { sourceId: s.id, status: 'failed', entries: prevCount, error };
     }
 
     const next: Record<string, number> = {};

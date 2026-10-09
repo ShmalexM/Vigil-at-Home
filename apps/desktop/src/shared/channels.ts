@@ -56,6 +56,7 @@ export const CALL_NAMES = [
   'getUsageLimits',
   'getAi',
   'getAiPrefs',
+  'turnAiBackOn',
   'setAiPrefs',
   'explainAlert',
   'signInAi',
