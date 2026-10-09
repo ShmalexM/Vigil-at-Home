@@ -108,11 +108,13 @@ export const TOOL_RULE_TEMPLATES: readonly ToolRuleTemplate[] = [
           fidelity: 'high',
           // `git`, any global options (`-C dir`, `-c k=v`, `--no-pager`), `push`, then
           // in the same command a short-flag cluster with f (-f, -uf), --force… or a
-          // +refspec. Each option reads only one way, so it never backtracks badly.
+          // +refspec. The gap before `push` is read a character at a time and ends at
+          // the first word that is neither an option nor an option's value, so it never
+          // backtracks badly (the linter refuses a repeated group of options).
           condition: {
             field: 'command',
             op: 'regex',
-            value: String.raw`\bgit(?:\s+-[Cc]\s+\S+|\s+(?!-[Cc]\s)--?[a-z][\w-]*(?:=\S*)?)*\s+push\b[^|;&\n]*?(?:\s-[a-zA-Z]*f|\s--force|\s\+\S)`,
+            value: String.raw`\bgit(?=\s)(?:(?!\s+(?!\s)(?<!\s-[Cc]\s+)(?!-[Cc]\s|--?[a-z][\w-]*(?:=\S*)?\s|push\b))[^|;&\n])*?\s+(?<!\s-[Cc]\s+)push\b[^|;&\n]*?(?:\s-[a-zA-Z]*f|\s--force|\s\+\S)`,
           },
           reasons: ['The command force-pushes, which can overwrite commits on the remote.'],
         },

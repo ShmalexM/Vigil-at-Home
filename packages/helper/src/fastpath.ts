@@ -16,16 +16,23 @@
 // Anything running as the user can reach the helper's socket, so a sync may
 // not weaken this policy on its own say-so. With the app closed, this policy
 // and Santa's pre-launch rules are all that block. A sync that turns a rule
-// off or changes it, adds an exception, or adds one of Vigil's own paths
-// needs the admin password (loosening(), checked by the executor). Indicator
-// lists change every day as feeds age entries out, so an entry a list drops
-// keeps blocking for RETIRE_MS instead, and a list cannot drop more than
-// RETIRED_MAX entries in that time. The saved policy and its revision live in
-// a root-owned file the user's account cannot write.
+// off or changes it, or adds an exception, needs the admin password
+// (loosening(), checked by the executor). So does naming anything new as
+// Vigil's own (a path, an AppImage, a program hash): the app sends that
+// apart from the rules (self.grant, selfLoosening()), so the rules never wait
+// on that password. Until that grant is approved, an app running from
+// outside the installer's folder is not Vigil's own to these rules, so a rule
+// that matches it may act on it like any other program. Indicator lists change every day as
+// feeds age entries out, so an entry a list drops keeps blocking for
+// RETIRE_MS instead, and a list cannot drop more than RETIRED_MAX entries in
+// that time. The saved policy and its revision live in a root-owned file the
+// user's account cannot write.
 
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { isRelease, type Action, type SensorEvent } from '@vigil/core';
+import { selfKey, selfRoots, underSelfRoot, type SelfImage } from '@vigil/core/self';
 import {
+  compileRule,
   DetectionEngine,
   DetectionRule,
   memoryStores,
@@ -40,6 +47,7 @@ import {
   RuleExceptionSchema,
   type DetectionListSet,
   type DetectionSync,
+  type SelfGrant,
 } from './protocol.js';
 
 /** An action the helper ran for a rule, sent to the app with the event. */
@@ -61,6 +69,23 @@ export interface FastPathOptions {
   now?: () => number;
   /** For tests: a smaller RETIRED_MAX. */
   retiredMax?: number;
+  /** A file's device and inode (`fileId`), to check an AppImage the app names is that file. */
+  fileId?: (path: string) => string | undefined;
+  /**
+   * Vigil's own folders as the installer put them in place (root-owned).
+   * Until the helper takes its first self grant, it may name these without
+   * the password.
+   */
+  installed?: readonly string[];
+}
+
+/** What the helper never pauses, kills or blocks, as the app last sent it. */
+export interface SelfSet {
+  paths: readonly string[];
+  /** File ids of approved AppImages. */
+  images: readonly string[];
+  /** sha256 of the programs inside them. */
+  hashes: readonly string[];
 }
 
 /** How long an entry a list drops keeps blocking. */
@@ -77,13 +102,30 @@ const Saved = z.object({
   rules: z.array(DetectionRule),
   exceptions: z.array(RuleExceptionSchema),
   selfPaths: z.array(z.string()),
+  selfImages: z.array(z.object({ path: z.string(), id: z.string() })).default([]),
+  selfHashes: z.array(z.string()).default([]),
   lists: z.record(z.string(), z.array(z.string())),
   /** Entries lists dropped, by list, with when (ms). Still blocking until RETIRE_MS later. */
   retired: z.record(z.string(), z.record(z.string(), z.number())).default({}),
+  /**
+   * Whether a self grant was ever taken. Files from before self.grant only
+   * ever came from syncs that carried one.
+   */
+  selfGranted: z.boolean().default(true),
 });
 type Saved = z.infer<typeof Saved>;
 
-const EMPTY: Saved = { rev: 0, rules: [], exceptions: [], selfPaths: [], lists: {}, retired: {} };
+const EMPTY: Saved = {
+  rev: 0,
+  rules: [],
+  exceptions: [],
+  selfPaths: [],
+  selfImages: [],
+  selfHashes: [],
+  lists: {},
+  retired: {},
+  selfGranted: false,
+};
 
 /** Rule fields that change what an alert says, not what gets blocked. */
 const WORDING = new Set([
@@ -103,6 +145,8 @@ const WORDING = new Set([
 
 export class FastPath {
   private state: Saved = EMPTY;
+  /** Whether the installer's folders may still be named as Vigil without the password. */
+  private selfGrace = true;
   private engine: DetectionEngine | undefined;
   private digests = new Map<string, string>();
   /** Lists arriving in parts: name → digest and the parts so far. */
@@ -122,12 +166,25 @@ export class FastPath {
       return;
     }
     const parsed = Saved.safeParse(safeJson(raw));
+    // A damaged file may have held a self grant: no grace.
+    this.selfGrace = parsed.success && !parsed.data.selfGranted;
     if (!parsed.success) {
       this.opts.log?.('fast path: ignoring saved rules that do not parse');
       return;
     }
+    // A rule a newer release no longer compiles (stricter regex and glob
+    // checks) is dropped on its own; the rest keep blocking.
+    const rules = parsed.data.rules.filter((r) => {
+      try {
+        compileRule(r);
+        return true;
+      } catch (err) {
+        this.opts.log?.(`fast path: dropping saved rule: ${(err as Error).message}`);
+        return false;
+      }
+    });
     try {
-      this.apply(parsed.data);
+      this.apply({ ...parsed.data, rules });
     } catch (err) {
       this.opts.log?.(`fast path: saved rules did not load: ${(err as Error).message}`);
     }
@@ -135,25 +192,65 @@ export class FastPath {
 
   /**
    * What this sync would weaken, in words for the password prompt; empty when
-   * it only adds. Lists are not counted: dropped entries retire instead.
+   * it only adds or tightens. Lists are not counted: dropped entries retire
+   * instead. This holds whether or not any rule is saved yet: an exception
+   * taken while no rule blocks would outlast the rules that follow. A sync
+   * from an app before self.grant also carries the self set, which counts as
+   * selfLoosening() does.
+   *
+   * Throws PolicyRefused for an AppImage that isn't the file at its path,
+   * before anyone is asked for a password for it.
    */
   loosening(cmd: DetectionSync): string[] {
-    // With no rules nothing is blocked yet, so there is nothing to weaken.
-    if (this.state.rules.length === 0) return [];
-    const out: string[] = [];
+    const self = carriedSelf(cmd);
+    const out = self ? this.selfLoosening(self) : [];
     const next = new Map(cmd.rules.map((r) => [r.id, r]));
+    const rules: string[] = [];
     for (const r of this.state.rules) {
       const n = next.get(r.id);
-      if (!n) out.push(`stop blocking with “${r.name}”`);
-      else if (enforced(n) !== enforced(r)) out.push(`change what “${r.name}” blocks`);
+      if (!n) rules.push(`stop blocking with “${r.name}”`);
+      else if (enforced(n) !== enforced(r)) rules.push(`change what “${r.name}” blocks`);
     }
     const had = new Set(this.state.exceptions.map(canonical));
     const added = cmd.exceptions.filter((e) => !had.has(canonical(e)));
-    if (added.length === 1) out.push(`add an exception to ${added[0]!.ruleId}`);
-    else if (added.length) out.push(`add ${added.length} exceptions`);
-    const paths = new Set(this.state.selfPaths);
-    for (const p of cmd.selfPaths) if (!paths.has(p)) out.push(`never block ${p}`);
+    if (added.length === 1) rules.push(`add an exception to ${added[0]!.ruleId}`);
+    else if (added.length) rules.push(`add ${added.length} exceptions`);
+    return [...rules, ...out];
+  }
+
+  /**
+   * What a self grant would newly name as Vigil's own, in words for the
+   * password prompt; empty when it names nothing new. Anything not named
+   * before counts, even a file inside a folder already named: being Vigil
+   * exempts a program from every block. The one exemption is the installer's
+   * own folders (see `installed`), until the helper takes its first self
+   * grant; a self path outside them, an AppImage or a program hash still
+   * asks.
+   *
+   * Throws PolicyRefused for an AppImage that isn't the file at its path,
+   * before anyone is asked for a password for it.
+   */
+  selfLoosening(cmd: SelfFields): string[] {
+    this.checkImages(cmd.selfImages ?? []);
+    const out: string[] = [];
+    const paths = new Set(this.state.selfPaths.map((p) => selfKey(p)));
+    const installed = this.selfGrace ? selfRoots(this.opts.installed ?? []) : [];
+    for (const p of ownPaths(cmd.selfPaths, cmd.selfImages ?? []))
+      if (!paths.has(selfKey(p)) && !underSelfRoot(installed, selfKey(p)))
+        out.push(`never block ${p}`);
+    const images = new Set(this.state.selfImages.map((i) => i.id));
+    for (const i of cmd.selfImages ?? []) if (!images.has(i.id)) out.push(`never block ${i.path}`);
+    const hashes = new Set(this.state.selfHashes);
+    const newHashes = (cmd.selfHashes ?? []).filter((h) => !hashes.has(h)).length;
+    if (newHashes) out.push(`never block ${newHashes} of Vigil’s programs by hash`);
     return out;
+  }
+
+  /** Replace what is Vigil's own. The executor asks for the password first (selfLoosening()). */
+  grantSelf(cmd: SelfFields): { rev: number } {
+    this.apply({ ...this.state, rev: this.state.rev + 1, ...this.selfFrom(cmd) });
+    this.save();
+    return { rev: this.state.rev };
   }
 
   /**
@@ -167,12 +264,22 @@ export class FastPath {
       if (have) lists[name] = have;
     }
     const retired = this.retire(lists);
-    // Throws RuleCompileError before anything changes.
+    // Only an app from before self.grant sends the self set with the rules.
+    const self = carriedSelf(cmd);
+    const selfFields = self ? this.selfFrom(self) : {};
+    // Throws RuleCompileError before anything changes. That includes a regex or
+    // glob that could take too long to match (regexProblem, globProblem): adding
+    // rules needs no password, so the same checks as the app's keep one rule
+    // from stalling every check here.
     this.apply({
       rev: this.state.rev + 1,
       rules: cmd.rules,
       exceptions: cmd.exceptions,
-      selfPaths: cmd.selfPaths,
+      selfPaths: this.state.selfPaths,
+      selfImages: this.state.selfImages,
+      selfHashes: this.state.selfHashes,
+      selfGranted: this.state.selfGranted,
+      ...selfFields,
       lists,
       retired,
     });
@@ -202,6 +309,43 @@ export class FastPath {
     this.apply({ ...this.state, rev: this.state.rev + 1, lists, retired: this.retire(lists) });
     this.save();
     return { complete: true };
+  }
+
+  /** What is Vigil's own, as the app last sent it. */
+  self(): SelfSet {
+    return {
+      paths: ownPaths(this.state.selfPaths, this.state.selfImages),
+      images: this.state.selfImages.map((i) => i.id),
+      hashes: this.state.selfHashes,
+    };
+  }
+
+  /** The saved fields for a self grant; throws PolicyRefused for an AppImage that isn't its file. */
+  private selfFrom(
+    cmd: SelfFields,
+  ): Pick<Saved, 'selfPaths' | 'selfImages' | 'selfHashes' | 'selfGranted'> {
+    const selfImages = cmd.selfImages ?? [];
+    this.checkImages(selfImages);
+    return {
+      selfPaths: ownPaths(cmd.selfPaths, selfImages),
+      selfImages,
+      selfHashes: cmd.selfHashes ?? [],
+      selfGranted: true,
+    };
+  }
+
+  /**
+   * A newly named AppImage must be the file at the path the password prompt
+   * showed. One already approved matches by id alone, so it still counts
+   * after the image is renamed while Vigil runs.
+   */
+  private checkImages(images: readonly SelfImage[]): void {
+    const known = new Set(this.state.selfImages.map((i) => i.id));
+    for (const i of images) {
+      if (known.has(i.id)) continue;
+      if (!this.opts.fileId || this.opts.fileId(i.path) !== i.id)
+        throw new PolicyRefused(`${i.path} is not the AppImage Vigil runs from`);
+    }
   }
 
   status(): { rev: number; rules: number; lists: Record<string, number>; retired: number } {
@@ -282,7 +426,13 @@ export class FastPath {
       ? new DetectionEngine(
           next.rules.map((r) => ({ ...r, mode: 'block' as const })),
           stores,
-          { safety: { selfPaths: next.selfPaths }, recordHistory: false },
+          {
+            safety: {
+              selfPaths: ownPaths(next.selfPaths, next.selfImages),
+              selfHashes: next.selfHashes,
+            },
+            recordHistory: false,
+          },
         )
       : undefined;
     this.engine = engine;
@@ -291,6 +441,7 @@ export class FastPath {
   }
 
   private save(): void {
+    if (this.state.selfGranted) this.selfGrace = false;
     const tmp = `${this.opts.file}.tmp`;
     try {
       writeFileSync(tmp, JSON.stringify(this.state), { mode: 0o600 });
@@ -299,6 +450,30 @@ export class FastPath {
       this.opts.log?.(`fast path: could not save rules: ${(err as Error).message}`);
     }
   }
+}
+
+/** A self grant, as self.grant or an older app's detection.sync carries it. */
+export type SelfFields = Pick<SelfGrant, 'selfPaths' | 'selfImages' | 'selfHashes'>;
+
+/** The self set a sync carries, if any: only apps from before self.grant send one. */
+function carriedSelf(cmd: DetectionSync): SelfFields | undefined {
+  if (cmd.selfPaths === undefined && cmd.selfImages === undefined && cmd.selfHashes === undefined)
+    return undefined;
+  return {
+    selfPaths: cmd.selfPaths ?? [],
+    ...(cmd.selfImages ? { selfImages: cmd.selfImages } : {}),
+    ...(cmd.selfHashes ? { selfHashes: cmd.selfHashes } : {}),
+  };
+}
+
+/**
+ * Self paths without the AppImages' own paths. An image counts by device and
+ * inode alone (selfImage.ts): trusting its path too would make whatever file
+ * later sits at that path Vigil, after the image is moved or replaced.
+ */
+function ownPaths(paths: readonly string[], images: readonly SelfImage[]): string[] {
+  const named = new Set(images.map((i) => selfKey(i.path)));
+  return paths.filter((p) => !named.has(selfKey(p)));
 }
 
 /** A rule as the helper enforces it, without its wording. */

@@ -144,6 +144,8 @@ export const EventQuery = z.object({
   text: z.string().max(200).optional(),
   /** Page backwards from this timestamp. */
   before: z.number().int().optional(),
+  /** With `before`: the id of the last event shown, for events sharing its ts. */
+  beforeId: z.string().min(1).max(128).optional(),
   limit: z.number().int().min(1).max(500).optional(),
   /** Only events from this agent's sessions. */
   agent: AgentId.optional(),
