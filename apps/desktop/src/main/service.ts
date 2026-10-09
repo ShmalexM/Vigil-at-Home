@@ -503,7 +503,14 @@ export class VigilCore {
       const { value, helper, reason } = await this.detector.quiet(id);
       if (!value.ok) return value;
       const rule = this.ruleNow(id);
-      return { ok: true, prior: value.prior, token: value.token, rule, helper, reason };
+      return {
+        ok: true,
+        prior: value.prior,
+        token: value.token,
+        rule,
+        helper,
+        ...(reason === undefined ? {} : { reason }),
+      };
     }
     const rule = this.store.getRule(id);
     if (!rule) throw new Error(`No rule ${id}`);
@@ -520,7 +527,12 @@ export class VigilCore {
     if (this.detector?.hasRule(id)) {
       const { value, helper, reason } = await this.detector.undoQuiet(id, token);
       if (!value.ok) return value;
-      return { ok: true, rule: this.ruleNow(id), helper, reason };
+      return {
+        ok: true,
+        rule: this.ruleNow(id),
+        helper,
+        ...(reason === undefined ? {} : { reason }),
+      };
     }
     const rule = this.store.getRule(id);
     if (!rule) throw new Error(`No rule ${id}`);
