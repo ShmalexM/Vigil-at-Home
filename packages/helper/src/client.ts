@@ -151,6 +151,17 @@ export class HelperClient {
   }
 
   /**
+   * Send a command, but never show the password dialog for it: resolves
+   * `needsApproval` if the helper wants the password, and the command is not
+   * carried out.
+   */
+  async attempt<T = unknown>(command: HelperCommand): Promise<{ result: T } | 'needsApproval'> {
+    const resp = await this.send(command);
+    if (!resp.ok && 'needsApproval' in resp) return 'needsApproval';
+    return { result: result<T>(resp) };
+  }
+
+  /**
    * Send a command that may need approval without asking yet. If it needs
    * none, it settles now. Otherwise it waits: the next password dialog, from
    * call() or approveHeld(), asks for it too, so a release and the rule
