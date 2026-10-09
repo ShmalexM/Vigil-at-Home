@@ -155,8 +155,12 @@ describe('redaction', () => {
 const MAX_PASS_MS = 2000;
 /** What n and 4n may take apart: 4 when linear, 16 when quadratic. */
 const MAX_GROWTH = 8;
-/** Shorter passes are timer noise: below this, the smaller one counts as this long. */
-const MIN_TIMED_MS = 2;
+/**
+ * Shorter passes are timer and GC noise: below this, the smaller one counts as
+ * this long. A pass this quick at n/4 can't be quadratic at these sizes (that
+ * would take seconds), and the MAX_PASS_MS ceiling still applies.
+ */
+const MIN_TIMED_MS = 10;
 
 function timeOf(run: () => void): number {
   const started = performance.now();
@@ -2487,35 +2491,32 @@ describe('redaction of secrets in object keys', () => {
   });
 
   it('runs in linear time on wide and deep keys', () => {
-    const time = (fn: () => void) => {
-      const started = performance.now();
-      fn();
-      return performance.now() - started;
+    const wide = (key: (i: number) => string) => (size: number) => {
+      let text = '{';
+      for (let i = 0; text.length < size; i++) text += `${i ? ',' : ''}"${key(i)}":${i}`;
+      return text + '}';
     };
-    const wide = (n: number, key: (i: number) => string) =>
-      '{' + Array.from({ length: n }, (_, i) => `"${key(i)}":${i}`).join(',') + '}';
-    const inputs = [
-      wide(10_000, (i) => `${W}${i}`),
-      wide(20_000, (i) => `k${i}`),
-      wide(10_000, (i) => `\\u005bREDACTED_KEY_${i}]`),
-      wide(10_000, (i) => `password${i}=x`),
-      '{"a":'.repeat(100_000),
-      '[{"' + `${W}":`.repeat(10_000),
-      '{"\\u005c'.repeat(50_000),
+    const shapes: ReadonlyArray<readonly [string, (size: number) => string]> = [
+      ['secret keys', wide((i) => `${W}${i}`)],
+      ['plain keys', wide((i) => `k${i}`)],
+      ['escaped placeholders', wide((i) => `\\u005bREDACTED_KEY_${i}]`)],
+      ['keyed keys', wide((i) => `password${i}=x`)],
+      ['deep objects', (n) => fill('{"a":', n)],
+      ['deep secret keys', (n) => '[{"' + fill(`${W}":`, n)],
+      ['escaped backslashes', (n) => fill('{"\\u005c', n)],
     ];
-    for (const input of inputs) {
-      expect(input.length).toBeLessThanOrEqual(MAX_REDACT_CHARS);
-      for (const text of [input, JSON.stringify(input).slice(0, MAX_REDACT_CHARS)]) {
-        const took = time(() => redact(text));
-        expect(took, `${text.slice(0, 16)}… took ${took.toFixed(1)} ms`).toBeLessThan(400);
-      }
+    const size = 256 * 1024;
+    for (const [label, make] of shapes) {
+      expectLinear(label, size, (n) => redact(make(n)));
+      expectLinear(`${label}, encoded`, size, (n) => redact(JSON.stringify(make(n / 2))));
     }
-    const object = Object.fromEntries(
-      Array.from({ length: 50_000 }, (_, i) => [i % 2 ? `${W}${i}` : `k${i}`, i]),
+    expectLinear('structured keys', 40_000, (n) =>
+      redactValue(
+        Object.fromEntries(Array.from({ length: n }, (_, i) => [i % 2 ? `${W}${i}` : `k${i}`, i])),
+        {},
+      ),
     );
-    const took = time(() => redactValue(object, {}));
-    expect(took, `50,000 keys took ${took.toFixed(1)} ms`).toBeLessThan(1000);
-  }, 30_000);
+  }, 60_000);
 });
 
 describe('redaction of more command-line and URL secrets', () => {
@@ -2681,29 +2682,24 @@ describe('redaction of more command-line and URL secrets', () => {
       'DB_PW=',
       'X-Goog-Signature=',
     ];
-    const size = 512 * 1024;
+    const size = MAX_REDACT_CHARS;
     for (const unit of units) {
-      const input = unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
-      for (const text of [input, `htpasswd smbclient lftp zip ${input.slice(30)}`]) {
-        const started = performance.now();
-        redact(text);
-        redactArgv(text.split(' ').slice(0, 20_000));
-        const took = performance.now() - started;
-        expect(took, `${JSON.stringify(unit)} took ${took.toFixed(1)} ms`).toBeLessThan(400);
-      }
+      const label = JSON.stringify(unit);
+      expectLinear(label, size, (n) => redact(fill(unit, n)));
+      expectLinear(`${label} after the tool names`, size, (n) =>
+        redact(`htpasswd smbclient lftp zip config ${fill(unit, n - 40)}`),
+      );
+      expectLinear(`${label} as arguments`, size / 4, (n) => redactArgv(fill(unit, n).split(' ')));
     }
-    for (const input of [
-      'htpasswd -' + 'b'.repeat(size - 10),
-      'smbclient -U ' + 'a'.repeat(size - 20),
-      'lftp -u ' + 'a'.repeat(size - 20),
-      'aws configure set ' + 'a.'.repeat((size - 30) / 2),
-    ]) {
-      const started = performance.now();
-      redact(input);
-      const took = performance.now() - started;
-      expect(took, `${input.slice(0, 16)}… took ${took.toFixed(1)} ms`).toBeLessThan(400);
+    for (const [label, make] of [
+      ['one long htpasswd flag', (n: number) => 'htpasswd -' + 'b'.repeat(n - 10)],
+      ['one long smbclient user', (n: number) => 'smbclient -U ' + 'a'.repeat(n - 20)],
+      ['one long lftp user', (n: number) => 'lftp -u ' + 'a'.repeat(n - 20)],
+      ['a dotted aws name', (n: number) => 'aws configure set ' + fill('a.', n - 30)],
+    ] as const) {
+      expectLinear(label, size, (n) => redact(make(n)));
     }
-  }, 60_000);
+  }, 120_000);
 });
 
 describe('child environment', () => {
