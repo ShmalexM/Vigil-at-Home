@@ -19,6 +19,10 @@ case $N in
 esac
 # And that name is the folder the link points to, however readlink printed it
 # (the / keeps a newline at the end of either path from being dropped).
-T=$(cd -P "$D/current" 2>/dev/null && pwd -P && echo /) && W=$(cd -P "$D/versions/$N" 2>/dev/null && pwd -P && echo /) && [ "$T" = "$W" ] ||
-  { echo "Unexpected $D/current: $V" >&2; exit 1; }
+T=$(cd -P "$D/current" 2>/dev/null && pwd -P && echo /) || T=
+W=$(cd -P "$D/versions/$N" 2>/dev/null && pwd -P && echo /) || W=
+if [ -z "$T" ] || [ "$T" != "$W" ]; then
+  echo "Unexpected $D/current: $V" >&2
+  exit 1
+fi
 exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "$D/versions/$N/node" "$D/versions/$N/helper.mjs" "$@"
