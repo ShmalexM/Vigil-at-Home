@@ -74,12 +74,12 @@ function withKeys(value: unknown, depth: number): unknown {
 
 /**
  * Text that is a JSON object or array is redacted as data, keys included;
- * text that is a JSON string (JSON encoded twice or more) is unwrapped and
- * read the same way; other text as one field.
+ * other text as one field. JSON encoded twice or more (a JSON string whose
+ * text is JSON) is one field here: the redactor reads its decoded content.
  */
 export function redactJsonText(text: string, depth = 0): string {
   const t = text.trim();
-  if (/^[{["]/.test(t)) {
+  if (/^[{[]/.test(t)) {
     if (depth >= MAX_DEPTH) return WITHHELD_TEXT;
     let parsed: unknown;
     try {
@@ -87,7 +87,6 @@ export function redactJsonText(text: string, depth = 0): string {
     } catch {
       parsed = undefined;
     }
-    if (typeof parsed === 'string') return JSON.stringify(redactJsonText(parsed, depth + 1));
     if (parsed && typeof parsed === 'object') return JSON.stringify(redactDeep(parsed, depth + 1));
   }
   return redactTextForPack(text);
@@ -130,13 +129,13 @@ function settle(value: unknown, depth: number): unknown {
  * The redactor reads JSON field by field, so a secret split across fields
  * (a command in the question, its password in the answer) passes it. This
  * reads the free text of a value as one text instead: its strings, one per
- * line, leaving out those that are JSON, which were read as data.
+ * line, leaving out JSON objects and arrays, which were read as data.
  */
 function objectsAsText(value: unknown): boolean {
   const lines: string[] = [];
   const walk = (v: unknown, depth: number): void => {
     if (typeof v === 'string') {
-      if (!/^\s*[{["]/.test(v)) lines.push(v);
+      if (!/^\s*[{[]/.test(v)) lines.push(v);
     } else if (v && typeof v === 'object' && depth < MAX_DEPTH) {
       for (const x of Array.isArray(v) ? v : Object.values(v)) walk(x, depth + 1);
     }

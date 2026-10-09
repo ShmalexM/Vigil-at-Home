@@ -142,15 +142,15 @@ flowchart LR
 
 **Details**, closed until you open it, is for digging deeper. It lists each
 tool call the run made: the tool, its arguments, whether it ran, didn't run
-(and why: the gate, you, a scheduled run that can't ask, or the run ending)
+(and why: the gate, you, or the run ending)
 or failed, and the first 800 characters of what it returned. Every field of
 a note (what was asked, the answer, reasons, tool titles, error text, and the
 arguments and results as data, before they are written out as text) goes
 through Vigil's redactor before it is stored, and is cut to size only after
 that. The whole note is then redacted again as the text that is stored,
 object keys included (the shared redactor keeps keys, so the pack redacts
-each one too, and reads a result that is JSON text as data, even JSON
-encoded twice). A secret split across fields, such as a command in the
+each one too, and reads a result that is JSON text as data; the redactor
+reads JSON encoded twice as its decoded content). A secret split across fields, such as a command in the
 question and its password in the answer, fails closed: that note's free
 text is withheld and its shape is kept. Notes are
 redacted the same way each time they are read for the page, so older notes
