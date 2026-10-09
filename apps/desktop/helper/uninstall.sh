@@ -15,8 +15,15 @@ LABEL=com.vigilathome.helper
 # Older helpers don't have this command, so a failure here doesn't stop the removal.
 /Library/PrivilegedHelperTools/vigil-helper osquery-remove 2>/dev/null || true
 launchctl bootout "system/$LABEL" 2>/dev/null || true
+# Remove the pin and its key once the helper has stopped. Older helpers lack
+# the command; the lines below cover them.
+/Library/PrivilegedHelperTools/vigil-helper pin-remove 2>/dev/null || true
 rm -f "/Library/LaunchDaemons/$LABEL.plist"
 rm -f /Library/PrivilegedHelperTools/vigil-helper
 rm -rf /Library/PrivilegedHelperTools/vigil-helper.d
+# The pin and its key are kept immutable by the helper; clear that before removing them.
+chflags nouchg "/Library/Application Support/Vigil/pin/app-pin.json" "/Library/Application Support/Vigil/pin/app-pin.key" "/Library/Application Support/Vigil/pin/app-pin.gen" 2>/dev/null || true
+rm -rf "/Library/Application Support/Vigil/pin"
+rm -f "/Library/Application Support/Vigil/app-pin.json" "/Library/Application Support/Vigil/app-pin.json.tmp"
 rm -f /var/run/vigil-helper.sock
 echo "Vigil helper removed. Quarantined files are still in /Library/Application Support/Vigil."

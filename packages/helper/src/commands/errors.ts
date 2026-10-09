@@ -1,6 +1,8 @@
+import type { ErrorCode } from '../protocol.js';
+
 export class ActionError extends Error {
   constructor(
-    readonly code: 'invalid' | 'refused' | 'failed' | 'not_found',
+    readonly code: ErrorCode,
     message: string,
   ) {
     super(message);

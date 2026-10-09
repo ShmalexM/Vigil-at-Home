@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SensorEvent } from '@vigil/core';
 import type { HelperRan } from '@vigil/helper';
-import type { HelperClient } from '@vigil/helper/client';
+import { HelperCallError, type HelperClient } from '@vigil/helper/client';
 import { describe, expect, it, vi } from 'vitest';
 import { HelperLink } from './helper.js';
 
@@ -96,6 +96,42 @@ describe('HelperLink', () => {
     link.stop();
   });
 
+  it('marks a quarantine refused for an installer-owned item, for the app to word', async () => {
+    const fake = fakeClient((cmd) => {
+      if (cmd.kind === 'file.quarantine')
+        throw new HelperCallError('belongs to root', 'installer-owned');
+      if (cmd.kind === 'persistence.disable')
+        throw new HelperCallError(
+          'no',
+          (cmd as { path?: string }).path?.includes('/a/')
+            ? 'startup-folder-linked'
+            : 'not-your-item',
+        );
+      throw new HelperCallError('no', 'refused');
+    });
+    const link = new HelperLink(socket(), async () => fake.client);
+    await link.tryConnect();
+    const r = await link.execute({ kind: 'file.quarantine', path: '/Applications/X.app' });
+    expect(r).toMatchObject({
+      errorCode: 'installer-owned',
+      error: expect.stringMatching(/^Not done/),
+    });
+    // Startup items in a linked folder, or another user's: their own codes.
+    const linked = '/home/a/.config/autostart/x.desktop';
+    expect(await link.execute({ kind: 'persistence.disable', path: linked })).toMatchObject({
+      errorCode: 'startup-folder-linked',
+    });
+    const theirs = '/home/b/.config/autostart/y.desktop';
+    expect(await link.execute({ kind: 'persistence.disable', path: theirs })).toMatchObject({
+      errorCode: 'not-your-item',
+    });
+    // Other refusals carry no code.
+    const other = await link.execute({ kind: 'process.suspend', pid: 5 });
+    expect(other.errorCode).toBeUndefined();
+    expect(other.error).toBe('Not done: no');
+    link.stop();
+  });
+
   it('does not run again what the helper’s own rules already ran', async () => {
     const fake = fakeClient(() => ({ actionId: 'j', summary: 'ok', undoable: false }));
     const link = new HelperLink(socket(), async () => fake.client);
@@ -122,8 +158,21 @@ describe('HelperLink', () => {
           action: { kind: 'network.block', address: '203.0.113.9' },
           error: 'pf is off',
         },
+        {
+          ruleId: 'known-bad-hash',
+          at: 3,
+          action: { kind: 'file.quarantine', path: '/tmp/payload' },
+          error: 'Not moved in time',
+          errorCode: 'move-stalled',
+        },
       ],
     );
+    // A move the helper stopped waiting on keeps its code, for the app's own line.
+    expect(await link.execute({ kind: 'file.quarantine', path: '/tmp/payload' })).toEqual({
+      at: 3,
+      error: 'Not moved in time',
+      errorCode: 'move-stalled',
+    });
     // The helper's own finish time, so time-to-block stays honest.
     expect(await link.execute(kill)).toEqual({ at: 1, simulated: false });
     expect(await link.execute({ kind: 'network.block', address: '203.0.113.9' })).toMatchObject({

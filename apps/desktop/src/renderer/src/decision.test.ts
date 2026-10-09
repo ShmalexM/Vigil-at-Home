@@ -1,6 +1,7 @@
 import type { Action, ActionProposal, ActionRecord, Alert } from '@vigil/core';
 import { describe, expect, it } from 'vitest';
 import {
+  actionErrorText,
   activeContainment,
   containLabel,
   isSimulated,
@@ -9,7 +10,9 @@ import {
   provenance,
   releaseLabel,
   releaseStep,
+  refusalNote,
   responseProvenance,
+  sameAlert,
 } from './decision';
 
 let n = 0;
@@ -67,6 +70,116 @@ describe('decision wording', () => {
     expect(containLabel([prop(suspend)])).toBe('Pause app');
     expect(containLabel([prop(block)])).toBe('Block connection');
     expect(containLabel([prop(suspend), prop(block)])).toBe('Do all 2');
+  });
+});
+
+describe('a quarantine an installer’s ownership stopped', () => {
+  const app = '/Applications/Tool.app/Contents/MacOS/Tool';
+  const refused = (path: string) =>
+    rec(
+      { kind: 'file.quarantine', path },
+      {
+        status: 'failed',
+        alertId: 'al1',
+        result: { at: 1, error: 'Not done: x', errorCode: 'installer-owned' },
+      },
+    );
+  const santaBlock = (over: Partial<ActionRecord> = {}) =>
+    rec(
+      { kind: 'santa.rule.set', ruleType: 'binary', identifier: 'a'.repeat(64), policy: 'block' },
+      { alertId: 'al1', ...over },
+    );
+
+  it('says the app is blocked only when this alert blocked it', () => {
+    const q = refused(app);
+    expect(refusalNote(q, [q, santaBlock()])).toBe(
+      'Vigil blocked this app from running but can’t move apps an installer put in Applications. Drag it to the Trash to remove it.',
+    );
+    // No block, a failed one, or one undone since: no claim.
+    for (const others of [
+      [],
+      [santaBlock({ status: 'failed' })],
+      [santaBlock({ status: 'undone' })],
+    ])
+      expect(refusalNote(q, [q, ...others])).toBe(
+        'Vigil can’t move apps an installer put in Applications. Drag it to the Trash to remove it.',
+      );
+    expect(
+      refusalNote(q, [
+        q,
+        santaBlock({
+          action: {
+            kind: 'santa.rule.set',
+            ruleType: 'binary',
+            identifier: 'b'.repeat(64),
+            policy: 'allow',
+          },
+        }),
+      ]),
+    ).not.toMatch(/blocked/);
+  });
+
+  it('uses the generic line for something that is not an app', () => {
+    const q = refused('/tmp/shared/helper.sh');
+    expect(refusalNote(q, [q, santaBlock()])).toBe(
+      'Vigil can’t move this item because it belongs to the system. Remove it yourself if you don’t need it.',
+    );
+  });
+
+  it('leaves other failures as they were', () => {
+    const plain = rec(
+      { kind: 'file.quarantine', path: '/tmp/x' },
+      { status: 'failed', result: { at: 1, error: 'boom' } },
+    );
+    expect(refusalNote(plain, [plain])).toBeUndefined();
+    expect(actionErrorText(plain, [plain])).toBe('boom');
+    const q = refused(app);
+    const elsewhere = santaBlock({ alertId: 'other' });
+    expect(sameAlert([q, elsewhere], q)).toEqual([q]);
+    expect(actionErrorText(q, sameAlert([q, elsewhere], q))).not.toMatch(/blocked/);
+  });
+});
+
+describe('a restore its owner can’t write back', () => {
+  it('shows one calm line for it', () => {
+    const r = rec(
+      { kind: 'file.restore', quarantineId: 'q1' },
+      { status: 'failed', result: { at: 1, error: 'x', errorCode: 'owner-cannot-write' } },
+    );
+    expect(actionErrorText(r, [r])).toBe(
+      'Vigil can’t put this back because its owner can’t write to that folder.',
+    );
+  });
+});
+
+describe('a startup item Vigil won’t turn off', () => {
+  it('shows one calm line for a linked folder, and for another user’s item', () => {
+    const linked = rec(
+      { kind: 'persistence.disable', path: '/home/a/.config/autostart/x.desktop' },
+      { status: 'failed', result: { at: 1, error: 'x', errorCode: 'startup-folder-linked' } },
+    );
+    expect(actionErrorText(linked, [linked])).toBe(
+      'Vigil couldn’t turn off this startup item because its folder is a link to somewhere else.',
+    );
+    const other = rec(
+      { kind: 'persistence.disable', path: '/home/b/.config/autostart/x.desktop' },
+      { status: 'failed', result: { at: 1, error: 'x', errorCode: 'not-your-item' } },
+    );
+    expect(actionErrorText(other, [other])).toBe(
+      'Vigil only acts on startup items that belong to you.',
+    );
+  });
+});
+
+describe('a move the helper stopped waiting on', () => {
+  it('shows one calm line for it', () => {
+    const r = rec(
+      { kind: 'file.quarantine', path: '/home/a/miner' },
+      { status: 'failed', result: { at: 1, error: 'x', errorCode: 'move-stalled' } },
+    );
+    expect(actionErrorText(r, [r])).toBe(
+      'Vigil couldn’t move this in time. Anything it stopped or blocked stays that way.',
+    );
   });
 });
 

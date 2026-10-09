@@ -21,6 +21,7 @@ type PackCall =
   | 'refreshConnector'
   | 'listPackNotes'
   | 'clearPackNotes'
+  | 'exportPackNotes'
   | 'listPackMemory'
   | 'addPackMemory'
   | 'forgetPackMemory'
@@ -73,6 +74,7 @@ export function packHandlers(pack: PackService, connectors: Connectors): Pick<Ha
     refreshConnector: (id) => result(() => pack.refreshConnector(id)),
     listPackNotes: (filter) => pack.notes(filter),
     clearPackNotes: (dog) => pack.clearNotes(dog),
+    exportPackNotes: (filter, as, title) => pack.exportNotes(filter, as, title),
     listPackMemory: () => pack.memories(),
     addPackMemory: (input) => result(() => pack.remember(input)),
     forgetPackMemory: (id) => pack.forget(id),

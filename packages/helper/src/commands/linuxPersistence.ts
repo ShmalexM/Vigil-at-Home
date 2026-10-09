@@ -11,13 +11,14 @@
 // part of the system and never touched.
 
 import { basename, dirname } from 'node:path';
-import { lstatSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { actorFor, readAs } from './transfer.js';
 import type { System } from '../system.js';
 import { PROTECTED_UNITS, protectionFor } from '../config.js';
 import { ActionError } from './errors.js';
 import { runsProtectedProgram } from './protectedSet.js';
-import { quarantine, resolveTarget, restore, type QuarantineOptions } from './quarantine.js';
-import type { PersistenceRecord } from './persistence.js';
+import { quarantine, restore, type QuarantineOptions } from './quarantine.js';
+import { checkOwnItem, startupTarget, type PersistenceRecord } from './persistence.js';
 
 /** Folders whose items persistence.disable accepts on Linux. */
 export const LINUX_STARTUP_DIR_RE =
@@ -111,6 +112,9 @@ export function parseShow(out: string): { names: string[]; programs: string[] } 
   return { names: names.filter(Boolean), programs };
 }
 
+const isTheirs = (name: string) =>
+  new ActionError('refused', `${name} belongs to Vigil or its sensors`);
+
 export async function disableLinuxPersistence(
   sys: System,
   path: string,
@@ -130,24 +134,20 @@ export async function disableLinuxPersistence(
   if (dirname(path).endsWith('/autostart') !== isDesktop) {
     throw new ActionError('invalid', `${name} does not belong in ${dirname(path)}`);
   }
-  if (PROTECTED_UNITS.has(name))
-    throw new ActionError('refused', `${name} belongs to Vigil or its sensors`);
-  // Vet the file the way the quarantine will before stopping anything.
-  resolveTarget(path, startupQuarantine(opts));
-  let st;
-  try {
-    st = lstatSync(path);
-  } catch {
-    throw new ActionError('not_found', `${path} does not exist`);
-  }
-  if (!st.isFile()) throw new ActionError('refused', `${path} is not a regular file`);
-  const text = readFileSync(path, 'utf8');
+  if (PROTECTED_UNITS.has(name)) throw isTheirs(name);
+  // Vetted before systemd is touched, so a protected file is never even stopped.
+  const real = await startupTarget(sys, path, startupQuarantine(opts));
+  if (PROTECTED_UNITS.has(basename(real))) throw isTheirs(basename(real));
+  // Read as whoever controls the path (commands/transfer.ts), never by root through it.
+  const file = await readAs(await (opts.actorFor ?? actorFor)(sys, real), real);
+  // Anywhere but /etc, an item is a user's own.
+  if (!dirname(real).startsWith('/etc/')) checkOwnItem(real, file.uid, sys.consoleUid());
 
-  const scope = unitScope(path, st.uid, passwd);
+  const scope = unitScope(real, file.uid, passwd);
   // Whatever it is called, an item that is or runs Vigil or a sensor is theirs:
   // check the names systemd knows the unit by (aliases too) and what it runs.
   const names = new Set<string>();
-  const programs = startCommands(text, isDesktop);
+  const programs = startCommands(file.data.toString('utf8'), isDesktop);
   if (scope.kind !== 'autostart') {
     const show = await sys.run('systemctl', [
       ...scopeArgs(scope),
@@ -181,7 +181,7 @@ export async function disableLinuxPersistence(
         throw new ActionError('failed', `could not stop ${name}: ${stop.stderr.trim()}`);
     }
   }
-  const q = quarantine(path, actionId, startupQuarantine(opts));
+  const q = await quarantine(sys, path, actionId, startupQuarantine(opts));
   if (scope.kind !== 'autostart')
     await sys.run('systemctl', [...scopeArgs(scope), 'daemon-reload']);
   return { quarantine: q, label: name, domain: domainOf(scope), wasLoaded };
@@ -192,7 +192,7 @@ export async function restoreLinuxPersistence(
   rec: PersistenceRecord,
   opts: QuarantineOptions,
 ): Promise<void> {
-  restore(rec.quarantine, startupQuarantine(opts));
+  await restore(sys, rec.quarantine, startupQuarantine(opts));
   const scope = scopeOf(rec.domain);
   if (scope.kind === 'autostart') return;
   const args = scopeArgs(scope);

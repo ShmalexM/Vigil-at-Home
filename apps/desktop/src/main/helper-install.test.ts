@@ -1,23 +1,31 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { insideInstalledRoot } from '@vigil/core/self';
 import {
   adminScriptArgs,
+  appPinFile,
+  appPinned,
+  appPinTarget,
   helperBundleDir,
   helperDigest,
   helperInstallCommand,
   helperScriptFiles,
   helperMatch,
+  inInstallerFolder,
   installedHelperFiles,
   ROOT_SHELL,
   rootStageScript,
@@ -64,7 +72,9 @@ describe('helper install', () => {
     const cmd = helperInstallCommand(dir, 'darwin')!;
     expect(cmd).toBe(
       `sudo ${ROOT_SHELL.join(' ')} ${shellQuote(rootStageScript('darwin'))} vigil-helper-setup ${shellQuote(dir)} ` +
-        [files[0]!, helperDigest(dir, files), ...files].map(shellQuote).join(' '),
+        [files[0]!, helperDigest(dir, files), appPinTarget('darwin'), ...files]
+          .map(shellQuote)
+          .join(' '),
     );
     const linux = helperInstallCommand(dir, 'linux')!;
     expect(
@@ -85,7 +95,7 @@ describe('helper install', () => {
     const out = mkdtempSync(join(tmpdir(), 'out-'));
     writeFileSync(
       join(dir, 'linux', 'install.sh'),
-      `cd "$(dirname "$0")" && pwd > ${shellQuote(join(out, 'ran-in'))}; cat "$(dirname "$0")/../helper.mjs" > ${shellQuote(join(out, 'saw'))}`,
+      `cd "$(dirname "$0")" && pwd > ${shellQuote(join(out, 'ran-in'))}; cat "$(dirname "$0")/../helper.mjs" > ${shellQuote(join(out, 'saw'))}; printf %s "$1" > ${shellQuote(join(out, 'app'))}`,
     );
     const files = helperScriptFiles('install', 'linux');
     const want = helperDigest(dir, files);
@@ -99,6 +109,7 @@ describe('helper install', () => {
           src,
           files[0]!,
           want,
+          "/home/a b/Vigil's.AppImage",
           ...files,
         ],
         // Root ignores whatever TMPDIR the caller had.
@@ -107,6 +118,8 @@ describe('helper install', () => {
 
     stage(dir);
     expect(readFileSync(join(out, 'saw'), 'utf8')).toBe('helper.mjs');
+    // The script gets the app to pin as its one argument, as given.
+    expect(readFileSync(join(out, 'app'), 'utf8')).toBe("/home/a b/Vigil's.AppImage");
     const ranIn = readFileSync(join(out, 'ran-in'), 'utf8').trim();
     expect(ranIn.startsWith(dir)).toBe(false);
     expect(ranIn).toMatch(/^\/tmp\/vigil-helper\.[^/]+\/linux$/);
@@ -190,6 +203,57 @@ describe('helper install', () => {
     expect(await runHelperScript('install', null, answer(0))).toMatchObject({ ok: false });
   });
 
+  it('counts only a closed dialog as a cancel, not -128 in a path', async () => {
+    const { dir } = bundle();
+    const answer =
+      (stderr: string): RunFile =>
+      async () => ({ code: 1, stdout: '', stderr });
+    expect(
+      await runHelperScript(
+        'install',
+        dir,
+        answer('0:1: execution error: User canceled. (-128)\n'),
+        'darwin',
+      ),
+    ).toEqual({ ok: false, error: 'cancelled' });
+    const r = await runHelperScript(
+      'install',
+      dir,
+      answer('0:9: execution error: sh: /Applications/Vigil-128.app/x: Permission denied (126)'),
+      'darwin',
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/Permission denied/);
+    expect(r).toHaveProperty('command');
+  });
+
+  it('runs one install at a time, whichever window asked', async () => {
+    const { dir } = bundle();
+    let calls = 0;
+    let finish!: () => void;
+    const slow: RunFile = () => {
+      calls++;
+      return new Promise((resolve) => {
+        finish = () => resolve({ code: 0, stdout: '', stderr: '' });
+      });
+    };
+    const first = runHelperScript('install', dir, slow, 'darwin');
+    const again = runHelperScript('install', dir, slow, 'darwin');
+    expect(await runHelperScript('uninstall', dir, slow, 'darwin')).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/being installed/),
+    });
+    finish();
+    expect(await first).toEqual({ ok: true });
+    expect(await again).toEqual({ ok: true });
+    expect(calls).toBe(1);
+    // Once it finishes, the next one runs.
+    const next = runHelperScript('uninstall', dir, slow, 'darwin');
+    finish();
+    expect(await next).toEqual({ ok: true });
+    expect(calls).toBe(2);
+  });
+
   it('on Linux, has pkexec copy and check a private copy of the files', async () => {
     const { dir } = bundle();
     const seen: string[][] = [];
@@ -215,6 +279,7 @@ describe('helper install', () => {
       staged,
       'linux/install.sh',
       helperDigest(dir, files),
+      appPinTarget('linux'),
       ...files,
     ]);
     expect(staged).toMatch(/vigil-helper-[^/]+$/);
@@ -296,6 +361,7 @@ describe('helper install', () => {
       error: 'Boom.',
       command: helperInstallCommand(dir, 'darwin'),
     });
+    expect(mac.command).toContain(` vigil-helper-setup ${shellQuote(dir)} 'install.sh' `);
   });
 
   it('never runs the real script from the demo', async () => {
@@ -368,4 +434,125 @@ describe('helper install', () => {
       expect(helperMatch(dir, platform, root).installed).toBe('outdated');
     });
   }
+
+  it('never asks anything of an app updated in place in /Applications', () => {
+    const { dir } = bundle();
+    const root = mkdtempSync(join(tmpdir(), 'root-'));
+    for (const f of installedHelperFiles(dir, 'darwin', root)) {
+      mkdirSync(dirname(f.installed), { recursive: true });
+      writeFileSync(f.installed, readFileSync(f.bundled));
+    }
+    const app = {
+      execPath: '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home',
+      env: {},
+    };
+    expect(inInstallerFolder('darwin', app)).toBe(true);
+    // No pin file at all, and whatever the app's executable now is: current,
+    // with the same bundle as without the app, so nothing is asked again.
+    const m = helperMatch(dir, 'darwin', root, app);
+    expect(m).toEqual(helperMatch(dir, 'darwin', root));
+    expect(m.installed).toBe('current');
+    expect(appPinned('darwin', app, root)).toBe(true);
+    // Folder names compare without case on macOS, as the disk does.
+    const lower = { ...app, execPath: '/applications/vigil at home.app/Contents/MacOS/x' };
+    expect(helperMatch(dir, 'darwin', root, lower).installed).toBe('current');
+    // The same test the helper uses for its pin and for stopping processes.
+    for (const execPath of [
+      app.execPath,
+      lower.execPath,
+      '/APPLICATIONS/VIGIL AT HOME.APP/Contents/MacOS/Vigil at Home',
+      '/Users/a/Downloads/Vigil at Home.app/Contents/MacOS/Vigil at Home',
+      '/Applications/Vigil at Home Evil.app/Contents/MacOS/Vigil at Home',
+    ])
+      expect(inInstallerFolder('darwin', { execPath, env: {} }), execPath).toBe(
+        insideInstalledRoot(execPath, 'darwin'),
+      );
+  });
+
+  it('asks for a helper update when a Downloads app is pinned to another build', () => {
+    const { dir } = bundle();
+    const root = mkdtempSync(join(tmpdir(), 'root-'));
+    for (const f of installedHelperFiles(dir, 'darwin', root)) {
+      mkdirSync(dirname(f.installed), { recursive: true });
+      writeFileSync(f.installed, readFileSync(f.bundled));
+    }
+    // As run from Downloads (or translocated): outside the installer's folder.
+    const exe = join(root, 'Vigil at Home');
+    writeFileSync(exe, 'app v1');
+    const app = { execPath: exe, env: {} };
+    const sha = (s: string) => createHash('sha256').update(s).digest('hex');
+    const pin = (sha256: string) => {
+      mkdirSync(dirname(appPinFile('darwin', root)), { recursive: true });
+      writeFileSync(appPinFile('darwin', root), JSON.stringify({ platform: 'darwin', sha256 }));
+    };
+    // Not pinned yet (a helper from before pins): an update pins it.
+    expect(helperMatch(dir, 'darwin', root, app).installed).toBe('outdated');
+    pin(sha('app v1'));
+    expect(appPinned('darwin', app, root)).toBe(true);
+    const v1 = helperMatch(dir, 'darwin', root, app);
+    expect(v1.installed).toBe('current');
+    // The app was replaced; the helper's files are the same, its pin isn't.
+    writeFileSync(exe, 'app v2');
+    const v2 = helperMatch(dir, 'darwin', root, app);
+    expect(v2.installed).toBe('outdated');
+    expect(v2.bundle).not.toBe(v1.bundle);
+    pin(sha('app v2'));
+    expect(helperMatch(dir, 'darwin', root, app).installed).toBe('current');
+  });
+
+  it('pins the AppImage on Linux, and nothing for the installer’s own folder', () => {
+    const { dir } = bundle();
+    // Real path: the pin target is resolved (tmpdir is a link on macOS).
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'root-')));
+    const image = join(root, 'Vigil.AppImage');
+    writeFileSync(image, 'image');
+    const app = { execPath: '/tmp/.mount_X/vigil-at-home', env: { APPIMAGE: image } };
+    expect(appPinTarget('linux', app)).toBe(image);
+    expect(appPinTarget('darwin', app)).toBe('/tmp/.mount_X/vigil-at-home');
+    expect(appPinned('linux', app, root)).toBe(false);
+    const st = statSync(image, { bigint: true });
+    mkdirSync(dirname(appPinFile('linux', root)), { recursive: true });
+    writeFileSync(appPinFile('linux', root), JSON.stringify({ image: `${st.dev}:${st.ino}` }));
+    expect(appPinned('linux', app, root)).toBe(true);
+    // A .deb install needs no pin: its folder is root-owned and protected already.
+    const deb = { execPath: '/opt/Vigil at Home/vigil-at-home', env: {} };
+    expect(inInstallerFolder('linux', deb)).toBe(true);
+    // Linux paths keep their case, as the helper compares them: another folder needs a pin.
+    expect(
+      inInstallerFolder('linux', { ...deb, execPath: '/opt/vigil at home/vigil-at-home' }),
+    ).toBe(false);
+    expect(inInstallerFolder('linux', { ...deb, execPath: '/opt/Vigil at Home' })).toBe(true);
+    // An AppImage there is pinned like one anywhere else: it runs from its own mount.
+    const inOpt = {
+      execPath: '/tmp/.mount_Y/vigil-at-home',
+      env: { APPIMAGE: '/opt/Vigil at Home/Vigil.AppImage' },
+    };
+    expect(inInstallerFolder('linux', inOpt)).toBe(false);
+    // Or by its name, without APPIMAGE set.
+    const named = { execPath: '/opt/Vigil at Home/Vigil.AppImage', env: {} };
+    expect(inInstallerFolder('linux', named)).toBe(false);
+    expect(appPinned('linux', deb, mkdtempSync(join(tmpdir(), 'empty-')))).toBe(true);
+    expect(helperMatch(dir, 'linux', root, deb).installed).toBe('none');
+  });
+});
+
+describe('the uninstallers', () => {
+  const script = (rel: string) =>
+    readFileSync(join(import.meta.dirname, '..', '..', 'helper', rel), 'utf8');
+  it.each([
+    ['uninstall.sh', 'launchctl bootout', '/Library/PrivilegedHelperTools/vigil-helper'],
+    ['linux/uninstall.sh', 'systemctl disable --now', '/usr/libexec/vigil-helper'],
+  ])(
+    '%s stops the helper before pin-remove, and runs it before removing the helper',
+    (rel, stop, bin) => {
+      const text = script(rel);
+      const at = (needle: string) => {
+        const i = text.indexOf(needle);
+        expect(i, needle).toBeGreaterThanOrEqual(0);
+        return i;
+      };
+      expect(at(stop)).toBeLessThan(at(`${bin} pin-remove`));
+      expect(at(`${bin} pin-remove`)).toBeLessThan(at(`rm -f ${bin}\n`));
+    },
+  );
 });

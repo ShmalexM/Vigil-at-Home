@@ -1,59 +1,37 @@
 // Moves files and apps into a root-only quarantine folder, and back.
 //
-// A quarantined item is renamed (not copied) into Quarantine/<action id>/,
-// and its permissions are set to 000 so nothing but root can read or run it.
-// The original mode and owner are kept for restore. Restore never overwrites
-// something that has since appeared at the original path.
+// A quarantined item is copied into Quarantine/<action id>/ and then removed
+// from where it was, and its permissions there are set to 000 so nothing
+// but root can read or run it. The original mode and owner are kept for
+// restore. Restore never overwrites something that has since appeared at
+// the original path.
 //
 // What may be moved is decided twice: by name (vetPath, the quick first
 // pass), then by identity (protectedSet.ts), which catches other spellings
-// of a protected path and hard links to protected files. The moves
-// themselves never follow a link swapped in after the checks: the item is
-// held open while it is checked, its mode is set through that handle, and
-// the folder on the far side is pinned and checked through the pin
-// (safeFs.ts), so a folder swapped for a link is noticed, not followed.
+// of a protected path and hard links to protected files.
+//
+// Root never acts through a path a user can change: each side of a move
+// runs as the user who controls it (transfer.ts), and root writes only in
+// its own quarantine folder. Something swapped in after the checks is
+// copied as that user could copy it, never changed in place: a protected
+// file the user can only read is left as it was.
 
-import {
-  chmodSync,
-  closeSync,
-  cpSync,
-  fchmodSync,
-  mkdirSync,
-  mkdtempSync,
-  openSync,
-  realpathSync,
-  renameSync,
-  rmdirSync,
-  rmSync,
-} from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import type { BigIntStats } from 'node:fs';
 import { basename, dirname, isAbsolute, join, normalize } from 'node:path';
 import { protectionFor } from '../config.js';
 import type { Platform } from '../platform.js';
+import type { System } from '../system.js';
 import { ActionError } from './errors.js';
 import {
-  checkChain,
   checkFolders,
   checkIdentity,
   checkSelf,
   protectedIds,
   protectedPaths,
-  sameId,
   type ProtectedIds,
 } from './protectedSet.js';
-import {
-  euid,
-  fchownIfRoot,
-  fdPath,
-  fstatBig,
-  lexists,
-  lstatOrNull,
-  O_CHECK,
-  O_FOLDER,
-  pinFolder,
-  withFolderFd,
-  type Pinning,
-} from './safeFs.js';
-import type { BigIntStats } from 'node:fs';
+import { actorFor, groupOf, self, transfer, type Actor } from './transfer.js';
 
 export interface QuarantineRecord {
   originalPath: string;
@@ -62,22 +40,82 @@ export interface QuarantineRecord {
   uid: number;
   gid: number;
   isDirectory: boolean;
-  /** Owner and mode of the folder it came from, for recreating it on restore. Absent in older records. */
+  /** Owner and mode of the folder it came from, for making it again on restore. Absent in older records. */
   parent?: { uid: number; gid: number; mode: number };
 }
 
 export interface QuarantineOptions {
   quarantineDir: string;
+  /**
+   * The helper's state folder (config supportDir). Like the platform's
+   * default one (Protection stateDir), nothing in it or above it is ever
+   * moved, deleted or restored into.
+   */
+  stateDir?: string;
   protectedPrefixes?: string[];
   protectedExact?: Set<string>;
   /** Picks the protected lists when they aren't given. macOS when absent. */
   platform?: Platform;
   /** Vigil's own files on this machine (runtime, socket, data), protected like the built-in lists. */
   selfPaths?: string[];
-  /** How folders are held during a move (see safeFs.ts). Picked from the OS when absent. */
-  pinning?: Pinning;
-  /** Test hook, called after the checks and right before each move. */
-  beforeMove?: (step: 'quarantine' | 'mkdir' | 'restore') => void;
+  /** Vigil's own files known by identity (`<device>:<inode>`), like an approved AppImage. */
+  selfIds?: readonly string[];
+  /**
+   * A tripwire over the files the helper keeps (pinStore.ts): whether they
+   * are all still where and what the helper left them. Checked before and
+   * after every move; a change refuses the command and is logged. It never
+   * moves anything itself.
+   */
+  guard?: () => Promise<boolean>;
+  log?: (msg: string) => void;
+  /** Who acts on a path; tests swap it. */
+  actorFor?: (sys: System, path: string) => Promise<Actor>;
+}
+
+/** macOS disks ignore case by default, so paths there are compared without it. */
+const caseless = (opts: QuarantineOptions) => opts.platform !== 'linux';
+
+function realpathOrUndefined(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch {
+    return undefined; // Not created yet: nothing can be inside it.
+  }
+}
+
+/** `path` without trailing slashes (a loop, so a long run of them stays cheap). */
+function trimSlashes(path: string): string {
+  let end = path.length;
+  while (end > 1 && path[end - 1] === '/') end--;
+  return path.slice(0, end);
+}
+
+/**
+ * The folders the helper keeps for itself: the quarantine folder and its
+ * whole state folder (the one configured and the platform's default), each
+ * as given and at its real location, so a path that reaches one through a
+ * symlink (like /var -> /private/var on macOS) is caught too.
+ */
+function helperRoots(opts: QuarantineOptions): string[] {
+  const roots = new Set<string>();
+  for (const dir of [opts.quarantineDir, opts.stateDir, protectionFor(opts.platform).stateDir]) {
+    if (!dir) continue;
+    const trimmed = trimSlashes(dir);
+    for (const r of [trimmed, realpathOrUndefined(trimmed)])
+      if (r) roots.add(caseless(opts) ? r.toLowerCase() : r);
+  }
+  return [...roots];
+}
+
+/**
+ * Whether `path` is one of the helper's own folders (helperRoots), is
+ * inside one, or holds one. Every file command refuses such a path, so no
+ * client can move, delete or restore over anything the helper keeps there,
+ * the app pin included.
+ */
+export function touchesHelperState(path: string, opts: QuarantineOptions): boolean {
+  const p = caseless(opts) ? path.toLowerCase() : path;
+  return helperRoots(opts).some((q) => p === q || p.startsWith(q + '/') || q.startsWith(p + '/'));
 }
 
 /** Reject relative, unnormalized or protected paths, and user home folders themselves. */
@@ -95,32 +133,20 @@ export function vetPath(path: string, opts: QuarantineOptions): string {
   ];
   // macOS disks ignore case by default, so /library/... is /Library/... there.
   // Other spellings the disk treats as equal are caught by identity later.
-  const fold = (s: string) => (opts.platform === 'linux' ? s : s.toLowerCase());
-  const key = fold(path);
-  const quarantineRoot = opts.quarantineDir.replace(/\/$/, '');
-  // Compare against the quarantine folder's real location too, so a path that
-  // reaches it through a symlink (like /var -> /private/var on macOS) is caught.
-  const quarantineRoots = [quarantineRoot];
-  try {
-    quarantineRoots.push(realpathSync(quarantineRoot));
-  } catch {
-    // Not created yet: nothing can be inside it.
-  }
+  const key = (s: string) => (caseless(opts) ? s.toLowerCase() : s);
+  const p = key(path);
   if (
-    [...exact].some((e) => fold(e) === key) ||
+    [...exact].some((e) => key(e) === p) ||
     prefixes.some((raw) => {
-      const p = fold(raw);
+      const pre = key(raw);
       // The protected path, anything inside it, or a folder that holds it.
       return (
-        key === p.replace(/\/$/, '') ||
-        key.startsWith(p.endsWith('/') ? p : p + '/') ||
-        p.startsWith(key + '/')
+        p === pre.replace(/\/$/, '') ||
+        p.startsWith(pre.endsWith('/') ? pre : pre + '/') ||
+        pre.startsWith(p + '/')
       );
     }) ||
-    quarantineRoots.some((raw) => {
-      const q = fold(raw);
-      return key === q || key.startsWith(q + '/') || q.startsWith(key + '/');
-    }) ||
+    touchesHelperState(path, opts) ||
     protection.homes.some((re) => re.test(path))
   ) {
     throw new ActionError('refused', `${path} is protected`);
@@ -128,9 +154,24 @@ export function vetPath(path: string, opts: QuarantineOptions): string {
   return path;
 }
 
+/** The real location of `dir`, through its nearest folder that exists. */
+function realFolder(dir: string): string {
+  const rest: string[] = [];
+  for (let d = dir; ; d = dirname(d)) {
+    try {
+      return join(realpathSync(d), ...rest);
+    } catch {
+      if (d === '/') return dir;
+      rest.unshift(basename(d));
+    }
+  }
+}
+
 /** Everything protected from file moves, by identity. */
 export function protectedFor(opts: QuarantineOptions): ProtectedIds {
-  return protectedIds(protectedPaths(opts));
+  const ids = protectedIds(protectedPaths(opts));
+  for (const id of opts.selfIds ?? []) ids.inside.set(id, "Vigil's own app");
+  return ids;
 }
 
 /** The path with symlinks in its parent folders resolved, or the path itself when they don't exist. */
@@ -139,6 +180,14 @@ export function realParentPath(path: string): string {
     return join(realpathSync.native(dirname(path)), basename(path));
   } catch {
     return path;
+  }
+}
+
+function lstatOrNull(path: string): BigIntStats | null {
+  try {
+    return lstatSync(path, { bigint: true });
+  } catch {
+    return null;
   }
 }
 
@@ -165,25 +214,6 @@ export function resolveTarget(
   return real;
 }
 
-function realpathOrNull(path: string): string | null {
-  try {
-    return realpathSync.native(path);
-  } catch {
-    return null;
-  }
-}
-
-function changed(path: string): ActionError {
-  return new ActionError(
-    'refused',
-    `${path} changed while it was being checked; nothing was moved`,
-  );
-}
-
-function hasMoved(dir: string): ActionError {
-  return new ActionError('refused', `${dir} has moved; nothing was moved`);
-}
-
 /** What may be quarantined: a file with no other names, a folder or a link, none of them protected. */
 function vetItem(path: string, st: BigIntStats, ids: ProtectedIds): void {
   if (!st.isFile() && !st.isDirectory() && !st.isSymbolicLink()) {
@@ -192,406 +222,187 @@ function vetItem(path: string, st: BigIntStats, ids: ProtectedIds): void {
   if (st.isFile() && st.nlink > 1n) {
     throw new ActionError(
       'refused',
-      `${path} has other hard links; quarantining it would lock those too`,
+      `${path} has other hard links; quarantine would leave those names in place`,
     );
   }
   checkSelf(path, st, ids);
 }
 
-/**
- * Open the item without following a link and check the handle is the item
- * that was checked. Links are moved as themselves and need no handle.
- */
-function holdItem(
-  path: string,
-  st: BigIntStats,
-  shown: string,
-  ids: ProtectedIds,
-): number | undefined {
-  if (st.isSymbolicLink()) return undefined;
-  let fd: number;
-  try {
-    fd = openSync(path, O_CHECK);
-  } catch {
-    throw changed(shown);
-  }
-  try {
-    const now = fstatBig(fd);
-    if (!sameId(now, st) || now.isDirectory() !== st.isDirectory()) throw changed(shown);
-    vetItem(shown, now, ids);
-    return fd;
-  } catch (err) {
-    closeSync(fd);
-    throw err;
-  }
+/** The tripwire (QuarantineOptions guard): refuse, and log, when a file the helper keeps changed. */
+async function checkGuard(opts: QuarantineOptions, when: string, after: string): Promise<void> {
+  if (!opts.guard || (await opts.guard())) return;
+  const msg = `a file Vigil's helper keeps changed ${when}; ${after}`;
+  opts.log?.(msg);
+  throw new ActionError(when === 'before the move' ? 'refused' : 'failed', msg);
 }
 
-function moveError(path: string, err: unknown): ActionError {
-  if (err instanceof ActionError) return err;
-  if ((err as NodeJS.ErrnoException).code === 'EXDEV') {
-    return new ActionError(
-      'failed',
-      `${path} is on another disk; quarantine only works on the startup disk for now`,
-    );
-  }
-  return new ActionError('failed', `could not move ${path}: ${(err as Error).message}`);
-}
-
-/** After a move, the thing that arrived must be the one that was checked; otherwise undo it. */
-function confirmMoved(at: string, st: BigIntStats, shown: string, putBack: () => void): void {
-  const now = lstatOrNull(at);
-  if (now && sameId(now, st)) return;
-  if (now) {
-    try {
-      putBack();
-    } catch {
-      // Left where it is; the error says nothing was quarantined.
-    }
-  }
-  throw new ActionError(
-    'refused',
-    `${shown} changed while it was being moved; nothing was quarantined`,
-  );
-}
-
-/**
- * Open an item in a folder only this process can reach (the store or a
- * handoff folder) to change its mode. Root can open a mode-000 item; without
- * root (tests) it can't, and the path is used instead, which is safe there
- * because nobody else can change those folders.
- */
-function withItem(path: string, fn: (fd: number | null) => void): void {
-  let fd: number;
-  try {
-    fd = openSync(path, O_CHECK);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EACCES' && euid() !== 0) return fn(null);
-    throw err;
-  }
-  try {
-    fn(fd);
-  } finally {
-    closeSync(fd);
-  }
-}
-
-/** Set the stored item's mode to 000 through a handle, never by a path a link could redirect. */
-function lockStored(fd: number | undefined, storedPath: string): void {
-  const st = lstatOrNull(storedPath);
-  if (!st || st.isSymbolicLink()) return;
-  if (fd !== undefined) {
-    fchmodSync(fd, 0o000);
-    return;
-  }
-  withItem(storedPath, (h) => (h === null ? chmodSync(storedPath, 0) : fchmodSync(h, 0)));
-}
-
-export function quarantine(
+export async function quarantine(
+  sys: System,
   requestedPath: string,
   actionId: string,
   opts: QuarantineOptions,
-): QuarantineRecord {
+): Promise<QuarantineRecord> {
   const ids = protectedFor(opts);
   const path = resolveTarget(requestedPath, opts, ids);
-  const before = lstatOrNull(path);
-  if (!before) throw new ActionError('not_found', `${path} does not exist`);
-  vetItem(path, before, ids);
+  // lstat: a symlink is quarantined as the link itself, never its target.
+  const st = lstatOrNull(path);
+  if (!st) throw new ActionError('not_found', `${path} does not exist`);
+  vetItem(path, st, ids);
+  const folder = lstatSync(dirname(path));
+  const actor = await (opts.actorFor ?? actorFor)(sys, path);
+  await checkGuard(opts, 'before the move', 'nothing was moved');
   mkdirSync(opts.quarantineDir, { recursive: true, mode: 0o700 });
   chmodSync(opts.quarantineDir, 0o700);
   const slot = join(opts.quarantineDir, actionId);
   mkdirSync(slot, { mode: 0o700 });
   const storedPath = join(slot, basename(path));
-  let moved: { st: BigIntStats; parent: BigIntStats };
   try {
-    moved = moveIn(path, storedPath, ids, opts);
+    await transfer(
+      { path, actor },
+      { path: storedPath, actor: self() },
+      {
+        owners: true,
+        removeSource: true,
+        // The child refuses anything at the path but what was checked here.
+        expectId: `${st.dev}:${st.ino}`,
+        expectParent: realpathSync(slot),
+      },
+    );
   } catch (err) {
-    if (!lexists(storedPath)) rmSync(slot, { recursive: true, force: true });
+    // A complete copy whose original could not be (fully) removed is kept.
+    if ((err as { copied?: boolean }).copied)
+      throw new ActionError('failed', `${(err as Error).message}; the copy is at ${storedPath}`);
+    // Otherwise whatever was copied is the helper's own; the original was not removed.
+    rmSync(slot, { recursive: true, force: true });
     throw err;
   }
-  const { st, parent } = moved;
+  await checkGuard(opts, 'during the move', `the item is in quarantine at ${storedPath}`);
+  const stored = lstatSync(storedPath);
+  if (!stored.isSymbolicLink()) chmodSync(storedPath, 0o000);
   return {
     originalPath: path,
     storedPath,
-    mode: Number(st.mode & 0o7777n),
+    mode: stored.mode & 0o7777,
     uid: Number(st.uid),
     gid: Number(st.gid),
-    isDirectory: st.isDirectory(),
-    parent: {
-      uid: Number(parent.uid),
-      gid: Number(parent.gid),
-      mode: Number(parent.mode & 0o7777n),
-    },
+    isDirectory: stored.isDirectory(),
+    parent: { uid: folder.uid, gid: folder.gid, mode: folder.mode & 0o7777 },
   };
 }
 
+/** Every owner but root of the stored item and what is in it, from the helper's own store. */
+function storedOwners(path: string): Set<number> {
+  const owners = new Set<number>();
+  const stack = [path];
+  while (stack.length) {
+    const p = stack.pop()!;
+    const st = lstatSync(p);
+    if (st.uid !== 0) owners.add(st.uid);
+    if (st.isDirectory()) for (const n of readdirSync(p)) stack.push(join(p, n));
+  }
+  return owners;
+}
+
 /**
- * Pin the item's folder, check it and the item through the pin, hold the
- * item open, move it into the store and lock it through the handle.
+ * Who puts a quarantined item back.
+ *
+ *   root        when the destination is root's alone (actorFor): no one
+ *               else can change it, and root gives every entry its owner.
+ *   its owner   otherwise, for anything of a user's, so root never fills a
+ *               folder someone else can change (records from before, too).
+ *               Something of more than one user's can't go back that way.
  */
-function moveIn(
-  path: string,
-  storedPath: string,
-  ids: ProtectedIds,
+async function restoreActor(
+  sys: System,
+  rec: QuarantineRecord,
   opts: QuarantineOptions,
-): { st: BigIntStats; parent: BigIntStats } {
-  const name = basename(path);
-  const pin = pinFolder(dirname(path), opts.pinning);
+): Promise<Actor> {
+  let dest: Actor | undefined;
+  let refusal: unknown;
   try {
-    const chain = pin.chain();
-    checkChain(chain, path, ids);
-    const src = pin.at(name);
-    const st = lstatOrNull(src);
-    if (!st) throw new ActionError('not_found', `${path} does not exist`);
-    vetItem(path, st, ids);
-    const fd = holdItem(src, st, path, ids);
-    try {
-      opts.beforeMove?.('quarantine');
-      if (pin.where() !== dirname(path)) throw hasMoved(dirname(path));
-      let copied = false;
-      try {
-        renameSync(src, storedPath);
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'EXDEV' || pin.fd === undefined) {
-          throw moveError(path, err);
-        }
-        copyOut(pin.fd, name, storedPath, st, path);
-        copied = true;
-      }
-      if (!copied) {
-        confirmMoved(storedPath, st, path, () => {
-          if (!lexists(src)) renameSync(storedPath, src);
-        });
-      }
-      lockStored(copied ? undefined : fd, storedPath);
-    } finally {
-      if (fd !== undefined) closeSync(fd);
-    }
-    return { st, parent: chain[0]! };
-  } finally {
-    pin.release();
-  }
-}
-
-/**
- * Linux homes are often their own partition. The item first moves into a
- * fresh root-only folder beside it, so what is copied and then deleted is
- * exactly what was checked.
- */
-function copyOut(
-  pfd: number,
-  name: string,
-  storedPath: string,
-  st: BigIntStats,
-  shown: string,
-): void {
-  const hold = mkdtempSync(fdPath(pfd, '.vigil-quarantine-'));
-  const holdName = basename(hold);
-  const hfd = openSync(hold, O_FOLDER);
-  try {
-    if (fstatBig(hfd).uid !== BigInt(euid())) throw changed(shown);
-    const src = fdPath(pfd, name);
-    const held = fdPath(hfd, name);
-    renameSync(src, held);
-    confirmMoved(held, st, shown, () => {
-      if (!lexists(src)) renameSync(held, src);
-    });
-    try {
-      moveAcrossDisks(held, storedPath);
-    } catch (err) {
-      if (lexists(held) && !lexists(src)) renameSync(held, src);
-      throw moveError(shown, err);
-    }
-  } finally {
-    closeSync(hfd);
-    try {
-      rmdirSync(fdPath(pfd, holdName));
-    } catch {
-      // Not empty, or already gone.
-    }
-  }
-}
-
-/**
- * rename, or when source and destination are on different filesystems, copy
- * (links stay links, times are kept) and then delete the source. The copy
- * is complete before anything is deleted, so a failure leaves the original.
- */
-export function moveAcrossDisks(from: string, to: string): void {
-  try {
-    renameSync(from, to);
-    return;
+    dest = await (opts.actorFor ?? actorFor)(sys, rec.originalPath);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err;
+    refusal = err;
   }
+  if (dest?.uid === 0) return dest;
+  const owners = storedOwners(rec.storedPath);
+  if (owners.size > 1)
+    throw new ActionError(
+      'owner-cannot-write',
+      `${rec.originalPath} belongs to more than one user; Vigil can't put it back as one of them`,
+    );
+  const owner = [...owners][0];
+  if (owner !== undefined) return { uid: owner, gid: await groupOf(sys, owner) };
+  if (dest) return dest;
+  throw refusal;
+}
+
+export async function restore(
+  sys: System,
+  rec: QuarantineRecord,
+  opts: QuarantineOptions,
+): Promise<void> {
+  const slot = dirname(rec.storedPath);
+  if (dirname(slot) !== trimSlashes(opts.quarantineDir))
+    throw new ActionError('refused', 'the quarantined copy is not in the quarantine folder');
+  let exists = true;
   try {
-    cpSync(from, to, {
-      recursive: true,
-      verbatimSymlinks: true,
-      preserveTimestamps: true,
-      errorOnExist: true,
-      force: false,
-    });
-  } catch (err) {
-    rmSync(to, { recursive: true, force: true });
-    throw err;
+    lstatSync(rec.originalPath);
+  } catch {
+    exists = false;
   }
-  rmSync(from, { recursive: true, force: true });
-}
-
-interface FolderOwner {
-  uid: number;
-  gid: number;
-  /** Mode of the folder the item was in; folders above it get 0755. */
-  mode: number;
-}
-
-/** Who owns folders recreated on restore: as recorded, else the existing folder's owner or the item's. */
-function newFolderOwner(rec: QuarantineRecord, base: BigIntStats): FolderOwner {
-  if (rec.parent) return { ...rec.parent, mode: rec.parent.mode & 0o7777 };
-  if (base.uid !== 0n) return { uid: Number(base.uid), gid: Number(base.gid), mode: 0o755 };
-  return { uid: rec.uid, gid: rec.gid, mode: 0o755 };
-}
-
-/** Give an item its old mode and owner, through a handle, where only this process can reach it. */
-function settle(path: string, rec: QuarantineRecord): void {
-  const st = lstatOrNull(path);
-  if (!st || st.isSymbolicLink()) return;
-  withItem(path, (fd) => {
-    if (fd === null) return chmodSync(path, rec.mode);
-    fchmodSync(fd, rec.mode);
-    fchownIfRoot(fd, rec.uid, rec.gid);
-  });
-}
-
-/**
- * Restore moves the file back as root, so the folder it goes into must be
- * the folder it came from at the moment of the move, not just at the check.
- * The folder (or the nearest one that still exists) is pinned, missing
- * folders are made inside the pin one by one, and the item is renamed into
- * the pinned folder by name. A folder swapped for a link since is noticed
- * when the pin is checked, and the item stays in the store.
- */
-export function restore(rec: QuarantineRecord, opts: QuarantineOptions): void {
-  if (lexists(rec.originalPath)) {
+  if (exists) {
     throw new ActionError(
       'refused',
       `something new is already at ${rec.originalPath}; not overwriting it`,
     );
   }
-  if (!lexists(rec.storedPath)) throw new ActionError('not_found', 'the quarantined copy is gone');
-  vetPath(rec.originalPath, opts);
-  const ids = protectedFor(opts);
-  const parent = dirname(rec.originalPath);
-  const name = basename(rec.originalPath);
-  const missing: string[] = [];
-  let base = parent;
-  while (!lexists(base)) {
-    missing.unshift(basename(base));
-    base = dirname(base);
-  }
-  // Recreate missing folders only below one that is still its real self.
-  if (realpathOrNull(base) !== base) {
-    throw new ActionError('refused', `${parent} has moved; not restoring into it`);
-  }
-  checkFolders(base, ids);
-  const owner = newFolderOwner(rec, lstatOrNull(base)!);
-
-  const pin = pinFolder(base, opts.pinning);
+  let stored;
   try {
-    checkChain(pin.chain(), parent, ids);
-    for (const [i, part] of missing.entries()) {
-      opts.beforeMove?.('mkdir');
-      try {
-        mkdirSync(pin.at(part), { mode: 0o700 });
-      } catch {
-        throw new ActionError('failed', `could not recreate ${parent}`);
-      }
-      pin.enter(part);
-      withFolderFd(pin, (fd) => {
-        if (fstatBig(fd).uid !== BigInt(euid())) throw changed(parent);
-        fchownIfRoot(fd, owner.uid, owner.gid);
-        fchmodSync(fd, i === missing.length - 1 ? owner.mode : 0o755);
-      });
-    }
-    if (pin.where() !== parent)
-      throw new ActionError('refused', `${parent} has moved; not restoring into it`);
-    checkChain(pin.chain(), parent, ids);
-
-    // Give the item its mode and owner back while it is still in the store,
-    // where nobody else can reach it, then rename it in by name.
-    settle(rec.storedPath, rec);
-    try {
-      opts.beforeMove?.('restore');
-      if (pin.where() !== parent) {
-        throw new ActionError('refused', `${parent} has moved; not restoring into it`);
-      }
-      if (lexists(pin.at(name))) {
-        throw new ActionError(
-          'refused',
-          `something new is already at ${rec.originalPath}; not overwriting it`,
-        );
-      }
-      try {
-        renameSync(rec.storedPath, pin.at(name));
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'EXDEV' || pin.fd === undefined) {
-          throw new ActionError(
-            'failed',
-            `could not move ${rec.originalPath} back: ${(err as Error).message}`,
-          );
-        }
-        copyIn(pin.fd, name, rec);
-      }
-    } catch (err) {
-      lockStored(undefined, rec.storedPath);
-      throw err;
-    }
-  } finally {
-    pin.release();
-  }
-  try {
-    rmdirSync(dirname(rec.storedPath));
+    stored = lstatSync(rec.storedPath);
   } catch {
-    // Leave a non-empty slot alone.
+    throw new ActionError('not_found', 'the quarantined copy is gone');
   }
-}
-
-/**
- * Linux, store and destination on different disks: copy into a fresh
- * root-only folder inside the pinned destination, then rename from there.
- */
-function copyIn(pfd: number, name: string, rec: QuarantineRecord): void {
-  const hand = mkdtempSync(fdPath(pfd, '.vigil-restore-'));
-  const handName = basename(hand);
-  const hfd = openSync(hand, O_FOLDER);
-  const held = fdPath(hfd, name);
+  vetPath(rec.originalPath, opts);
+  vetPath(realParentPath(rec.originalPath), opts);
+  // By identity too: no folder it goes back into is one of the protected ones.
+  checkFolders(dirname(rec.originalPath), protectedFor(opts));
+  // The folder it goes into, as checked now: the child refuses any other.
+  const parentAtCheck = realFolder(dirname(rec.originalPath));
+  vetPath(join(parentAtCheck, basename(rec.originalPath)), opts);
+  const isLink = stored.isSymbolicLink();
+  // The store is root's own: readable again only for the copy back, and
+  // for listing who owns what is in it.
+  if (!isLink) chmodSync(rec.storedPath, rec.mode);
+  let actor: Actor | undefined;
+  let moving = false;
   try {
-    if (fstatBig(hfd).uid !== BigInt(euid())) throw changed(rec.originalPath);
-    try {
-      moveAcrossDisks(rec.storedPath, held);
-    } catch (err) {
-      throw new ActionError(
-        'failed',
-        `could not move ${rec.originalPath} back: ${(err as Error).message}`,
-      );
-    }
-    settle(held, rec);
-    renameSync(held, fdPath(pfd, name));
+    actor = await restoreActor(sys, rec, opts);
+    await checkGuard(opts, 'before the move', 'nothing was moved');
+    moving = true;
+    await transfer(
+      { path: rec.storedPath, actor: self(), ownTree: true },
+      { path: rec.originalPath, actor },
+      {
+        parents: true,
+        // Root never makes a folder others can change; a user makes their own as it was.
+        ...(rec.parent
+          ? { parentMode: actor.uid === 0 ? rec.parent.mode & 0o755 : rec.parent.mode }
+          : {}),
+        expectParent: parentAtCheck,
+        ...(isLink ? {} : { topMode: rec.mode }),
+        owners: actor.uid === 0,
+      },
+    );
   } catch (err) {
-    if (lexists(held)) {
-      try {
-        moveAcrossDisks(held, rec.storedPath);
-      } catch {
-        // Stays in the root-only handoff folder.
-      }
-    }
+    if (!isLink) chmodSync(rec.storedPath, 0o000);
+    if (moving && actor!.uid !== 0 && /EACCES|EPERM/.test((err as Error).message))
+      throw new ActionError(
+        'owner-cannot-write',
+        `${rec.originalPath} can't be put back: its owner can't write to that folder`,
+      );
     throw err;
-  } finally {
-    closeSync(hfd);
-    try {
-      rmdirSync(fdPath(pfd, handName));
-    } catch {
-      // Not empty: it holds the item, in a folder only root can open.
-    }
   }
+  rmSync(slot, { recursive: true, force: true });
+  await checkGuard(opts, 'during the move', `${rec.originalPath} was restored`);
 }

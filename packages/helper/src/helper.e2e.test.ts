@@ -53,7 +53,8 @@ function rawCall(line: string): Promise<any> {
 }
 
 beforeAll(async () => {
-  root = mkdtempSync(join(tmpdir(), 'vigil-helper-'));
+  // Real path: startup items are only turned off in the folder as written (tmpdir is a link on macOS).
+  root = realpathSync(mkdtempSync(join(tmpdir(), 'vigil-helper-')));
   sock = join(root, 'helper.sock');
   approvalsDir = join(root, 'approvals');
   launchDir = join(root, 'Library', 'LaunchAgents');
@@ -274,6 +275,8 @@ describe('helper over its socket', () => {
     sys.labels.set(realpathSync(plist), 'com.evil.agent');
     const target = `gui/${statSync(plist).uid}/com.evil.agent`;
     sys.loaded.add(target);
+    // The agent is the asking user's own.
+    sys.console = statSync(plist).uid;
     const out = await client.call<ActionOutcome>({ kind: 'persistence.disable', path: plist });
     expect(existsSync(plist)).toBe(false);
     expect(sys.loaded.has(target)).toBe(false);
