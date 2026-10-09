@@ -31,9 +31,11 @@ import {
   syncTlsPaths,
 } from '@vigil/sensors';
 import { Approvals } from './approval.js';
+import { pinCandidate, repinFromGrant } from './appPin.js';
+import { AppPinStore } from './pinStore.js';
 import { defaultPaths, installedSelf, SANTA_SYNC_PORT, type HelperPaths } from './config.js';
 import { Executor, type ActionOutcome } from './executor.js';
-import { FastPath } from './fastpath.js';
+import { eventPipeline, FastPath } from './fastpath.js';
 import { Journal } from './journal.js';
 import {
   ensureOsquery,
@@ -161,6 +163,15 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       })
     : undefined;
 
+  // The app pin, signed and kept in memory (pinStore.ts).
+  const pinStore = new AppPinStore(sys, {
+    dir: paths.appPinDir,
+    publicFile: paths.appPin,
+    ownerUid: process.getuid?.() ?? 0,
+    log,
+  });
+  await pinStore.load();
+
   const executor: Executor = new Executor({
     sys,
     journal,
@@ -168,6 +179,8 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     rules,
     quarantine: {
       quarantineDir: paths.quarantineDir,
+      stateDir: paths.supportDir,
+      log,
       // The helper's own files where this install put them, on top of the
       // built-in lists: its state, socket, launcher, runtime and code.
       selfPaths: [
@@ -196,6 +209,20 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     }),
     fastPath,
     ...(fapolicyd ? { fapolicyd } : {}),
+    // The app pinned at install, never paused, stopped or blocked by hash.
+    appPin: pinStore,
+    repin: {
+      // Read before the password dialog; the approval re-pins only this code.
+      candidate: (grant) => pinCandidate(sys, grant, { installed: installedSelf(sys.platform) }),
+      commit: async (bound) => {
+        const pin = await repinFromGrant(sys, bound, {
+          store: pinStore,
+          installed: installedSelf(sys.platform),
+        });
+        if (pin) log(`pinned the app at ${pin.path}`);
+        else log(`did not pin ${bound.source}: its code changed after the password was asked for`);
+      },
+    },
   });
 
   const server = new HelperServer({
@@ -227,18 +254,22 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     }
   };
 
-  let delivered = Promise.resolve();
+  const deliver = eventPipeline<SensorEvent>(
+    async (e) => {
+      const blocked = await stopBlockedLaunch(e);
+      const { ran, moves } = await fastPath.start(e);
+      return { ran: [...blocked, ...ran], moves };
+    },
+    (e, ran) => server.publish(e, ran),
+  );
   const hub = new SensorHub({
     santaLogPath: paths.santaLog,
     osqueryResultsPath: paths.osqueryResults,
-    // One event at a time, in order: a block finishes before the next event
-    // is looked at, and the app hears about each event with what was done.
-    sink: (e) => {
-      delivered = delivered.then(async () => {
-        const ran = [...(await stopBlockedLaunch(e)), ...(await fastPath.check(e))];
-        server.publish(e, ran);
-      });
-    },
+    // One event at a time, in order: its pauses, kills and blocks finish
+    // before the next event is looked at; its moves go on beside the next
+    // events, so a stuck one never holds up a later block. The app hears
+    // about events in order, each with what was done (eventPipeline).
+    sink: deliver,
     // Signatures of programs that started before Vigil (codesign is macOS-only).
     ...(process.platform === 'darwin' && !linux ? { signatureLookup: signatureLookup(sys) } : {}),
     // Linux: whether the package manager installed each program, answered at
@@ -331,7 +362,14 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       .catch((err: Error) => log(`could not start osquery: ${err.message}`));
   };
   keepOsquery();
-  const osqueryTimer = setInterval(keepOsquery, 5 * 60 * 1000);
+  const osqueryTimer = setInterval(
+    () => {
+      keepOsquery();
+      // Puts the pin back from memory if its file went away; never a value older than the one in force.
+      pinStore.repair().catch((err: Error) => log(`could not repair the app pin: ${err.message}`));
+    },
+    5 * 60 * 1000,
+  );
   osqueryTimer.unref();
 
   // Renew the sync certificate daily if it is close to expiring.

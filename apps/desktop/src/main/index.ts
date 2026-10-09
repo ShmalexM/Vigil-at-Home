@@ -187,7 +187,10 @@ function start(): void {
   const checkHelperMatch = () => {
     const dir = helperDir();
     try {
-      const m = dir && core.helperInstallable && !demo ? helperMatch(dir) : null;
+      // A helper pinned to another app (before this one replaced it) is outdated too.
+      const app = { execPath: process.execPath, env: process.env };
+      const m =
+        dir && core.helperInstallable && !demo ? helperMatch(dir, process.platform, '', app) : null;
       core.helperOutdated = m?.installed === 'outdated';
       return m;
     } catch (err) {
@@ -374,6 +377,8 @@ function start(): void {
     const bundle = helperAtStart.bundle;
     if (store.getSetting('helper.updateAsked', z.string(), '') !== bundle) {
       setTimeout(() => {
+        // The self grant's password may have re-pinned this app meanwhile.
+        if (checkHelperMatch()?.installed !== 'outdated') return;
         void runHelperScript('update', helperDir())
           .then(afterHelperScript)
           .then((r) => {

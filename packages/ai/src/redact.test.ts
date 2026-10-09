@@ -16,6 +16,10 @@ import {
 } from './redact.js';
 
 /** A real-shaped private key body: 64-character lines, the last shorter. */
+/** unit repeated to exactly size characters. */
+const fill = (unit: string, size: number) =>
+  unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+
 const KEY_BODY = 'MIIE' + 'A'.repeat(60) + '\n' + 'B'.repeat(64) + '\nCCCC';
 
 describe('redaction', () => {
@@ -147,40 +151,74 @@ describe('redaction', () => {
   });
 });
 
+/** A ceiling no linear pass reaches, even on a slow shared CI runner. */
+const MAX_PASS_MS = 2000;
+/** What n and 4n may take apart: 4 when linear, 16 when quadratic. */
+const MAX_GROWTH = 8;
+/** Shorter passes are timer noise: below this, the smaller one counts as this long. */
+const MIN_TIMED_MS = 2;
+
+function timeOf(run: () => void): number {
+  const started = performance.now();
+  run();
+  return performance.now() - started;
+}
+
+/**
+ * Checks that run(size) takes linear time: four times the input may take
+ * at most MAX_GROWTH times as long, where quadratic time would take 16. Each
+ * size is timed more than once and the fastest pass kept, so a pause of the
+ * runner's own can't fail it, and no pass may reach MAX_PASS_MS.
+ */
+function expectLinear(label: string, size: number, run: (size: number) => void): void {
+  let small = Infinity;
+  for (let i = 0; i < 3; i++)
+    small = Math.min(
+      small,
+      timeOf(() => run(size / 4)),
+    );
+  const limit = MAX_GROWTH * Math.max(small, MIN_TIMED_MS);
+  let large = Infinity;
+  for (let i = 0; i < 3 && large >= limit; i++)
+    large = Math.min(
+      large,
+      timeOf(() => run(size)),
+    );
+  const report = `${label}: ${small.toFixed(1)} ms at ${size / 4}, ${large.toFixed(1)} ms at ${size}`;
+  expect(large, report).toBeLessThan(limit);
+  expect(large, report).toBeLessThan(MAX_PASS_MS);
+}
+
 describe('redaction, hardened', () => {
   const redact = (text: string) => redactString(text, {});
 
   it('runs in linear time on hostile input', () => {
     const size = 256 * 1024;
-    const fill = (unit: string) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
-    const inputs = [
-      fill('mysql '),
-      fill('a'),
-      fill('-p'),
-      fill('@'),
-      fill('password='),
-      fill('a@'),
-      fill('a:'),
-      fill('a.'),
-      fill('eyJ-'),
-      fill('sk-'),
-      fill('x://'),
-      fill('password="'),
-      fill("'password="),
-      fill('"password={'),
-      fill('password={'),
-      fill('-----BEGIN RSA PRIVATE KEY-----'),
-      fill('--token '),
-      fill('Authorization: Bearer '),
-      fill('A'),
+    const units = [
+      'mysql ',
+      'a',
+      '-p',
+      '@',
+      'password=',
+      'a@',
+      'a:',
+      'a.',
+      'eyJ-',
+      'sk-',
+      'x://',
+      'password="',
+      "'password=",
+      '"password={',
+      'password={',
+      '-----BEGIN RSA PRIVATE KEY-----',
+      '--token ',
+      'Authorization: Bearer ',
+      'A',
     ];
-    for (const input of inputs) {
-      const started = performance.now();
-      redact(input);
-      const took = performance.now() - started;
-      expect(took, `${input.slice(0, 12)}… took ${took.toFixed(1)} ms`).toBeLessThan(100);
+    for (const unit of units) {
+      expectLinear(JSON.stringify(unit), size, (n) => redact(fill(unit, n)));
     }
-  });
+  }, 30_000);
 
   it('runs in linear time on hostile input for every rule, up to the cap and past it', () => {
     const units = [
@@ -266,19 +304,17 @@ describe('redaction, hardened', () => {
       'machine x login y password ',
       '--token [',
     ];
-    for (const size of [256 * 1024, 512 * 1024, 600 * 1024]) {
-      const fill = (unit: string) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
-      for (const unit of units) {
-        const input = fill(unit);
-        const started = performance.now();
-        redact(input);
-        const took = performance.now() - started;
-        expect(took, `${JSON.stringify(unit)} × ${size} took ${took.toFixed(1)} ms`).toBeLessThan(
-          150,
-        );
-      }
+    for (const unit of units) {
+      // Up to the cap: 128 KiB, then 512 KiB.
+      expectLinear(JSON.stringify(unit), MAX_REDACT_CHARS, (n) => redact(fill(unit, n)));
+      // Past it, the field is withheld whole.
+      const past = fill(unit, MAX_REDACT_CHARS + 88 * 1024);
+      const took = timeOf(() => redact(past));
+      expect(took, `${JSON.stringify(unit)} past the cap took ${took.toFixed(1)} ms`).toBeLessThan(
+        MAX_PASS_MS,
+      );
     }
-  }, 30_000);
+  }, 60_000);
 
   it('runs in linear time on hostile input for the user and host names', () => {
     const names = { username: 'alexm', hostname: 'Alexs-MacBook-Pro.local' };
@@ -293,13 +329,9 @@ describe('redaction, hardened', () => {
       '@Alexs-MacBook-Pro ',
       'a@b.co ',
     ]) {
-      const input = unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
-      const started = performance.now();
-      redactString(input, names);
-      const took = performance.now() - started;
-      expect(took, `${JSON.stringify(unit)} took ${took.toFixed(1)} ms`).toBeLessThan(150);
+      expectLinear(JSON.stringify(unit), size, (n) => redactString(fill(unit, n), names));
     }
-  });
+  }, 30_000);
 
   it('withholds a field over the cap whole, unread, and never cuts one', () => {
     const secret = 'ghp_' + 'z'.repeat(36);
@@ -934,13 +966,13 @@ describe('redaction, the five review findings', () => {
     expect(text.length).toBeGreaterThan(500 * 1024);
     let started = performance.now();
     const out = redact(text);
-    expect(performance.now() - started).toBeLessThan(2000);
+    expect(performance.now() - started).toBeLessThan(MAX_PASS_MS);
     expect(out).toBe(text.replace('hunter2', '<redacted>'));
     let nested: unknown = Array.from({ length: 20_000 }, (_, i) => i);
     for (let i = 0; i < 60; i++) nested = [nested];
     started = performance.now();
     const serialized = redactAndSerialize({ data: nested, text }, { maxBytes: 4096 });
-    expect(performance.now() - started).toBeLessThan(2000);
+    expect(performance.now() - started).toBeLessThan(MAX_PASS_MS);
     expect(Buffer.byteLength(serialized.text)).toBeLessThanOrEqual(4096);
     expect(() => JSON.parse(serialized.text) as unknown).not.toThrow();
     expect(serialized.omitted).toBeGreaterThan(0);

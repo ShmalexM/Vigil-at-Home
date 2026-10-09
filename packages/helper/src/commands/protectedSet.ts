@@ -25,6 +25,10 @@ export interface ProtectionInput {
   platform?: Platform;
   /** Vigil's own files on this machine (its runtime, socket, data), protected like the built-in lists. */
   selfPaths?: string[];
+  /** The helper's state folder as configured (QuarantineOptions stateDir). */
+  stateDir?: string;
+  /** Vigil's own files known only by identity (`<device>:<inode>`), like an approved AppImage. */
+  selfIds?: readonly string[];
 }
 
 export interface ProtectedPaths {
@@ -120,6 +124,9 @@ export function protectedPaths(opts: ProtectionInput): ProtectedPaths {
     ...serviceItems(opts.platform),
     ...(opts.selfPaths ?? []),
     ...(opts.quarantineDir ? [opts.quarantineDir] : []),
+    // The helper's whole state folder, as configured and where it is by default.
+    ...(opts.stateDir ? [opts.stateDir] : []),
+    protection.stateDir,
   ];
   const whole = [...(opts.protectedExact ?? protection.exact), ...homeFolders(opts.platform)];
   return { inside: inside.map(strip), whole: whole.map(strip) };
@@ -240,7 +247,7 @@ export function runsProtectedProgram(program: string, opts: ProtectionInput): bo
   if (named(real)) return true;
   const ids = protectedIds(paths);
   const st = lstatOrNull(real);
-  if (st && ids.inside.has(idKey(st))) return true;
+  if (st && (ids.inside.has(idKey(st)) || opts.selfIds?.includes(idKey(st)))) return true;
   for (let a = dirname(real); ; a = dirname(a)) {
     const s = statOrNull(a);
     if (s && ids.inside.has(idKey(s))) return true;

@@ -6,6 +6,7 @@ import { execFile } from 'node:child_process';
 import { readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import { fileId } from '@vigil/core/self';
 import { hostPlatform, type Platform } from './platform.js';
+import { openRegularFile, type OpenedFile, type OpenOptions } from './openedFile.js';
 
 export const BINARIES = {
   pfctl: '/sbin/pfctl',
@@ -16,6 +17,9 @@ export const BINARIES = {
   santactl: '/Applications/Santa.app/Contents/MacOS/santactl',
   osascript: '/usr/bin/osascript',
   codesign: '/usr/bin/codesign',
+  chflags: '/usr/bin/chflags',
+  ls: '/bin/ls',
+  id: '/usr/bin/id',
   osqueryd: '/opt/osquery/lib/osquery.app/Contents/MacOS/osqueryd',
 } as const;
 
@@ -31,6 +35,8 @@ export const LINUX_BINARIES = {
   dpkgQuery: '/usr/bin/dpkg-query',
   rpm: '/usr/bin/rpm',
   fagenrules: '/usr/sbin/fagenrules',
+  chattr: '/usr/bin/chattr',
+  id: '/usr/bin/id',
   osqueryd: '/opt/osquery/bin/osqueryd',
 } as const;
 
@@ -53,7 +59,7 @@ export interface System {
   run(
     bin: BinaryName,
     args: string[],
-    opts?: { input?: string; timeoutMs?: number },
+    opts?: { input?: string | Buffer; timeoutMs?: number },
   ): Promise<RunResult>;
   signal(pid: number, signal: 'SIGSTOP' | 'SIGCONT' | 'SIGKILL'): void;
   /** uid of the user logged in at the screen, if any. */
@@ -82,6 +88,23 @@ export interface System {
    * file itself even after it was renamed.
    */
   fileId?(path: string): string | undefined;
+  /**
+   * Open a regular file once, without blocking (openedFile.ts): everything
+   * about it is then read from that descriptor. Undefined when it is
+   * missing, not a regular file, or (with `nofollow`) a symlink.
+   */
+  openFile?(path: string, opts?: OpenOptions): OpenedFile | undefined;
+}
+
+/**
+ * A file's device and inode (`fileId`), ctime (nanoseconds, as a decimal
+ * string) and size. Any write to the file moves its ctime, and nothing short
+ * of root setting the clock moves it back.
+ */
+export interface FileStat {
+  id: string;
+  ctime: string;
+  size: number;
 }
 
 export function realSystem(
@@ -194,6 +217,7 @@ export function realSystem(
         return undefined;
       }
     },
+    openFile: (path, opts) => openRegularFile(path, opts),
   };
 }
 
