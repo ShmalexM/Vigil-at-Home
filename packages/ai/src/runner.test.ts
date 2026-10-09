@@ -296,6 +296,66 @@ describe('runner', () => {
     }
   });
 
+  it('starts a new check once a probe that never answers has timed out', async () => {
+    vi.useFakeTimers();
+    try {
+      let probes = 0;
+      const codex = fake('codex', () => ({
+        kind: 'ok',
+        json: { verdict: 'benign', summary: 'ok' },
+        audit: audit(),
+      }));
+      codex.probe = () =>
+        ++probes === 1
+          ? new Promise(() => {})
+          : Promise.resolve({ provider: 'codex', state: 'ready' });
+      const { runner } = setup([codex], { order: ['codex'] });
+      const first = runner.run({ ...request, deadlineMs: 600_000 });
+      await vi.advanceTimersByTimeAsync(PROBE_DEADLINE_MS + 1);
+      expect(await first).toMatchObject({ ok: false });
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      const second = runner.run({ ...request, deadlineMs: 600_000 });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await second).toMatchObject({ ok: true });
+      expect(probes).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a check started before sign-in finished from deciding after it', async () => {
+    let signedIn = false;
+    let probes = 0;
+    const releases: (() => void)[] = [];
+    let finish!: (ok: boolean) => void;
+    const codex = fake('codex', () => ({ kind: 'error', message: 'x', audit: audit() }));
+    codex.probe = () => {
+      probes++;
+      const state = signedIn ? 'ready' : 'needs_sign_in';
+      return new Promise((r) => releases.push(() => r({ provider: 'codex', state })));
+    };
+    codex.signIn = async () => ({
+      url: 'https://example.com',
+      completed: new Promise<boolean>((r) => (finish = r)),
+      cancel: () => {},
+    });
+    const { runner } = setup([codex], { order: ['codex'] });
+    await runner.signIn('codex');
+    const before = runner.status(); // a check while signing in
+    await Promise.resolve();
+    signedIn = true;
+    finish(true);
+    await new Promise((r) => setTimeout(r, 0));
+    const after = runner.status(); // the refresh once signed in
+    for (const r of releases) r();
+    await before;
+    expect((await after)[0]?.state).toBe('ready');
+    expect(probes).toBe(2);
+    // Nor did the earlier answer land in the cache: a run finds Codex ready.
+    expect(await runner.run(request)).toMatchObject({ ok: false, reason: 'error' });
+    expect(codex.inputs).toHaveLength(1);
+  });
+
   it('reports no_provider when nothing is set up', async () => {
     const { runner, log } = setup([]);
     expect(await runner.run(request)).toMatchObject({ ok: false, reason: 'no_provider' });

@@ -94,6 +94,16 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
   const adapters = new Map(deps.adapters.map((a) => [a.id, a]));
   const statusCache = new Map<ProviderId, { status: ProviderStatus; at: number; ttl?: number }>();
   const probing = new Map<ProviderId, Promise<ProviderStatus>>();
+  /**
+   * Bumped when what a provider's check would say may have changed (a sign-in
+   * finished, a run failed). A check started before that installs nothing.
+   */
+  const statusGen = new Map<ProviderId, number>();
+  const forget = (id: ProviderId) => {
+    statusCache.delete(id);
+    probing.delete(id);
+    statusGen.set(id, (statusGen.get(id) ?? 0) + 1);
+  };
   const redaction = deps.settings.redaction;
   const planNames = new Map<ProviderId, string>();
   let planUsageAt = -Infinity;
@@ -146,22 +156,29 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
     const cached = statusCache.get(adapter.id);
     if (!fresh && cached && now() - cached.at < (cached.ttl ?? STATUS_TTL_MS)) return cached.status;
     // One probe at a time per provider: a slow one is waited on again, not started twice.
-    let probe = probing.get(adapter.id);
+    const id = adapter.id;
+    const gen = statusGen.get(id) ?? 0;
+    const current = () => (statusGen.get(id) ?? 0) === gen;
+    let probe = probing.get(id);
     if (!probe) {
-      probe = adapter.probe().then(
-        (status) => {
-          // A late answer still counts, for the next run.
-          statusCache.set(adapter.id, { status, at: now() });
-          return status;
-        },
-        (error: unknown): ProviderStatus => ({
-          provider: adapter.id,
-          state: 'error',
-          detail: error instanceof Error ? error.message : String(error),
-        }),
-      );
-      const settled = probe.finally(() => probing.delete(adapter.id));
-      probing.set(adapter.id, settled);
+      const settled: Promise<ProviderStatus> = adapter
+        .probe()
+        .then(
+          (status) => {
+            // A late answer still counts, for the next run, unless it is stale.
+            if (current()) statusCache.set(id, { status, at: now() });
+            return status;
+          },
+          (error: unknown): ProviderStatus => ({
+            provider: id,
+            state: 'error',
+            detail: error instanceof Error ? error.message : String(error),
+          }),
+        )
+        .finally(() => {
+          if (probing.get(id) === settled) probing.delete(id);
+        });
+      probing.set(id, settled);
       probe = settled;
     }
     // A probe that never answers (a CLI that hangs) must not hold the run, or
@@ -170,15 +187,19 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
     const late = Symbol('late');
     const status = await settleWithin(probe, PROBE_DEADLINE_MS, late);
     if (status !== late) {
-      statusCache.set(adapter.id, { status, at: now() });
+      if (current()) statusCache.set(id, { status, at: now() });
       return status;
     }
+    // The next check after the short wait starts afresh rather than joining
+    // a probe that may never answer.
+    if (probing.get(id) === probe) probing.delete(id);
     const timedOut: ProviderStatus = {
-      provider: adapter.id,
+      provider: id,
       state: 'error',
       detail: 'It did not answer in time.',
     };
-    statusCache.set(adapter.id, { status: timedOut, at: now(), ttl: TIMED_OUT_STATUS_TTL_MS });
+    if (current())
+      statusCache.set(id, { status: timedOut, at: now(), ttl: TIMED_OUT_STATUS_TTL_MS });
     return timedOut;
   }
 
@@ -271,7 +292,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
       const adapter = adapters.get(id);
       if (!adapter?.signIn) throw new Error(`${id} is signed in with its own app, not from Vigil.`);
       const flow = await adapter.signIn();
-      void flow.completed.then(() => statusCache.delete(id));
+      void flow.completed.then(() => forget(id));
       return flow;
     },
 
@@ -389,7 +410,7 @@ export function createAiRunner(deps: AiRunnerDeps): AiRunner {
             break;
           }
           if (out.kind === 'error') {
-            statusCache.delete(id);
+            forget(id);
             record(id, 'error', out.audit, out.message, out.usage);
             lastReason = 'error';
             lastDetail = out.message;

@@ -291,6 +291,8 @@ export function createCodexAdapter(options: CodexAdapterOptions): ProviderAdapte
     const sharedSignIn = !apiKeyMode && (await isCodexSignInShared(options.codexHome));
     const childEnv = await serverEnv();
     if (!childEnv) throw new Error(NO_API_KEY);
+    // A run that ended while getting ready starts no server.
+    signal?.throwIfAborted();
     const rpc = new JsonRpcStdio(
       binaryPath,
       codexAppServerArgs({

@@ -40,6 +40,9 @@ export class JsonRpcStdio {
       if (this.stderr.length < 200) this.stderr.push(chunk.toString());
     });
     this.child.on('error', (error) => this.fail(error));
+    // A server that died leaves its stdin to fail on the next write (EPIPE);
+    // without a listener that would crash the app.
+    this.child.stdin.on('error', (error) => this.fail(error));
     this.child.on('exit', (code, signal) => this.fail(new Error(`exited (${code ?? signal})`)));
     createInterface({ input: this.child.stdout }).on('line', (line) => this.onLine(line));
   }

@@ -75,4 +75,18 @@ describe('bounded outside calls', () => {
     await new Promise((r) => setTimeout(r, 2_500));
     expect(alive(pid)).toBe(false);
   }, 10_000);
+
+  it('a server that died is a failed request, not a crash', async () => {
+    const rpc = new JsonRpcStdio(
+      '/bin/sh',
+      ['-c', 'exec 0<&-; sleep 1'], // closes its input and stays up a moment
+      {},
+      process.cwd(),
+      handlers,
+    );
+    await new Promise((r) => setTimeout(r, 200));
+    for (let i = 0; i < 20; i++) rpc.notify('initialized', { pad: 'x'.repeat(65_536) });
+    await expect(rpc.request('thread/start', {}, 1_000)).rejects.toThrow();
+    await new Promise((r) => setTimeout(r, 100)); // an EPIPE would surface as an unhandled error here
+  });
 });
