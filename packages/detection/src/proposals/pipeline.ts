@@ -48,7 +48,13 @@ export interface Proposal {
   retireTo?: 'alert' | 'shadow' | 'disabled';
   /** What approving it would stop catching, including look-alikes that would slip through. */
   impact?: ImpactReport;
-  /** For a change drafted from an alert: that alert's program, checked against the blocklists until it is decided. */
+  /**
+   * For a change drafted from alerts: every source alert's program (the same
+   * change asked for again from another alert adds its own), each checked
+   * against the blocklists until the change is decided.
+   */
+  subjects?: ProposalSubject[];
+  /** Saved before `subjects`: a single source alert's program. */
   subject?: ProposalSubject;
   /**
    * For tuning and retire: the sha256 of each program whose detections the
@@ -240,6 +246,14 @@ export function aiMayNotChange(rule: DetectionRule, mode: RuleMode): string | un
   return undefined;
 }
 
+/** Lists of signers known to be bad, checked by name even before a feed has filled them. */
+const SIGNER_LISTS = ['known_bad_signing_ids', 'user_blocked_signing_ids', 'known_bad_team_ids'];
+
+/** Every source program on a proposal, including one saved before `subjects`. */
+function subjectsOf(p: Proposal): ProposalSubject[] {
+  return [...(p.subjects ?? []), ...(p.subject ? [p.subject] : [])];
+}
+
 /** What an alert's program was, carried into a change drafted from it. */
 export interface ProposalSubject {
   sha256?: string;
@@ -416,8 +430,6 @@ export class RulePipeline {
     if (!parsedInput.success)
       return { ok: false, errors: formatZod(parsedInput.error), warnings: [] };
     const input = parsedInput.data;
-    const budget = this.budgetProblem(provider);
-    if (budget) return { ok: false, errors: [budget], warnings: [], final: true };
     const base = this.engine.getRule(input.ruleId);
     if (!base) return { ok: false, errors: [`No rule called ${input.ruleId}.`], warnings: [] };
     const outOfScope = aiMayNotChange(base, this.engine.modeOf(base));
@@ -436,8 +448,11 @@ export class RulePipeline {
         p.baseRuleId === base.id &&
         p.baseRuleVersion === base.version &&
         canonical(p.rule.exclusions.at(-1)) === canonical(input.addExclusion),
+      subject,
     );
     if (same) return same;
+    const budget = this.budgetProblem(provider);
+    if (budget) return { ok: false, errors: [budget], warnings: [], final: true };
     const tuned: DetectionRule = {
       ...base,
       version: base.version + 1,
@@ -457,11 +472,19 @@ export class RulePipeline {
   }
 
   /** A refusal pointing at a proposal already waiting that matches, if there is one. */
-  private waiting(match: (p: Proposal) => boolean): SubmitResult | undefined {
+  private waiting(
+    match: (p: Proposal) => boolean,
+    subject?: ProposalSubject,
+  ): SubmitResult | undefined {
     const p = this.store.list().find((x) => x.status === 'awaiting_review' && match(x));
-    return (
-      p && { ok: false, errors: [ALREADY_WAITING], warnings: [], final: true, duplicateOf: p.id }
-    );
+    if (!p) return undefined;
+    // The new request's source program joins the waiting one's, so every alert it was asked from is checked.
+    if (subject) {
+      const all = subjectsOf(p);
+      if (!all.some((x) => canonical(x) === canonical(subject)))
+        this.store.put({ ...p, subjects: [...all, subject] });
+    }
+    return { ok: false, errors: [ALREADY_WAITING], warnings: [], final: true, duplicateOf: p.id };
   }
 
   /**
@@ -479,8 +502,6 @@ export class RulePipeline {
     if (!parsedInput.success)
       return { ok: false, errors: formatZod(parsedInput.error), warnings: [] };
     const input = parsedInput.data;
-    const budget = this.budgetProblem(provider);
-    if (budget) return { ok: false, errors: [budget], warnings: [], final: true };
     const base = this.engine.getRule(input.ruleId);
     if (!base) return { ok: false, errors: [`No rule called ${input.ruleId}.`], warnings: [] };
     const current = this.engine.modeOf(base);
@@ -503,8 +524,11 @@ export class RulePipeline {
         p.baseRuleId === base.id &&
         p.baseRuleVersion === base.version &&
         p.retireTo === input.toMode,
+      subject,
     );
     if (same) return same;
+    const budget = this.budgetProblem(provider);
+    if (budget) return { ok: false, errors: [budget], warnings: [], final: true };
     return this.queueRetirement(
       base,
       input.toMode,
@@ -589,7 +613,7 @@ export class RulePipeline {
       ),
     };
     if (by) proposal.by = by;
-    if (subject) proposal.subject = subject;
+    if (subject) proposal.subjects = [subject];
     this.store.put(proposal);
     return {
       ok: errors.length === 0,
@@ -632,7 +656,7 @@ export class RulePipeline {
       lint,
     };
     if (p.by) proposal.by = p.by;
-    if (p.subject) proposal.subject = p.subject;
+    if (p.subject) proposal.subjects = [p.subject];
     if (p.base) {
       proposal.baseRuleId = p.base.id;
       proposal.baseRuleVersion = p.base.version;
@@ -712,13 +736,15 @@ export class RulePipeline {
   isBlockedSubject(s: ProposalSubject): boolean {
     if (s.sha256 && this.isBlockedHash(s.sha256)) return true;
     const { lists } = this.engine.stores;
-    const team = s.teamId;
-    return (
-      team !== undefined &&
-      lists
-        .names()
-        .some((l) => isIndicatorList(l) && (lists.has(l, team) || lists.has(l, team.toLowerCase())))
-    );
+    // By signer: the team ID, the signing ID (known_bad_signing_ids, the
+    // user's blocked signing IDs) or both as "TEAMID:signing.id", on any
+    // blocked or known-bad list.
+    const values = [s.teamId, s.signingId, s.teamId && s.signingId && `${s.teamId}:${s.signingId}`]
+      .filter((v): v is string => typeof v === 'string' && v.length > 0)
+      .flatMap((v) => [v, v.toLowerCase()]);
+    if (values.length === 0) return false;
+    const names = new Set([...lists.names(), ...SIGNER_LISTS]);
+    return [...names].some((l) => isIndicatorList(l) && values.some((v) => lists.has(l, v)));
   }
 
   /**
@@ -804,7 +830,7 @@ export class RulePipeline {
       )
     )
       return INDICATOR_EXCLUSION;
-    if (p.subject && this.isBlockedSubject(p.subject))
+    if (subjectsOf(p).some((x) => this.isBlockedSubject(x)))
       return p.kind === 'retire' ? STILL_CATCHES_THREAT : BLOCKED_EXCLUSION;
     const added =
       p.kind === 'tuning'

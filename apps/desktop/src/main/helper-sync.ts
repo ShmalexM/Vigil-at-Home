@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { listDigest } from '@vigil/detection/fastpath';
 import { HelperCallError } from '@vigil/helper/client';
 import type { HelperSync, HelperSyncOptions, HelperSyncOutcome } from './detection.js';
@@ -10,8 +11,10 @@ export interface HelperRulesLink {
   /** Null when no helper is connected: nothing was sent. */
   syncRules(
     set: HelperRuleSet,
-    how: { hold?: boolean; onHeld?: () => void },
+    how: { hold?: boolean; onHeld?: () => void; syncId?: string },
   ): Promise<unknown | null>;
+  /** Which sync is in force on the helper, or null if it can't say. */
+  rulesState(): Promise<{ syncId: string | null } | null>;
 }
 
 /**
@@ -21,9 +24,10 @@ export interface HelperRulesLink {
  *
  * `unavailable` means only that no helper was connected, known before
  * anything was sent. Once a sync is sent, anything short of the helper's yes
- * means the change is not made: a cancelled password or one left open past
- * the timeout (`declined`), or a refusal or a connection lost mid-ask
- * (`failed`, with the reason).
+ * means the change is not made: a cancelled password (`declined`), or a
+ * refusal or a connection lost mid-ask (`failed`, with the reason). When the
+ * app stops waiting (the timeout), it asks the helper which sync is in force
+ * and goes by that: made if the helper has it, a cancel if not.
  */
 export function helperRulesSync(link: HelperRulesLink, current: () => HelperRuleSet | undefined) {
   // Re-sent on every connection and whenever the rules, exceptions or lists change.
@@ -32,6 +36,7 @@ export function helperRulesSync(link: HelperRulesLink, current: () => HelperRule
   // asked again until the rules change, so the health timer never re-prompts.
   let declined: string | undefined;
   let queue: Promise<unknown> = Promise.resolve();
+  let lastSyncId: string | undefined;
 
   const send = async (opts: HelperSyncOptions): Promise<HelperSyncOutcome> => {
     const set = opts.set ?? current();
@@ -41,7 +46,12 @@ export function helperRulesSync(link: HelperRulesLink, current: () => HelperRule
     if (key === sent) return 'applied';
     if (key === declined && !opts.byUser) return 'declined';
     try {
-      const how = opts.hold ? { hold: true, ...(opts.onHeld ? { onHeld: opts.onHeld } : {}) } : {};
+      const syncId = randomUUID();
+      const how = {
+        syncId,
+        ...(opts.hold ? { hold: true, ...(opts.onHeld ? { onHeld: opts.onHeld } : {}) } : {}),
+      };
+      lastSyncId = syncId;
       if (!(await link.syncRules(set, how))) return 'unavailable';
       sent = key;
       return 'applied';
@@ -67,7 +77,13 @@ export function helperRulesSync(link: HelperRulesLink, current: () => HelperRule
         opts.onError?.('the background helper stopped answering');
         return 'failed';
       }
-      // No answer in time, as when the password dialog is left open: a cancel.
+      // No answer in time (a password dialog left open, Santa slow): ask the
+      // helper what is in force and go by that, rather than guess.
+      const state = await link.rulesState();
+      if (state?.syncId === lastSyncId) {
+        sent = key;
+        return 'applied';
+      }
       return 'declined';
     }
   };

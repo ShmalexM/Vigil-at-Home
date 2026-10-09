@@ -37,8 +37,11 @@ export interface HelperRuleSet {
 }
 
 export interface HelperRulesOutcome {
+  /** False when the helper lacked a list's contents and changed nothing. */
+  applied: boolean;
   needLists: string[];
-  preexec: PreexecOutcome | null;
+  /** Santa's pre-launch rules follow in the background (`pending`); detection.status says how. */
+  preexec: 'pending' | PreexecOutcome | null;
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -69,6 +72,10 @@ export class HelperLink
   implements ActionExecutor
 {
   private client: HelperClient | undefined;
+  /** What the connected helper is known to have, so unchanged lists are not sent again. */
+  private confirmedFor: HelperClient | undefined;
+  private confirmedRules: string | undefined;
+  private confirmedLists = new Map<string, string>();
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
   private connecting = false;
@@ -147,7 +154,9 @@ export class HelperLink
   }
 
   /** Ask the helper for something read-only (status, journal, the Santa profile). */
-  async query<T>(kind: 'helper.status' | 'helper.journal' | 'santa.profile'): Promise<T | null> {
+  async query<T>(
+    kind: 'helper.status' | 'helper.journal' | 'santa.profile' | 'detection.status',
+  ): Promise<T | null> {
     const client = this.client;
     if (!client) return null;
     try {
@@ -161,59 +170,122 @@ export class HelperLink
 
   /**
    * Hand the helper the blocking rules it can run itself (and Santa before
-   * launch), then any indicator list it says it doesn't have yet. Null while
-   * unconnected. If the rules turn something off or add an exception, the
-   * helper asks for the admin password first; a cancelled dialog throws a
-   * HelperCallError with code refused and leaves the helper's rules as they were.
-   * With `hold`, that password is asked for by the next dialog instead (a
-   * release's) or by approveHeld().
+   * launch). Null while unconnected, before anything is sent.
+   *
+   * A change to the rules goes as one detection.sync carrying the contents of
+   * every list the helper may not have, which the helper puts in force whole
+   * or not at all. If it still lacks one (it says so and changes nothing), the
+   * sync is sent again with it. When only list contents changed (a feed
+   * refresh, a newly blocked program), the lists go on their own, in parts.
+   *
+   * If the rules turn something off or add an exception, the helper asks for
+   * the admin password first; a cancelled dialog throws a HelperCallError
+   * with code refused and leaves the helper's rules as they were. With
+   * `hold`, that password is asked for by the next dialog instead (a
+   * release's) or by approveHeld(). `syncId` names the sync, so
+   * rulesState() can tell whether it went in after the app stopped waiting.
    */
   async syncRules(
     set: HelperRuleSet,
-    opts: { hold?: boolean; onHeld?: () => void } = {},
+    opts: { hold?: boolean; onHeld?: () => void; syncId?: string } = {},
   ): Promise<HelperRulesOutcome | null> {
     const client = this.client;
     if (!client) return null;
+    if (client !== this.confirmedFor) {
+      this.confirmedFor = client;
+      this.confirmedRules = undefined;
+      this.confirmedLists = new Map();
+    }
     try {
       const digests = Object.fromEntries(
         Object.entries(set.lists).map(([name, entries]) => [name, listDigest(entries)]),
       );
-      const sync = {
+      const changed = Object.keys(digests).filter((n) => this.confirmedLists.get(n) !== digests[n]);
+      const rulesKey = JSON.stringify({
+        rules: set.rules,
+        appRules: set.appRules,
+        exceptions: set.exceptions,
+        selfPaths: set.selfPaths,
+        lists: Object.keys(digests).sort(),
+      });
+      if (rulesKey === this.confirmedRules && !opts.hold) {
+        await this.sendLists(client, set, digests, changed);
+        return { applied: true, needLists: [], preexec: null };
+      }
+      const base = {
         kind: 'detection.sync' as const,
         rules: set.rules,
         appRules: set.appRules,
         exceptions: set.exceptions,
         selfPaths: set.selfPaths,
         lists: digests,
+        ...(opts.syncId ? { syncId: opts.syncId } : {}),
       };
-      const out = await withTimeout(
-        opts.hold
-          ? client.hold<HelperRulesOutcome>(sync, opts.onHeld)
-          : client.call<HelperRulesOutcome>(sync),
-        // A sync that loosens the rules waits on the admin password, like a release.
-        RELEASE_TIMEOUT_MS,
-      );
-      for (const name of out.needLists) {
-        const entries = [...new Set(set.lists[name] ?? [])];
-        const parts = Math.max(1, Math.ceil(entries.length / LIST_PART_MAX));
-        for (let part = 0; part < parts; part++) {
-          await withTimeout(
-            client.call({
-              kind: 'detection.list.set',
-              list: name,
-              digest: digests[name]!,
-              part,
-              parts,
-              entries: entries.slice(part * LIST_PART_MAX, (part + 1) * LIST_PART_MAX),
-            }),
-            QUERY_TIMEOUT_MS,
-          );
+      let carry = changed;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const sync = carry.length
+          ? {
+              ...base,
+              entries: Object.fromEntries(carry.map((n) => [n, [...new Set(set.lists[n] ?? [])]])),
+            }
+          : base;
+        const out = await withTimeout(
+          opts.hold
+            ? client.hold<HelperRulesOutcome>(sync, opts.onHeld)
+            : client.call<HelperRulesOutcome>(sync),
+          // A sync that loosens the rules waits on the admin password, like a release.
+          RELEASE_TIMEOUT_MS,
+        );
+        if (out.applied) {
+          this.confirmedRules = rulesKey;
+          this.confirmedLists = new Map(Object.entries(digests));
+          return out;
         }
+        carry = [...new Set([...carry, ...out.needLists])];
       }
-      return out;
+      throw new HelperCallError('the helper kept asking for its lists', 'failed');
     } catch (err) {
-      if (!(err instanceof HelperCallError)) this.dropped(client);
+      // A timeout is not a dead connection (a password dialog can stay open):
+      // keep it, so the app can ask the helper what is in force.
+      if (err instanceof HelperCallError && /connection closed/.test(err.message))
+        this.dropped(client);
       throw err;
+    }
+  }
+
+  /** Lists on their own, in parts: each goes in once all its parts are in. */
+  private async sendLists(
+    client: HelperClient,
+    set: HelperRuleSet,
+    digests: Record<string, string>,
+    names: string[],
+  ): Promise<void> {
+    for (const name of names) {
+      const entries = [...new Set(set.lists[name] ?? [])];
+      const parts = Math.max(1, Math.ceil(entries.length / LIST_PART_MAX));
+      for (let part = 0; part < parts; part++) {
+        await withTimeout(
+          client.call({
+            kind: 'detection.list.set',
+            list: name,
+            digest: digests[name]!,
+            part,
+            parts,
+            entries: entries.slice(part * LIST_PART_MAX, (part + 1) * LIST_PART_MAX),
+          }),
+          QUERY_TIMEOUT_MS,
+        );
+      }
+      this.confirmedLists.set(name, digests[name]!);
+    }
+  }
+
+  /** Which sync is in force on the helper (the app's id for it), or null if it can't say. */
+  async rulesState(): Promise<{ syncId: string | null } | null> {
+    try {
+      return await this.query<{ syncId: string | null }>('detection.status');
+    } catch {
+      return null;
     }
   }
 

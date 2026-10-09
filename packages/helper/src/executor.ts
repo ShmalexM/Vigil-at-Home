@@ -112,6 +112,19 @@ export class Executor {
     // Refuse what Linux can't do before asking for a password for it.
     if (this.d.sys.platform === 'linux') checkLinuxBlock(cmd);
     if (cmd.kind === 'detection.sync') {
+      // A sync with a rule that doesn't compile, or missing list contents,
+      // changes nothing; say so before asking for a password.
+      try {
+        this.d.fastPath?.checkRules(cmd);
+      } catch (err) {
+        throw policyError(err);
+      }
+      const need = this.d.fastPath?.missingLists(cmd) ?? [];
+      if (need.length)
+        return {
+          kind: 'done',
+          result: { applied: false, needLists: need, preexec: null },
+        };
       // Whether a sync weakens anything depends on the policy in force.
       const weakens = this.d.fastPath?.loosening(cmd) ?? [];
       if (weakens.length && (!approval || !this.d.approvals.consume(approval, cmd))) {
@@ -367,20 +380,25 @@ export class Executor {
         } catch (err) {
           throw policyError(err);
         }
-        // Santa's pre-launch rules follow the rules in force, so only once the sync is.
-        if (!this.d.preexec || !synced.committed) return { ...synced, preexec: null };
-        return { ...synced, preexec: await this.applyPreexec(cmd.rules) };
+        if (!this.d.preexec || !synced.applied) return { ...synced, preexec: null };
+        // The rules and lists are in force and saved: answer now. Santa's
+        // pre-launch rules follow in the background; detection.status says how.
+        this.startPreexec(cmd.rules);
+        return { ...synced, preexec: 'pending' };
       }
+      case 'detection.status':
+        return {
+          ...(this.d.fastPath?.status() ?? {}),
+          syncId: this.d.fastPath?.syncId() ?? null,
+          preexec: this.preexecState,
+        };
       case 'detection.list.set': {
         if (!this.d.fastPath) throw new ActionError('failed', 'helper rules are not set up');
-        let put;
         try {
-          put = this.d.fastPath.putList(cmd);
+          return this.d.fastPath.putList(cmd);
         } catch (err) {
           throw policyError(err);
         }
-        if (this.d.preexec && put.committed) await this.applyPreexec(this.d.fastPath.rules());
-        return put;
       }
       case 'santa.profile':
         return { mobileconfig: santaProfile({ syncPort: this.d.syncPort }) };
@@ -390,12 +408,29 @@ export class Executor {
     }
   }
 
-  /** Hand Santa the pre-launch rules for these rules, and sync Santa if they changed. */
-  private async applyPreexec(rules: DetectionSync['rules']) {
-    const before = this.d.rules.rev;
-    const preexec = await this.d.preexec!.apply(rules);
-    if (this.d.rules.rev !== before) await this.syncSanta();
-    return preexec;
+  /** How the last hand-off of pre-launch rules to Santa went: pending, its outcome, or the error. */
+  private preexecState: unknown = null;
+  private preexecChain: Promise<void> = Promise.resolve();
+
+  /** Hand Santa the pre-launch rules for these rules, one hand-off at a time, without waiting. */
+  private startPreexec(rules: DetectionSync['rules']): void {
+    this.preexecState = 'pending';
+    this.preexecChain = this.preexecChain.then(async () => {
+      try {
+        const before = this.d.rules.rev;
+        const outcome = await this.d.preexec!.apply(rules);
+        if (this.d.rules.rev !== before) await this.syncSanta();
+        this.preexecState = outcome;
+      } catch (err) {
+        this.preexecState = { error: (err as Error).message };
+      }
+    });
+  }
+
+  /** Wait for pre-launch rules already handed off (tests). */
+  async preexecSettled(): Promise<unknown> {
+    await this.preexecChain;
+    return this.preexecState;
   }
 
   /**

@@ -421,7 +421,7 @@ describe('AI rule suggestions in the app', () => {
       );
       expect(d.status).toBe('waiting');
       const p = t.detector.pipeline.get(d.proposalId!)!;
-      expect(p.subject).toMatchObject({ sha256: prog });
+      expect(p.subjects).toEqual([{ sha256: prog }]);
       expect(p.hides ?? []).not.toContain(prog);
       t.detector.engine.stores.lists.add('user_blocked_sha256', prog, {
         source: 'user',

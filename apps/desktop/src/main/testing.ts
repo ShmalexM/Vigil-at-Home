@@ -79,18 +79,8 @@ export function helperPolicy(detector: Detector) {
       asked.push(weakens);
       if (!helper.approve) return 'declined';
     }
-    const { needLists } = fast.sync(cmd);
-    for (const list of needLists) {
-      const entries = [...new Set(set.lists[list] ?? [])];
-      fast.putList({
-        kind: 'detection.list.set',
-        list,
-        digest: cmd.lists[list]!,
-        part: 0,
-        parts: 1,
-        entries,
-      });
-    }
+    // Rules and lists in one step, as the app sends them.
+    fast.sync({ ...cmd, entries: set.lists });
     return 'applied';
   };
   return { asked, helper, done: () => rmSync(dir, { recursive: true, force: true }) };

@@ -50,6 +50,8 @@ export const HelperQuery = z.discriminatedUnion('kind', [
     limit: z.number().int().min(1).max(1000).optional(),
   }),
   z.strictObject({ kind: z.literal('santa.profile') }),
+  /** Which rules are in force (the app's id for the sync) and how Santa's pre-launch rules went. */
+  z.strictObject({ kind: z.literal('detection.status') }),
   z.strictObject({ kind: z.literal('events.subscribe'), since: z.string().max(200).optional() }),
 ]);
 export type HelperQuery = z.infer<typeof HelperQuery>;
@@ -79,6 +81,9 @@ export const RuleExceptionSchema = z.strictObject({
  * the admin password, like a release; one that only adds rules does not.
  * Lists may change freely: an entry a list drops keeps blocking for a week.
  */
+/** Most entries one list may have: as many as detection.list.set's 200 parts carry. */
+export const LIST_ENTRIES_MAX = 200 * 1000;
+
 export const DetectionSync = z.strictObject({
   kind: z.literal('detection.sync'),
   rules: z.array(DetectionRule).max(64),
@@ -100,6 +105,17 @@ export const DetectionSync = z.strictObject({
   exceptions: z.array(RuleExceptionSchema).max(2000),
   selfPaths: z.array(z.string().min(1).max(1024)).max(8),
   lists: z.record(ListName, Digest),
+  /**
+   * The contents of the named lists the helper may not have, so rules and
+   * lists go in force together in this one command. A named list it doesn't
+   * carry must already be on the helper with that digest.
+   */
+  entries: z.record(ListName, z.array(z.string().max(255)).max(LIST_ENTRIES_MAX)).optional(),
+  /** The app's id for this sync; detection.status reports the one in force. */
+  syncId: z
+    .string()
+    .regex(/^[A-Za-z0-9-]{1,64}$/)
+    .optional(),
 });
 export type DetectionSync = z.infer<typeof DetectionSync>;
 
@@ -139,6 +155,7 @@ export function isAction(cmd: HelperCommand): cmd is HelperAction {
     'events.subscribe',
     'detection.sync',
     'detection.list.set',
+    'detection.status',
   ].includes(cmd.kind);
 }
 
@@ -177,7 +194,13 @@ export function parseRequest(line: string): HelperRequest | { error: string; id?
   const kind = env.data.command.kind;
   const isQuery =
     typeof kind === 'string' &&
-    ['helper.status', 'helper.journal', 'santa.profile', 'events.subscribe'].includes(kind);
+    [
+      'helper.status',
+      'helper.journal',
+      'santa.profile',
+      'events.subscribe',
+      'detection.status',
+    ].includes(kind);
   const parsed = isQuery
     ? HelperQuery.safeParse(env.data.command)
     : kind === 'detection.sync'

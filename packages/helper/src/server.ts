@@ -14,8 +14,12 @@ import type { Executor } from './executor.js';
 import type { HelperRan } from './fastpath.js';
 import { ActionError } from './commands/errors.js';
 
-// Large enough for detection.sync with a full rule set; still bounded.
+// Large enough for any command but detection.sync; still bounded.
 const MAX_LINE = 1024 * 1024;
+// detection.sync carries its lists' contents (up to LIST_ENTRIES_MAX each),
+// so rules and lists go in force together; it alone may be this long.
+const MAX_SYNC_LINE = 64 * 1024 * 1024;
+const SYNC_PREFIX = /^\{"id":"[^"\\]{1,200}","command":\{"kind":"detection\.sync"/;
 const RECENT_EVENTS = 2000;
 
 export interface HelperServerOptions {
@@ -80,8 +84,12 @@ export class HelperServer {
     sock.setEncoding('utf8');
     sock.on('data', (chunk: string) => {
       buf += chunk;
-      if (buf.length > MAX_LINE && !buf.includes('\n')) {
-        sock.destroy();
+      // Only the new chunk can end the line, so a long sync isn't rescanned per chunk.
+      if (!chunk.includes('\n')) {
+        if (buf.length > MAX_LINE) {
+          const max = SYNC_PREFIX.test(buf.slice(0, 400)) ? MAX_SYNC_LINE : MAX_LINE;
+          if (buf.length > max) sock.destroy();
+        }
         return;
       }
       let nl: number;

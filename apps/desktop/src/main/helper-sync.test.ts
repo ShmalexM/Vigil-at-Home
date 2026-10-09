@@ -7,7 +7,12 @@ import { DryRunExecutor } from './executor.js';
 import { helperRulesSync } from './helper-sync.js';
 import { VigilCore } from './service.js';
 
-function setup(syncRules: () => Promise<unknown>) {
+function setup(
+  syncRules: () => Promise<unknown>,
+  rulesState: (lastSyncId?: string) => { syncId: string | null } | null = () => ({
+    syncId: null,
+  }),
+) {
   const db = new DatabaseSync(':memory:');
   const store = new Store(db);
   const core = new VigilCore(store, new DryRunExecutor(), true);
@@ -16,8 +21,15 @@ function setup(syncRules: () => Promise<unknown>) {
     selfPaths: ['/Applications/Vigil at Home.app'],
     feeds: { fetch: async () => Promise.reject(new Error('offline in tests')) },
   });
-  let answer = async (): Promise<unknown> => ({ needLists: [], preexec: null });
-  const link = { syncRules: () => answer() };
+  let answer = async (): Promise<unknown> => ({ applied: true, needLists: [], preexec: null });
+  let lastSyncId: string | undefined;
+  const link = {
+    syncRules: (_set: unknown, how: { syncId?: string }) => {
+      lastSyncId = how.syncId;
+      return answer();
+    },
+    rulesState: async () => rulesState(lastSyncId),
+  };
   detector.syncHelper = helperRulesSync(link, () => detector.helperRules()).sync;
   const mode = () => detector.rules().find((r) => r.rule.id === 'exec-from-shared-temp')!.mode;
   return {
@@ -29,6 +41,20 @@ function setup(syncRules: () => Promise<unknown>) {
 }
 
 describe('sending the helper a rule change', () => {
+  it('after a timeout, goes by what the helper has in force: there, the change is made', async () => {
+    const t = setup(
+      async () => {
+        throw new Error('The Vigil helper did not answer');
+      },
+      // The helper took the sync after the app stopped waiting (Santa was slow).
+      (last) => ({ syncId: last ?? null }),
+    );
+    expect(await t.detector.setMode('exec-from-shared-temp', 'block')).toBe('applied');
+    t.then();
+    expect(await t.detector.setMode('exec-from-shared-temp', 'shadow')).toBe('applied');
+    expect(t.mode()).toBe('shadow');
+  });
+
   it('counts a password dialog left open past the timeout as a cancel', async () => {
     const t = setup(async () => {
       throw new Error('The Vigil helper did not answer');

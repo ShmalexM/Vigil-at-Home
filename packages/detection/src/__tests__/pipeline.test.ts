@@ -8,6 +8,7 @@ import {
   INDICATOR_EXCLUSION,
   INDICATOR_RULE,
   isIndicatorRule,
+  STILL_CATCHES_THREAT,
   USER_TUNED_ONLY,
 } from '../proposals/pipeline.js';
 import { ruleLanguageGuide } from '../proposals/tools.js';
@@ -766,6 +767,80 @@ describe('the one check on what an AI may change', () => {
     });
     expect(pipeline.commitProblem('old-seq-2')).toBe(USER_TUNED_ONLY);
   });
+});
+
+describe('the programs a drafted change came from', () => {
+  const baseRule = testRule({
+    id: 'unsigned-net-alert',
+    name: 'Unsigned program online',
+    eventKinds: ['network.connection'],
+    severity: 'low',
+    condition: { field: 'process.signing', op: 'in', value: ['unsigned', 'adhoc'] },
+    reasons: ['{{process.name}} connected out'],
+  });
+  const narrow = {
+    ruleId: 'unsigned-net-alert',
+    addExclusion: { field: 'process.path', op: 'glob', value: ['~/code/**'] },
+    rationale: 'Your own builds in ~/code are expected.',
+  };
+  const retire = {
+    ruleId: 'unsigned-net-alert',
+    toMode: 'shadow',
+    rationale: 'Noisy.',
+    evidence: ['chat'],
+  };
+
+  it('checks the signing ID against the known-bad and user-blocked signing lists', () => {
+    const { pipeline, engine, stores } = twoWeeks();
+    engine.upsertRule(baseRule);
+    const signed = { sha256: 'a'.repeat(64), teamId: 'ABCDE12345', signingId: 'com.evil.upd' };
+    expect(pipeline.isBlockedSubject(signed)).toBe(false);
+    const res = pipeline.submitTuning(narrow, 'codex', 'Scout', signed);
+    expect(res.ok).toBe(true);
+    stores.lists.add('known_bad_signing_ids', 'com.evil.upd', { source: 'feed', updatedAt: 0 });
+    expect(pipeline.isBlockedSubject(signed)).toBe(true);
+    expect(pipeline.withdrawAffected()).toBe(1);
+    expect(() => pipeline.approve(res.proposalId!, userOrigin('rules-screen'))).toThrow(
+      /withdrawn/,
+    );
+    // The user's own blocked signing IDs count too, and so does TEAMID:signing.id.
+    const other = { teamId: 'ZZZZZ99999', signingId: 'com.other.tool' };
+    stores.lists.add('user_blocked_signing_ids', 'ZZZZZ99999:com.other.tool', {
+      source: 'user',
+      updatedAt: 0,
+    });
+    expect(pipeline.isBlockedSubject(other)).toBe(true);
+    expect(pipeline.submitRetirement(retire, 'codex', 'Scout', other)).toMatchObject({
+      ok: false,
+      errors: [STILL_CATCHES_THREAT],
+    });
+  });
+
+  for (const kind of ['exclusion', 'turn-down'] as const) {
+    it(`keeps every source alert's program on a repeated ${kind} and checks them all`, () => {
+      const { pipeline, engine, stores } = twoWeeks();
+      engine.upsertRule(baseRule);
+      const first = { sha256: 'b'.repeat(64) };
+      const second = { sha256: 'c'.repeat(64) };
+      const submit = (s: typeof first) =>
+        kind === 'exclusion'
+          ? pipeline.submitTuning(narrow, 'codex', 'Scout', s)
+          : pipeline.submitRetirement(retire, 'codex', 'Scout', s);
+      const res = submit(first);
+      expect(res.ok).toBe(true);
+      // The same change asked for from a second alert, about another program.
+      expect(submit(second)).toMatchObject({ duplicateOf: res.proposalId });
+      expect(submit(second)).toMatchObject({ duplicateOf: res.proposalId });
+      expect(pipeline.get(res.proposalId!)!.subjects).toEqual([first, second]);
+      // Only the second alert's program is blocked: the change goes.
+      stores.lists.add('user_blocked_sha256', second.sha256, { source: 'user', updatedAt: 0 });
+      expect(pipeline.list().find((p) => p.id === res.proposalId)).toMatchObject({
+        status: 'withdrawn',
+      });
+      expect(pipeline.commitProblem(res.proposalId!)).toBeDefined();
+      expect(() => pipeline.approve(res.proposalId!, userOrigin('rules-screen'))).toThrow();
+    });
+  }
 });
 
 describe('waiting proposals when threat information changes', () => {
