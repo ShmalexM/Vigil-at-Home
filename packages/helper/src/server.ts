@@ -117,6 +117,12 @@ export class HelperServer {
       this.send(sock, { id: req.id ?? '', ok: false, error: req.error, code: 'invalid' });
       return;
     }
+    // The size check above reads only the line's start; JSON lets a later
+    // duplicate "kind" win, so check the parsed kind too.
+    if (line.length > MAX_LINE && req.command.kind !== 'detection.sync') {
+      this.send(sock, { id: req.id, ok: false, error: 'request too long', code: 'invalid' });
+      return;
+    }
     if (req.command.kind === 'events.subscribe') {
       const since = req.command.since;
       const start = since ? this.recentIds.indexOf(since) + 1 : this.recent.length;

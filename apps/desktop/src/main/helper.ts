@@ -261,6 +261,9 @@ export class HelperLink
         appRules: set.appRules,
         exceptions: set.exceptions,
         // Only an AppImage names images and hashes; a helper from before them refuses unknown fields.
+        // A helper from before self.grant also refuses appRules, notAfter and
+        // syncId, so this fallback fails closed (the change is refused) until
+        // the helper is updated with the app; nothing is put in force unasked.
         ...(opts.withSelf ? selfOf(set) : {}),
         lists: digests,
         ...(opts.syncId ? { syncId: opts.syncId } : {}),

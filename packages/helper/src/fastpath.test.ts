@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createConnection } from 'node:net';
 import { join } from 'node:path';
 import { DetectionEngine, macosCoreRules, memoryStores } from '@vigil/detection';
 import { fastPathRules, listDigest } from '@vigil/detection/fastpath';
@@ -768,6 +769,25 @@ describe('one sync carrying big lists', () => {
     const other = await HelperClient.connect(join(root, 'helper.sock'), async () => false);
     const huge = { kind: 'helper.journal', limit: 1, pad: 'x'.repeat(2 * 1024 * 1024) };
     await expect(other.call(huge as never)).rejects.toMatchObject({ code: 'failed' });
+  });
+
+  it('refuses a long line that starts as a sync but parses as another command', async () => {
+    // JSON lets the later "kind" win, so the line's start alone can't grant the sync limit.
+    const pad = ' '.repeat(2 * 1024 * 1024);
+    const line = `{"id":"dup","command":{"kind":"detection.sync"${pad},"kind":"helper.journal","limit":1}}\n`;
+    const sock = createConnection(join(root, 'helper.sock'));
+    const reply = await new Promise<string>((resolve, reject) => {
+      let got = '';
+      sock.setEncoding('utf8');
+      sock.on('data', (d: string) => {
+        got += d;
+        if (got.includes('\n')) resolve(got.slice(0, got.indexOf('\n')));
+      });
+      sock.on('error', reject);
+      sock.write(line);
+    });
+    sock.destroy();
+    expect(JSON.parse(reply)).toMatchObject({ id: 'dup', ok: false, code: 'invalid' });
   });
 });
 
