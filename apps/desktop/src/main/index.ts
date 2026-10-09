@@ -37,6 +37,7 @@ import {
   HEALTH_CHECK_MS,
   macProbe,
   reportHealth,
+  helperSensorsFrom,
   type HelperSensors,
 } from './sensor-health.js';
 import { VigilCore } from './service.js';
@@ -161,8 +162,7 @@ function start(): void {
     ...macProbe(
       (source) => store.lastEventAt(source),
       () => helper.state,
-      async () =>
-        (await helper.query<{ sensors?: HelperSensors }>('helper.status'))?.sensors ?? null,
+      helperSensorsFrom(() => helper.query<{ sensors?: HelperSensors }>('helper.status')),
     ),
     awakeMs: (since: number) => awake.awakeMs(since),
   };

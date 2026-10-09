@@ -190,6 +190,57 @@ describe('helper install', () => {
     expect(await runHelperScript('install', null, answer(0))).toMatchObject({ ok: false });
   });
 
+  it('counts only a closed dialog as a cancel, not -128 in a path', async () => {
+    const { dir } = bundle();
+    const answer =
+      (stderr: string): RunFile =>
+      async () => ({ code: 1, stdout: '', stderr });
+    expect(
+      await runHelperScript(
+        'install',
+        dir,
+        answer('0:1: execution error: User canceled. (-128)\n'),
+        'darwin',
+      ),
+    ).toEqual({ ok: false, error: 'cancelled' });
+    const r = await runHelperScript(
+      'install',
+      dir,
+      answer('0:9: execution error: sh: /Applications/Vigil-128.app/x: Permission denied (126)'),
+      'darwin',
+    );
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/Permission denied/);
+    expect(r).toHaveProperty('command');
+  });
+
+  it('runs one install at a time, whichever window asked', async () => {
+    const { dir } = bundle();
+    let calls = 0;
+    let finish!: () => void;
+    const slow: RunFile = () => {
+      calls++;
+      return new Promise((resolve) => {
+        finish = () => resolve({ code: 0, stdout: '', stderr: '' });
+      });
+    };
+    const first = runHelperScript('install', dir, slow, 'darwin');
+    const again = runHelperScript('install', dir, slow, 'darwin');
+    expect(await runHelperScript('uninstall', dir, slow, 'darwin')).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/being installed/),
+    });
+    finish();
+    expect(await first).toEqual({ ok: true });
+    expect(await again).toEqual({ ok: true });
+    expect(calls).toBe(1);
+    // Once it finishes, the next one runs.
+    const next = runHelperScript('uninstall', dir, slow, 'darwin');
+    finish();
+    expect(await next).toEqual({ ok: true });
+    expect(calls).toBe(2);
+  });
+
   it('on Linux, has pkexec copy and check a private copy of the files', async () => {
     const { dir } = bundle();
     const seen: string[][] = [];
@@ -296,6 +347,7 @@ describe('helper install', () => {
       error: 'Boom.',
       command: helperInstallCommand(dir, 'darwin'),
     });
+    expect(mac.command).toContain(` vigil-helper-setup ${shellQuote(dir)} 'install.sh' `);
   });
 
   it('never runs the real script from the demo', async () => {
