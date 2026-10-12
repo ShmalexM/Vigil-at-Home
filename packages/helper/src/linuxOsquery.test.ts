@@ -55,6 +55,18 @@ describe('osquery service on Linux', () => {
     expect(sys.runs.at(-1)!.args).toEqual(['restart', 'osqueryd.service']);
   });
 
+  it('never replaces a backup another install made first', async () => {
+    writeFileSync(p.osqueryd, '');
+    await ensureLinuxOsquery(sys, p); // creates the folder
+    writeFileSync(p.config, '{"schedule":{"mine":{}}}');
+    // Another install, running at the same time, already backed up the original.
+    writeFileSync(p.config + '.before-vigil', '{"schedule":{}}');
+    sys.active.add('system osqueryd.service');
+    await ensureLinuxOsquery(sys, p);
+    expect(readFileSync(p.config + '.before-vigil', 'utf8')).toBe('{"schedule":{}}');
+    expect(readFileSync(p.config, 'utf8')).toBe(osqueryLinuxConfig());
+  });
+
   it('stops the service it started when there was nothing before', async () => {
     writeFileSync(p.osqueryd, '');
     await ensureLinuxOsquery(sys, p);

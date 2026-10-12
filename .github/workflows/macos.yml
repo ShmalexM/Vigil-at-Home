@@ -159,8 +159,11 @@ jobs:
           sudo "$h/install.sh"
           test -S /var/run/vigil-helper.sock
           sudo launchctl print system/com.vigilathome.helper | grep -E 'state = running'
-          ls -l /Library/PrivilegedHelperTools/vigil-helper /Library/PrivilegedHelperTools/vigil-helper.d
-          test "$(stat -f %Su /Library/PrivilegedHelperTools/vigil-helper.d/node)" = root
+          d=/Library/PrivilegedHelperTools/vigil-helper.d
+          ls -l /Library/PrivilegedHelperTools/vigil-helper "$d" "$d/versions"
+          # The helper runs through current, a link to one version.
+          test -L "$d/current"
+          test "$(stat -f %Su "$d/current/node")" = root
           # The app talks to it as the signed-in user.
           ls -l /var/run/vigil-helper.sock
           node -e "
@@ -173,11 +176,28 @@ jobs:
             });
             s.write(JSON.stringify({ id: '1', command: { kind: 'helper.status' } }) + '\\n');
           "
-          # Reinstalling over a running copy works.
+          # Reinstalling over a running copy works, and so do two runs at once.
           sudo "$h/install.sh"
+          sudo "$h/install.sh" & sudo "$h/install.sh"; wait $!
+          test -S /var/run/vigil-helper.sock
+          # Each run made its own version; none is pruned within the hour.
+          test "$(ls "$d/versions" | wc -l)" -eq 4
+          # current names one complete version.
+          test -f "$d/current/node"
+          test -f "$d/current/helper.mjs"
           sudo "$h/uninstall.sh"
-          ! test -e /Library/PrivilegedHelperTools/vigil-helper
-          ! sudo launchctl print system/com.vigilathome.helper 2>/dev/null
+          # A negated command (! cmd) never fails a step under errexit, so these
+          # are spelled as ifs.
+          for p in /Library/PrivilegedHelperTools/vigil-helper "$d"; do
+            if test -e "$p" || test -L "$p"; then
+              echo "$p is still there after uninstall.sh" >&2
+              exit 1
+            fi
+          done
+          if sudo launchctl print system/com.vigilathome.helper >/dev/null 2>&1; then
+            echo "The helper's launchd job is still loaded after uninstall.sh" >&2
+            exit 1
+          fi
       - if: failure()
         run: sudo cat /Library/Logs/Vigil/helper.log || true
 
