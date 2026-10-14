@@ -17,6 +17,6 @@
     "@vigil/core": "workspace:*",
     "@vigil/detection": "workspace:*",
     "@vigil/sensors": "workspace:*",
-    "zod": "^4.1.0"
+    "zod": "^4.6.6"
   }
 }
