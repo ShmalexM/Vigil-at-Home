@@ -24,7 +24,8 @@ export interface ReadTool<Shape extends z.ZodRawShape = z.ZodRawShape> {
   readonly name: string;
   readonly description: string;
   readonly input: Shape;
-  run(args: z.infer<z.ZodObject<Shape>>): Promise<unknown>;
+  /** `run.signal` aborts when the run that called the tool reaches its deadline. */
+  run(args: z.infer<z.ZodObject<Shape>>, run?: { signal: AbortSignal }): Promise<unknown>;
 }
 
 export interface RunRequest<T> {
@@ -39,6 +40,8 @@ export interface RunRequest<T> {
   /** Optional read-only tools. None by default. */
   readonly tools?: readonly ReadTool[];
   readonly deadlineMs: number;
+  /** Ends the run early too: a run made for another run ends with it. */
+  readonly signal?: AbortSignal;
   /** Only these providers, in the usual order. Default: all the settings allow. */
   readonly providers?: readonly ProviderId[];
   /**
@@ -64,10 +67,26 @@ export function mayUsePlan(
   );
 }
 
+/** The `detail` of a run that reached no AI because the monthly cap on the user's keys is spent. */
+export const MONTHLY_CAP_HELD = 'monthly cap reached';
+/** The `detail` of a run that reached no AI because the user's plans are near their limits. */
+export const PLAN_LIMITS_HELD = 'plan limits';
+
 export type RunFailureReason = 'quota' | 'timeout' | 'invalid_output' | 'no_provider' | 'error';
 
 export type RunResult<T> =
-  | { readonly ok: true; readonly value: T; readonly provider: ProviderId; readonly logId: string }
+  | {
+      readonly ok: true;
+      readonly value: T;
+      readonly provider: ProviderId;
+      readonly logId: string;
+      /**
+       * True when the answer came from the user's Claude plan rather than a
+       * key. The runner always sets it; a result without it (unknown) should
+       * be treated as from the plan when the provider is Claude.
+       */
+      readonly viaPlan?: boolean;
+    }
   | {
       readonly ok: false;
       readonly reason: RunFailureReason;

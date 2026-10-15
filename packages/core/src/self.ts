@@ -50,6 +50,58 @@ export function underSelfRoot(
   return roots.some((s) => p === s || p.startsWith(`${s}/`));
 }
 
+/**
+ * Where the installer puts Vigil, root-owned: the macOS app bundle, or the
+ * Linux package's folder. `platform` is a Node platform name; anything that
+ * isn't Linux is treated as macOS.
+ */
+export function installedRoots(platform: string): string[] {
+  return platform === 'linux' ? ['/opt/Vigil at Home'] : ['/Applications/Vigil at Home.app'];
+}
+
+/**
+ * Whether `path` is inside the installer's own folder (or is it): the one
+ * test for "protected by path already", shared by the helper's pin, the
+ * helper's process protection and the app's "no pin needed" check, so they
+ * never disagree. Compared without case on macOS, whose disks ignore it,
+ * and with case on Linux. `roots` defaults to {@link installedRoots}.
+ *
+ * An AppImage (`appImage`, see {@link looksLikeAppImage}) is never inside,
+ * wherever it sits: Vigil runs from the image's FUSE mount, not from the
+ * folder, so the folder's protection doesn't reach it and it is pinned like
+ * an AppImage anywhere else. Only an unpacked install there counts.
+ */
+export function insideInstalledRoot(
+  path: string,
+  platform: string,
+  opts: { roots?: readonly string[]; appImage?: boolean } = {},
+): boolean {
+  if (opts.appImage) return false;
+  const caseless = platform !== 'linux';
+  const roots = opts.roots ?? installedRoots(platform);
+  return underSelfRoot(selfRoots(roots, caseless), path, caseless);
+}
+
+/**
+ * Whether a file is an AppImage, by its name (`*.AppImage`, any case) or by
+ * its first bytes (`head`, at least 11): an ELF header carrying the AppImage
+ * magic, "AI" and the image type 1 or 2, at offset 8.
+ */
+export function looksLikeAppImage(path: string, head?: Uint8Array): boolean {
+  if (/\.appimage$/i.test(path)) return true;
+  return (
+    !!head &&
+    head.length >= 11 &&
+    head[0] === 0x7f &&
+    head[1] === 0x45 &&
+    head[2] === 0x4c &&
+    head[3] === 0x46 &&
+    head[8] === 0x41 &&
+    head[9] === 0x49 &&
+    (head[10] === 1 || head[10] === 2)
+  );
+}
+
 /** A file's identity, `<device>:<inode>`. It stays the same when the file is renamed. */
 export function fileId(dev: bigint | number, ino: bigint | number): string {
   return `${dev}:${ino}`;

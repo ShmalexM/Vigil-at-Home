@@ -1,5 +1,6 @@
 import { AgentIdentity, AgentIdentityInput } from '@vigil/core';
 import { assertUserOrigin, type UserOrigin } from '../origin.js';
+import { globProblem } from '../rules/compile.js';
 import type { AgentStore } from '../state/stores.js';
 import { AGENT_CATALOG, VIGIL_CONNECTOR, VIGIL_SELF, type CatalogEntry } from './catalog.js';
 import { compileAgentMatchers, type CompiledAgentMatcher } from './match.js';
@@ -83,6 +84,10 @@ export class AgentRegistry {
     const v = AgentIdentityInput.parse(input);
     if (v.id === VIGIL_SELF || v.id === VIGIL_CONNECTOR)
       throw new Error(`"${v.id}" is reserved for Vigil itself.`);
+    for (const g of v.match.flatMap((m) => m.paths ?? [])) {
+      const problem = globProblem(g);
+      if (problem) throw new Error(`Path ${g}: ${problem}.`);
+    }
     const at = this.now();
     const entry = this.catalog.get(v.id);
     const current = this.get(v.id);

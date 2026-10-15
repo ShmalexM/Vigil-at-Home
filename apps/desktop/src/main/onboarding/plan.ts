@@ -247,7 +247,7 @@ function aiSteps(inputs: PlanInputs, linux: boolean): StepDef[] {
       id: 'ollama-model',
       group: 'ai',
       title: 'Local model',
-      why: `${model} is ${size}, picked for this ${computer}’s memory, and only uses memory while it works. Vigil uses a model you already have instead, if there is one.`,
+      why: `A small model that labels unusual events. ${model} is ${size}, picked for this ${computer}’s memory, and only uses memory while it works. A small model you already have counts too; a bigger one explains alerts but isn’t used for labelling.`,
       modes: LOCAL_AI,
       commands: [{ label: 'Download the model', cmd: `ollama pull ${model}` }],
       check: 'ollama.model',

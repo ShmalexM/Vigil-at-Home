@@ -252,6 +252,45 @@ describe('dedupe, thresholds, exceptions, lists', () => {
     });
     expect(eng.evaluate(exec(evil)).map((d) => d.match.ruleId)).toEqual(['r-x']);
   });
+  it('check can leave out exclusions and exceptions on named fields, and no others', () => {
+    const stores = memoryStores();
+    const eng = new DetectionEngine(
+      [
+        testRule({ id: 'r-x', condition: isEvil }),
+        testRule({
+          id: 'r-y',
+          condition: isEvil,
+          exclusions: [{ field: 'process.sha256', op: 'eq', value: 'e'.repeat(64) }],
+        }),
+        testRule({
+          id: 'r-z',
+          condition: isEvil,
+          exclusions: [{ field: 'process.name', op: 'eq', value: 'evil' }],
+        }),
+      ],
+      stores,
+    );
+    stores.exceptions.add({
+      id: 'x1',
+      ruleId: 'r-x',
+      match: { 'process.signing': 'unsigned' },
+      createdAt: 0,
+    });
+    const e = exec(evil);
+    expect(eng.check(e).map((d) => d.match.ruleId)).toEqual([]);
+    const ids = (f: string[]) =>
+      eng
+        .check(e, { noSkipsOn: f })
+        .map((d) => d.match.ruleId)
+        .sort();
+    expect(ids(['process.sha256'])).toEqual(['r-y']);
+    expect(ids(['process.signing'])).toEqual(['r-x']);
+    expect(ids(['process.sha256', 'process.signing', 'process.name'])).toEqual([
+      'r-x',
+      'r-y',
+      'r-z',
+    ]);
+  });
   it('matches lists by exact value, subnet and parent domain', () => {
     const stores = memoryStores();
     stores.lists.replace('bad', ['evil.test', '198.51.100.0/24', '# comment', '1.2.3.4'], {

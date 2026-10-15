@@ -2,7 +2,14 @@ import type { ActionProposal, ActionRecord, Alert } from '@vigil/core';
 import { ShieldAlert, ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
 import { vigil } from '../api';
-import { activeContainment, containLabel, keepLabel, releaseLabel, releaseStep } from '../decision';
+import {
+  activeContainment,
+  containLabel,
+  refusalNote,
+  keepLabel,
+  releaseLabel,
+  releaseStep,
+} from '../decision';
 import { releaseFailed } from '../format';
 import { HoldButton } from './HoldButton';
 import { Button } from './ui';
@@ -32,6 +39,9 @@ export function DecisionControls({
   const pending = proposals.filter((p) => p.status === 'pending');
   const active = activeContainment(actions);
   const contained = alert.containment === 'active';
+  // A quarantine an installer's ownership stopped: one calm line, here, instead of closing.
+  const note = actions.map((r) => refusalNote(r, actions)).find(Boolean);
+  const serious = alert.severity === 'high' || alert.severity === 'critical';
 
   const decide = async (
     verdict: 'malicious' | 'benign' | 'expected',
@@ -46,12 +56,26 @@ export function DecisionControls({
     onDecided(d);
   };
   const contain = async () => {
-    for (const p of pending) await vigil.approveProposal(p.id);
+    let held = false;
+    for (const p of pending) {
+      const r = await vigil.approveProposal(p.id);
+      if (r.result?.errorCode) held = true;
+    }
+    if (held) {
+      // Recorded as malicious, but the view stays open so the line about the item is seen.
+      await vigil.decide(alert.id, { verdict: 'malicious', release: false });
+      return;
+    }
     await decide('malicious', false, 'contained');
   };
 
   return (
     <div className="col decision" style={{ gap: 8 }}>
+      {note && (
+        <p className="t-small" style={{ margin: 0 }}>
+          {note}
+        </p>
+      )}
       {failure?.id === alert.id && (
         <p role="alert" className="t-small" style={{ margin: 0, color: 'var(--poor)' }}>
           {failure.text}
@@ -77,7 +101,8 @@ export function DecisionControls({
           <>
             {pending.length > 0 && (
               <Button
-                kind="primary"
+                // A suggestion, not the default: only a serious alert leads with it.
+                kind={serious ? 'primary' : 'outline'}
                 icon={<ShieldAlert size={15} />}
                 onClick={() => void contain()}
               >
@@ -85,17 +110,28 @@ export function DecisionControls({
               </Button>
             )}
             <Button
-              kind={pending.length > 0 ? 'outline' : 'primary'}
+              kind={pending.length > 0 && serious ? 'outline' : 'primary'}
+              title="You did this yourself. Closes the alert; nothing is allowed for next time."
               onClick={() => void decide('expected', false, 'expected')}
             >
               That was me
             </Button>
-            <Button kind="ghost" onClick={() => void decide('benign', false, 'fine')}>
+            <Button
+              kind="ghost"
+              title="It wasn’t you, but it’s harmless. Closes the alert; nothing is allowed for next time."
+              onClick={() => void decide('benign', false, 'fine')}
+            >
               Looks fine
             </Button>
           </>
         )}
       </div>
+      {!contained && !full && (
+        <span className="t-small">
+          Either answer closes it, and Vigil remembers which. When a rule keeps getting these
+          answers, Vigil suggests turning it down on the Rules page.
+        </span>
+      )}
       {contained && active.length > 0 && (
         <div className="col release-scope" style={{ gap: 2 }}>
           <span className="t-small">Holding “{releaseLabel(active)}” will:</span>

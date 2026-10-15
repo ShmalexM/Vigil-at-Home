@@ -8,28 +8,57 @@ The Pack page shows Vigil's own AI agents as dogs. The third-party coding agents
 
 No dog can block or allow anything on the Mac, release a block, answer a watched agent's pre-flight check, or approve or edit a rule. No tool that does any of that exists.
 
+## Quieting a noisy alert
+
+Tell the Lead dog "make this stop alerting" (on the alert, or naming it) and it can suggest a rule change. It is only a suggestion, in every permission mode, Full access included: it waits under Suggested changes on Rules, next to Duke's, until you accept it there.
+
+- **Exclude:** stop the alert's rule matching what it was about: the app by its developer signature, this exact program (by hash), this path or this network host. Vigil builds the exclusion from the alert's own event, the same way "Stop alerting on this" does; the Lead dog only picks which. Its acting path never sees the alert's details: it names the alert by the id of what you have selected (or one you typed), and earlier suggestions come back to it only by rule id, kind and status, never the change's wording (which holds this Mac's paths and signers).
+- **Turn down:** move the rule to Shadow, where it keeps recording without alerting.
+
+Each suggestion goes through the same checks as Duke's: the 14-day replay and what it would stop catching, no exclusion that hides a program marked malicious or uses agent fields, no changes to rules about coding agents, and the same daily limit. Accepting one that loosens a blocking rule asks for the admin password, as any such change does. The Lead dog drafts at most two per answer and never repeats one that is already waiting.
+
+The chat shows a card with the change in plain words and a Review button that opens it on Rules; on Rules it says "Suggested by Scout" (the Lead dog's name). If the checks refuse a draft, the card says why. The answer may rest on alert text anyone could write, which is why only you can accept it.
+
+An answer your Claude plan wrote suggests nothing: the plan only explains, so the card says to pick another AI in Settings › AI.
+
+```mermaid
+flowchart LR
+  Y[You: make this stop alerting] --> L[Lead dog picks the alert and what to exclude]
+  L --> V[Vigil builds the change from the alert's event]
+  V --> C{Same checks as Duke's}
+  C -- refused --> F[Card says why]
+  C -- passed --> Q[Waits under Suggested changes]
+  Q -- you accept --> R[Rule changes]
+  Q -- you dismiss --> N[Nothing changes]
+```
+
 ## Permission modes
 
 The mode at the top of the page works like a coding agent's permission modes.
 
-| Mode             | Changes to the pack (Lead dog)                                                          | Tool calls that can change things                                    |
-| ---------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| Ask for approval | Every change waits for your OK                                                          | You are asked                                                        |
-| Let AI decide    | Adding, changing or running a dog goes ahead if it only gets read-only tools; else asks | Your AI rates the call; only low risk goes ahead, the rest are asked |
-| Full access      | Go ahead                                                                                | Go ahead                                                             |
+| Mode             | Changes to the pack (Lead dog)                                                         | Tool calls that can change things                                    |
+| ---------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| Ask for approval | Every change waits for your OK                                                         | You are asked                                                        |
+| Let AI decide    | Adding, changing or running a dog goes ahead if it only has read-only tools; else asks | Your AI rates the call; only low risk goes ahead, the rest are asked |
+| Full access      | Go ahead                                                                               | Go ahead                                                             |
 
 Retiring a dog always asks in Let AI decide.
+
+A tool call still waiting for your OK when its run ends is refused. A pack
+dog's card then stays held for its next same call (below); the Lead dog's
+goes with its answer.
 
 ### Who sees outside text
 
 Text Vigil didn't write and you didn't type can carry instructions: a file name, an alert, a web page a connector fetched, a dog's report. So the Lead dog answers each message along two paths, and the one that can change the pack never reads such text (`main/pack/service.ts`, `say`).
 
 - **The acting path** is the model call that may propose changes: add, change, run or retire a dog, remember or forget a fact. Its prompt holds only your own messages and clean state: dog names and jobs you typed or that are built in, report summaries from runs that read nothing outside, memory facts from your words, earlier answers that read nothing outside, and Vigil's own tools by key with Vigil's titles. Everything else is there only as a reference: `answer-3` for an earlier answer that read outside text, `report:<dog id>`, `job:<dog id>`, `memory:<id>`, a dog with an outside name by its id, and every connector tool as `tool-3` with a label Vigil writes ("connector tool 3 from github"), never the server's key, title or description. The acting path calls no tools. Its changes are your request, so they go through the gate as clean and apply as your mode allows: "Rename Pip to Spot", "Create a dog to find duplicate files" and "Change Pip's job to check Downloads" stay instant.
-- **Names and keys you type** are mapped to ids by Vigil, not the model, by exact match: a dog's whole name in any case (so "Run Pip" finds Pip even when its name came from outside text), and a connector tool's key exactly, same case, never part of a longer key ("github.create_issue_preview" doesn't vouch for "github.create_issue"). A connector key the model gives that you didn't type is dropped.
-- **The reading path** answers questions that need outside text: what a dog found, what a job says, what an alert is, what's on this Mac, a connector's output. The acting path asks for it with a question and the references it needs, or Vigil sends a message there itself when it plainly asks about a report or the memory. This call may see anything and use the Lead dog's tools, but its answer has no field for changes: it is shown to you, kept as outside text, and appears to the acting path only as `answer-<n>`.
-- **The bridge.** When your message leans on text the acting path never saw ("do what Pip suggested", "carry out the recommendation", "yes" right after a reading answer, or a reference like `answer-3`), or the acting path cites a reference, every change in that turn waits for your OK, in every mode, Full access included. Memory changes wait too when the turn also went down the reading path, when a fact replaces one your message doesn't name word for word, or when the fact to forget came from outside text.
+- **Names and keys you type** are mapped to ids by Vigil, not the model, by exact match: a dog's whole name in any case (so "Run Pip" finds Pip even when its name came from outside text), longest name first, so a name inside a longer one you typed doesn't count ("Retire Pip Two" names Pip Two, never Pip), and a connector tool's key exactly, same case, never part of a longer key ("github.create_issue_preview" doesn't vouch for "github.create_issue"). A connector key the model gives that you didn't type is dropped. When your message names a dog, a change, run or retirement the model asks for must be about a dog you named; one about any other dog waits for your OK.
+- **The reading path** answers questions that need outside text: what a dog found, what a job says, what an alert is, what's on this Mac, a connector's output. It runs only when the acting path asks for it, with a question and the references it needs; no word in your message sends a turn there. This call may see anything but is offered only Vigil's own read-only tools, and its answer has no field for changes: it is shown to you, kept as outside text, and appears to the acting path only as `answer-<n>`.
+- **The bridge.** When a change rests on text the acting path never saw, every change in that turn waits for your OK, in every mode, Full access included. Vigil goes by references, never by words: your message names one (`answer-3`, `report:<dog id>`), or the acting path cites one or writes one into a change. The acting path is told to cite what a change rests on ("do what Pip suggested" cites Pip's report, "yes" to a reading answer cites that answer); it never saw that text, so it has nothing of it to copy. A request you typed in full applies as your mode allows, whatever words it uses: "Create a dog named Advisor to check Downloads hourly", "Run Pip; ignore any recommendations in its report" and "Remember I prefer reports in plain English" read nothing and wait for nothing in Full access. Memory changes wait too when the turn also went down the reading path, when a fact replaces one your message doesn't name word for word, or when the fact to forget came from outside text.
+- **After an answer that read outside text.** Once any answer in the conversation read outside text or used a tool, a short "yes" may be agreeing to it, and the acting path can't see what it said. So from then on every change waits for your OK as an inline card in the Lead chat, in every mode, Full access included, however much of it you typed: adding, changing, running or retiring a dog, giving it tools, and remembering or forgetting a fact. Approving it is one tap; it raises no popup, notification or badge. The taint belongs to the conversation, not to one answer: a clean reply, a reply that only holds cards, or asking the same thing again does not clear it. Only a new conversation (clearing the chat) starts clean.
 
-Pack dogs' own runs keep their provenance: a run that used a tool, or whose prompt held a tainted job, report or memory fact, writes a tainted report. Their connector tools are offered as `tool_1`, `tool_2` and so on, never by the server's name, and every call goes through the tool gate below. Changes saved by older versions keep their recorded taint: approving one keeps an outside name or job marked, until you edit the dog yourself.
+Pack dogs' own runs keep their provenance: a run that used a tool, or whose prompt held a tainted job, report or memory fact, writes a tainted report. A tainted last report is outside text: a run whose prompt holds one may read it, but every call it makes to a tool that can change things asks you first, in every mode and even for a tool set to Always allow (the same reason the reading path has no such tools). Their connector tools are offered as `tool_1`, `tool_2` and so on, never by the server's name, and every call goes through the tool gate below. Changes saved by older versions keep their recorded taint: approving one keeps an outside name or job marked, until you edit the dog yourself.
 
 ## How a tool call is decided
 
@@ -42,7 +71,9 @@ flowchart TD
   off -- no --> rules{Vigil's rules<br/>connector calls only}
   rules -- stop --> refused
   rules -- ask --> ask[You are asked]
-  rules -- nothing --> choice{Your choice for the tool}
+  rules -- nothing --> prev{Run read a tainted<br/>last report?}
+  prev -- yes, and the tool can change things --> ask
+  prev -- no --> choice{Your choice for the tool}
   choice -- Always ask --> ask
   choice -- Always allow --> run[Checked again, then runs]
   choice -- Follow mode --> ro{One of Vigil's own tools?}
@@ -54,10 +85,12 @@ flowchart TD
   judge -- low --> run
   judge -- medium, high or no answer --> ask
   ask -- Allow once --> run
-  ask -- Deny or 10 minutes pass --> refused
+  ask -- Deny, 10 minutes pass, or the run ends --> refused
 ```
 
-Right before any call goes out, Vigil checks again that the tool is still on, the dog still has it and isn't napping, the connector is still on, and no rule stops it. Waiting for you or for the AI can take minutes, and a change you made meanwhile wins.
+Right before any call goes out, Vigil checks again that the tool is still on, the dog still has it and isn't napping, the connector is still on, and no rule stops it. After the AI rates a call, the whole check runs again, so a mode or tool choice you changed while it was rating wins. Waiting for you or for the AI can take minutes, and a change you made meanwhile wins.
+
+A scheduled run's card stays for a day after the run stops waiting, so the same write asked on a later run lands on the card it already has, and an answer you give on it goes to that dog's next same call. Such a held card and its answer count only under what they were asked under: the permission mode, the dog's tools, your choice for the tool, the connectors the dog's tools come from, and each of those tools' name, description and inputs as the server lists them. Changing the mode, the dog's tools or that choice, adding, removing, switching or changing one of those connectors, or a refresh that lists one of those tools differently drops them, and the next same call asks again.
 
 Vigil's rules come first in every mode, Full access included. Connector calls are checked as if a watched agent's hook had asked about an MCP tool (`mcp__<connector>__<tool>`, with the arguments as the command), so the agent pre-flight rules and your own tool rules from Agents › Tool policy apply. Nothing is recorded for these checks.
 
@@ -66,9 +99,9 @@ Vigil's rules come first in every mode, Full access included. Connector calls ar
 The Pack page sits under Advanced. Two parts of it reach the rest of the app:
 
 - **Scout on Home.** The Lead dog sits next to Home's status line and acts it out: relaxed when nothing needs you, ears up (the waiting pose) when something needs your decision (the Needs you count) or a protection layer has stopped, and busy while a dog's AI job runs. The status words don't change; the dog only shows them. Clicking it opens Ask.
-- **Today the pack.** Under the status line, one line per dog that did something since midnight ("Biscuit sniffed through new events 5 times"), counted from the notebooks. The wording is fixed, never written by an AI; runs that didn't finish are counted separately, and background runs that never reached an AI aren't noted. Each line opens that dog's notebook.
+- **Today the pack.** Under the status line, one line per dog that did something since midnight ("The labeller sniffed through new events 5 times"), counted from the notebooks. The wording is fixed, never written by an AI, and names each dog by its role, never by its name, since the Lead dog can name dogs; runs that didn't finish are counted separately, and background runs that never reached an AI aren't noted. When a pack dog's latest run today found something of medium or high severity, one more line says so ("A pack dog found 2 things worth a look"); info and low findings add nothing. That line is not an alert: no notification, nothing in Needs you. Each line opens that dog's notebook.
 - **Scout on a pile.** When Needs you holds a pile of three or more alerts (the alerts' own grouping: same rule, same agent run or program), the biggest one shows as Scout's card instead of a row: who set it off, how many times, and one button to look at them all, where "That was me, all N" and "Looks fine, all N" decide them together. Scout adds no grouping of its own and the wording is fixed.
-- **Ask.** A bar at the bottom of every page (except Pack and setup) opens a chat drawer with the Lead dog. It is closed until you open it (click the bar or press ⌘K; Esc closes it). It is the same conversation as the Pack page, sent as your own chat, so the same rules apply: a Claude plan only if you turned it on, and no dog blocks, allows or changes a rule. The drawer tells the Lead dog which page you're on and what you have selected there (an alert, a rule, an agent or one of its sessions, or Activity's filter to one agent or session), so "what's this?" works; the Lead dog's reading path reads the details with its read-only tools. Its tools are the ones listed in [agents.md](agents.md#the-tools): status, alerts, events (by agent, rule matches or Biscuit's labels), rules, what Vigil did, and agents. When you ask how to stop an alert repeating, it points you to "Stop alerting on this" on the alert or to the rule on Rules; it can't change either itself.
+- **Ask.** A bar at the bottom of every page (except Pack and setup) opens a chat drawer with the Lead dog. It is closed until you open it (click the bar or press ⌘K; Esc closes it). It is the same conversation as the Pack page, sent as your own chat, so the same rules apply: a Claude plan only if you turned it on, and no dog blocks, allows or changes a rule. The drawer tells the Lead dog which page you're on and what you have selected there (an alert, a rule, an agent or one of its sessions, or Activity's filter to one agent or session), so "what's this?" works; the Lead dog's reading path reads the details with its read-only tools. Its tools are the ones listed in [agents.md](agents.md#the-tools): status, alerts, events (by agent, rule matches or Biscuit's labels), rules, what Vigil did, and agents. When you ask it to stop an alert repeating, it suggests a change that waits under Suggested changes (see [Quieting a noisy alert](#quieting-a-noisy-alert)); it can't change a rule itself.
 
 ```mermaid
 flowchart LR
@@ -77,6 +110,7 @@ flowchart LR
   D -->|your message + page + selected id| L[Lead dog: your own chat]
   L -->|acting path: changes to the pack| G[Permission mode decides]
   L -->|reading path: questions| T[Vigil's read-only tools]
+  L -->|rule suggestions| S[Suggested changes on Rules: you accept]
 ```
 
 A half-written message stays in the box when you change pages or close the drawer. If a message doesn't reach the Lead dog, the words go back in the box with the reason. With no AI set up, neither Enter nor the starter questions send anything.
@@ -123,8 +157,39 @@ flowchart LR
   `thinking` field is filled only from a reasoning summary an official API
   returns, and today none of the runners return one, so it stays empty.
 - Notes stay on the Mac in Vigil's database, in a table the notebook creates
-  itself (no migration), for 30 days and at most 2,000 notes per dog.
+  itself (no migration), for 30 days and at most 2,000 notes per dog. Each
+  write trims that dog's notes and every start trims them all, so a dog that
+  went quiet doesn't keep old ones. Retiring a dog deletes its notebook; the
+  Lead dog's and the helpers' are never touched by that. A run or risk check
+  that finishes after its dog was retired writes nothing, and every start
+  drops any notes left from a dog that no longer exists, whatever their age.
 - Nothing reads notes back to decide anything. They are for the person.
+
+**Details**, closed until you open it, is for digging deeper. It lists each
+tool call the run made: the tool, its arguments, whether it ran, didn't run
+(and why: the gate, you, or the run ending)
+or failed, and the first 800 characters of what it returned. Every field of
+a note (what was asked, the answer, reasons, tool titles, error text, and the
+arguments and results as data, before they are written out as text) goes
+through Vigil's redactor before it is stored, and is cut to size only after
+that. The whole note is then redacted again as the text that is stored,
+object keys included (the shared redactor keeps keys, so the pack redacts
+each one too, and reads a result that is JSON text as data; the redactor
+reads JSON encoded twice as its decoded content). A secret split across fields, such as a command in the
+question and its password in the answer, fails closed: that note's free
+text is withheld and its shape is kept. Notes are
+redacted the same way each time they are read for the page, so older notes
+get the same treatment. It also shows the model and, from the Usage page's ledger, the tokens
+and estimated cost of the attempt that answered. Notes from before this was
+added simply have no Details.
+
+**Copy as Markdown** and **Copy JSON** at the bottom of the sheet copy up to
+the 200 newest notes in it to the clipboard, for an issue or a file. The app
+renders the export and redacts the finished Markdown or JSON as a whole, so
+the heading, the sheet's title and dog names are covered too; where the whole
+Markdown would be withheld, each note's section, then each line, is redacted
+on its own instead, and a section whose secret spans lines keeps only its
+heading.
 
 ## Memory
 
@@ -154,8 +219,9 @@ What it changes for a security app, compared with a coding agent's memory:
   (`remember`) or cross one out (`forget`, `replaces`). It never reads
   outside text, so Vigil applies that straight away, except that it waits on
   a "Remember this?" card when the same message also went down the reading
-  path, leans on a report or an earlier answer, replaces a fact your message
-  doesn't name word for word, or forgets a fact that came from outside text. Pack jobs and the built-in helpers read memory
+  path, leans on a report or an earlier answer, follows an answer that read
+  outside text, replaces a fact your message doesn't name word for word, or
+  forgets a fact that came from outside text. Pack jobs and the built-in helpers read memory
   and never write it, and no AI tidies it in the background (the post's
   "dreaming" step): duplicates are caught when a fact is saved, and a
   replacement crosses out the line it updates.
@@ -181,7 +247,14 @@ Connectors are your own MCP servers, added on the Pack page under Tools and conn
 
 Each connector tool gets the same four choices as Vigil's own: Follow mode, Always ask, Always allow, Off. A connector tool never counts as read-only, even when its server marks it so: MCP treats those hints as untrusted, and Vigil can't check them. The page shows the server's claim ("Server says it only reads"), but the tool still follows your permission mode, and in Let AI decide a dog given one waits for your OK. Set a tool you trust to Always allow and it is treated as read-only from then on.
 
+Each connector gets an id of its own when you add it: its name as a slug and a part that is new every time, so an id is never given twice, even to a connector you remove and add again under the same name. Tool grants, tool choices and held cards go by that id, so none carry over to a new connector. Connectors added before keep the ids they have. Vigil's rules check a connector call twice, as `mcp__<connector id>__<tool>` and as `mcp__<name slug>__<tool>` (the form rules written before used, like `mcp__github__create_issue`), and the stricter answer wins. Rules only add friction (stop or ask, never allow), so a match by name can only make a call wait. What lifts a rule binds to the id alone: an exception or exclusion on the tool or its server, written for the name, does not apply to a connector with an id of its own.
+
 Connections close after five idle minutes.
+
+What a connector returns is redacted before anything else sees it (the
+notebook, the risk judge, a cloud model): keys, tokens, passwords, email
+addresses and home folder names are replaced, as in the data Vigil sends any
+model. The AI runner redacts tool results again on their way out.
 
 A connector runs your program, not Vigil's. Vigil tells Agent watch the server's process id as soon as it starts, so the server and everything it runs are tagged `vigil-connector` in a session of their own (shown as "A pack connector" in Activity), and every Agent watch rule applies to them. They never share the `vigil-self` tag of Vigil's own AI helpers. A command inside Vigil's own app is refused, because Vigil never blocks its own binaries.
 

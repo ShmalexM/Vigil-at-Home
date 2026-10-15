@@ -1,11 +1,11 @@
 import type { Alert } from '@vigil/core';
 import { CircleCheck, Eye } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { vigil } from '../api';
 import { seenTimes, timeAgo } from '../format';
 import type { AlertView, WatchSummary } from '../../../shared/ipc';
 import { Segmented } from './ui';
-import { pileUp } from '../../../shared/piles';
+import { pileUp, untouched } from '../../../shared/piles';
 
 /** Proof Vigil is running, in one line. */
 export function WatchLine({ watch }: { watch: WatchSummary }) {
@@ -68,6 +68,8 @@ export function NoticedList({
   open,
   limit,
   toggle = true,
+  total,
+  clearable,
 }: {
   alerts: readonly Alert[];
   view: AlertView;
@@ -75,26 +77,57 @@ export function NoticedList({
   limit?: number;
   /** Show the Show me less / more button. History always lists them, so it hides it. */
   toggle?: boolean;
+  /**
+   * Every noticed alert (the status count). The lists load only the newest
+   * open alerts, so this can be more than `alerts`; the header shows it.
+   */
+  total?: number | undefined;
+  /**
+   * How many "Those were me" closes (the status's noticedClearable): those
+   * with an action taken or an AI suggestion waiting are left for a look.
+   */
+  clearable?: number | undefined;
 }) {
   const [busy, setBusy] = useState(false);
+  // When the confirm opened, and how many it offered: only those are cleared.
+  const [confirm, setConfirm] = useState<{ at: number; count: number }>();
+  const [cleared, setCleared] = useState<number>();
+  // The "Marked N as you" note fades after a few seconds.
+  useEffect(() => {
+    if (cleared === undefined) return;
+    const t = setTimeout(() => setCleared(undefined), 6000);
+    return () => clearTimeout(t);
+  }, [cleared]);
   if (alerts.length === 0) return null;
   const more = view === 'more';
   const shown = limit ? alerts.slice(0, limit) : alerts;
+  const count = Math.max(total ?? 0, alerts.length);
+  const closable = clearable ?? alerts.filter(untouched).length;
+  const kept = count - closable;
+  const confirming = confirm !== undefined;
+  const ask = () => {
+    setCleared(undefined);
+    setConfirm({ at: Date.now(), count: closable });
+  };
   const clear = async () => {
+    if (!confirm) return;
     setBusy(true);
     try {
-      await vigil.clearNoticed(alerts.map((a) => a.id));
+      setCleared(await vigil.clearNoticedUpTo(confirm.at));
     } finally {
       setBusy(false);
+      setConfirm(undefined);
     }
   };
+  const offered = confirm?.count ?? closable;
+  const these = offered === 1 ? 'this one' : `all ${offered}`;
   return (
     <section className="col noticed" style={{ gap: 6 }}>
       <div className="row spread">
         <span className="row" style={{ gap: 6 }}>
           <Eye size={14} />
           <span className="t-label">Noticed</span>
-          <span className="count">{alerts.length}</span>
+          <span className="count">{count}</span>
         </span>
         <span className="row" style={{ gap: 2 }}>
           {toggle && (
@@ -106,21 +139,50 @@ export function NoticedList({
               {more ? 'Show me less' : 'Show me more'}
             </button>
           )}
-          <button
-            type="button"
-            className="btn sm ghost"
-            disabled={busy}
-            title="Marks these as expected. Rules and blocks stay as they are."
-            onClick={() => void clear()}
-          >
-            {alerts.length === 1 ? 'That was me' : 'Those were me'}
-          </button>
+          {!confirming && closable > 0 && (
+            <button
+              type="button"
+              className="btn sm ghost"
+              disabled={busy}
+              title="Marks these as expected. Rules and blocks stay as they are."
+              onClick={ask}
+            >
+              {closable === 1 && count === 1 ? 'That was me' : `Those were me (${closable})`}
+            </button>
+          )}
         </span>
       </div>
+      {confirming && (
+        <div className="row noticed-confirm" role="group" aria-label="Confirm">
+          <span className="t-small grow">
+            Mark {these} as you? They move to History as expected. Rules and blocks stay as they
+            are.
+            {kept > 0 &&
+              ` ${kept === 1 ? 'One has' : `${kept} have`} an action or AI suggestion on ${kept === 1 ? 'it' : 'them'}, so ${kept === 1 ? 'it stays' : 'they stay'} for you to open.`}
+          </span>
+          <button type="button" className="btn sm ghost" onClick={() => setConfirm(undefined)}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn sm primary"
+            disabled={busy}
+            autoFocus
+            onClick={() => void clear()}
+          >
+            {offered === 1 ? 'Yes, that was me' : `Yes, all ${offered}`}
+          </button>
+        </div>
+      )}
+      {cleared !== undefined && !confirming && (
+        <span className="t-small" role="status">
+          Marked {cleared === 1 ? 'one' : cleared} as you. They’re in History.
+        </span>
+      )}
       <span className="t-small">
         {more
           ? 'Usually this is you installing or setting something up. None of these were blocked. Open one if it wasn’t you.'
-          : `${alerts.length === 1 ? 'One thing' : `${alerts.length} things`} Vigil noticed, probably you installing or setting something up. Nothing was blocked.`}
+          : `${count === 1 ? 'One thing' : `${count} things`} Vigil noticed, probably you installing or setting something up. Nothing was blocked.`}
       </span>
       {more && (
         <div className="list">
@@ -137,9 +199,9 @@ export function NoticedList({
               </div>
             </button>
           ))}
-          {shown.length < alerts.length && (
+          {shown.length < count && (
             <span className="t-small" style={{ padding: '4px 12px' }}>
-              and {alerts.length - shown.length} more
+              and {count - shown.length} more
             </span>
           )}
         </div>

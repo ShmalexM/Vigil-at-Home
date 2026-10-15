@@ -873,7 +873,18 @@ describe('AgentService: Vigil’s tools for agents', () => {
     const alert = result('get_alert', { id: alerts.alerts[0]!['id'] }) as {
       events: Array<Record<string, unknown>>;
     };
-    expect(alert.events[0]).toMatchObject({ kind: 'agent.tool_request', answer: 'deny' });
+    // Over MCP, Vigil's answer and the rules it matched are left out; the pack
+    // sees them.
+    expect(alert.events[0]).toMatchObject({ kind: 'agent.tool_request' });
+    expect(alert.events[0]).not.toHaveProperty('answer');
+    expect(alert.events[0]).not.toHaveProperty('rules');
+    const packed = agents.packTools().call('get_alert', { id: alerts.alerts[0]!['id'] });
+    expect(packed).toMatchObject({
+      ok: true,
+      result: {
+        events: [{ kind: 'agent.tool_request', answer: 'deny', rules: expect.any(Array) }],
+      },
+    });
 
     const found = result('search_events', { text: 'versions/2.0', kind: 'programs' }) as {
       events: Array<Record<string, unknown>>;

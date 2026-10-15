@@ -1,6 +1,7 @@
 // Builds what the app ships to install the Vigil helper:
 //   build/helper/common/        helper.mjs (the helper, bundled), the launchd job,
-//                               the install/uninstall scripts and the vigil-helper launcher,
+//                               the install/uninstall scripts, lib.sh (which both OSes'
+//                               scripts share) and the vigil-helper launcher,
 //                               and vigil-hook.mjs (the Claude Code pre-flight hook, bundled)
 //                               and linux/ (the systemd unit, polkit policy and Linux scripts)
 //   build/helper/<os>-<arch>/   node, Node.js's own binary for that OS and chip
@@ -94,9 +95,9 @@ async function bundle() {
       Object.keys(r.metafile.inputs).map((f) => join(process.cwd(), f)),
     ),
   );
-  for (const f of ['install.sh', 'uninstall.sh', 'vigil-helper']) {
+  for (const f of ['install.sh', 'uninstall.sh', 'vigil-helper', 'lib.sh']) {
     copyFileSync(join(app, 'helper', f), join(common, f));
-    chmodSync(join(common, f), 0o755);
+    chmodSync(join(common, f), f === 'lib.sh' ? 0o644 : 0o755);
   }
   copyFileSync(
     join(repo, 'packages/helper/launchd/com.vigilathome.helper.plist'),

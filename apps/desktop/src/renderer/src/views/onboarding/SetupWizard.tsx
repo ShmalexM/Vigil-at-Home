@@ -12,7 +12,7 @@ import {
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { SetupMode, SetupStepView, SetupView } from '../../../../shared/setup';
 import { useLive, vigil } from '../../api';
-import { computer } from '../../platform';
+import { computer, onLinux } from '../../platform';
 import { PreflightSetup } from '../../components/PreflightSetup';
 import { Shield } from '../../components/Shield';
 import { useToast } from '../../components/Toasts';
@@ -124,7 +124,13 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
       <div className="setup-inner">
         <div className="row" style={{ gap: 10 }}>
           <Shield height={26} />
-          <span className="t-h2">Set up Vigil at Home</span>
+          <span className="t-h2 grow">Set up Vigil at Home</span>
+          {/* Opened again from Home or Settings: leave without finishing anything. */}
+          {view.finished && (
+            <Button kind="ghost" size="sm" icon={<ArrowLeft size={15} />} onClick={onDone}>
+              Back to Vigil
+            </Button>
+          )}
         </div>
         <ol className="setup-stages" aria-label="Setup steps">
           {STAGES.map((s, i) => (
@@ -291,6 +297,7 @@ function StepList({
   checking: boolean;
   recheck: () => void;
 }) {
+  const toast = useToast();
   const required = steps.filter((s) => !s.optional);
   const done = required.filter((s) => s.state === 'done').length;
   return (
@@ -308,7 +315,13 @@ function StepList({
           )}
           <Button
             icon={<SquareTerminal size={15} />}
-            onClick={() => void vigil.openSettingsPane('terminal')}
+            onClick={() =>
+              vigil.openSettingsPane('terminal').catch(() =>
+                toast({
+                  text: 'No terminal app found. Open one yourself and paste the commands.',
+                }),
+              )
+            }
           >
             Open Terminal
           </Button>
@@ -355,7 +368,11 @@ function StepAction({
             }
           }}
         >
-          {busy ? 'Checking…' : action.label}
+          {busy
+            ? action.id === 'helper-install'
+              ? 'Waiting for your password…'
+              : 'Checking…'
+            : action.label}
         </Button>
       </div>
       {error && (
@@ -506,7 +523,10 @@ function Review({ view, onDone }: { view: SetupView; onDone: () => void }) {
       ? view.steps.some((s) => s.id === 'ollama-model' && s.state === 'done')
       : view.steps.some((s) => s.group === 'ai' && s.state === 'done') ||
         view.keys.some((k) => k.saved);
-  const pending = view.steps.filter((s) => s.state === 'unavailable');
+  // A skipped or unfinished helper means nothing is really blocked yet; say so here too.
+  const pending = view.steps.filter(
+    (s) => s.state === 'unavailable' || (s.id === 'helper' && s.state !== 'done'),
+  );
   return (
     <>
       <div className="col" style={{ gap: 6 }}>
@@ -514,7 +534,9 @@ function Review({ view, onDone }: { view: SetupView; onDone: () => void }) {
         <span>
           {left.length
             ? 'You can finish now and come back to the rest from Settings › Run setup again. Vigil shows Fair until protection is complete.'
-            : 'Vigil is watching. It lives in the menu bar and will pop up only when it blocks something or needs you.'}
+            : onLinux
+              ? 'Vigil is watching. It lives in the system tray and will pop up only when it blocks something or needs you. If your desktop shows no tray icons (GNOME needs the AppIndicator extension), open Vigil at Home from your apps instead; it keeps running when you close this window.'
+              : 'Vigil is watching. It lives in the menu bar and will pop up only when it blocks something or needs you.'}
         </span>
       </div>
       <Card>

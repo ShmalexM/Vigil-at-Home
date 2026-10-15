@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { QuotaTracker } from './quota.js';
-import { createAiRunner } from './runner.js';
+import { createAiRunner, PROBE_DEADLINE_MS } from './runner.js';
 import { defaultAiSettings, type AiSettings } from './settings.js';
 import { readTool } from './tools.js';
 import { watchAiApps, type AiAppsSnapshot } from './watch.js';
@@ -115,6 +115,37 @@ describe('runner', () => {
     expect(plan.inputs).toHaveLength(1);
   });
 
+  it('says whether an answer came from the Claude plan', async () => {
+    const answer = () => ({
+      kind: 'ok' as const,
+      json: { verdict: 'benign', summary: 'ok' },
+      audit: audit(),
+    });
+    const base = defaultAiSettings('/tmp/vigil-test');
+    const onPlan = setup([fake('claude', answer)], {
+      claude: { ...base.claude, allowPlan: true },
+    }).runner;
+    expect(await onPlan.run({ ...request, requestedByUser: true })).toMatchObject({
+      provider: 'claude',
+      viaPlan: true,
+    });
+    // A run that may not use the plan goes to the key.
+    expect(await onPlan.run(request)).toMatchObject({ provider: 'claude', viaPlan: false });
+    // A subscription login is the plan.
+    const sub = setup([fake('claude', answer)], {
+      claude: { enabled: true, mode: 'subscription' },
+    }).runner;
+    expect(await sub.run({ ...request, requestedByUser: true })).toMatchObject({ viaPlan: true });
+    // Plan not allowed: the key answers.
+    const key = setup([fake('claude', answer)]).runner;
+    expect(await key.run({ ...request, requestedByUser: true })).toMatchObject({ viaPlan: false });
+    const codex = setup([fake('codex', answer)]).runner;
+    expect(await codex.run({ ...request, requestedByUser: true })).toMatchObject({
+      provider: 'codex',
+      viaPlan: false,
+    });
+  });
+
   it('skips providers that are not ready, disabled or paused by Vigil', async () => {
     const claude = fake(
       'claude',
@@ -178,6 +209,184 @@ describe('runner', () => {
     expect(result).toMatchObject({ ok: false, reason: 'timeout' });
   });
 
+  it('times out at the deadline even if checking the provider hangs', async () => {
+    const claude = fake('claude', () => ({
+      kind: 'ok',
+      json: { verdict: 'benign', summary: 'ok' },
+      audit: audit(),
+    }));
+    let release!: () => void;
+    claude.probe = () =>
+      new Promise((r) => (release = () => r({ provider: 'claude', state: 'ready' })));
+    const { runner, log } = setup([claude]);
+    const result = await runner.run({ ...request, deadlineMs: 50 });
+    expect(result).toMatchObject({ ok: false, reason: 'timeout' });
+    const logged = log.length;
+    release(); // the check returns long after; nothing more runs or is logged
+    await new Promise((r) => setTimeout(r, 10));
+    expect(claude.inputs).toHaveLength(0);
+    expect(log).toHaveLength(logged);
+  });
+
+  it('ends with the run it was made for, even while its provider is being checked', async () => {
+    const claude = fake('claude', () => ({
+      kind: 'ok',
+      json: { verdict: 'benign', summary: 'ok' },
+      audit: audit(),
+    }));
+    let release!: () => void;
+    let checking!: () => void;
+    const checked = new Promise<void>((r) => (checking = r));
+    claude.probe = () =>
+      new Promise((r) => {
+        checking();
+        release = () => r({ provider: 'claude', state: 'ready' });
+      });
+    const { runner } = setup([claude]);
+    const parent = new AbortController();
+    // Its own deadline is far off; the run it serves ends first.
+    const result = runner.run({ ...request, deadlineMs: 60_000, signal: parent.signal });
+    await checked;
+    parent.abort();
+    release();
+    expect(await result).toMatchObject({ ok: false, reason: 'timeout' });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(claude.inputs).toHaveLength(0);
+  });
+
+  it('treats a provider whose check fails as not usable', async () => {
+    const claude = fake('claude', () => ({
+      kind: 'ok',
+      json: { verdict: 'benign', summary: 'ok' },
+      audit: audit(),
+    }));
+    claude.probe = () => Promise.reject(new Error('codesign timed out on /x'));
+    const { runner } = setup([claude]);
+    expect(await runner.status()).toEqual([
+      expect.objectContaining({ provider: 'claude', state: 'error' }),
+    ]);
+    expect(await runner.run(request)).toMatchObject({ ok: false });
+    expect(claude.inputs).toHaveLength(0);
+  });
+
+  it('passes over a provider whose probe never answers', async () => {
+    vi.useFakeTimers();
+    try {
+      const hung: ProviderAdapter = {
+        id: 'codex',
+        probe: () => new Promise(() => {}),
+        run: async () => ({ kind: 'error', message: 'x', audit: audit() }),
+      };
+      const ollama = fake('ollama', () => ({
+        kind: 'ok',
+        json: { verdict: 'benign', summary: 'ok' },
+        audit: audit(),
+      }));
+      const { runner } = setup([hung, ollama], { order: ['codex', 'ollama'] });
+      const result = runner.run(request);
+      await vi.advanceTimersByTimeAsync(PROBE_DEADLINE_MS + 1);
+      expect(await result).toMatchObject({ ok: true, provider: 'ollama' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('asks a slow probe again soon, and uses its late answer', async () => {
+    vi.useFakeTimers();
+    try {
+      let probes = 0;
+      const slow: ProviderAdapter = {
+        id: 'codex',
+        probe: () => {
+          probes++;
+          return new Promise((r) =>
+            setTimeout(() => r({ provider: 'codex', state: 'ready' }), PROBE_DEADLINE_MS + 10_000),
+          );
+        },
+        run: async () => ({
+          kind: 'ok',
+          json: { verdict: 'benign', summary: 'codex' },
+          audit: audit(),
+        }),
+      };
+      const ollama = fake('ollama', () => ({
+        kind: 'ok',
+        json: { verdict: 'benign', summary: 'ok' },
+        audit: audit(),
+      }));
+      const { runner } = setup([slow, ollama], { order: ['codex', 'ollama'] });
+      const first = runner.run(request);
+      await vi.advanceTimersByTimeAsync(PROBE_DEADLINE_MS + 1);
+      expect(await first).toMatchObject({ ok: true, provider: 'ollama' });
+      // The same probe answers later; the next run uses it without probing twice.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await runner.run(request)).toMatchObject({ ok: true, provider: 'codex' });
+      expect(probes).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('starts a new check once a probe that never answers has timed out', async () => {
+    vi.useFakeTimers();
+    try {
+      let probes = 0;
+      const codex = fake('codex', () => ({
+        kind: 'ok',
+        json: { verdict: 'benign', summary: 'ok' },
+        audit: audit(),
+      }));
+      codex.probe = () =>
+        ++probes === 1
+          ? new Promise(() => {})
+          : Promise.resolve({ provider: 'codex', state: 'ready' });
+      const { runner } = setup([codex], { order: ['codex'] });
+      const first = runner.run({ ...request, deadlineMs: 600_000 });
+      await vi.advanceTimersByTimeAsync(PROBE_DEADLINE_MS + 1);
+      expect(await first).toMatchObject({ ok: false });
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      const second = runner.run({ ...request, deadlineMs: 600_000 });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await second).toMatchObject({ ok: true });
+      expect(probes).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a check started before sign-in finished from deciding after it', async () => {
+    let signedIn = false;
+    let probes = 0;
+    const releases: (() => void)[] = [];
+    let finish!: (ok: boolean) => void;
+    const codex = fake('codex', () => ({ kind: 'error', message: 'x', audit: audit() }));
+    codex.probe = () => {
+      probes++;
+      const state = signedIn ? 'ready' : 'needs_sign_in';
+      return new Promise((r) => releases.push(() => r({ provider: 'codex', state })));
+    };
+    codex.signIn = async () => ({
+      url: 'https://example.com',
+      completed: new Promise<boolean>((r) => (finish = r)),
+      cancel: () => {},
+    });
+    const { runner } = setup([codex], { order: ['codex'] });
+    await runner.signIn('codex');
+    const before = runner.status(); // a check while signing in
+    await Promise.resolve();
+    signedIn = true;
+    finish(true);
+    await new Promise((r) => setTimeout(r, 0));
+    const after = runner.status(); // the refresh once signed in
+    for (const r of releases) r();
+    await before;
+    expect((await after)[0]?.state).toBe('ready');
+    expect(probes).toBe(2);
+    // Nor did the earlier answer land in the cache: a run finds Codex ready.
+    expect(await runner.run(request)).toMatchObject({ ok: false, reason: 'error' });
+    expect(codex.inputs).toHaveLength(1);
+  });
+
   it('reports no_provider when nothing is set up', async () => {
     const { runner, log } = setup([]);
     expect(await runner.run(request)).toMatchObject({ ok: false, reason: 'no_provider' });
@@ -200,6 +409,49 @@ describe('runner', () => {
     await runner.run({ ...request, tools: [tool] });
     expect(seen).toContain('/Users/<user>/bin/x');
     expect(seen).not.toContain('me@example.com');
+  });
+
+  it('runs no tool and takes no usage from a model still working after the deadline', async () => {
+    let toolRuns = 0;
+    let seenSignal: AbortSignal | undefined;
+    const tool = readTool({
+      name: 'get_process',
+      description: 'Process details',
+      input: { pid: z.number() },
+      run: async (_args, run) => {
+        toolRuns++;
+        seenSignal = run?.signal;
+        return {};
+      },
+    });
+    let late!: (input: AdapterRunInput) => Promise<void>;
+    const claude = fake('claude', () => {
+      late = async (i) => {
+        i.onUsage({ provider: 'claude', windowId: 'five_hour', usedPercent: 5, resetsAt: 1 });
+        await i.tools[0]!.run({ pid: 1 });
+      };
+      return new Promise<AdapterRunOutput>(() => {});
+    });
+    const { runner } = setup([claude], { order: ['claude'] });
+    runner.quota.observe({
+      provider: 'claude',
+      windowId: 'five_hour',
+      usedPercent: 95,
+      resetsAt: Date.now() + 3_600_000,
+    });
+    expect(await runner.run({ ...request, tools: [tool], deadlineMs: 20 })).toMatchObject({
+      reason: 'timeout',
+    });
+    await expect(late(claude.inputs[0]!)).rejects.toThrow('deadline passed');
+    expect(toolRuns).toBe(0);
+    expect(runner.quota.snapshot('claude').get('five_hour')?.usedPercent).toBe(95);
+    // A tool the run did call is handed the run's signal.
+    const ok = fake('claude', async (input) => {
+      await input.tools[0]!.run({ pid: 2 });
+      return { kind: 'ok', json: { verdict: 'benign', summary: 'x' }, audit: audit() };
+    });
+    await setup([ok]).runner.run({ ...request, tools: [tool] });
+    expect(seenSignal).toBeInstanceOf(AbortSignal);
   });
 
   it("keeps background work within Vigil's share of the window", async () => {
@@ -291,5 +543,42 @@ describe('finding AI apps', () => {
     stop();
     expect(seen[0]?.copilot).toEqual({ installed: true, supported: false });
     expect(seen.map((s) => s.providers[0]?.state)).toEqual(['not_installed', 'ready']);
+  });
+});
+
+describe('what a Claude run is billed to', () => {
+  const ok = (): AdapterRunOutput => ({
+    kind: 'ok',
+    json: { verdict: 'benign', summary: 'ok' },
+    audit: audit(),
+    usage: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1, costUsd: 0.01 },
+  });
+  const claudeWith = (account: string | undefined) => ({
+    ...fake('claude', ok),
+    probe: async () => ({
+      provider: 'claude' as const,
+      state: 'ready' as const,
+      ...(account ? { account } : {}),
+    }),
+  });
+  const billedFor = async (account: string | undefined, patch: Partial<AiSettings> = {}) => {
+    const { runner, log } = setup([claudeWith(account)], { order: ['claude'], ...patch });
+    await runner.run(request);
+    return log[0] && 'billed' in log[0] ? log[0].billed : 'absent';
+  };
+
+  it('is the plan on a claude.ai login, and unknown on any other', async () => {
+    const s = defaultAiSettings('/tmp/vigil-test');
+    const sub = { claude: { ...s.claude, mode: 'subscription' as const, allowPlan: true } };
+    expect(await billedFor('claude.ai', sub)).toBe(false);
+    expect(await billedFor('console', sub)).toBe('absent');
+    expect(await billedFor(undefined, sub)).toBe('absent');
+  });
+
+  it('is the saved key in API key mode', async () => {
+    const s = defaultAiSettings('/tmp/vigil-test');
+    expect(
+      await billedFor('claude.ai', { claude: { ...s.claude, mode: 'apiKey', allowPlan: false } }),
+    ).toBe(true);
   });
 });

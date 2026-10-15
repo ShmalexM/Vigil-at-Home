@@ -171,6 +171,15 @@ export interface VigilHelperView {
   tools: string[];
   lastRunAt?: number;
   runs7d: number;
+  /** It has been trying without reaching an AI since its last answer, and why. */
+  held?: HelperHeld;
+}
+
+/** Why one of Vigil's helpers keeps trying without reaching an AI. */
+export interface HelperHeld {
+  /** Its first try since its last answer that reached no AI. */
+  since: number;
+  why: string;
 }
 
 export type VigilToolName =

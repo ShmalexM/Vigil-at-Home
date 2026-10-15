@@ -13,6 +13,7 @@ import { draftIsToolRule, replayLine, replaySampleRow } from '../rule-modes';
 import { HoldButton } from './HoldButton';
 import { useToast } from './Toasts';
 import { Button, Chip, IconButton } from './ui';
+import { computer } from '../platform';
 
 /** Fields people usually exclude on, shown first in the picker. */
 const COMMON_FIELDS = [
@@ -144,7 +145,8 @@ function Exclusions({ view, reload }: { view: RuleEditorView; reload: () => void
             size="sm"
             label="Remove"
             onClick={async () => {
-              await vigil.removeException(x.id);
+              const r = await vigil.removeException(x.id);
+              if (!r.ok) setIssues(r);
               reload();
             }}
           >
@@ -180,7 +182,7 @@ function Exclusions({ view, reload }: { view: RuleEditorView; reload: () => void
         <input
           className="field"
           aria-label="Value"
-          placeholder="/Applications/Docker.app/Contents/MacOS/com.docker.backend"
+          placeholder="e.g. /Applications/Docker.app/…"
           value={draft.value}
           onChange={(e) => setDraft({ ...draft, value: e.target.value })}
           onKeyDown={(e) => {
@@ -229,6 +231,12 @@ function JsonEditor({
 
   const save = async () => {
     const r = await vigil.saveRule(text);
+    if (r.helper === 'declined' || r.helper === 'failed') {
+      // The draft is fine; the helper (or the password) turned it down, so nothing changed.
+      setChecked({ text, result: { ...r, ok: true, errors: [], warnings: [] } });
+      toast({ text: r.errors[0] ?? 'Not changed' });
+      return;
+    }
     setChecked({ text, result: r });
     if (r.ok) {
       toast({ text: 'Rule saved' });
@@ -241,7 +249,8 @@ function JsonEditor({
       <div className="col" style={{ gap: 2 }}>
         <span className="t-h3">{view ? 'Rule' : 'New rule'}</span>
         <span className="t-small">
-          The whole rule as JSON. Check it first: Vigil replays it over the last 14 days on this Mac
+          The whole rule as JSON. Check it first: Vigil replays it over the last 14 days on this{' '}
+          {computer}
           so you can see how often it would have fired before you save.
         </span>
       </div>
@@ -281,7 +290,11 @@ function JsonEditor({
             label="Hold to restore the shipped rule"
             doneLabel="Restored"
             onConfirm={async () => {
-              await vigil.revertRule(view.rule.id);
+              const r = await vigil.revertRule(view.rule.id);
+              if (!r.ok) {
+                toast({ text: r.errors[0] ?? 'Not changed' });
+                return;
+              }
               toast({ text: 'Restored the shipped version' });
               onSaved();
             }}
@@ -294,7 +307,11 @@ function JsonEditor({
             label="Hold to delete"
             doneLabel="Deleted"
             onConfirm={async () => {
-              await vigil.deleteRule(view.rule.id);
+              const r = await vigil.deleteRule(view.rule.id);
+              if (!r.ok) {
+                toast({ text: r.errors[0] ?? 'Not changed' });
+                return;
+              }
               toast({ text: 'Rule deleted' });
               onClose();
             }}

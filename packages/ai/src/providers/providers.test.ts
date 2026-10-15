@@ -1,6 +1,15 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { lstat, mkdtemp, readFile, readdir, readlink, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdtemp,
+  readFile,
+  readdir,
+  readlink,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createRequire } from 'node:module';
@@ -232,10 +241,14 @@ describe.skipIf(!bundledCodex())('Codex app-server as launched', () => {
       },
     );
     try {
-      await rpc.request('initialize', {
-        clientInfo: { name: 'vigil_test', title: null, version: '0' },
-        capabilities: { experimentalApi: true, requestAttestation: false },
-      });
+      await rpc.request(
+        'initialize',
+        {
+          clientInfo: { name: 'vigil_test', title: null, version: '0' },
+          capabilities: { experimentalApi: true, requestAttestation: false },
+        },
+        30_000,
+      );
       rpc.notify('initialized');
       const { config } = await rpc.request<{
         config: {
@@ -243,7 +256,7 @@ describe.skipIf(!bundledCodex())('Codex app-server as launched', () => {
           features: Record<string, boolean | null>;
           mcp_servers: object;
         };
-      }>('config/read', {});
+      }>('config/read', {}, 30_000);
       expect(config.web_search).toBe('disabled');
       expect(config.mcp_servers).toEqual({});
       for (const feature of CODEX_DISABLED_FEATURES) {
@@ -256,7 +269,11 @@ describe.skipIf(!bundledCodex())('Codex app-server as launched', () => {
         sandbox: { type: string; networkAccess: boolean };
         approvalPolicy: string;
         thread: { environments: unknown[]; ephemeral: boolean };
-      }>('thread/start', codexThreadStartParams({ cwd, systemPrompt: 's', tools: [getFinding] }));
+      }>(
+        'thread/start',
+        codexThreadStartParams({ cwd, systemPrompt: 's', tools: [getFinding] }),
+        30_000,
+      );
       expect(started.sandbox).toEqual({ type: 'readOnly', networkAccess: false });
       expect(started.approvalPolicy).toBe('untrusted');
       expect(started.thread.environments).toEqual([]);
@@ -516,6 +533,76 @@ describe.skipIf(!bundledCodex())('Codex sign-in from Vigil', () => {
     flow.cancel();
     expect(await flow.completed).toBe(false);
   }, 60_000);
+});
+
+describe('Codex at the end of a run', () => {
+  /**
+   * A stand-in app server: it logs every method it receives, answers `slow`
+   * only after a delay, and ignores SIGTERM, so only Vigil's own care keeps
+   * it from being sent more after the run ends.
+   */
+  async function fakeCodex(slow: string) {
+    const dir = await tempDir('vigil-fake-codex-');
+    const log = join(dir, 'log');
+    const bin = join(dir, 'codex');
+    await writeFile(
+      bin,
+      `#!${process.execPath}
+const { appendFileSync } = require('node:fs');
+const { createInterface } = require('node:readline');
+process.on('SIGTERM', () => {});
+createInterface({ input: process.stdin }).on('line', (line) => {
+  const m = JSON.parse(line);
+  appendFileSync(${JSON.stringify(log)}, m.method + '\\n');
+  if (m.id === undefined) return;
+  const result = m.method === 'thread/start' ? { thread: { id: 't1' } } : {};
+  const answer = () => process.stdout.write(JSON.stringify({ id: m.id, result }) + '\\n');
+  if (m.method === ${JSON.stringify(slow)}) setTimeout(answer, 600);
+  else answer();
+});
+`,
+    );
+    await chmod(bin, 0o755);
+    const adapter = createCodexAdapter({
+      codexHome: await tempDir('vigil-fake-codex-home-'),
+      pins: memoryPinStore(),
+      executablePath: bin,
+      mode: 'apiKey',
+      getApiKey: async () => 'sk-test-vigil',
+    });
+    const methods = async () =>
+      (await readFile(log, 'utf8').catch(() => '')).split('\n').filter(Boolean);
+    return { adapter, methods };
+  }
+
+  async function runUntil(slow: string) {
+    const { adapter, methods } = await fakeCodex(slow);
+    const run = new AbortController();
+    const out = adapter.run({
+      systemPrompt: 's',
+      userPrompt: 'u',
+      jsonSchema: schema,
+      tools: [getFinding],
+      signal: run.signal,
+      onUsage: () => {},
+    });
+    // The run ends while the server is still working on `slow`.
+    for (let i = 0; i < 100 && !(await methods()).includes(slow); i++)
+      await new Promise((r) => setTimeout(r, 50));
+    run.abort();
+    expect((await out).kind).toBe('error');
+    // Past the moment `slow` is answered: nothing more goes out.
+    await new Promise((r) => setTimeout(r, 1_000));
+    return methods();
+  }
+
+  it('sends nothing more when the run ends during initialize', async () => {
+    expect(await runUntil('initialize')).toEqual(['initialize']);
+  }, 20_000);
+
+  it('starts no turn when the run ends while the thread starts', async () => {
+    expect(await runUntil('thread/start')).toEqual(['initialize', 'initialized', 'thread/start']);
+  }, 20_000);
 });
 
 describe('Ollama adapter', () => {

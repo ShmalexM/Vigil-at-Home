@@ -1,22 +1,15 @@
-import { BookOpen, X } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { BookOpen, Braces, ChevronDown, Copy, X } from 'lucide-react';
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import type { DogNote, DogNoteKind, NotesFilter } from '../../../shared/pack';
+import type { DogNote, NotesFilter, NoteToolCall } from '../../../shared/pack';
 import { vigil } from '../api';
 import { timeAgo } from '../format';
+import { CALL_OUTCOME, NOTE_KIND, usageWords } from '../../../shared/notebook-export';
 import '../styles/pack.css';
 import { useDialogFocus } from './dialog-focus';
 import { Thinking } from './Thinking';
-import { Chip } from './ui';
-
-const KIND: Record<DogNoteKind, string> = {
-  chat: 'Chat',
-  job: 'Job',
-  judge: 'Risk check',
-  explain: 'Explanation',
-  label: 'Labels',
-  review: 'Rule review',
-};
+import { useToast } from './Toasts';
+import { Button, Chip } from './ui';
 
 /**
  * A dog's notebook: what each AI run was asked, what it looked at, what it
@@ -47,6 +40,14 @@ export function NotebookSheet({
   }, [load]);
   const box = useRef<HTMLDivElement>(null);
   useDialogFocus(box, onClose);
+  const toast = useToast();
+  // Every note the notebook keeps (up to 200), not only the ones on screen,
+  // rendered and redacted as a whole by the app, never here.
+  const copy = async (as: 'md' | 'json') => {
+    const text = await vigil.exportPackNotes(JSON.parse(key) as NotesFilter, as, title);
+    await navigator.clipboard.writeText(text);
+    toast({ text: as === 'md' ? 'Copied as Markdown' : 'Copied as JSON' });
+  };
 
   // On body: inside a sticky parent such as the Lead panel, the scrim would sit under the drag strip.
   return createPortal(
@@ -81,6 +82,26 @@ export function NotebookSheet({
             ))}
           </ol>
         )}
+        {notes && notes.length > 0 && (
+          <div className="row" style={{ gap: 6 }}>
+            <Button
+              size="sm"
+              kind="ghost"
+              icon={<Copy size={13} />}
+              onClick={() => void copy('md')}
+            >
+              Copy as Markdown
+            </Button>
+            <Button
+              size="sm"
+              kind="ghost"
+              icon={<Braces size={13} />}
+              onClick={() => void copy('json')}
+            >
+              Copy JSON
+            </Button>
+          </div>
+        )}
       </div>
     </div>,
     document.body,
@@ -91,7 +112,7 @@ function NoteEntry({ note: n, who }: { note: DogNote; who?: string | undefined }
   return (
     <li className={`note ${n.ok ? '' : 'failed'}`}>
       <span className="row t-small muted" style={{ gap: 6 }}>
-        <Chip>{KIND[n.kind]}</Chip>
+        <Chip>{NOTE_KIND[n.kind]}</Chip>
         {who && <b>{who}</b>}
         <span>{timeAgo(n.at)}</span>
         {(n.provider || n.model) && (
@@ -143,6 +164,75 @@ function NoteEntry({ note: n, who }: { note: DogNote; who?: string | undefined }
             .map((p) => ({ primary: p.trim() }))}
           prose
         />
+      )}
+      <NoteDetails note={n} />
+    </li>
+  );
+}
+
+/**
+ * For whoever wants to dig: each tool call with its (redacted) arguments and
+ * the start of its result, and what the run cost. Closed until opened.
+ */
+function NoteDetails({ note: n }: { note: DogNote }) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  const calls = n.calls ?? [];
+  // Older notes kept no calls or usage; a judge's note never has calls.
+  if (calls.length === 0 && !n.model && !n.usage) return null;
+  return (
+    <div className="note-details">
+      <button
+        type="button"
+        className="note-details-head t-small"
+        aria-expanded={open}
+        aria-controls={id}
+        onClick={() => setOpen(!open)}
+      >
+        <ChevronDown size={13} aria-hidden className={open ? 'open' : ''} />
+        Details
+        {calls.length > 0 && (
+          <span className="muted">
+            · {calls.length} tool {calls.length === 1 ? 'call' : 'calls'}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div id={id} className="note-details-body">
+          {calls.length > 0 && (
+            <ol className="note-calls">
+              {calls.map((c, i) => (
+                <CallRow key={i} call={c} />
+              ))}
+            </ol>
+          )}
+          <Field label="Model">
+            {n.model ?? 'Not recorded'}
+            {n.usage && <span className="muted"> · {usageWords(n.usage)}</span>}
+          </Field>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CallRow({ call: c }: { call: NoteToolCall }) {
+  return (
+    <li className={`note-call ${c.outcome}`}>
+      <span className="row wrap t-small" style={{ gap: 6 }}>
+        <b>{c.title}</b>
+        <Chip tone={c.outcome === 'ran' ? undefined : c.outcome === 'failed' ? 'poor' : 'fair'}>
+          {CALL_OUTCOME[c.outcome]}
+        </Chip>
+        {c.reason && <span className="muted">{c.reason}</span>}
+      </span>
+      <Field label="Arguments">
+        <code className="note-code">{c.args}</code>
+      </Field>
+      {c.result !== undefined && (
+        <Field label="Result">
+          <code className="note-code">{c.result || '(empty)'}</code>
+        </Field>
       )}
     </li>
   );

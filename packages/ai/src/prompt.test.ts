@@ -19,4 +19,10 @@ describe('tools in the prompt', () => {
     expect(prompt).not.toContain('The only tools you have');
     expect(buildSystemPrompt('explain', [])).toContain('You have no tools.');
   });
+
+  it('says what the redaction markers mean', () => {
+    const prompt = buildSystemPrompt('explain', []);
+    expect(prompt).toContain('<redacted>');
+    expect(prompt).toContain('[withheld: may contain a secret]: treat its content as unknown');
+  });
 });

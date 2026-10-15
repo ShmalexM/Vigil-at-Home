@@ -52,6 +52,20 @@ for (const f of readdirSync(dir)
       );
     }
     lines.push('');
+    // Shadow rules raise nothing; this is what they would have flagged.
+    const shadow = d.workload.filter((w) => w.shadowPerDay && Object.keys(w.shadowPerDay).length);
+    if (shadow.length) {
+      lines.push('Shadow matches per day (recorded only):', '');
+      for (const w of shadow)
+        lines.push(
+          `- ${w.profile}${w.variant ? ` (${w.variant})` : ''}, ${w.telemetry}: ${Object.entries(
+            w.shadowPerDay,
+          )
+            .map(([id, n]) => `${id} ${n.toFixed(2)}`)
+            .join(', ')}`,
+        );
+      lines.push('');
+    }
   } else if (f === 'preflight.json') {
     const s = d.summary;
     lines.push('### Pre-flight', '');

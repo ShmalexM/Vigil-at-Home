@@ -265,6 +265,9 @@
 .action-card.declined {
   opacity: 0.65;
 }
+.rule-draft .warn {
+  color: var(--fair);
+}
 .approval-card {
   flex-wrap: nowrap;
   align-items: flex-start;
@@ -569,6 +572,66 @@
   margin: 0;
   padding-left: 16px;
 }
+.note-details-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--tx2);
+  font: inherit;
+  cursor: pointer;
+}
+.note-details-head:hover {
+  color: var(--tx0);
+}
+.note-details-head svg {
+  transition: transform 0.15s ease;
+  transform: rotate(-90deg);
+}
+.note-details-head svg.open {
+  transform: none;
+}
+.note-details-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+.note-calls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.note-call {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--ln0);
+  border-radius: 8px;
+  background: var(--bg1);
+}
+.note-code {
+  display: block;
+  max-height: 160px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--tx1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .note-details-head svg {
+    transition: none;
+  }
+}
 
 /* ---------------------------------------------------------------- memory */
 .memory-add {
@@ -591,10 +654,12 @@
   border-radius: 10px;
   background: var(--bg2);
 }
-.memory-card {
+.memory-card,
+.rule-draft {
   padding-left: 12px;
 }
-.memory-card .memory-icon {
+.memory-card .memory-icon,
+.rule-draft .memory-icon {
   flex: none;
   color: var(--ac);
 }

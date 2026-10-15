@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { app, dialog, Notification, powerMonitor, safeStorage, shell } from 'electron';
 import { HelperCallError } from '@vigil/helper/client';
 import { z } from 'zod';
+import { approvalOpen } from '@vigil/helper/client';
 import type { HelperInstallResult } from '../shared/ipc.js';
 import { AgentService } from './agents/service.js';
 import { AiBridge } from './ai.js';
@@ -15,14 +16,16 @@ import {
   helperBundleDir,
   helperInstallCommand,
   helperMatch,
+  helperScriptRunning,
   runHelperScript,
+  unlessDemo,
 } from './helper-install.js';
 import { HelperLink } from './helper.js';
 import { HelperSyncer } from './helper-sync.js';
 import { registerIpc } from './ipc.js';
 import { systemProbe } from './onboarding/checks.js';
 import { demoProbe } from './onboarding/demo.js';
-import { KeyStore } from './onboarding/keys.js';
+import { FeedKeyStore, KeyStore, type Cipher } from './onboarding/keys.js';
 import { linuxDistro, type LinuxDistro } from './onboarding/plan.js';
 import { OnboardingService } from './onboarding/service.js';
 import { Connectors, ConnectorRecord } from './pack/connectors.js';
@@ -31,9 +34,18 @@ import { PackMemory } from './pack/memory.js';
 import { PackService } from './pack/service.js';
 import { seedPackDemo } from './pack/demo.js';
 import { PowerPolicy } from './power.js';
+import { RuleSuggestions } from './rule-suggestions.js';
 import { hashSelf, selfPaths } from './self-path.js';
-import { HEALTH_CHECK_MS, macProbe, reportHealth, type HelperSensors } from './sensor-health.js';
+import {
+  AwakeClock,
+  HEALTH_CHECK_MS,
+  macProbe,
+  reportHealth,
+  helperSensorsFrom,
+  type HelperSensors,
+} from './sensor-health.js';
 import { VigilCore } from './service.js';
+import { bundleOf, SelfUpdater } from './self-update.js';
 import { UpdateChecker } from './updates.js';
 import { wantsX11 } from './display.js';
 import { restrictWebContents, Windows } from './windows.js';
@@ -99,10 +111,22 @@ function start(): void {
   const demo = !app.isPackaged && !!process.env['VIGIL_DEMO'];
   // The .app bundle or install folder when packaged; the Electron binary in development.
   const self = selfPaths(process.execPath, process.platform, app.isPackaged, process.env);
+  // API keys, feed keys and connector secrets: encrypted with a key held in the Keychain.
+  const cipher: Cipher = {
+    available: () => safeStorage.isEncryptionAvailable(),
+    encrypt: (s) => safeStorage.encryptString(s),
+    decrypt: (b) => safeStorage.decryptString(b),
+  };
+  // Accepted limit: on Linux (GNOME keyring and similar) safeStorage's key is open to any
+  // app running as the same user, so this does not keep the abuse.ch key from them. That
+  // is the platform's limit, and the key is for a free feed, so it is stored the same way.
+  const feedKeys = new FeedKeyStore(join(dataDir, 'feed-keys.json'), cipher);
   const detector = new Detector(db, store, core.alerts, (e, o) => core.ingest(e, o), {
     installedAt: core.installedAt(),
     selfPaths: self.app,
     helperSelf: self.helper,
+    // URLhaus and MalwareBazaar send the user's abuse.ch key once they add one.
+    feeds: { keys: (name) => feedKeys.get(name) },
     // What Vigil itself starts (its AI helpers) is tagged vigil-self, never a watched agent.
     selfPid: process.pid,
     // The tracker reports to the agent service, created just below.
@@ -127,6 +151,8 @@ function start(): void {
     userData: dataDir,
     // For the vigil_status tool (Vigil's read-only tools for the user's own agents).
     status: () => core.status(),
+    // Why the explainer or labeller isn't reaching an AI, for the Agents page.
+    heldBack: (id) => ai.heldBack(id),
     ...(devHelperDir ? { devHelperDir } : {}),
     // The demo shows a fixed set of agents rather than this Mac's.
     ...(demo ? { readPs: async () => [], statInstall: demoInstalled } : {}),
@@ -149,7 +175,8 @@ function start(): void {
 
   // A development build installs the helper that `pnpm build:helper` made.
   const helperDir = () => helperBundleDir(process.resourcesPath, devHelperDir);
-  core.helperInstallable = HELPER_PLATFORMS.has(process.platform) && helperDir() !== null;
+  // The demo offers no helper buttons (see unlessDemo).
+  core.helperInstallable = !demo && HELPER_PLATFORMS.has(process.platform) && helperDir() !== null;
   // Santa's configuration profile comes from the helper, which holds the sync
   // server's certificate. Setup offers it once it has been written here.
   const santaProfilePath = join(dataDir, 'Vigil Santa.mobileconfig');
@@ -166,7 +193,10 @@ function start(): void {
   const checkHelperMatch = () => {
     const dir = helperDir();
     try {
-      const m = dir && core.helperInstallable && !demo ? helperMatch(dir) : null;
+      // A helper pinned to another app (before this one replaced it) is outdated too.
+      const app = { execPath: process.execPath, env: process.env };
+      const m =
+        dir && core.helperInstallable && !demo ? helperMatch(dir, process.platform, '', app) : null;
       core.helperOutdated = m?.installed === 'outdated';
       return m;
     } catch (err) {
@@ -184,11 +214,13 @@ function start(): void {
     return r;
   };
 
-  const keys = new KeyStore(join(dataDir, 'api-keys.json'), {
-    available: () => safeStorage.isEncryptionAvailable(),
-    encrypt: (s) => safeStorage.encryptString(s),
-    decrypt: (b) => safeStorage.decryptString(b),
-  });
+  const installHelper = unlessDemo(demo, async () =>
+    afterHelperScript(
+      await runHelperScript(core.helperOutdated ? 'update' : 'install', helperDir()),
+    ),
+  );
+
+  const keys = new KeyStore(join(dataDir, 'api-keys.json'), cipher);
   const setup: OnboardingService = new OnboardingService({
     store,
     keys,
@@ -211,6 +243,8 @@ function start(): void {
     ...(demo
       ? {}
       : { codex: { status: () => ai.codexStatus(), share: () => ai.shareCodexSignIn() } }),
+    // The helper step's button: the same password dialog as Home's. None in the demo.
+    ...(demo ? {} : { installHelper }),
     // The wizard's helper and Santa steps, once this build can install them.
     plan: () => {
       const command = helperInstallCommand(helperDir());
@@ -237,22 +271,68 @@ function start(): void {
     mode: () => setup.mode(),
     dataDir,
     isBusy: () => power.isBusy(),
+    busyReason: () => power.busyReason(),
     openExternal: (url) => shell.openExternal(url),
   });
   if (!demo) core.usage.setLimitsSource(() => ai.limits());
+  core.aiNotice = () => ai.offNotice();
   ai.on('changed', () => windows.broadcast('changed'));
   ai.explainAlertsFrom(core);
   ai.labelEventsFrom(core);
   ai.reviewRulesFrom(core);
 
-  // Tells the user when a newer release is out. Unsigned builds can't update
-  // themselves, so it offers the DMG; nothing installs without the user.
+  // Keeps Vigil current. On a Mac where the app sits in a folder the user can
+  // write, a newer release downloads, is checked against its published
+  // checksums, and installs while the user is away (or at quit). Elsewhere it
+  // says a release is out and offers the DMG.
+  const appBundle = process.platform === 'darwin' ? bundleOf(process.execPath) : undefined;
+  const installer =
+    appBundle && app.isPackaged && !demo
+      ? new SelfUpdater({
+          bundle: appBundle,
+          bundleId: 'app.vigilathome.desktop',
+          downloads: join(dataDir, 'updates'),
+        })
+      : undefined;
+  installer?.cleanup();
+  // Settles once someone is at the computer: password dialogs wait for this
+  // rather than sit on an empty desk.
+  const whenPresent = () =>
+    new Promise<void>((resolve) => {
+      const check = () => {
+        if (powerMonitor.getSystemIdleTime() >= 30) return false;
+        resolve();
+        return true;
+      };
+      if (check()) return;
+      const t = setInterval(() => check() && clearInterval(t), 3000);
+      t.unref?.();
+    });
+  // Set once the helper syncer exists (below).
+  let selfGrantPending = () => false;
   const updates = new UpdateChecker({
     current: app.getVersion(),
     arch: process.arch,
+    platform: process.platform,
     load: () => store.getSetting('updates', z.unknown(), {}),
     save: (s) => store.setSetting('updates', s),
     openExternal: (url) => shell.openExternal(url),
+    ...(installer
+      ? {
+          installer,
+          relaunch: () => {
+            app.relaunch();
+            app.quit();
+          },
+          idleSeconds: () => powerMonitor.getSystemIdleTime(),
+          // Never restart under an open alert popup or a password dialog.
+          canRestart: () =>
+            !windows.popupVisible() &&
+            !helperScriptRunning() &&
+            !selfGrantPending() &&
+            !approvalOpen(),
+        }
+      : {}),
     onFound: (version) => {
       if (!Notification.isSupported()) return;
       const n = new Notification({
@@ -265,7 +345,11 @@ function start(): void {
   });
   updates.on('changed', () => windows.broadcast('changed'));
   if (app.isPackaged) updates.start();
-  app.on('before-quit', () => updates.stop());
+  // Synchronous: the swap is done (or refused) before anything else quits.
+  app.on('before-quit', () => {
+    updates.stop();
+    updates.installOnQuit();
+  });
 
   // The pack: Vigil's own AI agents as dogs. The Lead dog talks with the user
   // and manages the pack; every tool call goes through the pack's gate, and
@@ -277,11 +361,6 @@ function start(): void {
       packPush = undefined;
       windows.broadcast('pack');
     }, 150);
-  };
-  const cipher = {
-    available: () => safeStorage.isEncryptionAvailable(),
-    encrypt: (s: string) => safeStorage.encryptString(s),
-    decrypt: (b: Buffer) => safeStorage.decryptString(b),
   };
   const connectors = new Connectors({
     load: () => store.getSetting('pack.connectors', z.array(ConnectorRecord), []),
@@ -299,16 +378,25 @@ function start(): void {
     save: (key, value) => store.setSetting(key, value),
     ai: ai.packAi(),
     vigilTools: agents.packTools(),
-    preflight: (req) => agents.packPreflight(req),
+    preflight: (req, opts) => agents.packPreflight(req, opts),
     connectors,
     scheduler: core.scheduler,
     isBusy: () => power.isBusy(),
     notebook: new Notebook(db, { onChange: pushPack }),
     memory: new PackMemory(db, { onChange: pushPack }),
+    // The Lead dog's rule drafts join the rule reviewer's under Suggested changes.
+    rules: new RuleSuggestions(
+      detector,
+      () => ai.ruleReviewRunner() !== undefined,
+      (alertId) => store.getAlertDetection(alertId),
+    ),
     onChange: pushPack,
   });
   ai.on('busy', (helper, busy) => pack.helperBusy(helper, busy));
   ai.on('note', (helper, note) => pack.helperNote(helper, note));
+  // A switch flipped or a key saved: the chat asks again rather than keep saying no AI for a minute.
+  ai.on('changed', () => pack.forgetAiStatus());
+  setup.on('changed', () => pack.forgetAiStatus());
   pack.start();
   if (demo)
     seedPackDemo(pack, connectors, join(app.getAppPath(), 'src/main/pack/fixtures/demo-mcp.mjs'));
@@ -372,7 +460,11 @@ function start(): void {
   if (helperAtStart?.installed === 'outdated' && app.isPackaged) {
     const bundle = helperAtStart.bundle;
     if (store.getSetting('helper.updateAsked', z.string(), '') !== bundle) {
-      setTimeout(() => {
+      // After an update that installed while the user was away, the password
+      // dialog waits until they are back rather than sitting on an empty desk.
+      void whenPresent().then(() => {
+        // The self grant's password may have re-pinned this app meanwhile.
+        if (checkHelperMatch()?.installed !== 'outdated') return;
         void runHelperScript('update', helperDir())
           .then(afterHelperScript)
           .then((r) => {
@@ -380,7 +472,7 @@ function start(): void {
             if (!r.ok && r.error !== 'cancelled') console.error('[helper] update failed:', r.error);
             windows.broadcast('changed');
           });
-      }, 3000).unref?.();
+      });
     }
   }
 
@@ -410,8 +502,11 @@ function start(): void {
     link: helper,
     rules: () => core.detector?.helperRules(),
     ready: selfHashed,
+    // Packaged only: a test run has nobody at the keyboard.
+    ...(app.isPackaged && !demo && !perf ? { present: whenPresent } : {}),
     log: (msg, err) => console.warn(msg, err),
   });
+  selfGrantPending = () => helperSync.selfGrantPending();
   const syncHelperRules = helperSync.sync;
   if (core.detector) core.detector.syncHelper = syncHelperRules;
   helper.on('state', (state) => {
@@ -432,6 +527,9 @@ function start(): void {
         await syncHelperRules();
       },
       true,
+      // Each helper call has its own time limit, and a big list sync can
+      // take a while chunk by chunk; past ten minutes, something is wrong.
+      { stuckAfterMs: 10 * 60_000 },
     );
   }
 

@@ -206,7 +206,9 @@ export class RuleEditor {
     if (rule.exclusions.some((x) => JSON.stringify(x) === same)) {
       return { ok: true, rule, errors: [], warnings: ['That exclusion is already on the rule.'] };
     }
-    return this.save({ ...rule, exclusions: [...rule.exclusions, c.data] }, origin);
+    // Keep the mode it runs in: the rule's own may be older than the user's choice.
+    const mode = this.engine.modeOf(rule);
+    return this.save({ ...rule, mode, exclusions: [...rule.exclusions, c.data] }, origin);
   }
 
   removeExclusion(ruleId: string, index: number, origin: UserOrigin): EditResult {
@@ -216,7 +218,11 @@ export class RuleEditor {
       return { ok: false, errors: ['No exclusion at that position'], warnings: [] };
     }
     return this.save(
-      { ...rule, exclusions: rule.exclusions.filter((_, i) => i !== index) },
+      {
+        ...rule,
+        mode: this.engine.modeOf(rule),
+        exclusions: rule.exclusions.filter((_, i) => i !== index),
+      },
       origin,
     );
   }

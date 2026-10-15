@@ -10,7 +10,7 @@ import {
   type RuleExceptionSchema,
 } from '@vigil/helper';
 import type { DetectionRule } from '@vigil/detection';
-import { listDigest } from '@vigil/detection/fastpath';
+import { listDigest, type AppBlockingRule } from '@vigil/detection/fastpath';
 import { HelperCallError, HelperClient } from '@vigil/helper/client';
 import type { z } from 'zod';
 import { DryRunExecutor, type ActionExecutor } from './executor.js';
@@ -19,9 +19,19 @@ export type HelperState = 'not_installed' | 'not_running' | 'connected';
 
 /** How often to look for the helper while it isn't connected. */
 export const HELPER_RETRY_MS = 15_000;
+/** The longest wait between tries while the helper keeps failing. */
+export const HELPER_RETRY_MAX_MS = 2 * 60_000;
+/**
+ * A second drop this soon after the last one is a helper that keeps failing
+ * (crash-looping, or answering some calls and not others), not a blip: it
+ * shows as not running and is retried with backoff.
+ */
+export const HELPER_FLAP_WINDOW_MS = 3 * 60_000;
 const QUERY_TIMEOUT_MS = 5_000;
 const ACTION_TIMEOUT_MS = 15_000;
-const RELEASE_TIMEOUT_MS = 3 * 60_000;
+export const RELEASE_TIMEOUT_MS = 3 * 60_000;
+/** A sync's deadline on the helper falls this long before the app stops waiting. */
+const SYNC_DEADLINE_MARGIN_MS = 5_000;
 /** The helper keeps its last 2000 events; remember a little more than that. */
 const SEEN_EVENT_IDS = 4000;
 /** How long an action the helper already ran waits for the app's engine to ask for it. */
@@ -30,12 +40,16 @@ const HELPER_RAN_MS = 60_000;
 /** The blocking rules the helper runs itself, and what they need. */
 export interface HelperRuleSet {
   rules: DetectionRule[];
+  /** Blocking rules only the app runs: weakening one needs the password too. */
+  appRules: AppBlockingRule[];
   exceptions: z.infer<typeof RuleExceptionSchema>[];
   selfPaths: string[];
   /** Linux AppImage: the image by device and inode, and its programs' sha256. */
   selfImages?: SelfImage[];
   selfHashes?: string[];
   lists: Record<string, string[]>;
+  /** Rules that run an older pattern the linear-time engine can't (legacy.ts). */
+  legacy?: string[];
 }
 
 /** What is Vigil's own, as the helper takes it in a self grant. */
@@ -64,13 +78,32 @@ export function fromOlderHelper(err: unknown, field: 'kind' | 'selfPaths'): bool
 }
 
 export interface HelperRulesOutcome {
+  /** False when the helper lacked a list's contents and changed nothing. */
+  applied: boolean;
   needLists: string[];
-  preexec: PreexecOutcome | null;
+  /** Santa's pre-launch rules follow in the background (`pending`); detection.status says how. */
+  preexec: 'pending' | PreexecOutcome | null;
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+/** The helper's socket is open but it didn't answer in time. */
+class HelperTimeout extends Error {}
+
+/**
+ * Waits `ms` for the helper. Given a function, it gets a signal that aborts
+ * when the wait ends, so a password dialog the call showed closes with it
+ * and an answer after that can't act unseen.
+ */
+function withTimeout<T>(
+  call: Promise<T> | ((signal: AbortSignal) => Promise<T>),
+  ms: number,
+): Promise<T> {
+  const stop = new AbortController();
+  const p = typeof call === 'function' ? call(stop.signal) : call;
   return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error('The Vigil helper did not answer')), ms);
+    const t = setTimeout(() => {
+      stop.abort();
+      reject(new HelperTimeout('The Vigil helper did not answer'));
+    }, ms);
     p.then(
       (v) => (clearTimeout(t), resolve(v)),
       (e: unknown) => (clearTimeout(t), reject(e instanceof Error ? e : new Error(String(e)))),
@@ -96,9 +129,16 @@ export class HelperLink
   implements ActionExecutor
 {
   private client: HelperClient | undefined;
+  /** What the connected helper is known to have, so unchanged lists are not sent again. */
+  private confirmedFor: HelperClient | undefined;
+  private confirmedRules: string | undefined;
+  private confirmedLists = new Map<string, string>();
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
   private connecting = false;
+  /** When the connection last dropped, and how many drops came close together since. */
+  private lastDropAt = -Infinity;
+  private failures = 0;
   state: HelperState = 'not_installed';
   /** The last event received, so a reconnect only replays what was missed. */
   private lastEventId: string | undefined;
@@ -154,14 +194,46 @@ export class HelperLink
       // Releases make the helper ask for the admin password; call() shows the dialog.
       // A release waits on the user typing their password; containment must be quick.
       const out = await withTimeout(
-        client.call<Outcome>(action),
+        (signal) => client.call<Outcome>(action, signal),
         isRelease(action) ? RELEASE_TIMEOUT_MS : ACTION_TIMEOUT_MS,
       );
       if (!out) throw new Error('No answer from the Vigil helper');
-      return { at: Date.now(), ...(out.quarantineId ? { quarantineId: out.quarantineId } : {}) };
+      return {
+        at: Date.now(),
+        simulated: false,
+        ...(out.quarantineId ? { quarantineId: out.quarantineId } : {}),
+      };
     } catch (err) {
       if (!(err instanceof HelperCallError) || /connection closed/.test(err.message)) {
-        this.dropped(client);
+        this.dropped(client, err);
+      }
+      if (err instanceof HelperCallError && err.code === 'installer-owned') {
+        return {
+          at: Date.now(),
+          error: 'Not done: it belongs to an installer or the system',
+          errorCode: 'installer-owned',
+        };
+      }
+      if (err instanceof HelperCallError && err.code === 'owner-cannot-write') {
+        return {
+          at: Date.now(),
+          error: 'Not done: its owner can’t write there',
+          errorCode: 'owner-cannot-write',
+        };
+      }
+      if (err instanceof HelperCallError && err.code === 'startup-folder-linked') {
+        return {
+          at: Date.now(),
+          error: 'Not done: its folder is a link to somewhere else',
+          errorCode: 'startup-folder-linked',
+        };
+      }
+      if (err instanceof HelperCallError && err.code === 'not-your-item') {
+        return {
+          at: Date.now(),
+          error: 'Not done: it belongs to another user',
+          errorCode: 'not-your-item',
+        };
       }
       const error =
         err instanceof HelperCallError && err.code === 'refused'
@@ -174,14 +246,16 @@ export class HelperLink
   }
 
   /** Ask the helper for something read-only (status, journal, the Santa profile). */
-  async query<T>(kind: 'helper.status' | 'helper.journal' | 'santa.profile'): Promise<T | null> {
+  async query<T>(
+    kind: 'helper.status' | 'helper.journal' | 'santa.profile' | 'detection.status',
+  ): Promise<T | null> {
     const client = this.client;
     if (!client) return null;
     try {
       return await withTimeout(client.call<T>({ kind }), QUERY_TIMEOUT_MS);
     } catch (err) {
       // A closed or hung connection: drop it and start reconnecting.
-      this.dropped(client);
+      this.dropped(client, err);
       throw err;
     }
   }
@@ -210,13 +284,22 @@ export class HelperLink
 
   /**
    * Hand the helper the blocking rules it can run itself (and Santa before
-   * launch), then any indicator list it says it doesn't have yet. Null while
-   * unconnected. If the rules turn something off or add an exception, the
-   * helper asks for the admin password first; a cancelled dialog throws a
-   * HelperCallError with code refused and leaves the helper's rules as they were.
-   * With `hold`, that password is asked for by the next dialog instead (a
+   * launch). Null while unconnected, before anything is sent.
+   *
+   * A change to the rules goes as one detection.sync carrying the contents of
+   * every list the helper may not have, which the helper puts in force whole
+   * or not at all. If it still lacks one (it says so and changes nothing), the
+   * sync is sent again with it. When only list contents changed (a feed
+   * refresh, a newly blocked program), the lists go on their own, in parts.
+   *
+   * If the rules turn something off or add an exception, the helper asks for
+   * the admin password first; a cancelled dialog throws a HelperCallError
+   * with code refused and leaves the helper's rules as they were. With
+   * `hold`, that password is asked for by the next dialog instead (a
    * release's) or by approveHeld(). With `ask: false` no dialog is shown:
-   * a sync that needs the password resolves 'needs_password' and changes nothing.
+   * a sync that needs the password resolves 'needs_password' and changes
+   * nothing. `syncId` names the sync, so rulesState() can tell whether it
+   * went in after the app stopped waiting.
    *
    * Vigil's own programs go to the helper apart from the rules (grantSelf).
    * `withSelf` sends them with the rules instead, for a helper from before
@@ -224,60 +307,140 @@ export class HelperLink
    */
   async syncRules(
     set: HelperRuleSet,
-    opts: { hold?: boolean; onHeld?: () => void; ask?: boolean; withSelf?: boolean } = {},
+    opts: {
+      hold?: boolean;
+      onHeld?: () => void;
+      ask?: boolean;
+      withSelf?: boolean;
+      syncId?: string;
+    } = {},
   ): Promise<HelperRulesOutcome | 'needs_password' | null> {
     const client = this.client;
     if (!client) return null;
+    if (client !== this.confirmedFor) {
+      this.confirmedFor = client;
+      this.confirmedRules = undefined;
+      this.confirmedLists = new Map();
+    }
     try {
       const digests = Object.fromEntries(
         Object.entries(set.lists).map(([name, entries]) => [name, listDigest(entries)]),
       );
-      const sync = {
+      const changed = Object.keys(digests).filter((n) => this.confirmedLists.get(n) !== digests[n]);
+      const rulesKey = JSON.stringify({
+        rules: set.rules,
+        appRules: set.appRules,
+        exceptions: set.exceptions,
+        legacy: set.legacy ?? [],
+        self: opts.withSelf ? selfOf(set) : null,
+        lists: Object.keys(digests).sort(),
+      });
+      if (rulesKey === this.confirmedRules && !opts.hold) {
+        await this.sendLists(client, set, digests, changed);
+        return { applied: true, needLists: [], preexec: null };
+      }
+      const base = {
         kind: 'detection.sync' as const,
         rules: set.rules,
+        appRules: set.appRules,
         exceptions: set.exceptions,
         // Only an AppImage names images and hashes; a helper from before them refuses unknown fields.
+        // A helper from before self.grant also refuses appRules, notAfter and
+        // syncId, so this fallback fails closed (the change is refused) until
+        // the helper is updated with the app; nothing is put in force unasked.
         ...(opts.withSelf ? selfOf(set) : {}),
         lists: digests,
+        ...(set.legacy?.length ? { legacy: set.legacy } : {}),
+        ...(opts.syncId ? { syncId: opts.syncId } : {}),
       };
-      let out: HelperRulesOutcome;
-      if (opts.ask === false) {
-        const tried = await withTimeout(
-          client.attempt<HelperRulesOutcome>(sync),
-          ACTION_TIMEOUT_MS,
-        );
-        if (tried === 'needsApproval') return 'needs_password';
-        out = tried.result;
-      } else {
-        out = await withTimeout(
-          opts.hold
-            ? client.hold<HelperRulesOutcome>(sync, opts.onHeld)
-            : client.call<HelperRulesOutcome>(sync),
-          // A sync that loosens the rules waits on the admin password, like a release.
-          RELEASE_TIMEOUT_MS,
-        );
-      }
-      for (const name of out.needLists) {
-        const entries = [...new Set(set.lists[name] ?? [])];
-        const parts = Math.max(1, Math.ceil(entries.length / LIST_PART_MAX));
-        for (let part = 0; part < parts; part++) {
-          await withTimeout(
-            client.call({
-              kind: 'detection.list.set',
-              list: name,
-              digest: digests[name]!,
-              part,
-              parts,
-              entries: entries.slice(part * LIST_PART_MAX, (part + 1) * LIST_PART_MAX),
-            }),
-            QUERY_TIMEOUT_MS,
+      let carry = changed;
+      // Without a dialog the helper answers at once; with one it waits on the password.
+      const wait = opts.ask === false ? ACTION_TIMEOUT_MS : RELEASE_TIMEOUT_MS;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        // The helper refuses this sync once the app has stopped waiting for
+        // it, so a password typed after the timeout can't put it in force
+        // after rulesState() said it wasn't.
+        const notAfter = Date.now() + wait - SYNC_DEADLINE_MARGIN_MS;
+        const sync = {
+          ...base,
+          notAfter,
+          ...(carry.length
+            ? {
+                entries: Object.fromEntries(
+                  carry.map((n) => [n, [...new Set(set.lists[n] ?? [])]]),
+                ),
+              }
+            : {}),
+        };
+        let out: HelperRulesOutcome;
+        if (opts.ask === false) {
+          const tried = await withTimeout(client.attempt<HelperRulesOutcome>(sync), wait);
+          if (tried === 'needsApproval') return 'needs_password';
+          out = tried.result;
+        } else {
+          out = await withTimeout(
+            // A held sync's dialog is approveHeld()'s, shared with what else
+            // is held; it closes on its own (APPROVAL_TIMEOUT_MS).
+            (signal) =>
+              opts.hold
+                ? client.hold<HelperRulesOutcome>(sync, opts.onHeld)
+                : client.call<HelperRulesOutcome>(sync, signal),
+            // A sync that loosens the rules waits on the admin password, like a release.
+            RELEASE_TIMEOUT_MS,
           );
         }
+        if (out.applied) {
+          this.confirmedRules = rulesKey;
+          this.confirmedLists = new Map(Object.entries(digests));
+          return out;
+        }
+        carry = [...new Set([...carry, ...out.needLists])];
       }
-      return out;
+      throw new HelperCallError('the helper kept asking for its lists', 'failed');
     } catch (err) {
-      if (!(err instanceof HelperCallError)) this.dropped(client);
+      // A timeout is not a dead connection (a password dialog can stay open):
+      // keep it, so the app can ask the helper what is in force. A closed
+      // connection or any other failure drops it.
+      const closed = err instanceof HelperCallError && /connection closed/.test(err.message);
+      if (closed || !(err instanceof HelperCallError || err instanceof HelperTimeout))
+        this.dropped(client, err);
       throw err;
+    }
+  }
+
+  /** Lists on their own, in parts: each goes in once all its parts are in. */
+  private async sendLists(
+    client: HelperClient,
+    set: HelperRuleSet,
+    digests: Record<string, string>,
+    names: string[],
+  ): Promise<void> {
+    for (const name of names) {
+      const entries = [...new Set(set.lists[name] ?? [])];
+      const parts = Math.max(1, Math.ceil(entries.length / LIST_PART_MAX));
+      for (let part = 0; part < parts; part++) {
+        await withTimeout(
+          client.call({
+            kind: 'detection.list.set',
+            list: name,
+            digest: digests[name]!,
+            part,
+            parts,
+            entries: entries.slice(part * LIST_PART_MAX, (part + 1) * LIST_PART_MAX),
+          }),
+          QUERY_TIMEOUT_MS,
+        );
+      }
+      this.confirmedLists.set(name, digests[name]!);
+    }
+  }
+
+  /** Which sync is in force on the helper (the app's id for it), or null if it can't say. */
+  async rulesState(): Promise<{ syncId: string | null } | null> {
+    try {
+      return await this.query<{ syncId: string | null }>('detection.status');
+    } catch {
+      return null;
     }
   }
 
@@ -291,7 +454,9 @@ export class HelperLink
     const client = this.client;
     if (!client) return null;
     try {
-      // No timeout: the dialog may stay open, and a lost connection settles it.
+      // No timeout here: the dialog closes itself after APPROVAL_TIMEOUT_MS
+      // (a no), and a lost connection settles it too. No other call's
+      // timeout closes it.
       await client.call({ kind: 'self.grant', ...selfOf(set) });
       return 'applied';
     } catch (err) {
@@ -331,7 +496,7 @@ export class HelperLink
     this.emit('state', s);
   }
 
-  /** Try once now; on failure, try again after HELPER_RETRY_MS. */
+  /** Try once now; on failure, try again after HELPER_RETRY_MS (longer while it keeps failing). */
   async tryConnect(): Promise<void> {
     if (this.stopped || this.client || this.connecting) return;
     clearTimeout(this.timer);
@@ -347,10 +512,20 @@ export class HelperLink
         client.close();
         return;
       }
-      this.client = client;
       client.onEvent((e, ran) => this.received(e, ran));
-      await client.subscribe(this.lastEventId);
-      this.setState('connected');
+      // A helper that accepts the connection but never answers counts as not
+      // running, rather than leaving the link stuck mid-connect.
+      try {
+        await withTimeout(client.subscribe(this.lastEventId), QUERY_TIMEOUT_MS);
+      } catch (err) {
+        client.close();
+        throw err;
+      }
+      this.client = client;
+      // After a quiet reconnect the state hasn't changed, but listeners still
+      // need to hear of the new connection (to send the rules again).
+      if (this.state === 'connected') this.emit('state', 'connected');
+      else this.setState('connected');
     } catch {
       this.client = undefined;
       this.setState('not_running');
@@ -381,8 +556,16 @@ export class HelperLink
     for (const r of ran) {
       const at = typeof r.at === 'number' ? r.at : now;
       const result: ActionResult = r.outcome
-        ? { at, ...(r.outcome.quarantineId ? { quarantineId: r.outcome.quarantineId } : {}) }
-        : { at, error: r.error ?? 'The Vigil helper could not do this' };
+        ? {
+            at,
+            simulated: false,
+            ...(r.outcome.quarantineId ? { quarantineId: r.outcome.quarantineId } : {}),
+          }
+        : {
+            at,
+            error: r.error ?? 'The Vigil helper could not do this',
+            ...(r.errorCode ? { errorCode: r.errorCode } : {}),
+          };
       const key = JSON.stringify(r.action);
       const entry = this.helperRan.get(key);
       if (entry) entry.results.push(result);
@@ -399,10 +582,27 @@ export class HelperLink
     return result;
   }
 
-  private dropped(client: HelperClient): void {
+  /**
+   * A connection that closed once is tried again at once before anything
+   * changes on screen, so a one-off blip (a helper restart) never shows the
+   * helper as stopped. A helper that didn't answer, or a second drop within
+   * HELPER_FLAP_WINDOW_MS, is not a blip: it shows as not running and is
+   * retried with backoff, so a wedged or crash-looping helper never reads as
+   * fine and isn't hammered with reconnects.
+   */
+  private dropped(client: HelperClient, why?: unknown): void {
     if (this.client !== client) return;
     this.client = undefined;
     client.close();
+    const now = Date.now();
+    const again = now - this.lastDropAt < HELPER_FLAP_WINDOW_MS;
+    this.lastDropAt = now;
+    if (!again) this.failures = 0;
+    if (!again && !(why instanceof HelperTimeout)) {
+      void this.tryConnect();
+      return;
+    }
+    this.failures++;
     this.setState(existsSync(this.socket) ? 'not_running' : 'not_installed');
     this.retry();
   }
@@ -410,7 +610,11 @@ export class HelperLink
   private retry(): void {
     if (this.stopped) return;
     clearTimeout(this.timer);
-    this.timer = setTimeout(() => void this.tryConnect(), HELPER_RETRY_MS);
+    const wait = Math.min(
+      HELPER_RETRY_MS * 2 ** Math.max(0, this.failures - 1),
+      HELPER_RETRY_MAX_MS,
+    );
+    this.timer = setTimeout(() => void this.tryConnect(), wait);
     this.timer.unref?.();
   }
 }

@@ -21,6 +21,7 @@ type PackCall =
   | 'refreshConnector'
   | 'listPackNotes'
   | 'clearPackNotes'
+  | 'exportPackNotes'
   | 'listPackMemory'
   | 'addPackMemory'
   | 'forgetPackMemory'
@@ -59,13 +60,21 @@ export function packHandlers(pack: PackService, connectors: Connectors): Pick<Ha
     addConnector: (input) =>
       result(async () => {
         const c = connectors.add(input);
+        pack.connectorChanged(c.id);
         await pack.refreshConnector(c.id).catch(() => undefined);
       }),
-    setConnectorEnabled: (id, on) => connectors.setEnabled(id, on),
-    removeConnector: (id) => connectors.remove(id),
+    setConnectorEnabled: (id, on) => {
+      connectors.setEnabled(id, on);
+      pack.connectorChanged(id);
+    },
+    removeConnector: (id) => {
+      connectors.remove(id);
+      pack.connectorChanged(id);
+    },
     refreshConnector: (id) => result(() => pack.refreshConnector(id)),
     listPackNotes: (filter) => pack.notes(filter),
     clearPackNotes: (dog) => pack.clearNotes(dog),
+    exportPackNotes: (filter, as, title) => pack.exportNotes(filter, as, title),
     listPackMemory: () => pack.memories(),
     addPackMemory: (input) => result(() => pack.remember(input)),
     forgetPackMemory: (id) => pack.forget(id),

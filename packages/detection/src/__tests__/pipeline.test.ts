@@ -2,6 +2,15 @@ import { PreflightRequest } from '@vigil/core';
 import { describe, expect, it } from 'vitest';
 import { conditionUsesAgentFields, exclusionHidesAgent, isAgentField } from '../agents/fields.js';
 import { toolRequestEvent } from '../agents/preflight.js';
+import {
+  aiMayNotChange,
+  BLOCKING_RULE,
+  INDICATOR_EXCLUSION,
+  INDICATOR_RULE,
+  isIndicatorRule,
+  STILL_CATCHES_THREAT,
+  USER_TUNED_ONLY,
+} from '../proposals/pipeline.js';
 import { ruleLanguageGuide } from '../proposals/tools.js';
 import { replayRule } from '../proposals/replay.js';
 import { MemoryExceptionStore } from '../state/stores.js';
@@ -272,6 +281,102 @@ describe('AI tuning proposals', () => {
     engine.upsertRule({ ...(baseRule as object), version: 5 } as never);
     expect(() => pipeline.approve(res.proposalId!, userOrigin('rules-screen'))).toThrow(/changed/);
   });
+
+  it('does not queue the same change twice, and keeps who drafted it', () => {
+    const { pipeline, engine } = twoWeeks();
+    engine.upsertRule(baseRule);
+    const tune = { ruleId: 'unsigned-net-alert', rationale: 'Your own builds are expected.' };
+    const first = pipeline.submitTuning({ ...tune, addExclusion: narrow }, 'claude', 'Scout');
+    expect(first.ok).toBe(true);
+    expect(pipeline.get(first.proposalId!)).toMatchObject({ by: 'Scout', provider: 'claude' });
+    // The same condition with its keys in another order is the same change.
+    const again = pipeline.submitTuning(
+      { ...tune, addExclusion: { value: ['~/code/**'], op: 'glob', field: 'process.path' } },
+      'codex',
+    );
+    expect(again).toMatchObject({ ok: false, final: true, duplicateOf: first.proposalId });
+    const retire = { ruleId: 'unsigned-net-alert', toMode: 'shadow', rationale: 'Noisy.' };
+    expect(pipeline.submitRetirement({ ...retire, evidence: ['x'] }, 'claude').ok).toBe(true);
+    expect(pipeline.submitRetirement({ ...retire, evidence: ['y'] }, 'claude')).toMatchObject({
+      ok: false,
+      final: true,
+    });
+    expect(pipeline.list().filter((p) => p.status === 'awaiting_review')).toHaveLength(2);
+    // Once the first is settled, the change can be suggested again.
+    pipeline.reject(first.proposalId!, userOrigin('rules-screen'));
+    expect(pipeline.submitTuning({ ...tune, addExclusion: narrow }, 'claude').ok).toBe(true);
+  });
+
+  it('takes a fresh change once the rule was edited under a waiting one', () => {
+    const { pipeline, engine } = twoWeeks();
+    engine.upsertRule(baseRule);
+    const tune = { ruleId: 'unsigned-net-alert', rationale: 'Your own builds are expected.' };
+    const first = pipeline.submitTuning({ ...tune, addExclusion: narrow }, 'claude');
+    expect(first.ok).toBe(true);
+    // The user edits the rule: the waiting proposal can no longer be accepted...
+    engine.upsertRule({ ...engine.getRule('unsigned-net-alert')!, version: 9 } as never);
+    expect(() => pipeline.approve(first.proposalId!, userOrigin('rules-screen'))).toThrow(
+      /changed/,
+    );
+    // ...so the same change against the edited rule is not a duplicate of it.
+    const fresh = pipeline.submitTuning({ ...tune, addExclusion: narrow }, 'codex', 'Scout');
+    expect(fresh.ok).toBe(true);
+    expect(fresh.duplicateOf).toBeUndefined();
+    expect(pipeline.get(fresh.proposalId!)).toMatchObject({ baseRuleVersion: 9 });
+  });
+
+  it('a waiting turn-down to one mode does not swallow a turn-down to another', () => {
+    const { pipeline, engine } = twoWeeks();
+    engine.upsertRule(baseRule);
+    const vig = pipeline.suggestDemotion({
+      ruleId: 'unsigned-net-alert',
+      to: 'disabled',
+      message: 'You keep marking these safe.',
+    })!;
+    expect(vig.ok).toBe(true);
+    const retire = { ruleId: 'unsigned-net-alert', rationale: 'Noisy.', evidence: ['chat'] };
+    const shadow = pipeline.submitRetirement({ ...retire, toMode: 'shadow' }, 'codex', 'Scout');
+    expect(shadow.ok).toBe(true);
+    expect(pipeline.get(shadow.proposalId!)!.retireTo).toBe('shadow');
+    // The same mode again is still a duplicate, of the Shadow request.
+    expect(pipeline.submitRetirement({ ...retire, toMode: 'shadow' }, 'claude')).toMatchObject({
+      ok: false,
+      duplicateOf: shadow.proposalId,
+    });
+  });
+
+  it('refuses to exclude a program on the blocked list, even with no events in the window', () => {
+    const { pipeline, engine, stores } = twoWeeks();
+    engine.upsertRule(baseRule);
+    const mine = 'f'.repeat(64);
+    const feed = 'e'.repeat(64);
+    stores.lists.add('user_blocked_sha256', mine, { source: 'user', updatedAt: 0 });
+    stores.lists.add('known_bad_sha256', feed, { source: 'feed', updatedAt: 0 });
+    const tune = { ruleId: 'unsigned-net-alert', rationale: 'It is fine.' };
+    const eq = pipeline.submitTuning(
+      { ...tune, addExclusion: { field: 'process.sha256', op: 'eq', value: mine } },
+      'codex',
+      'Scout',
+    );
+    expect(eq).toMatchObject({ ok: false, final: true });
+    expect(eq.errors.join(' ')).toMatch(/on your blocked list/);
+    const inList = pipeline.submitTuning(
+      {
+        ...tune,
+        addExclusion: {
+          any: [{ field: 'process.sha256', op: 'in', value: ['a'.repeat(64), feed] }],
+        },
+      },
+      'claude',
+    );
+    expect(inList.ok).toBe(false);
+    expect(inList.errors.join(' ')).toMatch(/on your blocked list/);
+    const fine = pipeline.submitTuning(
+      { ...tune, addExclusion: { field: 'process.sha256', op: 'eq', value: 'a'.repeat(64) } },
+      'claude',
+    );
+    expect(fine.errors.join(' ')).not.toMatch(/blocked list/);
+  });
 });
 
 describe('AI proposals about agent rules', () => {
@@ -437,6 +542,491 @@ describe('AI proposals about agent rules', () => {
     expect(conditionUsesAgentFields({ any: [narrow, { field: 'path', op: 'exists' }] })).toBe(
       false,
     );
+  });
+});
+
+describe('AI proposals about blocked-indicator rules', () => {
+  const retire = (ruleId: string) => ({
+    ruleId,
+    toMode: 'shadow',
+    rationale: 'It has not fired in two weeks.',
+    evidence: ['Drafted by Scout in chat'],
+  });
+  const exclude = (ruleId: string) => ({
+    ruleId,
+    addExclusion: { field: 'process.sha256', op: 'eq', value: '1'.repeat(64) },
+    rationale: 'This one program is fine.',
+  });
+
+  it('refuses to turn down or exclude from a known-bad or blocked-list rule, alert or no alert', () => {
+    const { pipeline, stores } = twoWeeks();
+    // Still listed, but its last event was 15 days ago: nothing in the replay window.
+    stores.lists.add('known_bad_sha256', '7'.repeat(64), { source: 'feed', updatedAt: 0 });
+    for (const id of [
+      'known-bad-hash',
+      'user-blocked-hash',
+      'known-bad-destination',
+      'known-bad-domain',
+    ]) {
+      expect(pipeline.submitRetirement(retire(id), 'claude', 'Scout'), id).toMatchObject({
+        ok: false,
+        final: true,
+        errors: [INDICATOR_RULE],
+      });
+      expect(pipeline.submitRetirement(retire(id), 'codex'), id).toMatchObject({ ok: false });
+      expect(pipeline.submitTuning(exclude(id), 'claude', 'Scout'), id).toMatchObject({
+        ok: false,
+        final: true,
+        errors: [INDICATOR_RULE],
+      });
+    }
+    expect(pipeline.list()).toEqual([]);
+  });
+
+  it('finds the indicator lists anywhere in a rule, including a sequence step', () => {
+    const { pipeline, engine } = twoWeeks();
+    engine.upsertRule(
+      testRule({
+        id: 'my-bad-domain-after-download',
+        eventKinds: ['network.connection'],
+        condition: { field: 'process.signing', op: 'in', value: ['unsigned', 'adhoc'] },
+        sequence: {
+          steps: [
+            {
+              eventKinds: ['network.connection'],
+              condition: { any: [{ inList: { list: 'known_bad_domains', field: 'remoteHost' } }] },
+            },
+          ],
+          key: ['process.pid'],
+          windowSec: 600,
+        },
+      }),
+    );
+    engine.upsertRule(
+      testRule({
+        id: 'my-blocked-signers',
+        condition: {
+          all: [
+            { field: 'process.path', op: 'exists' },
+            { inList: { list: 'user_blocked_teams', field: 'process.teamId' } },
+          ],
+        },
+      }),
+    );
+    for (const id of ['my-bad-domain-after-download', 'my-blocked-signers']) {
+      expect(isIndicatorRule(engine.getRule(id)!), id).toBe(true);
+      expect(pipeline.submitRetirement(retire(id), 'claude', 'Scout').errors, id).toEqual([
+        INDICATOR_RULE,
+      ]);
+      expect(pipeline.submitTuning(exclude(id), 'claude').errors, id).toEqual([INDICATOR_RULE]);
+    }
+    expect(isIndicatorRule(engine.getRule('exec-from-shared-temp')!)).toBe(false);
+  });
+
+  it('withdraws a waiting AI turn-down of an indicator rule and refuses to accept it', () => {
+    const { pipeline, engine } = twoWeeks();
+    const base = engine.getRule('known-bad-hash')!;
+    // Queued before this check existed.
+    const stale = {
+      id: 'old-1',
+      kind: 'retire' as const,
+      createdAt: NOW - HOUR,
+      provider: 'claude',
+      by: 'Scout',
+      rationale: 'Quiet.',
+      evidence: [],
+      rule: base,
+      baseRuleId: base.id,
+      baseRuleVersion: base.version,
+      retireTo: 'shadow' as const,
+      status: 'awaiting_review' as const,
+      lint: { errors: [], warnings: [] },
+    };
+    (pipeline as unknown as { store: { put(p: unknown): void } }).store.put(stale);
+    expect(() => pipeline.approve('old-1', userOrigin('rules-screen'))).toThrow(INDICATOR_RULE);
+    expect(engine.modeOf(base)).toBe('block');
+    expect(pipeline.get('old-1')).toMatchObject({ status: 'withdrawn' });
+  });
+});
+
+describe('the one check on what an AI may change', () => {
+  const retire = (ruleId: string) => ({
+    ruleId,
+    toMode: 'shadow',
+    rationale: 'Noisy.',
+    evidence: ['Drafted by Scout in chat'],
+  });
+  const exclude = (ruleId: string) => ({
+    ruleId,
+    addExclusion: { field: 'process.sha256', op: 'eq', value: '1'.repeat(64) },
+    rationale: 'This one program is fine.',
+  });
+
+  it('finds a blocklist lookup inside an exclusion, at any depth', () => {
+    const { pipeline, engine } = twoWeeks();
+    engine.upsertRule(
+      testRule({
+        id: 'curl-ran',
+        condition: { field: 'process.name', op: 'eq', value: 'curl' },
+        exclusions: [
+          {
+            all: [
+              { field: 'process.name', op: 'eq', value: 'curl' },
+              { not: { inList: { list: 'known_bad_sha256', field: 'process.sha256' } } },
+            ],
+          },
+        ],
+      }),
+    );
+    const rule = engine.getRule('curl-ran')!;
+    expect(isIndicatorRule(rule)).toBe(true);
+    expect(aiMayNotChange(rule, 'alert')).toBe(INDICATOR_RULE);
+    expect(pipeline.submitRetirement(retire('curl-ran'), 'claude', 'Scout').errors).toEqual([
+      INDICATOR_RULE,
+    ]);
+    expect(pipeline.submitTuning(exclude('curl-ran'), 'claude').errors).toEqual([INDICATOR_RULE]);
+    // Nor may an AI add such a lookup as an exclusion, to a rule or a new one.
+    engine.upsertRule(
+      testRule({ id: 'plain', condition: { field: 'process.name', op: 'eq', value: 'wget' } }),
+    );
+    const sneaky = {
+      ruleId: 'plain',
+      addExclusion: {
+        all: [
+          { field: 'process.name', op: 'eq', value: 'wget' },
+          { not: { inList: { list: 'user_blocked_sha256', field: 'process.sha256' } } },
+        ],
+      },
+      rationale: 'Only the bad ones matter.',
+    };
+    expect(pipeline.submitTuning(sneaky, 'claude').errors).toEqual([INDICATOR_EXCLUSION]);
+    const rule2 = {
+      ...pasteRule,
+      id: 'paste-x',
+      exclusions: [{ inList: { list: 'known_bad_domains', field: 'remoteHost' } }],
+    };
+    expect(pipeline.submitRule({ rule: rule2, rationale: why }, 'claude').errors).toEqual([
+      INDICATOR_EXCLUSION,
+    ]);
+  });
+
+  it('never lets an AI change a rule that is blocking now', () => {
+    const { pipeline, engine } = twoWeeks();
+    engine._setMode('exec-from-shared-temp', 'block');
+    expect(
+      pipeline.submitRetirement(retire('exec-from-shared-temp'), 'codex', 'Scout'),
+    ).toMatchObject({ ok: false, final: true, errors: [BLOCKING_RULE] });
+    expect(pipeline.submitTuning(exclude('exec-from-shared-temp'), 'claude').errors).toEqual([
+      BLOCKING_RULE,
+    ]);
+  });
+
+  it('refuses at accept an agent-sequence turn-down queued before the guard knew sequences', () => {
+    const { pipeline, engine } = twoWeeks();
+    engine.upsertRule(
+      testRule({
+        id: 'seq-agent',
+        condition: { field: 'process.name', op: 'eq', value: 'curl' },
+        sequence: {
+          steps: [
+            {
+              eventKinds: ['process.exec'],
+              condition: { field: 'process.agent.id', op: 'eq', value: 'claude-code' },
+            },
+          ],
+          key: ['process.pid'],
+          windowSec: 60,
+        },
+      }),
+    );
+    const base = engine.getRule('seq-agent')!;
+    const old = (id: string) => ({
+      id,
+      kind: 'retire' as const,
+      createdAt: NOW - HOUR,
+      provider: 'claude',
+      by: 'Scout',
+      rationale: 'Quiet.',
+      evidence: [],
+      rule: base,
+      baseRuleId: base.id,
+      baseRuleVersion: base.version,
+      retireTo: 'shadow' as const,
+      status: 'awaiting_review' as const,
+      lint: { errors: [], warnings: [] },
+    });
+    const store = (pipeline as unknown as { store: { put(p: unknown): void } }).store;
+    store.put(old('old-seq-1'));
+    expect(() => pipeline.approve('old-seq-1', userOrigin('rules-screen'))).toThrow(
+      USER_TUNED_ONLY,
+    );
+    expect(engine.modeOf(base)).toBe('alert');
+    store.put(old('old-seq-2'));
+    expect(pipeline.list().find((p) => p.id === 'old-seq-2')).toMatchObject({
+      status: 'withdrawn',
+    });
+    expect(pipeline.commitProblem('old-seq-2')).toBe(USER_TUNED_ONLY);
+  });
+});
+
+describe('the programs a drafted change came from', () => {
+  const baseRule = testRule({
+    id: 'unsigned-net-alert',
+    name: 'Unsigned program online',
+    eventKinds: ['network.connection'],
+    severity: 'low',
+    condition: { field: 'process.signing', op: 'in', value: ['unsigned', 'adhoc'] },
+    reasons: ['{{process.name}} connected out'],
+  });
+  const narrow = {
+    ruleId: 'unsigned-net-alert',
+    addExclusion: { field: 'process.path', op: 'glob', value: ['~/code/**'] },
+    rationale: 'Your own builds in ~/code are expected.',
+  };
+  const retire = {
+    ruleId: 'unsigned-net-alert',
+    toMode: 'shadow',
+    rationale: 'Noisy.',
+    evidence: ['chat'],
+  };
+
+  it('checks the signing ID against the known-bad and user-blocked signing lists', () => {
+    const { pipeline, engine, stores } = twoWeeks();
+    engine.upsertRule(baseRule);
+    const signed = { sha256: 'a'.repeat(64), teamId: 'ABCDE12345', signingId: 'com.evil.upd' };
+    expect(pipeline.isBlockedSubject(signed)).toBe(false);
+    const res = pipeline.submitTuning(narrow, 'codex', 'Scout', signed);
+    expect(res.ok).toBe(true);
+    stores.lists.add('known_bad_signing_ids', 'com.evil.upd', { source: 'feed', updatedAt: 0 });
+    expect(pipeline.isBlockedSubject(signed)).toBe(true);
+    expect(pipeline.withdrawAffected()).toBe(1);
+    expect(() => pipeline.approve(res.proposalId!, userOrigin('rules-screen'))).toThrow(
+      /withdrawn/,
+    );
+    // The user's own blocked signing IDs count too, and so does TEAMID:signing.id.
+    const other = { teamId: 'ZZZZZ99999', signingId: 'com.other.tool' };
+    stores.lists.add('user_blocked_signing_ids', 'ZZZZZ99999:com.other.tool', {
+      source: 'user',
+      updatedAt: 0,
+    });
+    expect(pipeline.isBlockedSubject(other)).toBe(true);
+    expect(pipeline.submitRetirement(retire, 'codex', 'Scout', other)).toMatchObject({
+      ok: false,
+      errors: [STILL_CATCHES_THREAT],
+    });
+  });
+
+  for (const kind of ['exclusion', 'turn-down'] as const) {
+    it(`keeps every source alert's program on a repeated ${kind} and checks them all`, () => {
+      const { pipeline, engine, stores } = twoWeeks();
+      engine.upsertRule(baseRule);
+      const first = { sha256: 'b'.repeat(64) };
+      const second = { sha256: 'c'.repeat(64) };
+      const submit = (s: typeof first) =>
+        kind === 'exclusion'
+          ? pipeline.submitTuning(narrow, 'codex', 'Scout', s)
+          : pipeline.submitRetirement(retire, 'codex', 'Scout', s);
+      const res = submit(first);
+      expect(res.ok).toBe(true);
+      // The same change asked for from a second alert, about another program.
+      expect(submit(second)).toMatchObject({ duplicateOf: res.proposalId });
+      expect(submit(second)).toMatchObject({ duplicateOf: res.proposalId });
+      expect(pipeline.get(res.proposalId!)!.subjects).toEqual([first, second]);
+      // Only the second alert's program is blocked: the change goes.
+      stores.lists.add('user_blocked_sha256', second.sha256, { source: 'user', updatedAt: 0 });
+      expect(pipeline.list().find((p) => p.id === res.proposalId)).toMatchObject({
+        status: 'withdrawn',
+      });
+      expect(pipeline.commitProblem(res.proposalId!)).toBeDefined();
+      expect(() => pipeline.approve(res.proposalId!, userOrigin('rules-screen'))).toThrow();
+    });
+  }
+});
+
+describe('waiting proposals when threat information changes', () => {
+  const baseRule = testRule({
+    id: 'unsigned-net-alert',
+    name: 'Unsigned program online',
+    eventKinds: ['network.connection'],
+    severity: 'low',
+    condition: { field: 'process.signing', op: 'in', value: ['unsigned', 'adhoc'] },
+    reasons: ['{{process.name}} connected out'],
+  });
+  const stealer = '9'.repeat(64);
+  const hideLibrary = {
+    ruleId: 'unsigned-net-alert',
+    addExclusion: { field: 'process.path', op: 'glob', value: ['~/Library/**'] },
+    rationale: 'Library helpers are fine.',
+  };
+
+  it('refuses at accept an exclusion that now hides a program the user confirmed malicious', () => {
+    const { pipeline, engine, stores } = twoWeeks();
+    engine.upsertRule(baseRule);
+    const res = pipeline.submitTuning(hideLibrary, 'claude', 'Scout');
+    expect(res.ok).toBe(true);
+    // The user marks the program malicious after the suggestion was queued.
+    stores.lists.add('user_blocked_sha256', stealer, { source: 'user', updatedAt: 0 });
+    expect(() => pipeline.approve(res.proposalId!, userOrigin('rules-screen'))).toThrow(
+      /malicious/,
+    );
+    expect(engine.getRule('unsigned-net-alert')!.exclusions).toEqual([]);
+    expect(pipeline.get(res.proposalId!)).toMatchObject({ status: 'withdrawn' });
+  });
+
+  it('refuses at accept even when the program only shows in the replay, not in what was recorded', () => {
+    const { pipeline, engine, stores } = twoWeeks();
+    engine.upsertRule(baseRule);
+    const res = pipeline.submitTuning(hideLibrary, 'claude');
+    expect(res.ok).toBe(true);
+    const store = (
+      pipeline as unknown as { store: { get(id: string): object; put(p: object): void } }
+    ).store;
+    // A proposal saved before Vigil recorded what it hides.
+    const { hides: _h, ...old } = store.get(res.proposalId!) as { hides?: string[] };
+    store.put(old);
+    stores.lists.add('known_bad_sha256', stealer, { source: 'feed', updatedAt: 0 });
+    expect(() => pipeline.approve(res.proposalId!, userOrigin('rules-screen'))).toThrow(
+      /malicious/,
+    );
+    expect(engine.getRule('unsigned-net-alert')!.exclusions).toEqual([]);
+  });
+
+  it('quietly withdraws what a newly blocked or listed program affects', () => {
+    const { pipeline, engine, stores } = twoWeeks();
+    engine.upsertRule(baseRule);
+    const later = 'a'.repeat(64);
+    const tuning = pipeline.submitTuning(hideLibrary, 'claude', 'Scout');
+    const byHash = pipeline.submitTuning(
+      {
+        ruleId: 'unsigned-net-alert',
+        addExclusion: { field: 'process.sha256', op: 'eq', value: later },
+        rationale: 'This program is fine.',
+      },
+      'claude',
+    );
+    const turnDown = pipeline.submitRetirement(
+      { ruleId: 'unsigned-net-alert', toMode: 'shadow', rationale: 'Noisy.', evidence: ['x'] },
+      'claude',
+      'Scout',
+    );
+    const unrelated = pipeline.submitTuning(
+      {
+        ruleId: 'unsigned-net-alert',
+        addExclusion: { field: 'process.path', op: 'glob', value: ['~/code/**'] },
+        rationale: 'Your own builds in ~/code are expected.',
+      },
+      'codex',
+    );
+    for (const r of [tuning, byHash, turnDown, unrelated]) expect(r.ok).toBe(true);
+    const waiting = () =>
+      pipeline
+        .list()
+        .filter((p) => p.status === 'awaiting_review')
+        .map((p) => p.id)
+        .sort();
+    expect(waiting()).toHaveLength(4);
+
+    stores.lists.add('user_blocked_sha256', stealer, { source: 'user', updatedAt: 0 });
+    expect(pipeline.withdrawAffected()).toBe(2);
+    expect(waiting()).toEqual([byHash.proposalId!, unrelated.proposalId!].sort());
+    expect(pipeline.get(tuning.proposalId!)).toMatchObject({ status: 'withdrawn' });
+    expect(pipeline.get(turnDown.proposalId!)).toMatchObject({ status: 'withdrawn' });
+
+    // A feed listing the excluded program withdraws that one too, on the next look.
+    stores.lists.replace('known_bad_sha256', [later], { source: 'feeds', updatedAt: 0 });
+    expect(waiting()).toEqual([unrelated.proposalId!]);
+    expect(() => pipeline.approve(byHash.proposalId!, userOrigin('rules-screen'))).toThrow(
+      /withdrawn/,
+    );
+    pipeline.approve(unrelated.proposalId!, userOrigin('rules-screen'));
+  });
+});
+
+describe('AI proposals about agent rules written as sequences', () => {
+  const tune = (ruleId: string) => ({
+    ruleId,
+    addExclusion: { field: 'process.sha256', op: 'eq', value: '1'.repeat(64) },
+    rationale: 'This tool is a known build helper.',
+  });
+  const step = (condition: unknown, eventKinds = ['process.exec']) => ({ eventKinds, condition });
+
+  it('leaves an agent rule to the user when only a sequence step or key mentions agents', () => {
+    const { pipeline, engine } = twoWeeks();
+    const plain = { field: 'process.name', op: 'eq', value: 'curl' };
+    const rules = [
+      testRule({
+        id: 'seq-agent-step',
+        condition: plain,
+        sequence: {
+          steps: [step({ field: 'process.agent.id', op: 'eq', value: 'claude-code' })],
+          key: ['process.pid'],
+          windowSec: 60,
+        },
+      }),
+      testRule({
+        id: 'seq-agent-nested',
+        condition: plain,
+        sequence: {
+          steps: [
+            step({
+              all: [
+                { field: 'process.name', op: 'eq', value: 'git' },
+                { not: { inList: { list: 'x_y', field: 'process.agent.session' } } },
+              ],
+            }),
+          ],
+          key: ['process.pid'],
+          windowSec: 60,
+        },
+      }),
+      testRule({
+        id: 'seq-agent-key',
+        condition: plain,
+        sequence: {
+          steps: [step({ field: 'process.name', op: 'eq', value: 'git' })],
+          key: ['process.agent.session'],
+          windowSec: 60,
+        },
+      }),
+      testRule({
+        id: 'seq-tool-request',
+        condition: plain,
+        sequence: {
+          steps: [
+            step({ field: 'command', op: 'contains', value: 'curl' }, ['agent.tool_request']),
+          ],
+          key: ['process.pid'],
+          windowSec: 60,
+        },
+      }),
+    ];
+    for (const r of rules) engine.upsertRule(r);
+    for (const r of rules) {
+      const id = (r as { id: string }).id;
+      expect(pipeline.submitTuning(tune(id), 'claude'), id).toMatchObject({
+        ok: false,
+        errors: ['Agent rules are tuned only by you.'],
+        final: true,
+      });
+      const retire = { ruleId: id, toMode: 'shadow', rationale: 'Noisy.', evidence: ['x'] };
+      expect(pipeline.submitRetirement(retire, 'claude', 'Scout'), id).toMatchObject({
+        ok: false,
+        errors: ['Agent rules are tuned only by you.'],
+      });
+    }
+    // An ordinary sequence rule is still the AI's to suggest changes to.
+    engine.upsertRule(
+      testRule({
+        id: 'seq-plain',
+        condition: plain,
+        sequence: {
+          steps: [step({ field: 'process.name', op: 'eq', value: 'git' })],
+          key: ['process.pid'],
+          windowSec: 60,
+        },
+      }),
+    );
+    expect(pipeline.submitTuning(tune('seq-plain'), 'claude').ok).toBe(true);
   });
 });
 

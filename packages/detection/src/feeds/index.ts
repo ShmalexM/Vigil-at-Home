@@ -1,4 +1,4 @@
-export { DEFAULT_FEEDS, type FeedList, type FeedSource } from './sources.js';
+export { DEFAULT_FEEDS, type FeedKeyName, type FeedList, type FeedSource } from './sources.js';
 export { parseFeed } from './parse.js';
 export {
   cleanEntries,

@@ -24,7 +24,13 @@ describe('computeStatus', () => {
   const ok = [{ id: 'osquery', name: 'osquery', state: 'ok' as const }];
 
   it('is good when every layer runs and nothing needs the user', () => {
-    expect(computeStatus([], ok)).toEqual({ level: 'good', needsYou: 0, noticed: 0, reasons: [] });
+    expect(computeStatus([], ok)).toEqual({
+      level: 'good',
+      needsYou: 0,
+      noticed: 0,
+      noticedClearable: 0,
+      reasons: [],
+    });
   });
 
   it('keeps protection good while an alert waits on the user, and counts it apart', () => {
@@ -32,6 +38,7 @@ describe('computeStatus', () => {
       level: 'good',
       needsYou: 1,
       noticed: 0,
+      noticedClearable: 0,
       reasons: [],
     });
     expect(computeStatus([alert({ containment: 'none', severity: 'critical' })], ok)).toMatchObject(
@@ -54,6 +61,7 @@ describe('computeStatus', () => {
       level: 'good',
       needsYou: 0,
       noticed: 2,
+      noticedClearable: 2,
       reasons: [],
     });
   });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   PromptLogEntry,
   ProviderStatus,
@@ -6,6 +6,8 @@ import type {
   VigilAi,
   VigilAiOptions,
 } from '@vigil/ai';
+import { defaultAiSettings } from '@vigil/ai';
+import { localNames } from '@vigil/ai/redact';
 import { AiBridge, type KeySource } from './ai.js';
 import { DryRunExecutor, type ActionExecutor } from './executor.js';
 import { VigilCore } from './service.js';
@@ -29,6 +31,8 @@ function fakeAi(
   opts: VigilAiOptions,
   calls: RunRequest<unknown>[],
   signInUrl = 'https://example.test/sign-in',
+  /** States changed outside the app (Ollama started, a CLI signed in), read on every check. */
+  outside: Partial<Record<string, ProviderStatus['state']>> = {},
 ): VigilAi {
   const statuses: ProviderStatus[] = opts.settings.order.map((provider) => ({
     provider,
@@ -37,7 +41,7 @@ function fakeAi(
   return {
     quota: undefined as never,
     listApiModels: async () => [],
-    status: async () => statuses,
+    status: async () => statuses.map((st) => ({ ...st, state: outside[st.provider] ?? st.state })),
     signIn: async () => ({
       url: signInUrl,
       completed: Promise.resolve(true),
@@ -87,6 +91,8 @@ function setup(
     mode?: SetupMode;
     executor?: ActionExecutor;
     signInUrl?: string;
+    outside?: Partial<Record<string, ProviderStatus['state']>>;
+    now?: () => number;
   } = {},
 ) {
   const store = memoryStore();
@@ -103,9 +109,9 @@ function setup(
     openExternal: async (url) => void opened.push(url),
     create: (opts) => {
       made.push(opts);
-      return fakeAi(opts, calls, o.signInUrl);
+      return fakeAi(opts, calls, o.signInUrl, o.outside);
     },
-    now: () => NOW,
+    now: o.now ?? (() => NOW),
   });
   return { store, core, ai, calls, made, opened };
 }
@@ -123,6 +129,14 @@ describe('AiBridge settings', () => {
     expect(s.api).toMatchObject({ enabled: true, preset: 'openrouter' });
     expect(new URL(s.api.baseUrl).hostname).toBe('openrouter.ai');
     expect(s.jev.enabled).toBe(true);
+  });
+
+  it("redacts this Mac's user and host names", () => {
+    const { ai } = setup();
+    expect(ai.settings().redaction).toEqual({
+      ...defaultAiSettings('/x').redaction,
+      ...localNames(),
+    });
   });
 
   it('runs Codex on an OpenAI API key when the user picks it', async () => {
@@ -294,6 +308,63 @@ describe('AiBridge view', () => {
     expect(v.jevVia).toBe('typesafe');
   });
 
+  it('tells the chat why nothing can talk when Settings › AI shows only Jev, or all off', async () => {
+    const { ai } = setup({ saved: { typesafe: 'ts-aaaaaaaaaaaaaaaaaa9876' } });
+    ai.setPrefs({ claude: false, codex: false, api: false, ollama: false });
+    expect((await ai.view()).providers.find((p) => p.provider === 'jev')).toMatchObject({
+      state: 'ready',
+    });
+    expect(await ai.packAi().status()).toMatchObject({
+      anyReady: false,
+      noAiWhy: 'Jev only labels events; it can’t chat.',
+    });
+    ai.setPrefs({ jev: false });
+    expect(await ai.packAi().status()).toMatchObject({
+      anyReady: false,
+      noAiWhy: 'Every AI app is switched off.',
+    });
+    ai.setPrefs({ codex: true });
+    const on = await ai.packAi().status();
+    expect(on.anyReady).toBe(true);
+    expect(on.noAiWhy).toBeUndefined();
+  });
+
+  it('says AI changed when a check finds a provider ready that wasn’t, so the chat asks again', async () => {
+    const outside: Partial<Record<string, ProviderStatus['state']>> = { ollama: 'not_installed' };
+    let now = NOW;
+    const { ai } = setup({ outside, now: () => now });
+    let changed = 0;
+    ai.on('changed', () => changed++);
+    await ai.view();
+    await ai.view();
+    expect(changed).toBe(0);
+    delete outside.ollama;
+    await ai.view();
+    expect(changed).toBe(1);
+    await ai.view();
+    expect(changed).toBe(1);
+    // A change right after waits its turn, then is told with no further check.
+    vi.useFakeTimers();
+    try {
+      outside.ollama = 'error';
+      await ai.view();
+      expect(changed).toBe(1);
+      now += 30_000;
+      vi.advanceTimersByTime(30_000);
+      expect(changed).toBe(2);
+      // Flipping back and forth within the wait tells nothing new.
+      delete outside.ollama;
+      await ai.view();
+      outside.ollama = 'error';
+      await ai.view();
+      now += 30_000;
+      vi.advanceTimersByTime(30_000);
+      expect(changed).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('opens the vendor sign-in page in the browser', async () => {
     const { ai, opened } = setup();
     expect(await ai.signIn('codex')).toEqual({ ok: true });
@@ -357,7 +428,10 @@ describe('AiBridge event labels', () => {
   const unmatched = { checked: 21, matches: [] };
 
   function labelling(
-    answer: (ids: string[]) => { labels: string[]; deferred: string[] },
+    answer: (
+      ids: string[],
+    ) =>
+      { labels: string[]; deferred: string[] } | Promise<{ labels: string[]; deferred: string[] }>,
     as: { label: 'unusual' | 'suspicious'; score: number; by: 'model' | 'jev' } = {
       label: 'unusual',
       score: 0,
@@ -382,7 +456,7 @@ describe('AiBridge event labels', () => {
                   classify: async (events: readonly { id: string }[]) => {
                     const ids = events.map((e) => e.id);
                     sent.push(ids);
-                    const r = answer(ids);
+                    const r = await answer(ids);
                     return {
                       ok: true as const,
                       labels: r.labels.map((id) => ({
@@ -442,6 +516,41 @@ describe('AiBridge event labels', () => {
     core.events.flush();
     await ai.labelBatch(core.store);
     expect(sent[0]).toHaveLength(31);
+  });
+
+  it('gives a batch back when the classifier fails', async () => {
+    let round = 0;
+    const { core, ai } = labelling((ids) => {
+      if (round++ === 0) throw new Error('model crashed');
+      return { labels: ids, deferred: [] };
+    });
+    ai.labelEventsFrom(core);
+    core.ingest(makeExec('/tmp/once'), unmatched);
+    core.events.flush();
+    await expect(ai.labelBatch(core.store)).rejects.toThrow('model crashed');
+    expect(await ai.labelBatch(core.store)).toBe(1);
+  });
+
+  it('never lets new events push out a batch that was given back', async () => {
+    let release!: () => void;
+    let round = 0;
+    const { core, ai, sent } = labelling(async (ids) => {
+      if (round++ > 0) return { labels: ids, deferred: [] };
+      await new Promise<void>((r) => (release = r));
+      throw new Error('model crashed');
+    });
+    ai.labelEventsFrom(core);
+    const firsts = Array.from({ length: 200 }, (_, i) => makeExec(`/tmp/first-${i}`));
+    for (const e of firsts) core.ingest(e, unmatched);
+    core.events.flush();
+    const failing = ai.labelBatch(core.store);
+    await new Promise((r) => setImmediate(r));
+    release();
+    await expect(failing).rejects.toThrow('model crashed'); // all 200 go back; the queue is full
+    for (let i = 0; i < 50; i++) core.ingest(makeExec(`/tmp/newer-${i}`), unmatched);
+    core.events.flush();
+    await ai.labelBatch(core.store);
+    expect(sent[1]).toEqual(firsts.map((e) => e.id));
   });
 
   it('puts events the model skipped back in the queue', async () => {

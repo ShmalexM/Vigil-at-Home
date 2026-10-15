@@ -21,8 +21,9 @@
 // Vigil's own (a path, an AppImage, a program hash): the app sends that
 // apart from the rules (self.grant, selfLoosening()), so the rules never wait
 // on that password. Until that grant is approved, an app running from
-// outside the installer's folder is not Vigil's own to these rules, so a rule
-// that matches it may act on it like any other program. Indicator lists change every day as
+// outside the installer's folder is not Vigil's own to these rules, except
+// that the executor won't pause, stop or hash-block the app pinned at
+// install (appPin.ts), checked against each target. Indicator lists change every day as
 // feeds age entries out, so an entry a list drops keeps blocking for
 // RETIRE_MS instead, and a list cannot drop more than RETIRED_MAX entries in
 // that time. The saved policy and its revision live in a root-owned file the
@@ -32,17 +33,27 @@ import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { isRelease, type Action, type SensorEvent } from '@vigil/core';
 import { selfKey, selfRoots, underSelfRoot, type SelfImage } from '@vigil/core/self';
 import {
+  adoptLegacyUses,
+  admitSavedRules,
   compileRule,
   DetectionEngine,
   DetectionRule,
+  isBuiltinRuleId,
+  legacyKey,
+  legacyRuleIds,
   memoryStores,
+  retainLegacyUses,
+  type LegacyUse,
   type RuleException,
   type Stores,
 } from '@vigil/detection';
 import { listDigest } from '@vigil/detection/fastpath';
 import { z } from 'zod';
 import type { ActionOutcome } from './executor.js';
+import { ActionError } from './commands/errors.js';
 import {
+  APP_WORDED_CODES,
+  type AppWordedCode,
   HelperAction,
   RuleExceptionSchema,
   type DetectionListSet,
@@ -58,7 +69,22 @@ export interface HelperRan {
   at: number;
   outcome?: ActionOutcome;
   error?: string;
+  /** Why it was not done, when the app words that itself (core ActionRecord result errorCode). */
+  errorCode?: 'move-stalled' | AppWordedCode;
 }
+
+/** Actions that move an item, which can take a while; everything else is quick containment. */
+const MOVES = new Set<Action['kind']>(['file.quarantine', 'persistence.disable']);
+/**
+ * Blocks by hash, which wait for the helper to hash its own programs at
+ * startup (ownHashes.ts) and for Santa to sync. They stop a program from
+ * starting again, so they run after the pauses and kills, beside the next
+ * events, like the moves (and before them).
+ */
+const HASH_BLOCKS = new Set<Action['kind']>(['santa.rule.set']);
+
+/** How long the next event waits on a move before it is looked at anyway. */
+export const MOVE_WAIT_MS = 15_000;
 
 export interface FastPathOptions {
   /** Where the synced rules are kept between restarts. */
@@ -69,6 +95,8 @@ export interface FastPathOptions {
   now?: () => number;
   /** For tests: a smaller RETIRED_MAX. */
   retiredMax?: number;
+  /** For tests: a shorter MOVE_WAIT_MS. */
+  moveWaitMs?: number;
   /** A file's device and inode (`fileId`), to check an AppImage the app names is that file. */
   fileId?: (path: string) => string | undefined;
   /**
@@ -77,6 +105,11 @@ export interface FastPathOptions {
    * the password.
    */
   installed?: readonly string[];
+  /**
+   * The program of the helper's, a sensor's or the installed app's this hash
+   * is (ownHashes.ts). A rule whose response blocks one by hash is dropped.
+   */
+  ownProgram?: (identifier: string) => string | undefined;
 }
 
 /** What the helper never pauses, kills or blocks, as the app last sent it. */
@@ -107,6 +140,23 @@ const Saved = z.object({
   lists: z.record(z.string(), z.array(z.string())),
   /** Entries lists dropped, by list, with when (ms). Still blocking until RETIRE_MS later. */
   retired: z.record(z.string(), z.record(z.string(), z.number())).default({}),
+  /** The app's id for the sync in force, so it can tell whether a sync it lost track of went in. */
+  syncId: z.string().optional(),
+  /** The app's own blocking rules, by fingerprint (DetectionSync.appRules). */
+  appRules: z.array(z.object({ id: z.string(), name: z.string(), digest: z.string() })).default([]),
+  /**
+   * By rule id, the regex tests (field, case setting, text) it runs on the
+   * backtracking engine as it did before rule patterns moved to the
+   * linear-time one (legacy.ts in @vigil/detection). Missing in a file an
+   * earlier release wrote: every rule in it ran then, so loading it adopts
+   * them. Only a rule still in force keeps its entry.
+   */
+  legacyUses: z
+    .record(
+      z.string(),
+      z.array(z.object({ field: z.string(), nocase: z.boolean(), pattern: z.string() })),
+    )
+    .optional(),
   /**
    * Whether a self grant was ever taken. Files from before self.grant only
    * ever came from syncs that carried one.
@@ -124,8 +174,41 @@ const EMPTY: Saved = {
   selfHashes: [],
   lists: {},
   retired: {},
+  legacyUses: {},
+  appRules: [],
   selfGranted: false,
 };
+
+/**
+ * The rule with its origin as this helper knows it: built-in only when Vigil
+ * ships a rule with that id. A pattern's trust (isTrustedPattern) depends on
+ * the origin, so it never comes from what the app sent.
+ */
+function ownOrigin(r: DetectionRule): DetectionRule {
+  const origin = isBuiltinRuleId(r.id) ? 'builtin' : r.origin === 'builtin' ? 'user' : r.origin;
+  return origin === r.origin ? r : { ...r, origin };
+}
+
+/** A rule as this helper would run it. */
+interface Planned {
+  rule: DetectionRule;
+  /** How its patterns run: which are timed and which keep the backtracking engine. */
+  how: string;
+  legacy: LegacyUse[];
+}
+
+function planned(rule: DetectionRule): Planned {
+  const c = compileRule(rule);
+  const legacy = c.legacy.map(legacyKey).sort();
+  return { rule, how: JSON.stringify([c.untrusted, legacy]), legacy: c.legacy };
+}
+
+/** Each rule's regex tests that run on the backtracking engine, for the saved file. */
+function legacyOf(plan: Planned[]): Record<string, LegacyUse[]> {
+  const out: Record<string, LegacyUse[]> = {};
+  for (const p of plan) if (p.legacy.length) out[p.rule.id] = p.legacy;
+  return out;
+}
 
 /** Rule fields that change what an alert says, not what gets blocked. */
 const WORDING = new Set([
@@ -145,6 +228,8 @@ const WORDING = new Set([
 
 export class FastPath {
   private state: Saved = EMPTY;
+  /** The rules in force, as planned. */
+  private running = new Map<string, Planned>();
   /** Whether the installer's folders may still be named as Vigil without the password. */
   private selfGrace = true;
   private engine: DetectionEngine | undefined;
@@ -155,6 +240,41 @@ export class FastPath {
 
   constructor(private readonly opts: FastPathOptions) {
     this.now = opts.now ?? Date.now;
+  }
+
+  /**
+   * The rules without those whose response blocks, by a hash written into
+   * the rule, a program Vigil or its sensors run on. Each is dropped on its
+   * own with the reason logged; the others keep blocking. A hash filled in
+   * from an event is checked by the executor when the block runs.
+   */
+  private withoutOwnBlocks(rules: DetectionRule[]): DetectionRule[] {
+    const own = this.opts.ownProgram;
+    if (!own) return rules;
+    return rules.filter((r) => {
+      for (const t of r.response) {
+        if (t.kind !== 'santa.rule.set' || t.policy === 'allow') continue;
+        const program = typeof t.identifier === 'string' ? own(t.identifier) : undefined;
+        if (program) {
+          this.opts.log?.(`fast path: dropping rule ${r.id}: it would block ${program} by hash`);
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Drop the rules in force that block one of those programs by hash, once
+   * the helper has (re)hashed them (ownProgram). Rules taken before that
+   * were checked against what was known then.
+   */
+  dropOwnBlocks(): void {
+    const rules = this.withoutOwnBlocks(this.state.rules);
+    if (rules.length === this.state.rules.length) return;
+    const plan = rules.flatMap((r) => this.running.get(r.id) ?? []);
+    this.apply({ ...this.state, rev: this.state.rev + 1, rules, legacyUses: legacyOf(plan) }, plan);
+    this.save();
   }
 
   /** Pick up the rules saved by the last sync. A missing or damaged file means none. */
@@ -172,19 +292,34 @@ export class FastPath {
       this.opts.log?.('fast path: ignoring saved rules that do not parse');
       return;
     }
-    // A rule a newer release no longer compiles (stricter regex and glob
-    // checks) is dropped on its own; the rest keep blocking.
-    const rules = parsed.data.rules.filter((r) => {
-      try {
-        compileRule(r);
-        return true;
-      } catch (err) {
-        this.opts.log?.(`fast path: dropping saved rule: ${(err as Error).message}`);
-        return false;
-      }
-    });
+    // A saved rule keeps blocking as it did. Only this root-owned file says
+    // which rules keep an older pattern (legacy.ts): one an earlier release
+    // wrote adopts every rule in it, since each ran then. A rule that no
+    // longer compiles at all is dropped on its own; the rest keep blocking.
+    let rules: DetectionRule[];
+    const saved = parsed.data.rules.map(ownOrigin);
+    if (parsed.data.legacyUses === undefined) {
+      const admitted = admitSavedRules(saved);
+      for (const d of admitted.dropped)
+        this.opts.log?.(`fast path: dropping saved rule: ${d.error}`);
+      rules = admitted.rules;
+    } else {
+      for (const [id, uses] of Object.entries(parsed.data.legacyUses)) adoptLegacyUses(id, uses);
+      rules = saved.filter((r) => {
+        try {
+          compileRule(r);
+          return true;
+        } catch (err) {
+          this.opts.log?.(`fast path: dropping saved rule: ${(err as Error).message}`);
+          return false;
+        }
+      });
+    }
+    // A rule that blocks one of Vigil's own programs by hash is dropped too.
+    rules = this.withoutOwnBlocks(rules);
     try {
-      this.apply({ ...parsed.data, rules });
+      const plan = rules.map(planned);
+      this.apply({ ...parsed.data, rules, legacyUses: legacyOf(plan) }, plan);
     } catch (err) {
       this.opts.log?.(`fast path: saved rules did not load: ${(err as Error).message}`);
     }
@@ -204,12 +339,38 @@ export class FastPath {
   loosening(cmd: DetectionSync): string[] {
     const self = carriedSelf(cmd);
     const out = self ? this.selfLoosening(self) : [];
-    const next = new Map(cmd.rules.map((r) => [r.id, r]));
     const rules: string[] = [];
+    // The app's own blocking rules: dropping one or changing what it blocks.
+    const nextApp = new Map((cmd.appRules ?? []).map((r) => [r.id, r.digest]));
+    for (const r of this.state.appRules) {
+      const d = nextApp.get(r.id);
+      if (d === undefined) rules.push(`stop blocking with “${r.name}”`);
+      else if (d !== r.digest) rules.push(`change what “${r.name}” blocks`);
+    }
+    // Judged by outcome: the rules this helper would actually run after the
+    // sync, compiled as it would compile them, against the ones it runs now.
+    // A rule that would be left out for any reason (removed, no longer
+    // compiling, skipped as an older pattern) or run differently counts.
+    let next: Map<string, Planned>;
+    try {
+      next = new Map(this.plan(cmd).map((p) => [p.rule.id, p]));
+    } catch {
+      // sync() refuses it and nothing changes.
+      next = new Map(this.running);
+    }
+    // Origins are the helper's own (ownOrigin) on both sides: what the app
+    // claims never counts by itself, and an id this helper does not ship is
+    // the user's however often the app calls it built-in.
     for (const r of this.state.rules) {
       const n = next.get(r.id);
+      const now = this.running.get(r.id);
       if (!n) rules.push(`stop blocking with “${r.name}”`);
-      else if (enforced(n) !== enforced(r)) rules.push(`change what “${r.name}” blocks`);
+      else if (
+        enforced(n.rule) !== enforced(r) ||
+        n.how !== now?.how ||
+        n.rule.origin !== ownOrigin(r).origin
+      )
+        rules.push(`change what “${r.name}” blocks`);
     }
     const had = new Set(this.state.exceptions.map(canonical));
     const added = cmd.exceptions.filter((e) => !had.has(canonical(e)));
@@ -248,18 +409,55 @@ export class FastPath {
 
   /** Replace what is Vigil's own. The executor asks for the password first (selfLoosening()). */
   grantSelf(cmd: SelfFields): { rev: number } {
-    this.apply({ ...this.state, rev: this.state.rev + 1, ...this.selfFrom(cmd) });
+    this.apply({ ...this.state, rev: this.state.rev + 1, ...this.selfFrom(cmd) }, [
+      ...this.running.values(),
+    ]);
     this.save();
     return { rev: this.state.rev };
   }
 
   /**
-   * Replace the rules. Returns the lists whose contents the app should send;
-   * until they arrive the current contents stay in force.
+   * The lists a sync names whose contents neither it carries nor the helper
+   * already has. A sync missing any is not applied (sync() says which), so
+   * the app can send it again with them; nothing is held in between.
    */
-  sync(cmd: DetectionSync): { needLists: string[]; rev: number } {
+  missingLists(cmd: DetectionSync): string[] {
+    return Object.keys(cmd.lists).filter(
+      (n) => cmd.entries?.[n] === undefined && this.digests.get(n) !== cmd.lists[n],
+    );
+  }
+
+  /**
+   * Throws RuleCompileError if a rule doesn't compile as this helper would
+   * run it (plan()). That includes a regex or glob that could take too long to
+   * match (regexProblem, globProblem): adding rules needs no password, so the
+   * same checks as the app's keep one rule from stalling every check here. A
+   * rule the app marks as an older pattern is skipped instead (plan()).
+   */
+  checkRules(cmd: DetectionSync): void {
+    this.plan(cmd);
+  }
+
+  /**
+   * Replace the rules and the lists they read, in one step: every rule must
+   * compile, every list it carries must match its digest, and no list may
+   * drop more than it may in a week; then all of it goes in force and is
+   * saved, or none of it does. Lists it names but doesn't carry keep their
+   * current contents, which must match the named digest; if any doesn't,
+   * nothing changes and `needLists` says which to send.
+   */
+  sync(cmd: DetectionSync): { applied: boolean; needLists: string[]; rev: number } {
+    this.checkRules(cmd);
+    const needLists = this.missingLists(cmd);
+    if (needLists.length) return { applied: false, needLists, rev: this.state.rev };
     const lists: Saved['lists'] = {};
     for (const name of Object.keys(cmd.lists)) {
+      const sent = cmd.entries?.[name];
+      if (sent !== undefined) {
+        if (listDigest(sent) !== cmd.lists[name]) throw new Error(`list ${name} arrived damaged`);
+        lists[name] = [...new Set(sent)];
+        continue;
+      }
       const have = this.state.lists[name];
       if (have) lists[name] = have;
     }
@@ -267,13 +465,18 @@ export class FastPath {
     // Only an app from before self.grant sends the self set with the rules.
     const self = carriedSelf(cmd);
     const selfFields = self ? this.selfFrom(self) : {};
-    // Throws RuleCompileError before anything changes. That includes a regex or
-    // glob that could take too long to match (regexProblem, globProblem): adding
-    // rules needs no password, so the same checks as the app's keep one rule
-    // from stalling every check here.
-    this.apply({
+    // Throws RuleCompileError before anything changes (checkRules does the
+    // same before any password is asked for).
+    const planAll = this.plan(cmd, (err) =>
+      this.opts.log?.(`fast path: skipping rule with an older pattern: ${err.message}`),
+    );
+    // Less any rule that would block one of Vigil's own programs by hash.
+    const kept = new Set(this.withoutOwnBlocks(planAll.map((p) => p.rule)));
+    const plan = planAll.filter((p) => kept.has(p.rule));
+    const next: Saved = {
       rev: this.state.rev + 1,
-      rules: cmd.rules,
+      rules: plan.map((p) => p.rule),
+      appRules: cmd.appRules ?? [],
       exceptions: cmd.exceptions,
       selfPaths: this.state.selfPaths,
       selfImages: this.state.selfImages,
@@ -282,15 +485,53 @@ export class FastPath {
       ...selfFields,
       lists,
       retired,
-    });
-    this.save();
-    return {
-      needLists: Object.keys(cmd.lists).filter((n) => this.digests.get(n) !== cmd.lists[n]),
-      rev: this.state.rev,
+      legacyUses: legacyOf(plan),
     };
+    if (cmd.syncId) next.syncId = cmd.syncId;
+    this.apply(next, plan);
+    this.save();
+    return { applied: true, needLists: [], rev: this.state.rev };
   }
 
-  /** One part of a list. The list changes only once every part is in and the digest matches. */
+  /**
+   * The rules this sync would have the helper run, compiled. Origins are the
+   * helper's own (ownOrigin). A rule the app marks as an older pattern
+   * (`legacy`) runs only if this helper already let that exact test keep the
+   * backtracking engine; otherwise it is left out (and `skipped` hears why).
+   * Any other rule that does not compile throws.
+   */
+  private plan(cmd: DetectionSync, skipped?: (err: Error) => void): Planned[] {
+    const older = new Set(cmd.legacy ?? []);
+    const out: Planned[] = [];
+    for (const raw of cmd.rules) {
+      const rule = ownOrigin(raw);
+      if (!older.has(rule.id)) {
+        out.push(planned(rule));
+        continue;
+      }
+      try {
+        out.push(planned(rule));
+      } catch (err) {
+        skipped?.(err as Error);
+      }
+    }
+    return out;
+  }
+
+  /** The rules in force. */
+  rules(): DetectionRule[] {
+    return this.state.rules;
+  }
+
+  /** Which sync is in force: the app's id for it, if it gave one. */
+  syncId(): string | undefined {
+    return this.state.syncId;
+  }
+
+  /**
+   * One part of a list, on its own (a feed refresh). The list changes only
+   * once every part is in and the digest matches.
+   */
   putList(cmd: DetectionListSet): { complete: boolean } {
     let inc = this.incoming.get(cmd.list);
     if (!inc || inc.digest !== cmd.digest || inc.parts.length !== cmd.parts) {
@@ -306,7 +547,9 @@ export class FastPath {
     const entries = inc.parts.flat() as string[];
     if (listDigest(entries) !== cmd.digest) throw new Error(`list ${cmd.list} arrived damaged`);
     const lists = { ...this.state.lists, [cmd.list]: entries };
-    this.apply({ ...this.state, rev: this.state.rev + 1, lists, retired: this.retire(lists) });
+    this.apply({ ...this.state, rev: this.state.rev + 1, lists, retired: this.retire(lists) }, [
+      ...this.running.values(),
+    ]);
     this.save();
     return { complete: true };
   }
@@ -357,39 +600,122 @@ export class FastPath {
   }
 
   /**
-   * Run the rules on one event and carry out what block-mode rules ask for.
-   * Never throws: a failed action is reported to the app like any other.
+   * Run the rules on one event and carry out what block-mode rules ask for,
+   * moves included (see start). Never throws: a failed action is reported
+   * to the app like any other.
    */
   async check(e: SensorEvent): Promise<HelperRan[]> {
-    if (!this.engine) return [];
+    const { ran, moves } = await this.start(e);
+    return [...ran, ...(await moves)];
+  }
+
+  /**
+   * The same in two parts. `ran` is every pause, kill and network block the
+   * rules ask for, all done before this resolves and before anything else
+   * starts. `moves` is the blocks by hash, then the quarantines and startup
+   * items they ask for, started then, each waited on for a while only (one
+   * still running after that goes on by itself; transfer.ts bounds a move).
+   * The daemon waits on `ran` alone before the next event, so neither a
+   * stuck move nor a block by hash waiting for the helper's own hashes
+   * (Executor.ownProgram) ever holds up a pause or kill.
+   */
+  async start(e: SensorEvent): Promise<{ ran: HelperRan[]; moves: Promise<HelperRan[]> }> {
+    const none = { ran: [], moves: Promise.resolve([]) };
+    if (!this.engine) return none;
     let detections;
     try {
       detections = this.engine.evaluate(e as Parameters<DetectionEngine['evaluate']>[0]);
     } catch (err) {
       this.opts.log?.(`fast path: ${(err as Error).message}`);
-      return [];
+      return none;
     }
     const ran: HelperRan[] = [];
+    const hashBlocks: { ruleId: string; action: Action; parsed: HelperAction }[] = [];
+    const moves: { ruleId: string; action: Action; parsed: HelperAction }[] = [];
     for (const d of detections) {
       if (d.mode !== 'block') continue;
       for (const action of d.execute) {
         const parsed = HelperAction.safeParse(action);
         // Containment only. Rules never carry releases, but the helper checks.
         if (!parsed.success || isRelease(action)) continue;
-        try {
-          const outcome = await this.opts.run(parsed.data);
-          ran.push({ ruleId: d.match.ruleId, action, at: Date.now(), outcome });
-        } catch (err) {
-          ran.push({
-            ruleId: d.match.ruleId,
-            action,
-            at: Date.now(),
-            error: (err as Error).message,
-          });
+        if (HASH_BLOCKS.has(action.kind)) {
+          hashBlocks.push({ ruleId: d.match.ruleId, action, parsed: parsed.data });
+          continue;
         }
+        if (MOVES.has(action.kind)) {
+          moves.push({ ruleId: d.match.ruleId, action, parsed: parsed.data });
+          continue;
+        }
+        ran.push(await this.runOne(d.match.ruleId, action, this.opts.run(parsed.data)));
+      }
+    }
+    return { ran, moves: this.runMoves([...hashBlocks, ...moves]) };
+  }
+
+  private async runMoves(
+    moves: { ruleId: string; action: Action; parsed: HelperAction }[],
+  ): Promise<HelperRan[]> {
+    const wait = this.opts.moveWaitMs ?? MOVE_WAIT_MS;
+    const ran: HelperRan[] = [];
+    for (const m of moves) {
+      const run = this.opts.run(m.parsed);
+      let timer: NodeJS.Timeout | undefined;
+      const stalled = new Promise<'stalled'>((resolve) => {
+        timer = setTimeout(() => resolve('stalled'), wait);
+      });
+      const first = await Promise.race([
+        run.then(
+          () => 'done' as const,
+          () => 'done' as const,
+        ),
+        stalled,
+      ]);
+      clearTimeout(timer);
+      if (first === 'stalled') {
+        run.catch((err: Error) => this.opts.log?.(`fast path: ${m.action.kind}: ${err.message}`));
+        this.opts.log?.(`fast path: ${m.action.kind} is taking long; not waiting on it`);
+        ran.push(
+          MOVES.has(m.action.kind)
+            ? {
+                ruleId: m.ruleId,
+                action: m.action,
+                at: Date.now(),
+                error: 'Not moved in time; what was stopped or blocked stays that way',
+                errorCode: 'move-stalled',
+              }
+            : {
+                ruleId: m.ruleId,
+                action: m.action,
+                at: Date.now(),
+                error: 'Not done in time; it goes on, and what was stopped stays that way',
+              },
+        );
+      } else {
+        ran.push(await this.runOne(m.ruleId, m.action, run));
       }
     }
     return ran;
+  }
+
+  private async runOne(
+    ruleId: string,
+    action: Action,
+    run: Promise<ActionOutcome>,
+  ): Promise<HelperRan> {
+    try {
+      return { ruleId, action, at: Date.now(), outcome: await run };
+    } catch (err) {
+      const code = err instanceof ActionError ? err.code : undefined;
+      return {
+        ruleId,
+        action,
+        at: Date.now(),
+        error: (err as Error).message,
+        ...(code && (APP_WORDED_CODES as readonly string[]).includes(code)
+          ? { errorCode: code as AppWordedCode }
+          : {}),
+      };
+    }
   }
 
   /**
@@ -415,7 +741,12 @@ export class FastPath {
     return out;
   }
 
-  private apply(next: Saved): void {
+  /**
+   * Put `next` in force. `plan` is its rules compiled (planned). Legacy
+   * permissions follow: a rule no longer run, or no longer using a test,
+   * loses that test's permission, here and in the saved file.
+   */
+  private apply(next: Saved, plan: Planned[]): void {
     const stores: Stores = memoryStores();
     for (const name of new Set([...Object.keys(next.lists), ...Object.keys(next.retired)])) {
       const entries = [...(next.lists[name] ?? []), ...Object.keys(next.retired[name] ?? {})];
@@ -432,11 +763,17 @@ export class FastPath {
               selfHashes: next.selfHashes,
             },
             recordHistory: false,
+            // The rule keeps blocking; the app times its own copy and tells the user.
+            onSlowRule: (rule, ms) =>
+              this.opts.log?.(`fast path: rule ${rule.id} spent ${Math.round(ms)} ms matching`),
           },
         )
       : undefined;
     this.engine = engine;
     this.state = next;
+    this.running = new Map(plan.map((p) => [p.rule.id, p]));
+    for (const id of legacyRuleIds()) if (!this.running.has(id)) retainLegacyUses(id, []);
+    for (const p of plan) retainLegacyUses(p.rule.id, p.legacy);
     this.digests = new Map(Object.entries(next.lists).map(([n, e]) => [n, listDigest(e)]));
   }
 
@@ -499,4 +836,34 @@ function safeJson(raw: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * How the daemon hands sensor events to the rules and on to the app. Each
+ * event is contained (its pauses, kills and blocks, `contain`) one at a
+ * time, in order, and the next event is contained without waiting on the
+ * moves before it. Events reach the app (`publish`) in that same order,
+ * each with everything done about it: one whose moves are still running
+ * holds back the reports after it, never the blocks. The app's rules (chain
+ * rules, first-seen) see events in the order they happened.
+ */
+export function eventPipeline<E>(
+  contain: (e: E) => Promise<{ ran: HelperRan[]; moves: Promise<HelperRan[]> }>,
+  publish: (e: E, ran: HelperRan[]) => void,
+): (e: E) => void {
+  let contained = Promise.resolve();
+  let published = Promise.resolve();
+  return (e) => {
+    const done = contained.then(() => contain(e));
+    contained = done.then(
+      () => undefined,
+      () => undefined,
+    );
+    published = published
+      .then(async () => {
+        const { ran, moves } = await done;
+        publish(e, [...ran, ...(await moves)]);
+      })
+      .catch(() => undefined);
+  };
 }

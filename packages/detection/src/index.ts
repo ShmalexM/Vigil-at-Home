@@ -1,8 +1,45 @@
 export * from './types.js';
 export { lintRule, isAnchored, type LintResult, type LintOptions } from './rules/lint.js';
-export { globProblem, globToRegExp, regexProblem, renderTemplate } from './rules/compile.js';
+export {
+  globMatcher,
+  globProblem,
+  globToRegExp,
+  regexProblem,
+  renderTemplate,
+} from './rules/compile.js';
+export {
+  foldCase,
+  linearEngine,
+  linearProblem,
+  NO_LINEAR_ENGINE,
+  simulateLinearEngine,
+} from './rules/linear.js';
+export {
+  adoptLegacyUses,
+  forgetLegacyPatterns,
+  isLegacyPattern,
+  legacyKey,
+  legacyRuleIds,
+  retainLegacyUses,
+  type LegacyUse,
+} from './rules/legacy.js';
+export {
+  isBuiltinRuleId,
+  isTrustedPattern,
+  TEMPLATE_PATTERNS,
+  TEMPLATE_REGEXES,
+} from './rules/trusted.js';
 export { KNOWN_FIELDS, COMPUTED_FIELDS } from './rules/fields.js';
-export { DetectionEngine, compileRule, RuleCompileError, type EngineConfig } from './engine.js';
+export {
+  DetectionEngine,
+  admitSavedRules,
+  compileRule,
+  RuleCompileError,
+  SLOW_RULE_BUDGET_MS,
+  SLOW_RULE_WINDOW_MS,
+  type CheckOptions,
+  type EngineConfig,
+} from './engine.js';
 export {
   SafetyFloor,
   selfKey,
@@ -76,6 +113,13 @@ export {
   ProposeRuleInput,
   ProposeTuningInput,
   ProposeRetirementInput,
+  BLOCKED_EXCLUSION,
+  INDICATOR_RULE,
+  INDICATOR_EXCLUSION,
+  BLOCKING_RULE,
+  aiMayNotChange,
+  isIndicatorRule,
+  type ProposalSubject,
   type Proposal,
   type ProposalStatus,
   type ProposalStore,

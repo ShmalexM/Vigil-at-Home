@@ -5,6 +5,7 @@ import {
   Brain,
   Check,
   Dice5,
+  EyeOff,
   Hand,
   Moon,
   Pencil,
@@ -28,11 +29,13 @@ import type {
   LeadAction,
   PackView,
   PermissionMode,
+  RuleDraft,
   Schedule,
   ToolChoice,
   ToolView,
 } from '../../../shared/pack';
-import { vigil } from '../api';
+import { nextRunAt, nextRunWords } from '../../../shared/pack';
+import { useLive, vigil } from '../api';
 import { useDialogFocus } from '../components/dialog-focus';
 import { HoldButton } from '../components/HoldButton';
 import { ApprovalStack } from '../components/ApprovalStack';
@@ -40,10 +43,11 @@ import { NotebookSheet } from '../components/Notebook';
 import { StreamingText } from '../components/StreamingText';
 import { Thinking } from '../components/Thinking';
 import { MemoryChangeCard, MemorySheet } from '../components/PackMemory';
+import { showSuggestion } from '../components/RuleSuggestions';
 import { onRovingKeyDown, rovingKeyDown, rovingTabIndex } from '../components/roving';
 import { BREEDS, Dog, breedName } from '../components/Dog';
 import { useToast } from '../components/Toasts';
-import { STARTERS, contextStarter, leadChat, useLeadChat } from '../lead-chat';
+import { STARTERS, contextStarter, leadChat, sendsOnEnter, useLeadChat } from '../lead-chat';
 import { Button, Card, Chip, Segmented } from '../components/ui';
 import { timeAgo } from '../format';
 import '../styles/dog.css';
@@ -62,8 +66,19 @@ export function usePack({ settings = true }: { settings?: boolean } = {}): [
   () => void,
 ] {
   const [pack, setPack] = useState<PackView>();
+  const asked = useRef(0);
+  const shown = useRef(0);
   const reload = useRef(() => {
-    vigil.getPack().then(setPack, (err: unknown) => console.error(err));
+    // An answer older than the one on screen would bring back old state; any newer one lands.
+    const n = ++asked.current;
+    vigil.getPack().then(
+      (p) => {
+        if (n < shown.current) return;
+        shown.current = n;
+        setPack(p);
+      },
+      (err: unknown) => console.error(err),
+    );
   }).current;
   useEffect(() => {
     reload();
@@ -113,15 +128,9 @@ export function PackPage() {
   const [editing, setEditing] = useState<PackDog | 'new' | undefined>();
   if (!pack) return <div className="page pack" />;
   const mode = MODES.find((m) => m.id === pack.mode)!;
-  const waiting =
-    pack.approvals.length +
-    pack.chat.reduce(
-      (n, m) =>
-        n +
-        (m.actions?.filter((a) => a.status === 'pending').length ?? 0) +
-        (m.memory?.filter((c) => c.status === 'pending').length ?? 0),
-      0,
-    );
+  // Tool calls waiting on the person. A change the Lead dog asked for is a
+  // card inline in its chat, on this same tab, and adds nothing here.
+  const waiting = pack.approvals.length;
 
   return (
     <div className="page pack">
@@ -319,6 +328,7 @@ export function LeadConversation({
   const lead = pack.dogs.find((d) => d.role === 'lead')!;
   const { draft, sending, error } = useLeadChat();
   const log = useRef<HTMLDivElement>(null);
+  const box = useRef<HTMLTextAreaElement>(null);
   const names = new Map(pack.dogs.map((d) => [d.id, d]));
   const canSend = !!draft.trim() && !sending && !pack.noAi;
   // Answers that arrive while the chat is open come in word by word; the rest are just there.
@@ -348,8 +358,14 @@ export function LeadConversation({
                     key={s}
                     type="button"
                     className="starter"
-                    disabled={pack.noAi || sending}
-                    onClick={() => send(s)}
+                    // Drops the words in the box to send or change, AI or not.
+                    onClick={() => {
+                      leadChat.setDraft(s);
+                      requestAnimationFrame(() => {
+                        box.current?.focus();
+                        box.current?.setSelectionRange(s.length, s.length);
+                      });
+                    }}
                   >
                     {s}
                   </button>
@@ -383,8 +399,11 @@ export function LeadConversation({
       </div>
       {pack.noAi && (
         <span className="t-small no-ai">
+          {pack.noAiWhy && `${pack.noAiWhy} `}
           <button type="button" className="link" onClick={() => openSettings()}>
-            Set up an AI in Settings
+            {pack.noAiWhy
+              ? 'Turn on Claude, Codex or a local model in Settings'
+              : 'Set up an AI in Settings'}
           </button>{' '}
           so {lead.name} can talk.
         </span>
@@ -402,6 +421,7 @@ export function LeadConversation({
         }}
       >
         <textarea
+          ref={box}
           className="field"
           rows={2}
           value={draft}
@@ -413,7 +433,7 @@ export function LeadConversation({
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
-              if (canSend) send(draft);
+              if (canSend && sendsOnEnter(e)) send(draft);
             }
           }}
         />
@@ -489,6 +509,9 @@ function Message({
           <>
             {m.actions?.map((a) => (
               <ActionCard key={a.id} a={a} msgId={m.id} dogs={dogs} tools={tools} reload={reload} />
+            ))}
+            {m.rules?.map((r) => (
+              <RuleDraftCard key={r.id} r={r} />
             ))}
             {m.memory?.map((c) => (
               <MemoryChangeCard key={c.id} c={c} msgId={m.id} reload={reload} />
@@ -571,6 +594,76 @@ function ActionCard({
         <Chip tone={a.status === 'done' ? 'good' : a.status === 'failed' ? 'poor' : undefined}>
           {a.status === 'done' ? 'Done' : a.status === 'failed' ? 'Couldn’t' : 'Declined'}
         </Chip>
+      )}
+    </div>
+  );
+}
+
+const DECIDED: Record<string, string> = {
+  approved: 'Accepted',
+  rejected: 'Dismissed',
+  withdrawn: 'Withdrawn',
+};
+
+/**
+ * A rule change the Lead dog suggested. It never applies here: it waits under
+ * Suggested changes on Rules, and the card says exactly what it would change.
+ */
+function RuleDraftCard({ r }: { r: RuleDraft }) {
+  const live = r.proposalId !== undefined && r.status !== 'failed';
+  const [view] = useLive(() => (live ? vigil.listRuleSuggestions() : Promise.resolve(undefined)));
+  const pending = live && view?.pending.some((p) => p.id === r.proposalId);
+  const decided = view?.recent.find((p) => p.id === r.proposalId)?.status;
+  const rule = r.ruleName ?? r.ruleId ?? 'a rule';
+  return (
+    <div
+      className={`action-card rule-draft ${r.status === 'failed' ? 'declined' : pending ? 'pending' : ''}`}
+    >
+      <EyeOff size={18} className="memory-icon" />
+      <div className="col grow" style={{ gap: 3, minWidth: 0 }}>
+        <span className="t-label">
+          {r.status === 'failed'
+            ? `Couldn’t suggest a change to ${rule}`
+            : `Suggested a change to ${rule}`}
+        </span>
+        {r.change && <span className="t-small">{r.change}</span>}
+        {r.hits && (
+          <span className="t-small muted">
+            On your last 14 days: {r.hits.before} matches before, {r.hits.after} after.
+          </span>
+        )}
+        {r.warnings?.map((w) => (
+          <span key={w} className="t-small warn">
+            {w}
+          </span>
+        ))}
+        <span className="t-small muted">
+          {r.status === 'failed'
+            ? r.note
+            : r.status === 'already'
+              ? 'The same change is already waiting under Suggested changes on Rules.'
+              : 'Nothing changes until you accept it under Suggested changes on Rules.'}
+        </span>
+      </div>
+      {pending ? (
+        <Button
+          size="sm"
+          kind="primary"
+          onClick={() => {
+            // From the Ask drawer, get it out of the way of Rules.
+            leadChat.close();
+            showSuggestion(r.proposalId!);
+          }}
+        >
+          Review
+        </Button>
+      ) : r.status === 'failed' ? (
+        <Chip tone="poor">Couldn’t</Chip>
+      ) : (
+        decided &&
+        DECIDED[decided] && (
+          <Chip tone={decided === 'approved' ? 'good' : undefined}>{DECIDED[decided]}</Chip>
+        )
       )}
     </div>
   );
@@ -677,6 +770,9 @@ function DogCard({
   const toast = useToast();
   const [open, setOpen] = useState(false);
   const busy = ['thinking', 'sniffing', 'fetching', 'waiting'].includes(dog.mood);
+  // The scheduler's own rule; with no AI set up, a scheduled run can't happen.
+  const now = Date.now();
+  const next = dog.role === 'pack' && !noAi && !busy ? nextRunAt(dog, now) : undefined;
   const run = async () => {
     const r = await vigil.runDog(dog.id);
     if (!r.ok) toast({ text: r.error ?? 'It couldn’t run' });
@@ -707,6 +803,11 @@ function DogCard({
             {dog.tools.length} {dog.tools.length === 1 ? 'tool' : 'tools'}
           </Chip>
           {dog.createdBy === 'lead' && <Chip tone="ai">Added by {lead.name}</Chip>}
+        </span>
+      )}
+      {next !== undefined && (
+        <span className="t-small muted">
+          Next run: {nextRunWords(next, now, dog.schedule === 'nightly')}
         </span>
       )}
       {dog.lastReport && (

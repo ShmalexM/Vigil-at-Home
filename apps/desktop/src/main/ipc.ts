@@ -9,6 +9,8 @@ import type { Connectors } from './pack/connectors.js';
 import type { PackService } from './pack/service.js';
 import type { AgentService } from './agents/service.js';
 import type { UpdateChecker } from './updates.js';
+import type { FeedKeyStore } from './onboarding/keys.js';
+import { keyedFeeds, type FeedKeysView } from '../shared/setup.js';
 import { onboardingHandlers } from './onboarding/ipc.js';
 import type { OnboardingService } from './onboarding/service.js';
 import type { VigilCore } from './service.js';
@@ -44,9 +46,14 @@ export function registerIpc(
   updates: UpdateChecker,
   agents: AgentService,
   pack: { service: PackService; connectors: Connectors },
+  feedKeys: FeedKeyStore,
   helper: HelperControl = noHelper,
 ): void {
   let ruleSuggestions: RuleSuggestions | undefined;
+  const feedKeysView = (): FeedKeysView => ({
+    ...feedKeys.view(),
+    feeds: keyedFeeds(core.detector?.feedStatus() ?? []),
+  });
   const suggestions = () => {
     if (!core.detector) throw new Error('Detection is not running');
     ruleSuggestions ??= new RuleSuggestions(
@@ -55,13 +62,27 @@ export function registerIpc(
     );
     return ruleSuggestions;
   };
+  // A rule edit settles once the helper answers; then every screen shows what is in force.
+  const edited = async <T>(change: Promise<T>): Promise<T> => {
+    const out = await change;
+    windows.broadcast('changed');
+    return out;
+  };
   const h: Handlers = {
     getStatus: () => core.status(),
     listAlerts: (status) => core.store.listAlerts(status ? { status } : {}),
     getAlertDetail: (id) => core.alertDetail(id),
+    alertEvidence: (id) => core.alertEvidence(id),
     decide: (id, input) => core.decide(id, stripUndefined(input)),
     reopen: (id) => core.alerts.reopen(id),
     clearNoticed: (ids) => core.clearNoticed(ids),
+    staleAlerts: () => core.staleAlerts(),
+    alertCounts: () => ({
+      open: core.store.countAlerts('open'),
+      resolved: core.store.countAlerts('resolved'),
+    }),
+    clearStale: (ids) => core.clearStale(ids),
+    clearNoticedUpTo: (at) => core.clearNoticedUpTo(at),
     undoAction: (id) => core.alerts.undo(id),
     approveProposal: (id) => core.alerts.approveProposal(id),
     rejectProposal: (id) => core.alerts.rejectProposal(id),
@@ -72,20 +93,31 @@ export function registerIpc(
       windows.broadcast('changed');
       return result;
     },
+    quietRule: async (id) => {
+      const result = await core.quietRule(id);
+      windows.broadcast('changed');
+      return result;
+    },
+    undoQuietRule: async (id, token) => {
+      const result = await core.undoQuietRule(id, token);
+      windows.broadcast('changed');
+      return result;
+    },
     getRuleEditor: (id) => core.ruleEditing()?.view(id) ?? null,
     previewRule: (json) => editing(core).preview(json),
-    saveRule: (json) => editing(core).save(json),
-    revertRule: (id) => editing(core).revert(id),
-    deleteRule: (id) => editing(core).delete(id),
-    addExclusion: (id, input) => editing(core).addExclusion(id, input),
-    removeExclusion: (id, index) => editing(core).removeExclusion(id, index),
-    removeException: (id) => editing(core).removeException(id),
-    excludeFromAlert: (id, scope) => editing(core).excludeFromAlert(id, scope),
+    // Each waits for the helper (and the password, if it weakens a blocking rule).
+    saveRule: (json) => edited(editing(core).save(json)),
+    revertRule: (id) => edited(editing(core).revert(id)),
+    deleteRule: (id) => edited(editing(core).delete(id)),
+    addExclusion: (id, input) => edited(editing(core).addExclusion(id, input)),
+    removeExclusion: (id, index) => edited(editing(core).removeExclusion(id, index)),
+    removeException: (id) => edited(editing(core).removeException(id)),
+    excludeFromAlert: (id, scope) => edited(editing(core).excludeFromAlert(id, scope)),
     listRuleSuggestions: () => suggestions().view(),
     acceptRuleSuggestion: async (id, mode) => {
-      const helper = await suggestions().accept(id, mode);
+      const result = await suggestions().acceptWithReason(id, mode);
       windows.broadcast('changed');
-      return { helper };
+      return result;
     },
     dismissRuleSuggestion: (id, note) => suggestions().dismiss(id, note),
     reviewRulesNow: () => suggestions().reviewNow(),
@@ -99,6 +131,8 @@ export function registerIpc(
       version: app.getVersion(),
       commit: typeof __VIGIL_COMMIT__ === 'string' ? __VIGIL_COMMIT__ : '',
       showAdvanced: core.showAdvanced(),
+      platform: process.platform,
+      arch: process.arch,
     }),
     setTheme: (theme) => {
       core.setTheme(theme);
@@ -123,6 +157,17 @@ export function registerIpc(
     fitPopup: (height) => windows.fitPopup(height),
     quit: () => app.quit(),
     ...onboardingHandlers(setup, () => windows.openMain('home')),
+    getFeedKeys: () => feedKeysView(),
+    saveFeedKey: (name, key) => {
+      feedKeys.set(name, key);
+      // Retry a feed refused for want of this key now rather than at the next check.
+      void core.detector?.feeds.run().catch((err) => console.error('[feeds] run failed:', err));
+      return feedKeysView();
+    },
+    clearFeedKey: (name) => {
+      feedKeys.clear(name);
+      return feedKeysView();
+    },
     installHelper: () => helper.install(),
     uninstallHelper: () => helper.uninstall(),
     repairSantaSync: async () => {
@@ -134,11 +179,14 @@ export function registerIpc(
     getUsageLimits: (refresh) => core.usage.limits(refresh ?? false),
     getUpdates: () => updates.view(),
     checkUpdates: () => updates.check(),
-    setUpdateAuto: (auto) => updates.setAuto(auto),
+    setUpdateMode: (mode) => updates.setMode(mode),
+    installUpdate: () => updates.install(true),
     dismissUpdate: () => updates.dismiss(),
     downloadUpdate: () => updates.download(),
+    openUpdateNotes: () => updates.openNotes(),
     getAi: () => ai.view(),
     getAiPrefs: () => ai.prefs(),
+    turnAiBackOn: () => ai.turnBackOn(),
     setAiPrefs: (patch) => ai.setPrefs(patch),
     explainAlert: (id) => ai.explainOnRequest(core, id),
     signInAi: (provider) => ai.signIn(provider),

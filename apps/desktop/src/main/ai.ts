@@ -4,9 +4,18 @@ import {
   API_PRESETS,
   createVigilAi,
   defaultAiSettings,
+  MONTHLY_CAP_HELD,
+  PLAN_LIMITS_HELD,
   isCodexSignInShared,
   shareCodexSignIn,
   stopSharingCodexSignIn,
+  canRun,
+  candidatesFor,
+  jevRoute,
+  whoRuns,
+  type AiKeysSaved,
+  type AiNotRunning,
+  type AiPurpose,
   type AiSettings,
   type ExecutablePin,
   type PinStore,
@@ -19,6 +28,7 @@ import {
 } from '@vigil/ai';
 import type { AiAssessment, Alert, SensorEvent } from '@vigil/core';
 import type { AnalyzeRunner } from '@vigil/detection';
+import { localNames } from '@vigil/ai/redact';
 import {
   AiPrefs,
   AiPrefsPatch,
@@ -29,24 +39,103 @@ import {
   type AiView,
 } from '../shared/ai.js';
 import type { AlertDetail, EventOutcome } from '../shared/ipc.js';
-import type { DogNoteInput, HelperId } from '../shared/pack.js';
+import type { HelperHeld } from '../shared/agents.js';
+import type { DogNoteInput, HelperId, NoteUsage } from '../shared/pack.js';
 import type { PackAi } from './pack/service.js';
 import type { ApiKeyProvider, SetupMode } from '../shared/setup.js';
 import type { Store } from './db/store.js';
 import type { VigilCore } from './service.js';
 import { labelKey } from './label-filter.js';
+import { SLOW_RULE } from './slow-rule.js';
 import { TEST_RULE } from './test-alert.js';
 import { WORTH_A_LOOK_RULE, WorthALook } from './worth-a-look.js';
-import { monthStart, sumCost, type UsageService } from './usage.js';
+import { monthStart, sumCost, toRun, type UsageService } from './usage.js';
 import { isKeyBilled } from '../shared/usage.js';
 
 const KEY_PREFS = 'ai.prefs';
 const KEY_PINS = 'ai.pins';
+const PROVIDER_PREFS = ['claude', 'codex', 'api', 'ollama', 'jev'] as const;
+const PROVIDER_LABEL: Record<(typeof PROVIDER_PREFS)[number], string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  api: 'the API connection',
+  ollama: 'Ollama',
+  jev: 'Jev',
+};
+
+/** "a", "a and b", "a, b and c". */
+function listWords(words: string[]): string {
+  return words.length < 2
+    ? (words[0] ?? 'AI')
+    : `${words.slice(0, -1).join(', ')} and ${words.at(-1)}`;
+}
+
+/** Where Settings › AI keeps each switch (Ai.tsx). */
+const EXPLAINS = '“Explains alerts”';
+const LABELS = '“Labels events no rule matched”';
+const KEY_NEEDED: Record<AiProvider, string> = {
+  claude: 'an Anthropic API key',
+  codex: 'an OpenAI API key',
+  api: 'an OpenRouter or OpenAI key',
+  ollama: 'nothing',
+  jev: 'an OpenRouter or TypeSafe key',
+};
+
+/** "Codex needs an OpenAI API key and Jev needs an OpenRouter or TypeSafe key". */
+function needsKeys(ks: readonly AiProvider[]): string {
+  return listWords(ks.map((k) => `${PROVIDER_LABEL[k]} needs ${KEY_NEEDED[k]}`));
+}
+
+/** What to set up for apps a switch alone won't start: the key, then the switch. */
+function setupHint(ks: readonly AiProvider[]): string {
+  const them = ks.length > 1 ? 'them' : 'it';
+  const where = [
+    ...(ks.some((k) => k !== 'jev') ? [EXPLAINS] : []),
+    ...(ks.includes('jev') ? [LABELS] : []),
+  ];
+  const text = `${needsKeys(ks)}: add ${them} under API keys in Setup, then turn ${them} on under ${where.join(' and ')}`;
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+const NO_RECORD = Symbol('no saved prefs');
+
+/**
+ * Saved prefs, field by field, so one bad field never discards the rest. A
+ * field that is missing (saved by an older Vigil) or unreadable takes its
+ * default, except an AI app's switch, which stays off: a bad record never
+ * turns AI on. Only with nothing saved at all do the apps start on.
+ */
+function readPrefs(read: () => unknown): AiPrefs {
+  let raw: unknown;
+  try {
+    raw = read();
+  } catch {
+    // Saved but not JSON: the switches stay off.
+    raw = undefined;
+  }
+  if (raw === NO_RECORD) return DEFAULT_AI_PREFS;
+  const saved = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const [field, schema] of Object.entries(AiPrefs.shape)) {
+    const r = schema.safeParse(saved[field]);
+    if (r.success && r.data !== undefined) out[field] = r.data;
+    else if ((PROVIDER_PREFS as readonly string[]).includes(field)) out[field] = false;
+    else if (field in DEFAULT_AI_PREFS) out[field] = DEFAULT_AI_PREFS[field as keyof AiPrefs];
+  }
+  return AiPrefs.parse(out);
+}
+
+function offView(fix: { notice: string; label?: string } | undefined): Partial<AiView> {
+  if (!fix) return {};
+  return { off: fix.notice, ...(fix.label ? { offAction: fix.label } : {}) };
+}
 /** An explanation for a popup should be there by the time the user reads it. */
 const EXPLAIN_NOW_DEADLINE_MS = 90_000;
 const EXPLAIN_BACKGROUND_DEADLINE_MS = 180_000;
 /** Most events of one alert the AI sees. */
 const MAX_EVENTS = 20;
+/** How often a readiness change found by a check is told to the pages. */
+const READY_TOLD_EVERY_MS = 30_000;
 const LABEL_EVERY_MS = 60_000;
 /** The same program or destination is labelled at most once an hour. */
 const REPEAT_MS = 60 * 60_000;
@@ -70,6 +159,13 @@ const REVIEW_PROVIDERS: ProviderId[] = ['claude', 'codex', 'api'];
  * (a burst) go unexplained, so AI work never crowds out Vigil's routine jobs.
  */
 const MAX_QUEUED_BACKGROUND = 3;
+
+/**
+ * Labelling waits while the Mac is busy and retries what failed, so a pause
+ * comes and goes; it is only worth a line once it has lasted this long. The
+ * explainer's is shown at once: an alert is waiting on it.
+ */
+const LABELLER_HELD_SHOWN_AFTER_MS = 60 * 60_000;
 
 const NAMES: Record<AiProvider, string> = {
   claude: 'Claude Code',
@@ -106,6 +202,8 @@ export interface AiBridgeOptions {
   readonly dataDir: string;
   /** Optional AI work waits while the Mac is busy or on low battery. */
   readonly isBusy?: () => boolean;
+  /** Why the Mac is busy (PowerPolicy.busyReason); lets labelling go after a long wait on load alone. */
+  readonly busyReason?: () => 'power' | 'load' | undefined;
   /** Opens a vendor's sign-in page in the user's browser. */
   readonly openExternal: (url: string) => Promise<void>;
   /** For tests. */
@@ -133,11 +231,19 @@ export class AiBridge extends EventEmitter<{
   note: [helper: HelperId, note: Omit<DogNoteInput, 'dog'>];
 }> {
   private instance: { ai: VigilAi; key: string } | undefined;
+  /** Which providers the last view found ready, to notice one changing outside the app. */
+  private lastReady: string | undefined;
+  private lastReadyToldAt = -Infinity;
+  /** What the newest check found, waiting to be told while a change is held back. */
+  private pendingReady: string | undefined;
+  private readyTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly now: () => number;
   private readonly explaining = new Set<string>();
   private queuedBackground = 0;
   /** Events waiting for a label, oldest first. */
   private labelQueue: SensorEvent[] = [];
+  /** Events a run gave back to the queue (see labelBatch); the cap keeps them. */
+  private readonly retrying = new Set<string>();
   private worthALook: WorthALook | undefined;
   private cachedPrefs: AiPrefs | undefined;
   /** When each program or destination was last queued, so repeats aren't sent again. */
@@ -146,6 +252,17 @@ export class AiBridge extends EventEmitter<{
   private toolQueuedAt: number[] = [];
   /** The model behind recent runs, so an explanation can say who wrote it. */
   private readonly models = new Map<string, string>();
+  /** Tokens and cost of the same recent runs, for the pack's notebooks. */
+  private readonly spent = new Map<string, NoteUsage>();
+  /**
+   * Why the explainer or labeller has been trying without reaching an AI
+   * since its last answer (the cap, nothing ready, a busy Mac). Cleared by
+   * its next answer. So AI work that stops never stops silently.
+   */
+  private readonly held = new Map<'explainer' | 'labeller', HelperHeld>();
+  private labellerShowTimer: ReturnType<typeof setTimeout> | undefined;
+  /** When labelling last sent a batch, kept when the runner is rebuilt. */
+  private readonly labelClock: { lastSentAt?: number } = {};
 
   constructor(private readonly o: AiBridgeOptions) {
     super();
@@ -154,11 +271,9 @@ export class AiBridge extends EventEmitter<{
 
   prefs(): AiPrefs {
     // Read once: `consider` asks for every event.
-    if (this.cachedPrefs) return this.cachedPrefs;
-    // Prefs saved by an older Vigil lack newer switches; those take their defaults.
-    const saved = this.o.store.getSetting(KEY_PREFS, AiPrefs.partial(), {});
-    const defined = Object.fromEntries(Object.entries(saved).filter(([, v]) => v !== undefined));
-    this.cachedPrefs = AiPrefs.parse({ ...DEFAULT_AI_PREFS, ...defined });
+    this.cachedPrefs ??= readPrefs(() =>
+      this.o.store.getSetting(KEY_PREFS, z.unknown(), NO_RECORD),
+    );
     return this.cachedPrefs;
   }
 
@@ -178,6 +293,143 @@ export class AiBridge extends EventEmitter<{
     return this.prefs();
   }
 
+  /** Which keys are saved, for @vigil/ai's `canRun`. `api` is the API connection's. */
+  private savedKeys(): AiKeysSaved {
+    const saved = this.o.keys.list();
+    return {
+      anthropic: !!saved.anthropic,
+      openai: !!saved.openai,
+      api: !!this.apiConnection(),
+      typesafe: !!saved.typesafe,
+    };
+  }
+
+  /**
+   * Whether this app would serve the purpose with these switches, by
+   * @vigil/ai's own `canRun`. The API switch alone is off in `settings()`
+   * without a key, so here it counts as needing one.
+   */
+  private reachOf(
+    q: AiPrefs,
+    keys: AiKeysSaved,
+    k: AiProvider,
+    purpose: AiPurpose,
+  ): true | AiNotRunning {
+    const s = this.settings(q);
+    if (k === 'api' && q.api && !keys.api)
+      return canRun({ ...s, api: { ...s.api, enabled: true } }, keys, k, purpose);
+    return canRun(s, keys, k, purpose);
+  }
+
+  /**
+   * Which AI apps the "Turn on" button switches back on: the ones Vigil's
+   * runs have used, or else every one, kept to those the mode allows and
+   * that would run on a switch alone (a key they need isn't saved by a
+   * button). Labelling on with none of them labelling adds Ollama, outside
+   * cloud mode. Never the Claude plan switch, which stays the user's own
+   * opt-in. `needs` are the ones (of those that ran before, when any did)
+   * that would run once their key is saved.
+   */
+  private providersToRestore(
+    p: AiPrefs,
+    keys: AiKeysSaved,
+  ): { patch: Partial<Record<AiProvider, boolean>>; needs: AiProvider[] } {
+    const why = (k: AiProvider): true | AiNotRunning => {
+      const q = { ...p, [k]: true };
+      const explain = this.reachOf(q, keys, k, 'explain');
+      const label = this.reachOf(q, keys, k, 'label');
+      return explain === true || label === true
+        ? true
+        : explain === 'needs_setup' || label === 'needs_setup'
+          ? 'needs_setup'
+          : explain;
+    };
+    const used = new Set(this.o.store.aiRunProviders());
+    const fromRuns = PROVIDER_PREFS.filter((k) => used.has(k));
+    const pool: AiProvider[] = fromRuns.length ? fromRuns : [...PROVIDER_PREFS];
+    let restore = pool.filter((k) => why(k) === true);
+    // What ran before isn't allowed or usable any more: fall back to every app.
+    if (!restore.length) restore = PROVIDER_PREFS.filter((k) => why(k) === true);
+    const patch: Partial<Record<AiProvider, boolean>> = Object.fromEntries(
+      restore.map((k) => [k, true]),
+    );
+    if (
+      restore.length &&
+      p.labelling &&
+      !whoRuns(this.settings({ ...p, ...patch }), keys, 'label').provider &&
+      this.reachOf({ ...p, ...patch, ollama: true }, keys, 'ollama', 'label') === true
+    )
+      patch.ollama = true;
+    return { patch, needs: pool.filter((k) => why(k) === 'needs_setup') };
+  }
+
+  /**
+   * When the switches leave the AI unable to work, in words, and the one
+   * change the user's button makes: every app off, or labelling on with
+   * nothing that labels. Vigil never makes this change on its own, since a
+   * deliberate opt-out looks the same as an accidental one. From prefs,
+   * setup's mode and the saved keys only, by @vigil/ai's `whoRuns`, so it
+   * is cheap enough for Home and agrees with what the runner would do.
+   */
+  offFix(): { notice: string; label?: string; patch?: AiPrefsPatch } | undefined {
+    const p = this.prefs();
+    const keys = this.savedKeys();
+    const mode = this.o.mode() ?? 'both';
+    if (PROVIDER_PREFS.every((k) => !p[k])) {
+      const { patch, needs } = this.providersToRestore(p, keys);
+      const names = PROVIDER_PREFS.filter((k) => patch[k]).map((k) => PROVIDER_LABEL[k]);
+      const notice =
+        'Every AI app is switched off, so new alerts aren’t explained and events aren’t labelled';
+      // Nothing would run on a switch alone: say what to set up, and where.
+      if (!names.length)
+        return {
+          notice: `${notice}. ${needs.length ? setupHint(needs) : `Turn one on under ${EXPLAINS}`}`,
+        };
+      return {
+        notice:
+          notice +
+          // `patch.claude` means the mode allows Claude.
+          (patch.claude && p.claudePlan
+            ? '. Turning Claude back on also uses your Claude plan again for explanations you ask for'
+            : ''),
+        label: `Turn on ${listWords(names)}`,
+        patch,
+      };
+    }
+    if (!p.labelling || whoRuns(this.settings(p), keys, 'label').provider) return undefined;
+    const settings = this.settings(p);
+    // The apps switched on that would label once their key is saved.
+    const needs = candidatesFor(settings, 'label').filter(
+      (k): k is AiProvider => p[k] && this.reachOf(p, keys, k, 'label') === 'needs_setup',
+    );
+    const notice = needs.length
+      ? `Event labelling is on, but ${needsKeys(needs)} to label events. Add ${needs.length > 1 ? 'them' : 'it'} under API keys in Setup`
+      : 'Event labelling is on, but no AI app that labels events is switched on';
+    // Outside cloud mode Ollama labels on this computer, at no cost. In cloud
+    // mode each labeller needs a key or a subscription, so the user picks one.
+    if (mode !== 'cloud' && this.reachOf({ ...p, ollama: true }, keys, 'ollama', 'label') === true)
+      return {
+        notice: needs.length ? `${notice}, or label with Ollama on this Mac` : notice,
+        label: 'Label with Ollama',
+        patch: { ollama: true },
+      };
+    return {
+      notice: needs.length
+        ? `${notice}, or pick another app under ${EXPLAINS}`
+        : `${notice}. Pick one: Codex, Claude or the API under ${EXPLAINS}, or Jev under ${LABELS}. Claude, the API and Jev each need a key under API keys in Setup`,
+    };
+  }
+
+  offNotice(): string | undefined {
+    return this.offFix()?.notice;
+  }
+
+  /** The user's button under the notice (Settings › AI): makes exactly the change it names. */
+  turnBackOn(): AiView['prefs'] {
+    const patch = this.offFix()?.patch;
+    return patch ? this.setPrefs(patch) : this.prefs();
+  }
+
   /** The OpenAI-style API connection, from whichever key the user saved. */
   private apiConnection() {
     const saved = this.o.keys.list();
@@ -189,10 +441,9 @@ export class AiBridge extends EventEmitter<{
     return undefined;
   }
 
-  /** The settings @vigil/ai runs with. Built fresh each time from what's saved. */
-  settings(): AiSettings {
+  /** The settings @vigil/ai runs with. Built fresh each time from what's saved (or `prefs`). */
+  settings(prefs: AiPrefs = this.prefs()): AiSettings {
     const base = defaultAiSettings(this.o.dataDir);
-    const prefs = this.prefs();
     const api = this.apiConnection();
     const cap = prefs.monthlyCapUsd;
     return {
@@ -219,13 +470,17 @@ export class AiBridge extends EventEmitter<{
       jev: { ...base.jev, enabled: prefs.jev },
       classifier: { ...base.classifier, enabled: prefs.labelling },
       quota: { ...base.quota, ...(cap !== undefined ? { apiKeyMonthlyCapUsd: cap } : {}) },
+      // The account and Mac names are replaced before anything reaches a model.
+      redaction: { ...base.redaction, ...localNames() },
     };
   }
 
   /** The runner, rebuilt whenever the settings it was made with change. */
   ai(): VigilAi {
     const settings = this.settings();
-    const key = JSON.stringify(settings);
+    const keys = this.savedKeys();
+    // A key saved or removed changes what runs (Jev, Claude Haiku), so it rebuilds too.
+    const key = JSON.stringify({ settings, keys: this.o.keys.list() });
     if (this.instance?.key === key) return this.instance.ai;
     const keyOf = (p: ApiKeyProvider) => async () => this.o.keys.get(p)?.key;
     const api = this.apiConnection();
@@ -237,9 +492,12 @@ export class AiBridge extends EventEmitter<{
       // Codex sends this only to api.openai.com, so only an OpenAI key is offered.
       getOpenAiApiKey: keyOf('openai'),
       ...(api ? { getApiKey: keyOf(api.provider) } : {}),
-      ...(this.o.keys.list().typesafe ? { getJevApiKey: keyOf('typesafe') } : {}),
+      ...(keys.typesafe ? { getJevApiKey: keyOf('typesafe') } : {}),
+      keys,
       spentThisMonthUsd: async () => this.spentThisMonthUsd(),
       ...(this.o.isBusy ? { isBusy: this.o.isBusy } : {}),
+      ...(this.o.busyReason ? { busyReason: this.o.busyReason } : {}),
+      labelClock: this.labelClock,
     });
     this.instance = { ai, key };
     return ai;
@@ -247,15 +505,78 @@ export class AiBridge extends EventEmitter<{
 
   /** Every run, wherever it went, lands in the Usage page's store. */
   private record(entry: PromptLogEntry): void {
+    // The labeller's state comes from its batches (labelBatch), which try
+    // several AIs in turn; one attempt alone says little.
+    if (entry.purpose === 'explain') {
+      if (entry.provider === null) this.hold('explainer', heldWhy(entry.outcome, entry.detail));
+      else if (entry.outcome === 'ok') this.unhold('explainer');
+    }
     if (entry.model) {
       this.models.set(entry.id, entry.model);
       if (this.models.size > 100) this.models.delete(this.models.keys().next().value!);
+    }
+    // The Usage page's own reading of the run, so a notebook shows the same numbers.
+    const run = entry.usage ? toRun(entry) : undefined;
+    if (run) {
+      const { inputTokens, cachedInputTokens, outputTokens, costUsd } = run;
+      this.spent.set(entry.id, { inputTokens, cachedInputTokens, outputTokens, costUsd });
+      if (this.spent.size > 100) this.spent.delete(this.spent.keys().next().value!);
     }
     try {
       this.o.usage.record(entry);
     } catch (err) {
       console.error('[ai] recording a run failed:', err);
     }
+  }
+
+  /** The model and spend behind a run, for a helper's notebook entry. */
+  private ranOn(logId: string): Pick<DogNoteInput, 'model' | 'usage'> {
+    const model = this.models.get(logId);
+    const usage = this.spent.get(logId);
+    return { ...(model ? { model } : {}), ...(usage ? { usage } : {}) };
+  }
+
+  /**
+   * Why the explainer or labeller hasn't been answering, when it has been
+   * trying since its last answer without reaching an AI. For the Agents page.
+   */
+  heldBack(helper: HelperId): HelperHeld | undefined {
+    if (helper !== 'explainer' && helper !== 'labeller') return undefined;
+    const h = this.held.get(helper);
+    if (!h) return undefined;
+    if (helper === 'labeller' && this.now() - h.since < LABELLER_HELD_SHOWN_AFTER_MS)
+      return undefined;
+    return { ...h };
+  }
+
+  /**
+   * Note why a helper's work reached no AI. The most important reason seen
+   * since its last answer stays (the cap, then no AI ready, then failures,
+   * then a busy Mac), so the line doesn't flip between them; the page hears
+   * of it only when what it shows changes.
+   */
+  private hold(helper: 'explainer' | 'labeller', why: string): void {
+    const prev = this.held.get(helper);
+    if (prev && heldRank(prev.why) > heldRank(why)) return;
+    this.held.set(helper, { since: prev?.since ?? this.now(), why });
+    if (helper === 'labeller' && !prev) {
+      // Shown only after an hour: tell the page when that hour is up.
+      clearTimeout(this.labellerShowTimer);
+      this.labellerShowTimer = setTimeout(
+        () => this.emit('changed'),
+        LABELLER_HELD_SHOWN_AFTER_MS + 1_000,
+      );
+      this.labellerShowTimer.unref?.();
+      return;
+    }
+    if (prev?.why !== why && this.heldBack(helper)) this.emit('changed');
+  }
+
+  private unhold(helper: 'explainer' | 'labeller'): void {
+    const shown = this.heldBack(helper) !== undefined;
+    if (!this.held.delete(helper)) return;
+    if (helper === 'labeller') clearTimeout(this.labellerShowTimer);
+    if (shown) this.emit('changed');
   }
 
   /** What Vigil charged to the user's keys since the 1st, all providers together, for the cap. */
@@ -296,17 +617,14 @@ export class AiBridge extends EventEmitter<{
         ? { ...providerView({ provider: 'api', state: 'disabled' }, shared), state: 'optional' }
         : providerView(s, shared, settings.codex.mode === 'apiKey'),
     );
-    // Jev isn't a runner provider; it rides on the keys.
+    // Jev isn't a runner provider; it rides on the keys, by the classifier's own route.
     const saved = this.o.keys.list();
     const api = this.apiConnection();
-    const jevVia =
+    const route =
       !settings.jev.enabled || settings.mode === 'local'
-        ? null
-        : saved.typesafe
-          ? 'typesafe'
-          : api?.provider === 'openrouter' && settings.api.enabled
-            ? 'openrouter'
-            : null;
+        ? undefined
+        : jevRoute(settings, this.savedKeys());
+    const jevVia = route?.typesafe ? 'typesafe' : route?.openrouter ? 'openrouter' : null;
     providers.push({
       provider: 'jev',
       name: NAMES.jev,
@@ -327,6 +645,15 @@ export class AiBridge extends EventEmitter<{
       canShareSignIn: false,
       signInShared: false,
     });
+    // Ollama started, or a CLI signed in, outside the app: tell everyone, so the chat asks again.
+    // At most once in a while, so a provider that flips between ready and not can't keep
+    // every page re-checking; a change held back is told when the wait is over.
+    this.noticeReady(
+      providers
+        .filter((p) => p.state === 'ready')
+        .map((p) => p.provider)
+        .join(','),
+    );
     const mode = this.o.mode();
     return {
       ...(mode ? { mode } : {}),
@@ -335,8 +662,31 @@ export class AiBridge extends EventEmitter<{
       ...(api ? { api: { name: api.name, last4: api.last4 } } : {}),
       anthropicKey: !!saved.anthropic,
       jevVia,
+      ...offView(this.offFix()),
       checkedAt: this.now(),
     };
+  }
+
+  private noticeReady(ready: string): void {
+    if (this.lastReady === undefined) {
+      this.lastReady = ready;
+      return;
+    }
+    this.pendingReady = ready;
+    if (ready === this.lastReady || this.readyTimer) return;
+    const wait = this.lastReadyToldAt + READY_TOLD_EVERY_MS - this.now();
+    if (wait <= 0) return this.tellReady();
+    this.readyTimer = setTimeout(() => {
+      this.readyTimer = undefined;
+      if (this.pendingReady !== this.lastReady) this.tellReady();
+    }, wait);
+    this.readyTimer.unref?.();
+  }
+
+  private tellReady(): void {
+    this.lastReady = this.pendingReady;
+    this.lastReadyToldAt = this.now();
+    this.emit('changed');
   }
 
   /** Opens the vendor's sign-in page. The login stays with the vendor's own CLI. */
@@ -385,11 +735,17 @@ export class AiBridge extends EventEmitter<{
    * Explains each new alert once its response has run. Popups go first, in
    * the scheduler's urgent lane. The test alert is never sent, and neither
    * are "worth a look" alerts: the labeller's reason already explains them,
-   * and the user can still press Explain.
+   * and the user can still press Explain. A "slow rule" note is about a rule,
+   * not the event, so it is not sent either.
    */
   explainAlertsFrom(core: Pick<VigilCore, 'alerts' | 'scheduler' | 'alertDetail'>): void {
     core.alerts.on('raised', (alert) => {
-      if (alert.ruleId === TEST_RULE.id || alert.ruleId === WORTH_A_LOOK_RULE.id) return;
+      if (
+        alert.ruleId === TEST_RULE.id ||
+        alert.ruleId === WORTH_A_LOOK_RULE.id ||
+        alert.ruleId === SLOW_RULE.id
+      )
+        return;
       const urgent = alert.notify === 'popup';
       if (!urgent) {
         if (this.queuedBackground >= MAX_QUEUED_BACKGROUND) return;
@@ -471,7 +827,7 @@ export class AiBridge extends EventEmitter<{
             : whyNot(r.reason),
           reasons: proposed,
           ...(r.ok ? { provider: r.provider } : {}),
-          ...(this.models.has(r.logId) ? { model: this.models.get(r.logId)! } : {}),
+          ...this.ranOn(r.logId),
         });
         if (r.ok) return { ok: true, value: r.value, provider: r.provider };
         return { ok: false, reason: r.reason, ...(r.detail ? { detail: r.detail } : {}) };
@@ -498,26 +854,48 @@ export class AiBridge extends EventEmitter<{
     if (this.lastQueued.size > MAX_REMEMBERED)
       this.lastQueued.delete(this.lastQueued.keys().next().value!);
     this.labelQueue.push(event);
-    if (this.labelQueue.length > MAX_LABEL_QUEUE) this.labelQueue.shift();
+    this.trimLabelQueue();
   }
 
-  /** Sends one batch to the classifier and stores what comes back. */
+  /**
+   * Sends one batch to the classifier and stores what comes back. If the
+   * classifier fails, the batch goes back to the front of the queue; the
+   * queue's cap drops newer events to make room for it, never the other way
+   * round. (The classifier's own deadline bounds the wait.)
+   */
   async labelBatch(store: Pick<Store, 'setEventLabels'>): Promise<number> {
     if (this.labelQueue.length === 0) return 0;
     const classifier = this.ai().classifier;
     if (!classifier) {
       this.labelQueue = [];
+      this.retrying.clear();
       return 0;
     }
     const batch = this.labelQueue;
     this.labelQueue = [];
-    const result = await this.busyWhile('labeller', () => classifier.classify(batch));
-    // Whatever wasn't labelled goes back ahead of newer events, within the cap.
+    this.retrying.clear();
+    const giveBack = (events: readonly SensorEvent[]): void => {
+      for (const e of events) this.retrying.add(e.id);
+      this.labelQueue = [...events, ...this.labelQueue];
+      this.trimLabelQueue();
+    };
+    let result: Awaited<ReturnType<typeof classifier.classify>>;
+    try {
+      result = await this.busyWhile('labeller', () => classifier.classify(batch));
+    } catch (err) {
+      giveBack(batch);
+      throw err;
+    }
+    // Whatever wasn't labelled goes back ahead of newer events.
     const deferred = new Set(result.deferred);
-    this.labelQueue = [...batch.filter((e) => deferred.has(e.id)), ...this.labelQueue].slice(
-      -MAX_LABEL_QUEUE,
-    );
-    if (!result.ok) return 0;
+    giveBack(batch.filter((e) => deferred.has(e.id)));
+    if (!result.ok) {
+      // A batch over the hourly budget isn't held back: the labeller ran recently.
+      if (result.reason === 'busy') this.hold('labeller', MAC_BUSY);
+      else if (result.reason === 'failed') this.hold('labeller', heldWhy('failed', result.detail));
+      return 0;
+    }
+    this.unhold('labeller');
     const at = this.now();
     const labelled = result.labels.map((l) => ({
       eventId: l.eventId,
@@ -546,6 +924,19 @@ export class AiBridge extends EventEmitter<{
     return result.labels.length;
   }
 
+  /**
+   * Keep the label queue within its cap by dropping the newest events, never
+   * ones a run gave back: those already waited longest.
+   */
+  private trimLabelQueue(): void {
+    for (
+      let i = this.labelQueue.length - 1;
+      this.labelQueue.length > MAX_LABEL_QUEUE && i >= 0;
+      i--
+    )
+      if (!this.retrying.has(this.labelQueue[i]!.id)) this.labelQueue.splice(i, 1);
+  }
+
   private async busyWhile<T>(helper: HelperId, work: () => Promise<T>): Promise<T> {
     this.emit('busy', helper, true);
     try {
@@ -564,6 +955,7 @@ export class AiBridge extends EventEmitter<{
     return {
       run: (req) => this.ai().run(req),
       modelOf: (logId) => this.models.get(logId),
+      usageOf: (logId) => this.spent.get(logId),
       status: async () => {
         const v = await this.view();
         const ready = (p: AiProvider) =>
@@ -576,8 +968,18 @@ export class AiBridge extends EventEmitter<{
           ready('ollama') && 'the local model',
         ].filter((x): x is string => typeof x === 'string');
         const planOnly = ready('claude') && !v.anthropicKey && v.prefs.claudePlan;
+        const anyReady = judges.length > 0 || planOnly;
+        // Settings › AI can show Jev as ready while nothing that can chat is.
+        const noAiWhy = anyReady
+          ? undefined
+          : PROVIDER_PREFS.every((k) => !v.prefs[k])
+            ? 'Every AI app is switched off.'
+            : ready('jev')
+              ? 'Jev only labels events; it can’t chat.'
+              : undefined;
         return {
-          anyReady: judges.length > 0 || planOnly,
+          anyReady,
+          ...(noAiWhy ? { noAiWhy } : {}),
           judge: judges.length
             ? { ready: true, detail: `${judges[0]} checks risky calls` }
             : {
@@ -658,7 +1060,7 @@ export class AiBridge extends EventEmitter<{
         answer: `${VERDICT_WORDS[v.verdict]}. ${v.summary}`,
         reasons: v.details ? [v.details] : [],
         provider: result.provider,
-        ...(this.models.has(result.logId) ? { model: this.models.get(result.logId)! } : {}),
+        ...this.ranOn(result.logId),
       });
       return {
         provider: result.provider,
@@ -711,6 +1113,28 @@ const Explanation = z.object({
   summary: z.string().min(1).max(600),
   details: z.string().max(2000).optional(),
 });
+
+const CAP_USED_UP = 'This month’s spending cap on your API keys is used up';
+const NO_AI_READY = 'No AI app is ready';
+const MAC_BUSY = 'The Mac has been busy or on battery';
+
+/** Which held-back reason matters most when several come up. */
+function heldRank(why: string): number {
+  if (why === CAP_USED_UP) return 3;
+  if (why === NO_AI_READY) return 2;
+  if (why === MAC_BUSY) return 0;
+  return 1;
+}
+
+/** In words, why a helper's runs aren't reaching an AI. */
+function heldWhy(outcome: string, detail: string | undefined): string {
+  if (detail === MONTHLY_CAP_HELD) return CAP_USED_UP;
+  if (detail === PLAN_LIMITS_HELD || outcome === 'quota')
+    return 'Your AI plans are near their limits';
+  if (outcome === 'no_provider' || detail === 'no_provider') return NO_AI_READY;
+  if (detail === 'quota') return 'Your AI plans are near their limits';
+  return detail ? `Its tries keep failing (${detail.slice(0, 160)})` : whyNot(outcome);
+}
 
 /** Failures where no AI ran at all. */
 const NOTHING_RAN = new Set(['no_provider', 'quota']);

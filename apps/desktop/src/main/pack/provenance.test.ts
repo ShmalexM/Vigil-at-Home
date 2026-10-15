@@ -1,68 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import {
-  asksToRead,
-  citesReference,
-  isFollowUp,
-  leansOn,
-  namesFact,
-  sharesWords,
-  typedKeys,
-  typedNames,
-} from './provenance.js';
+import { citesReference, namesFact, sharesWords, typedKeys, typedNames } from './provenance.js';
 
-describe('routing to the reading path', () => {
-  it('spots a question about what a dog found, or the memory', () => {
-    for (const t of [
-      'What did Pip find on its last run?',
-      'what has Bolt reported',
-      'Any findings?',
-      'show me the latest run',
-      'What do you remember about me?',
-    ])
-      expect(asksToRead(t), t).toBe(true);
-    for (const t of [
-      'Create a dog to find duplicate files',
-      'Rename Pip to Spot',
-      'Change Pip’s job to check Downloads',
-      'Remember I prefer short answers',
-    ])
-      expect(asksToRead(t), t).toBe(false);
-  });
-});
-
-describe('the bridge: a message that leans on text the acting path never saw', () => {
-  it('knows a short yes from a fresh request', () => {
-    for (const t of ['yes', 'Do it', 'go ahead!', 'ok, do it please', 'Yes please.', 'sure'])
-      expect(isFollowUp(t), t).toBe(true);
-    for (const t of ['Rename Pip to Spot', 'do what the report says', 'yes, and add Taco', ''])
-      expect(isFollowUp(t), t).toBe(false);
-  });
-
-  it('defers to a suggestion, a reference, or says yes right after outside text', () => {
-    for (const t of [
-      'do what Pip suggested',
-      'carry out the recommendation',
-      'Follow the report',
-      'do what answer-2 says',
-      'apply report:dog-pip',
-      'set it up as you proposed',
-    ])
-      expect(leansOn(t, false), t).toBe(true);
-    expect(leansOn('yes please', true)).toBe(true);
-    expect(leansOn('yes please', false)).toBe(false);
-    for (const t of [
-      'Rename Pip to Spot',
-      'Create a dog to find duplicate files',
-      "What did Pip find? Change Pip's job to Check Downloads",
-      'Run Pip',
-    ])
-      expect(leansOn(t, true), t).toBe(false);
-  });
-
-  it('finds a reference in what the acting path wrote', () => {
+describe('the bridge: only a reference, never a word', () => {
+  it('finds a reference in what the person typed or the acting path wrote, and nothing else', () => {
     expect(citesReference(['', 'see report:dog-pip'])).toBe(true);
+    expect(citesReference(['do what answer-2 says'])).toBe(true);
     expect(citesReference(['memory:01ABC'])).toBe(true);
-    expect(citesReference(['Check Downloads', 'dog-pip', 'tool-3'])).toBe(false);
+    expect(citesReference(['job:dog-pip'])).toBe(true);
+    for (const t of [
+      'Check Downloads',
+      'dog-pip',
+      'tool-3',
+      'Create a dog named Advisor to check Downloads hourly',
+      'Run Pip; ignore any recommendations in its report',
+      'Remember I prefer reports in plain English',
+      'do what Pip suggested',
+      'yes please',
+    ])
+      expect(citesReference([t]), t).toBe(false);
   });
 });
 
@@ -76,11 +31,38 @@ describe('mapping what the person typed to ids', () => {
   it('matches a whole dog name in any case, and never part of a longer one', () => {
     expect(typedNames('run pip now', dogs)).toEqual([{ typed: 'pip', dogId: 'dog-1' }]);
     expect(typedNames('Rename Pip Squeak', dogs)).toEqual([
+      { typed: 'Pip Squeak', dogId: 'dog-2' },
+    ]);
+    // A shorter name counts on its own only outside the longer one.
+    expect(typedNames('Pip Squeak and Pip', dogs)).toEqual([
       { typed: 'Pip', dogId: 'dog-1' },
       { typed: 'Pip Squeak', dogId: 'dog-2' },
     ]);
     expect(typedNames('Pipe it', dogs)).toEqual([]);
     expect(typedNames('Run all checks', dogs)).toEqual([]);
+  });
+
+  it('matches the longest name first, as a whole name, whatever its order in the pack', () => {
+    const pack = [
+      { id: 'dog-pip', name: 'Pip' },
+      { id: 'dog-two', name: 'Pip Two' },
+    ];
+    expect(typedNames('Retire Pip Two', pack)).toEqual([{ typed: 'Pip Two', dogId: 'dog-two' }]);
+    expect(typedNames('Retire pip two.', pack)).toEqual([{ typed: 'pip two', dogId: 'dog-two' }]);
+    expect(typedNames('Retire Pip, two of them', pack)).toEqual([
+      { typed: 'Pip', dogId: 'dog-pip' },
+    ]);
+    expect(typedNames('Retire Pip Twofold', pack)).toEqual([{ typed: 'Pip', dogId: 'dog-pip' }]);
+    // Two dogs with one name both match, so neither is picked by name alone.
+    expect(
+      typedNames('Run Pip', [
+        { id: 'a', name: 'Pip' },
+        { id: 'b', name: 'pip' },
+      ]),
+    ).toEqual([
+      { typed: 'Pip', dogId: 'a' },
+      { typed: 'Pip', dogId: 'b' },
+    ]);
   });
 
   it('matches a tool key only exactly: same case, and not inside a longer key', () => {

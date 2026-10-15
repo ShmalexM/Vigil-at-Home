@@ -12,6 +12,10 @@
 // vigil-helper osquery-flags     print osquery's startup flags (osquery.flags)
 // vigil-helper osquery-setup     (root) write Vigil's osquery config and start osquery
 // vigil-helper osquery-remove    (root) stop Vigil's osquery job, restore osquery's old config
+// vigil-helper pin-app <path>    (root) pin the app the helper is installed for (appPin.ts):
+//                                its main executable on macOS, its AppImage on Linux
+// vigil-helper pin-remove        (root) remove the pin once the helper has stopped (pinRemove.ts)
+// vigil-helper fs-child          one file operation as a user, for the daemon (commands/fsChild.ts)
 
 import { readFileSync } from 'node:fs';
 import {
@@ -22,6 +26,8 @@ import {
   santaProfile,
   syncTlsPaths,
 } from '@vigil/sensors';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { Approvals } from './approval.js';
 import { HelperClient } from './client.js';
 import { defaultPaths, SANTA_SYNC_PORT } from './config.js';
@@ -34,6 +40,9 @@ import { realSystem } from './system.js';
 async function main(argv: string[]): Promise<number> {
   const [cmd, arg, ...more] = argv;
   switch (cmd) {
+    case 'fs-child':
+      // One file operation as a user, started by the daemon (commands/fsChild.ts).
+      return runFsChild();
     case 'daemon': {
       const stop = await runDaemon();
       const shutdown = () => {
@@ -127,6 +136,41 @@ async function main(argv: string[]): Promise<number> {
           `osquery: ${await (linux ? ensureLinuxOsquery(realSystem()) : ensureOsquery(realSystem()))}`,
         );
       return 0;
+    }
+    case 'pin-app': {
+      if (process.geteuid?.() !== 0) {
+        console.error('pin-app must run as root (install.sh runs it)');
+        return 1;
+      }
+      if (!arg || more.length) {
+        console.error('usage: vigil-helper pin-app <path>');
+        return 2;
+      }
+      const sys = realSystem();
+      const paths = defaultPaths();
+      // The daemon keeps its own pin in memory; pinning under it would be undone or lost.
+      if (await daemonAnswers(paths.socket)) {
+        console.error('the helper is running; stop it before pin-app (install.sh does)');
+        return 1;
+      }
+      mkdirSync(dirname(paths.appPinDir), { recursive: true, mode: 0o755 });
+      const store = new AppPinStore(sys, { dir: paths.appPinDir, publicFile: paths.appPin });
+      await store.load();
+      // Whatever happens, an older app's pin doesn't outlive this install.
+      await store.write(undefined);
+      const pin = await pinFor(sys, arg, { installed: installedSelf(sys.platform) });
+      if (pin) await store.write(pin);
+      return 0;
+    }
+    case 'pin-remove': {
+      const paths = defaultPaths();
+      return pinRemove({
+        euid: process.geteuid?.(),
+        socket: paths.socket,
+        dir: paths.appPinDir,
+        publicFile: paths.appPin,
+        sys: realSystem(),
+      });
     }
     default:
       console.error(

@@ -4,6 +4,7 @@ import { runUsageFromResult, planUsageFromClaude } from './providers/claude.js';
 import { createAiRunner } from './runner.js';
 import { defaultAiSettings } from './settings.js';
 import { spendingDays } from './spending.js';
+import { MONTHLY_CAP_HELD } from './types.js';
 import type { PromptLogEntry, ProviderAdapter } from './types.js';
 
 const T0 = new Date(2026, 8, 26, 12).getTime();
@@ -147,6 +148,7 @@ describe('spending', () => {
 
   it('stops Claude on an API key once the monthly cap is spent', async () => {
     let ran = 0;
+    const log: PromptLogEntry[] = [];
     const claude: ProviderAdapter = {
       id: 'claude',
       probe: async () => ({ provider: 'claude', state: 'ready' }),
@@ -164,7 +166,7 @@ describe('spending', () => {
         quota: { ...base.quota, apiKeyMonthlyCapUsd: 5 },
       },
       adapters: [claude],
-      log: { record: () => {} },
+      log: { record: (e) => log.push(e) },
       spentThisMonthUsd: async () => 5.2,
     });
     const result = await runner.run({
@@ -177,6 +179,10 @@ describe('spending', () => {
     });
     expect(result).toMatchObject({ ok: false, reason: 'quota' });
     expect(ran).toBe(0);
+    // Held back, but never silently: one entry says why no AI ran.
+    expect(log).toEqual([
+      expect.objectContaining({ provider: null, outcome: 'quota', detail: MONTHLY_CAP_HELD }),
+    ]);
   });
 
   it('holds Codex on an OpenAI key to the same one cap, but not a ChatGPT plan or a requested plan explanation', async () => {

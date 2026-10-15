@@ -36,10 +36,19 @@ import {
   syncTlsPaths,
 } from '@vigil/sensors';
 import { Approvals } from './approval.js';
-import { defaultPaths, installedSelf, SANTA_SYNC_PORT, type HelperPaths } from './config.js';
-import { Executor, type ActionOutcome } from './executor.js';
-import { FastPath } from './fastpath.js';
+import { pinCandidate, repinFromGrant } from './appPin.js';
+import { AppPinStore } from './pinStore.js';
+import {
+  defaultPaths,
+  installedSelf,
+  ownProgramRoots,
+  SANTA_SYNC_PORT,
+  type HelperPaths,
+} from './config.js';
+import { Executor, OWN_HASHES_WAIT_MS, type ActionOutcome } from './executor.js';
+import { eventPipeline, FastPath } from './fastpath.js';
 import { Journal } from './journal.js';
+import { OwnHashes } from './ownHashes.js';
 import {
   ensureOsquery,
   defaultOsqueryPaths,
@@ -74,6 +83,8 @@ export interface DaemonOptions {
   fapolicydRulesDir?: string;
   /** Linux: the trust answer for a program path. Defaults to the dpkg/rpm index. */
   trust?: (path: string) => SignatureInfo | undefined;
+  /** Where the programs no block by hash may name live (ownProgramRoots); tests point it elsewhere. */
+  ownProgramRoots?: string[];
   /** How long to wait before trying the sync port again when it is taken. */
   syncRetryMs?: number;
   /** Tests: options for Santa's identity store (crash points, retry delay). */
@@ -220,6 +231,16 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     };
   };
 
+  // The programs no block by hash may name, hashed by the helper itself from
+  // where it knows they live; the first pass runs while everything else starts.
+  const ownHashes = new OwnHashes({
+    roots:
+      opts.ownProgramRoots ?? ownProgramRoots(linux ? 'linux' : 'darwin', paths.helperExecutable),
+    cdhashes: !linux,
+    log,
+  });
+  const rehash = (): Promise<void> => ownHashes.refresh().then(() => fastPath.dropOwnBlocks());
+
   // Blocking rules from the app, run on the sensor stream before events reach it.
   const fastPath: FastPath = new FastPath({
     file: paths.helperRules,
@@ -231,8 +252,10 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     log,
     ...(sys.fileId ? { fileId: (p: string) => sys.fileId?.(p) } : {}),
     installed: installedSelf(sys.platform),
+    ownProgram: (id) => ownHashes.owner(id),
   });
   fastPath.load();
+  void rehash().then(() => log(`hashed ${ownHashes.size} of Vigil's and its sensors' programs`));
 
   // Linux: programs blocked by hash (fapolicyd, plus the check on each launch below).
   const fapolicyd = linux
@@ -242,12 +265,36 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       })
     : undefined;
 
+  // The app pin, signed and kept in memory (pinStore.ts).
+  const pinStore = new AppPinStore(sys, {
+    dir: paths.appPinDir,
+    publicFile: paths.appPin,
+    ownerUid: process.getuid?.() ?? 0,
+    log,
+  });
+  await pinStore.load();
+
   const executor: Executor = new Executor({
     sys,
     journal,
     approvals,
     rules,
-    quarantine: { quarantineDir: paths.quarantineDir },
+    quarantine: {
+      quarantineDir: paths.quarantineDir,
+      stateDir: paths.supportDir,
+      log,
+      // The helper's own files where this install put them, on top of the
+      // built-in lists: its state, socket, launcher, runtime and code.
+      selfPaths: [
+        paths.supportDir,
+        paths.socket,
+        paths.approvalsDir,
+        paths.helperExecutable,
+        `${paths.helperExecutable}.d`,
+        process.execPath,
+        ...(process.argv[1] ? [process.argv[1]] : []),
+      ],
+    },
     syncPort,
     ...(linux
       ? {}
@@ -280,6 +327,21 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     }),
     fastPath,
     ...(fapolicyd ? { fapolicyd } : {}),
+    // The app pinned at install, never paused, stopped or blocked by hash.
+    appPin: pinStore,
+    ownHashes,
+    repin: {
+      // Read before the password dialog; the approval re-pins only this code.
+      candidate: (grant) => pinCandidate(sys, grant, { installed: installedSelf(sys.platform) }),
+      commit: async (bound) => {
+        const pin = await repinFromGrant(sys, bound, {
+          store: pinStore,
+          installed: installedSelf(sys.platform),
+        });
+        if (pin) log(`pinned the app at ${pin.path}`);
+        else log(`did not pin ${bound.source}: its code changed after the password was asked for`);
+      },
+    },
   });
 
   const server = new HelperServer({
@@ -311,18 +373,22 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     }
   };
 
-  let delivered = Promise.resolve();
+  const deliver = eventPipeline<SensorEvent>(
+    async (e) => {
+      const blocked = await stopBlockedLaunch(e);
+      const { ran, moves } = await fastPath.start(e);
+      return { ran: [...blocked, ...ran], moves };
+    },
+    (e, ran) => server.publish(e, ran),
+  );
   const hub = new SensorHub({
     santaLogPath: paths.santaLog,
     osqueryResultsPath: paths.osqueryResults,
-    // One event at a time, in order: a block finishes before the next event
-    // is looked at, and the app hears about each event with what was done.
-    sink: (e) => {
-      delivered = delivered.then(async () => {
-        const ran = [...(await stopBlockedLaunch(e)), ...(await fastPath.check(e))];
-        server.publish(e, ran);
-      });
-    },
+    // One event at a time, in order: its pauses, kills and blocks finish
+    // before the next event is looked at; its moves go on beside the next
+    // events, so a stuck one never holds up a later block. The app hears
+    // about events in order, each with what was done (eventPipeline).
+    sink: deliver,
     // Signatures of programs that started before Vigil (codesign is macOS-only).
     ...(process.platform === 'darwin' && !linux ? { signatureLookup: signatureLookup(sys) } : {}),
     // Linux: whether the package manager installed each program, answered at
@@ -414,7 +480,16 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       .catch((err: Error) => log(`could not start osquery: ${err.message}`));
   };
   keepOsquery();
-  const osqueryTimer = setInterval(keepOsquery, 5 * 60 * 1000);
+  const osqueryTimer = setInterval(
+    () => {
+      keepOsquery();
+      // Picks up Santa, osquery or the app installed or updated since.
+      void rehash();
+      // Puts the pin back from memory if its file went away; never a value older than the one in force.
+      pinStore.repair().catch((err: Error) => log(`could not repair the app pin: ${err.message}`));
+    },
+    5 * 60 * 1000,
+  );
   osqueryTimer.unref();
 
   // Every hour: read client.p12 back and repair it if it doesn't hold the

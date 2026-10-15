@@ -1,16 +1,29 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { PreflightRequest, SensorEvent } from '@vigil/core';
-import type { SessionStart } from '@vigil/detection';
-import { describe, expect, it, vi } from 'vitest';
+import {
+  DetectionRule,
+  forgetLegacyPatterns,
+  simulateLinearEngine,
+  sqliteStores,
+  SLOW_RULE_BUDGET_MS,
+  type SessionStart,
+} from '@vigil/detection';
+import { userOrigin } from '@vigil/detection/user';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { QuietRuleResult } from '../shared/ipc.js';
 import { Store } from './db/store.js';
 import { Detector, type DetectorOptions } from './detection.js';
 import { DryRunExecutor } from './executor.js';
 import { VigilCore } from './service.js';
+import { SLOW_RULE } from './slow-rule.js';
+import { makeRule } from './testing.js';
 
 const BAD = 'a'.repeat(64);
 
-function setup(extra: Partial<DetectorOptions> = {}) {
+function setup(extra: Partial<DetectorOptions> = {}, saved: DetectionRule[] = []) {
   const db = new DatabaseSync(':memory:');
+  // Rules an earlier release saved, there before the app starts.
+  for (const r of saved) sqliteStores(db).rules.save(r, 1);
   const store = new Store(db);
   const executor = new DryRunExecutor();
   const core = new VigilCore(store, executor, true);
@@ -51,6 +64,86 @@ function exec(path: string, sha256?: string): SensorEvent {
 }
 
 describe('Detector', () => {
+  afterEach(() => {
+    simulateLinearEngine(undefined);
+    forgetLegacyPatterns();
+  });
+
+  const ownRule = (id: string, value: string, mode: 'alert' | 'block' = 'block') =>
+    DetectionRule.parse({
+      id,
+      version: 1,
+      name: `Rule ${id}`,
+      description: '',
+      origin: 'user',
+      mode,
+      severity: 'high',
+      fidelity: 'high',
+      eventKinds: ['process.exec'],
+      condition: { field: 'process.path', op: 'regex', value },
+      response: [{ kind: 'process.kill', pid: '{{process.pid}}' }],
+      reasons: ['Matched.'],
+      tags: [],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+  it('keeps a saved rule whose pattern needs the usual engine, quietly marked as older', async () => {
+    // A lookahead: compiled before rule patterns moved to the linear-time engine.
+    const older = ownRule('older', '^/tmp/(?=e)evil$');
+    const { core, store, popups } = setup({}, [older, ownRule('newer', '^/tmp/[0-9a-f]{40}$')]);
+    const views = core.rules();
+    expect(views.find((r) => r.rule.id === 'older')).toMatchObject({
+      rule: { mode: 'block' },
+      legacy: true,
+    });
+    expect(views.find((r) => r.rule.id === 'newer')?.legacy).toBeUndefined();
+    // No popup, alert or badge for being older; it blocks as it did.
+    expect(store.listAlerts()).toEqual([]);
+    expect(popups).toEqual([]);
+    await core.handleEvent(exec('/tmp/evil'));
+    expect(store.listAlerts().map((a) => a.ruleId)).toContain('older');
+    // The helper hears it is one, so it can skip it if it never had it.
+    const set = core.detector!.helperRules();
+    expect(set.rules.map((r) => r.id)).toContain('older');
+    expect(set.legacy).toEqual(['older']);
+  });
+
+  it('refuses the same pattern in a new rule, with the reason', () => {
+    const { core } = setup({}, [ownRule('older', '^/tmp/(?=e)evil$')]);
+    const out = core.detector!.editor.validate({
+      ...ownRule('brand-new', '^/tmp/(?=e)evil$'),
+      origin: undefined,
+    });
+    expect(out.ok).toBe(false);
+    expect(out.errors.join()).toMatch(/linear-time.*lookahead/);
+  });
+
+  it('does not let a deleted older rule come back with the same id and pattern', () => {
+    const older = ownRule('older', '^/tmp/(?=e)evil$');
+    const { core } = setup({}, [older]);
+    const editor = core.detector!.editor;
+    // Kept while it stays as saved, edits included.
+    expect(editor.validate({ ...older, name: 'Renamed' }).ok).toBe(true);
+    editor.delete('older', userOrigin('rules-screen'));
+    for (const again of [older, { ...older, condition: { ...older.condition, nocase: true } }]) {
+      const out = editor.validate(again);
+      expect(out.ok).toBe(false);
+      expect(out.errors.join()).toMatch(/linear-time.*lookahead/);
+    }
+  });
+
+  it('says in sensor health when the linear-time engine is missing, and keeps saved rules', () => {
+    expect(setup().core.sensors.get('rule-matcher')).toBeUndefined();
+    simulateLinearEngine(false);
+    const { core } = setup({}, [ownRule('mine', '^/tmp/x[0-9]+$')]);
+    expect(core.sensors.get('rule-matcher')).toMatchObject({ state: 'degraded' });
+    expect(core.status().reasons.join()).toMatch(/Rule matcher/);
+    expect(core.rules().find((r) => r.rule.id === 'mine')).toMatchObject({ legacy: true });
+    const out = core.detector!.editor.validate(ownRule('brand-new', '^/tmp/y$'));
+    expect(out.errors.join()).toMatch(/can't run the linear-time matcher/);
+  });
+
   it('stores ordinary events with how many rules checked them', async () => {
     const { core, store, popups } = setup();
     await core.handleEvent(exec('/usr/bin/git'));
@@ -96,6 +189,46 @@ describe('Detector', () => {
       helper: 'applied',
     });
     expect(core.rules().find((r) => r.rule.id === 'known-bad-hash')?.rule.mode).toBe('alert');
+  });
+
+  it('notes a slow rule of your own once, quietly, and keeps it on', async () => {
+    const { core, store, popups } = setup();
+    core.detector!.engine.upsertRule({
+      id: 'my-rule',
+      version: 1,
+      name: 'My rule',
+      description: '',
+      origin: 'user',
+      mode: 'block',
+      severity: 'high',
+      fidelity: 'high',
+      eventKinds: ['process.exec'],
+      condition: { field: 'process.path', op: 'regex', value: '^/tmp/x[0-9]+$' },
+      response: [],
+      reasons: ['Ran from /tmp.'],
+      tags: [],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    // Every timed condition test looks like it took SLOW_RULE_BUDGET_MS.
+    let t = 0;
+    let calls = 0;
+    const clock = vi
+      .spyOn(performance, 'now')
+      .mockImplementation(() => (calls++ % 2 ? (t += SLOW_RULE_BUDGET_MS) : t));
+    for (let i = 0; i < 3; i++) await core.handleEvent(exec('/usr/bin/git'));
+    clock.mockRestore();
+    await vi.waitFor(() => expect(store.listAlerts()).toHaveLength(1));
+    const [note] = store.listAlerts();
+    expect(note).toMatchObject({
+      ruleId: SLOW_RULE.id,
+      notify: 'silent',
+      title: 'Slow rule: My rule',
+    });
+    expect(popups).toEqual([]);
+    const mine = core.rules().find((r) => r.rule.id === 'my-rule');
+    expect(mine).toMatchObject({ rule: { mode: 'block' }, slow: true });
+    expect(core.rules().some((r) => r.rule.id === SLOW_RULE.id)).toBe(false);
   });
 
   it('the Rules screen hears that a cancelled password left the rule blocking', async () => {
@@ -411,5 +544,401 @@ describe('built-in rule pack', () => {
     expect(rules).not.toContain('tcc-database-tamper');
     expect(rules).toContain('known-bad-hash');
     expect(rules.some((id) => id.startsWith('agent-'))).toBe(true);
+  });
+});
+
+describe('rules still learning', () => {
+  it('says which rules only record while the baseline is learned', () => {
+    const view = (installedAt: number) =>
+      setup({ installedAt })
+        .core.rules()
+        .find((v) => v.rule.id === 'persistence-first-seen');
+    const learning = view(Date.now());
+    expect(learning?.learningUntil).toBeGreaterThan(Date.now());
+    expect(view(1)?.learningUntil).toBeUndefined();
+    const plain = setup({ installedAt: Date.now() })
+      .core.rules()
+      .find((v) => v.rule.id === 'download-pipe-to-shell');
+    expect(plain?.learningUntil).toBeUndefined();
+  });
+});
+
+describe('stale open alerts', () => {
+  /** The read a real Mac raised hourly before the excuse covered it (2026-10-08), from signed Claude Code. */
+  const read = (service: string): SensorEvent => {
+    n++;
+    return {
+      id: `kc-${n}`,
+      ts: Date.now() + n,
+      source: 'santa',
+      kind: 'process.exec',
+      process: {
+        pid: 9000 + n,
+        path: '/bin/sh',
+        args: [
+          '/bin/sh',
+          '-c',
+          `security find-generic-password -a "alexmargaris" -w -s "${service}"`,
+        ],
+        ancestors: ['2.1.283', '2.1.283', '-zsh', 'login'],
+        // Santa-style: the signed root's team ID, no signing ID.
+        agent: {
+          id: 'claude-code',
+          session: '0123456789abcdef',
+          depth: 2,
+          teamId: 'Q6L2SF6YDW',
+        },
+      },
+    };
+  };
+
+  it('names the open alerts a rule now excuses, and clears only those', async () => {
+    const { core, store } = setup();
+    const rule = makeRule({ id: 'agent-keychain-secret', mode: 'alert', severity: 'high' });
+    const own = await core.alerts.raise({
+      rule,
+      events: [read('Claude Code-credentials')],
+      actions: [],
+    });
+    const other = await core.alerts.raise({
+      rule,
+      events: [read('Chrome Safe Storage')],
+      actions: [],
+    });
+    expect(core.staleAlerts()).toEqual([own.id]);
+    // Only what is still stale is cleared, whatever the caller passes.
+    expect(await core.clearStale([own.id, other.id])).toBe(1);
+    expect(store.getAlert(own.id)?.status).toBe('resolved');
+    expect(store.getAlert(own.id)?.decision?.note).toBe('Its rule no longer flags this');
+    expect(store.getAlert(other.id)?.status).toBe('open');
+    expect(core.staleAlerts()).toEqual([]);
+  });
+
+  it('leaves alerts that hold something back or were already answered', async () => {
+    const { core } = setup();
+    const rule = makeRule({ id: 'agent-keychain-secret', mode: 'alert', severity: 'high' });
+    const held = await core.alerts.raise({
+      rule,
+      events: [read('Claude Code-credentials')],
+      actions: [],
+    });
+    core.store.saveAlert({ ...held, containment: 'active' });
+    expect(core.staleAlerts()).toEqual([]);
+  });
+
+  it('leaves alerts that carry a suggestion or a taken action', async () => {
+    const { core, store } = setup();
+    const rule = makeRule({ id: 'agent-keychain-secret', mode: 'alert', severity: 'high' });
+    const raise = () =>
+      core.alerts.raise({ rule, events: [read('Claude Code-credentials')], actions: [] });
+    const suggested = await raise();
+    store.saveAlert({
+      ...suggested,
+      ai: { provider: 'claude', at: 1, verdict: 'unsure', summary: 's', proposalIds: ['p1'] },
+    });
+    const acted = await raise();
+    store.saveAlert({ ...acted, actionIds: ['act-1'] });
+    expect(core.staleAlerts()).toEqual([]);
+    expect(await core.clearStale([suggested.id, acted.id])).toBe(0);
+    expect(store.getAlert(suggested.id)?.status).toBe('open');
+  });
+
+  it("leaves an alert with a rule's pending suggestion, so Close all never expires it", async () => {
+    const { core, store } = setup();
+    const rule = makeRule({ id: 'agent-keychain-secret', mode: 'alert', severity: 'high' });
+    // Only the proposals table knows: no action taken, no AI assessment.
+    const suggested = await core.alerts.raise({
+      rule,
+      events: [read('Claude Code-credentials')],
+      actions: [{ kind: 'process.suspend', pid: 4242 }],
+    });
+    expect(suggested.ai).toBeUndefined();
+    expect(store.listProposals({ alertId: suggested.id }).map((p) => p.status)).toEqual([
+      'pending',
+    ]);
+    expect(core.staleAlerts()).toEqual([]);
+    expect(await core.clearStale([suggested.id])).toBe(0);
+    expect(store.listProposals({ alertId: suggested.id }).map((p) => p.status)).toEqual([
+      'pending',
+    ]);
+  });
+
+  it('reuses its answer until an open alert changes', async () => {
+    const { core, store } = setup();
+    const rule = makeRule({ id: 'agent-keychain-secret', mode: 'alert', severity: 'high' });
+    const a = await core.alerts.raise({
+      rule,
+      events: [read('Claude Code-credentials')],
+      actions: [],
+    });
+    const reads = vi.spyOn(store, 'getEvents');
+    expect(core.staleAlerts()).toEqual([a.id]);
+    const first = reads.mock.calls.length;
+    expect(core.staleAlerts()).toEqual([a.id]);
+    expect(reads.mock.calls.length).toBe(first);
+    const b = await core.alerts.raise({ rule, events: [read('Claude Code')], actions: [] });
+    expect([...core.staleAlerts()].sort()).toEqual([a.id, b.id].sort());
+    expect(reads.mock.calls.length).toBeGreaterThan(first);
+  });
+});
+
+describe('Only log this rule', () => {
+  const ID = 'download-pipe-to-shell'; // a pack rule that alerts
+  const tokenOf = (r: QuietRuleResult) => (r.ok ? r.token : 'refused');
+  const modeOf = (core: VigilCore) => core.rules().find((r) => r.rule.id === ID)?.rule.mode;
+
+  it('refuses when the rule went to Block after the card was drawn', async () => {
+    const { core } = setup();
+    expect(modeOf(core)).toBe('alert');
+    await core.setRuleMode(ID, 'block');
+    expect(await core.quietRule(ID)).toEqual({ ok: false, mode: 'block' });
+    expect(modeOf(core)).toBe('block');
+    expect(core.detector!.engine.modeOverride(ID)).toBe('block');
+  });
+
+  it('checks the mode when it applies, behind a change still waiting on the helper', async () => {
+    const { core } = setup();
+    let release!: () => void;
+    const held = new Promise<'applied'>((resolve) => (release = () => resolve('applied')));
+    let calls = 0;
+    // The first sync (the change to Block) waits; later ones go straight through.
+    core.detector!.syncHelper = () => (calls++ === 0 ? held : Promise.resolve('applied'));
+    const toBlock = core.setRuleMode(ID, 'block');
+    const quiet = core.quietRule(ID);
+    release();
+    await toBlock;
+    expect(await quiet).toEqual({ ok: false, mode: 'block' });
+    expect(modeOf(core)).toBe('block');
+  });
+
+  it('undo takes off the override when the rule had none', async () => {
+    const { core } = setup();
+    const engine = core.detector!.engine;
+    expect(engine.modeOverride(ID)).toBeUndefined();
+    const quiet = await core.quietRule(ID);
+    expect(quiet).toMatchObject({ ok: true, prior: null, rule: { id: ID, mode: 'shadow' } });
+    expect(modeOf(core)).toBe('shadow');
+    const undo = await core.undoQuietRule(ID, tokenOf(quiet));
+    expect(undo).toMatchObject({ ok: true, rule: { mode: 'alert' } });
+    expect(engine.modeOverride(ID)).toBeUndefined();
+    // With no override left, a pack update to the rule's own mode takes effect.
+    engine.upsertRule({ ...engine.getRule(ID)!, mode: 'block' });
+    expect(modeOf(core)).toBe('block');
+  });
+
+  it('undo puts back the override the rule had', async () => {
+    const { core } = setup();
+    const engine = core.detector!.engine;
+    await core.setRuleMode(ID, 'alert');
+    expect(engine.modeOverride(ID)).toBe('alert');
+    const quiet = await core.quietRule(ID);
+    expect(quiet).toMatchObject({ ok: true, prior: 'alert' });
+    expect(await core.undoQuietRule(ID, tokenOf(quiet))).toMatchObject({ ok: true });
+    expect(engine.modeOverride(ID)).toBe('alert');
+    // Once only.
+    expect(await core.undoQuietRule(ID, tokenOf(quiet))).toEqual({ ok: false, mode: 'alert' });
+  });
+
+  it('undo works once the helper took the quiet', async () => {
+    const { core } = setup();
+    core.detector!.syncHelper = async () => 'applied';
+    const quiet = await core.quietRule(ID);
+    expect(quiet).toMatchObject({ ok: true, helper: 'applied' });
+    expect(modeOf(core)).toBe('shadow');
+    expect(await core.undoQuietRule(ID, tokenOf(quiet))).toMatchObject({ ok: true });
+    expect(modeOf(core)).toBe('alert');
+  });
+
+  it('a quiet the password was cancelled for changes nothing and has no undo', async () => {
+    const { core } = setup();
+    core.detector!.syncHelper = async () => 'declined';
+    const quiet = await core.quietRule(ID);
+    expect(quiet).toMatchObject({ ok: true, helper: 'declined' });
+    expect(modeOf(core)).toBe('alert');
+    core.detector!.syncHelper = async () => 'applied';
+    expect(await core.undoQuietRule(ID, tokenOf(quiet))).toEqual({ ok: false, mode: 'alert' });
+  });
+
+  it('undo leaves a newer change alone', async () => {
+    const { core } = setup();
+    const quiet = await core.quietRule(ID);
+    await core.setRuleMode(ID, 'block');
+    expect(await core.undoQuietRule(ID, tokenOf(quiet))).toEqual({ ok: false, mode: 'block' });
+    expect(core.detector!.engine.modeOverride(ID)).toBe('block');
+  });
+
+  it('undo leaves a newer Shadow alone, even after a change and back', async () => {
+    const { core } = setup();
+    const engine = core.detector!.engine;
+    const quiet = await core.quietRule(ID);
+    await core.setRuleMode(ID, 'alert');
+    await core.setRuleMode(ID, 'shadow');
+    expect(engine.modeOverride(ID)).toBe('shadow');
+    expect(await core.undoQuietRule(ID, tokenOf(quiet))).toEqual({ ok: false, mode: 'shadow' });
+    expect(engine.modeOverride(ID)).toBe('shadow');
+    expect(modeOf(core)).toBe('shadow');
+  });
+
+  it('undo leaves a newer version of the rule alone', async () => {
+    const { core } = setup();
+    const engine = core.detector!.engine;
+    const quiet = await core.quietRule(ID);
+    const rule = engine.getRule(ID)!;
+    engine.upsertRule({ ...rule, version: rule.version + 1, mode: 'shadow' });
+    expect(await core.undoQuietRule(ID, tokenOf(quiet))).toEqual({ ok: false, mode: 'shadow' });
+    expect(engine.modeOverride(ID)).toBe('shadow');
+  });
+
+  it("undo can't use another rule's token", async () => {
+    const { core } = setup();
+    const OTHER = 'agent-secret-upload';
+    await core.setRuleMode(OTHER, 'alert');
+    const a = await core.quietRule(ID);
+    const b = await core.quietRule(OTHER);
+    expect(a.ok && b.ok).toBe(true);
+    expect(tokenOf(a)).not.toBe(tokenOf(b));
+    expect(await core.undoQuietRule(OTHER, tokenOf(a))).toEqual({ ok: false, mode: 'shadow' });
+    expect(await core.undoQuietRule(ID, tokenOf(b))).toEqual({ ok: false, mode: 'shadow' });
+    expect(await core.undoQuietRule(OTHER, tokenOf(b))).toMatchObject({ ok: true });
+  });
+
+  it('undo takes only the token its quiet gave', async () => {
+    const { core } = setup();
+    const quiet = await core.quietRule(ID);
+    expect(await core.undoQuietRule(ID, `${tokenOf(quiet)}x`)).toEqual({
+      ok: false,
+      mode: 'shadow',
+    });
+    expect(modeOf(core)).toBe('shadow');
+  });
+});
+
+describe('alert detail', () => {
+  it("shows a pack rule's card, in the mode the engine applies", async () => {
+    const { core } = setup();
+    const rule = makeRule({ id: 'download-pipe-to-shell', mode: 'alert', severity: 'medium' });
+    const alert = await core.alerts.raise({ rule, events: [exec('/bin/zsh')], actions: [] });
+    const before = core.alertDetail(alert.id)?.rule;
+    expect(before?.name).toBe('Downloaded script run directly');
+    expect(before?.mode).toBe('alert');
+    core.detector!.engine._setMode('download-pipe-to-shell', 'shadow');
+    expect(core.alertDetail(alert.id)?.rule?.mode).toBe('shadow');
+  });
+  it('copies the evidence redacted, without raw sensor records', async () => {
+    const { core } = setup();
+    core.evidenceRedaction = () => ({ username: 'alice', hostname: 'alices-mbp' });
+    const rule = makeRule({ id: 'download-pipe-to-shell', mode: 'alert', severity: 'medium' });
+    const event: SensorEvent = {
+      ...exec('/Users/alice/bin/tool'),
+      raw: { secret: 'kept out' },
+    };
+    if (event.kind === 'process.exec') {
+      event.process.args = ['tool', '--token=hunter2hunter2', 'alice@alices-mbp.local'];
+    }
+    const alert = await core.alerts.raise({ rule, events: [event], actions: [] });
+    expect(core.alertDetail(alert.id)?.events[0]?.raw).toBeDefined();
+    const json = (await core.alertEvidence(alert.id))!;
+    expect(json).not.toContain('kept out');
+    expect(json).not.toContain('"raw"');
+    expect(json).not.toContain('hunter2');
+    expect(json).not.toMatch(/alice/i);
+    expect(JSON.parse(json).rule.name).toBe('Downloaded script run directly');
+    expect(await core.alertEvidence('nope')).toBeNull();
+  });
+  it("copies only the fields picked for export, never a repeat's match key", async () => {
+    const { core, store } = setup();
+    core.evidenceRedaction = () => ({});
+    const rule = makeRule({ id: 'download-pipe-to-shell', mode: 'alert', severity: 'medium' });
+    const event = exec('/usr/local/bin/tool');
+    if (event.kind === 'process.exec') event.process.args = ['tool', '--token', 'hunter2'];
+    const alert = await core.alerts.raise({ rule, events: [event], actions: [] });
+    // The key is the evidence itself, command line included.
+    expect(store.getAlert(alert.id)?.repeats?.key).toContain('hunter2');
+    const json = (await core.alertEvidence(alert.id))!;
+    expect(json).not.toContain('hunter2');
+    const out = JSON.parse(json);
+    expect(out.alert.repeats).toEqual({ count: 1, lastAt: expect.any(Number) });
+    expect(out.alert.pile?.key).toBeUndefined();
+
+    // A field added to a record later stays out until the export picks it.
+    const d = core.alertDetail(alert.id)!;
+    vi.spyOn(core, 'alertDetail').mockReturnValue({
+      ...d,
+      alert: { ...d.alert, internal: 'later-field' } as never,
+      events: d.events.map((e) => ({ ...e, internal: 'later-field' }) as never),
+      actions: [
+        {
+          id: 'a1',
+          action: { kind: 'process.kill', pid: 1, internal: 'later-field' } as never,
+          actor: 'rule',
+          reason: 'r',
+          requestedAt: 1,
+          status: 'done',
+          internal: 'later-field',
+        } as never,
+      ],
+    });
+    const later = (await core.alertEvidence(alert.id))!;
+    expect(later).not.toContain('later-field');
+    expect(JSON.parse(later).actions[0]).toMatchObject({
+      id: 'a1',
+      action: { kind: 'process.kill' },
+    });
+  });
+  it("copies a system alert's details only under the keys its subtype writes", async () => {
+    const { core } = setup();
+    core.evidenceRedaction = () => ({});
+    const rule = makeRule({ id: 'download-pipe-to-shell', mode: 'alert', severity: 'medium' });
+    const xprotect: SensorEvent = {
+      id: 'ev-xp',
+      ts: Date.now(),
+      source: 'santa',
+      kind: 'system.alert',
+      subtype: 'xprotect_detected',
+      details: { malware: 'MACOS.ADLOAD', password: 'hunter2', internal: 'x' },
+    };
+    const tcc: SensorEvent = {
+      ...xprotect,
+      id: 'ev-tcc',
+      subtype: 'tcc_modified',
+      details: { service: 'kTCCServiceCamera', authRight: 'allowed', sessionToken: 'hunter2' },
+    };
+    const alert = await core.alerts.raise({ rule, events: [xprotect, tcc], actions: [] });
+    const json = (await core.alertEvidence(alert.id))!;
+    expect(json).not.toContain('hunter2');
+    expect(json).not.toContain('internal');
+    const events: Array<{ id: string; details: unknown }> = JSON.parse(json).events;
+    const a = events.find((e) => e.id === 'ev-xp')!;
+    const b = events.find((e) => e.id === 'ev-tcc')!;
+    expect(a.details).toEqual({ malware: 'MACOS.ADLOAD' });
+    // A known key that looks like a credential is still withheld.
+    expect(b.details).toEqual({
+      service: 'kTCCServiceCamera',
+      authRight: '[withheld: may contain a secret]',
+    });
+  });
+  it('copies a command line that may hold a secret as the marker, and others with names hidden', async () => {
+    const { core } = setup();
+    core.evidenceRedaction = () => ({ username: 'al', hostname: 'pc.local' });
+    const rule = makeRule({ id: 'download-pipe-to-shell', mode: 'alert', severity: 'medium' });
+    const secret = exec('/usr/local/bin/tool');
+    const plain = exec('/usr/bin/ssh');
+    if (secret.kind === 'process.exec') {
+      secret.process.args = ['tool', '--token', 'secret123456', 'al@pc'];
+    }
+    if (plain.kind === 'process.exec') plain.process.args = ['ssh', 'al@pc', '-l', 'al'];
+    const alert = await core.alerts.raise({ rule, events: [secret, plain], actions: [] });
+    const events: Array<{ id: string; process: { args: string[] } }> = JSON.parse(
+      (await core.alertEvidence(alert.id))!,
+    ).events;
+    expect(events.find((e) => e.id === secret.id)?.process.args).toEqual([
+      '[withheld: may contain a secret]',
+    ]);
+    expect(events.find((e) => e.id === plain.id)?.process.args).toEqual([
+      'ssh',
+      '<user>@<host>',
+      '-l',
+      '<user>',
+    ]);
   });
 });

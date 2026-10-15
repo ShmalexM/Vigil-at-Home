@@ -1,5 +1,5 @@
-import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { execFileWithin } from '@vigil/ai';
 import type { EventSource } from '@vigil/core';
 import type { HelperState } from './helper.js';
 import type { SensorRegistry } from './sensors.js';
@@ -148,6 +148,24 @@ export interface HealthProbe {
   platform?: NodeJS.Platform;
 }
 
+const PGREP_TIMEOUT_MS = 10_000;
+
+/**
+ * The helper's sensor report, from its helper.status answer. No answer
+ * because there is no connection (it dropped and is reconnecting) means
+ * the helper can't be vouched for, so it throws and the check says down; an
+ * older helper's answer without sensors is just no report.
+ */
+export function helperSensorsFrom(
+  query: () => Promise<{ sensors?: HelperSensors } | null>,
+): () => Promise<HelperSensors | null> {
+  return async () => {
+    const status = await query();
+    if (status === null) throw new Error('The helper is not connected');
+    return status.sensors ?? null;
+  };
+}
+
 export function macProbe(
   lastEventAt: HealthProbe['lastEventAt'],
   helper: HealthProbe['helper'],
@@ -160,8 +178,9 @@ export function macProbe(
     ...(helperSensors ? { helperSensors } : {}),
     ...(awakeSince ? { awakeSince } : {}),
     exists: existsSync,
-    running: (name) =>
-      new Promise((resolve) => execFile('/usr/bin/pgrep', ['-x', name], (err) => resolve(!err))),
+    // A pgrep that hangs counts as not running rather than holding up the health check.
+    running: async (name) =>
+      (await execFileWithin('/usr/bin/pgrep', ['-x', name], PGREP_TIMEOUT_MS)).code === 0,
     lastEventAt,
     helper,
     now: Date.now,
@@ -176,9 +195,16 @@ const minutes = (ms: number) => Math.max(1, Math.round(ms / 60_000));
  * here needs root.
  */
 export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
-  const helperState = p.helper();
   const fromHelper =
-    helperState === 'connected' ? await p.helperSensors?.().catch(() => null) : null;
+    p.helper() === 'connected' && p.helperSensors
+      ? await p.helperSensors().catch(() => 'failed' as const)
+      : null;
+  // Read the state after the query: the helper can drop while it runs, and a
+  // helper that can't answer its own status isn't working.
+  const now = p.helper();
+  const helperState: HelperState =
+    fromHelper === 'failed' && now === 'connected' ? 'not_running' : now;
+  const reportedSensors = fromHelper === 'failed' ? null : fromHelper;
   const helper: SensorHealth = {
     id: 'helper',
     name: 'Vigil helper',
@@ -198,7 +224,7 @@ export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
     processes: string[],
   ): Promise<SensorHealth> => {
     const base = { id, name, detail };
-    const reported = fromHelper?.[id];
+    const reported = reportedSensors?.[id];
     const installed = reported?.installed || paths.some((path) => p.exists(path));
     if (!installed) return { ...base, state: 'not_installed' };
     const running = await Promise.all(processes.map((name) => p.running(name)));
@@ -282,9 +308,47 @@ async function fapolicyd(p: HealthProbe, helperState: HelperState): Promise<Sens
   return { ...base, state: 'ok' };
 }
 
+/**
+ * The threat-feeds line, present only while a feed's last update was refused
+ * for shrinking its list too far. It stays `ok` with a note, so it never lowers
+ * the protection level, badges or pops anything up: the old list is still in use.
+ */
+export function feedHealth(
+  feeds: readonly { name: string; heldBack?: boolean }[],
+): SensorHealth | undefined {
+  const held = feeds.filter((f) => f.heldBack).map((f) => f.name);
+  if (!held.length) return undefined;
+  return {
+    id: 'threat-feeds',
+    name: 'Threat feeds',
+    detail: 'Known-bad lists refreshed in the background',
+    state: 'ok',
+    note: `Stale: ${held.join(', ')} kept ${held.length === 1 ? 'its' : 'their'} last list; the new one looked broken`,
+  };
+}
+
+/** Put the threat-feeds line in the registry, or take it out, only when it changes. */
+export function reportFeedHealth(
+  registry: SensorRegistry,
+  feeds: readonly { name: string; heldBack?: boolean }[],
+): void {
+  const h = feedHealth(feeds);
+  const prev = registry.get('threat-feeds');
+  if (!h) registry.remove('threat-feeds');
+  else if (prev?.state !== h.state || prev?.note !== h.note) registry.report(h);
+}
+
 /** Re-check and report every layer. */
+const latestCheck = new WeakMap<SensorRegistry, number>();
+
 export async function reportHealth(registry: SensorRegistry, probe: HealthProbe): Promise<void> {
-  for (const h of await checkHealth(probe)) {
+  // Checks overlap (a timer and a helper reconnect), and an older one can
+  // finish last; only the latest-started check may report.
+  const seq = (latestCheck.get(registry) ?? 0) + 1;
+  latestCheck.set(registry, seq);
+  const health = await checkHealth(probe);
+  if (latestCheck.get(registry) !== seq) return;
+  for (const h of health) {
     const prev = registry.get(h.id);
     if (
       prev?.state !== h.state ||
@@ -293,5 +357,44 @@ export async function reportHealth(registry: SensorRegistry, probe: HealthProbe)
       prev?.compatUntil !== h.compatUntil
     )
       registry.report(h);
+  }
+}
+
+/**
+ * The time Vigil has been running with the computer awake, from its start and
+ * the sleeps the power monitor reports. Keeps the last day of sleeps.
+ */
+export class AwakeClock {
+  private readonly sleeps: { from: number; to: number }[] = [];
+  private asleepAt: number | undefined;
+
+  constructor(
+    private readonly startedAt: number,
+    private readonly now: () => number = Date.now,
+  ) {}
+
+  suspend(at = this.now()): void {
+    this.asleepAt ??= at;
+  }
+
+  resume(at = this.now()): void {
+    if (this.asleepAt === undefined) return;
+    this.sleeps.push({ from: this.asleepAt, to: at });
+    this.asleepAt = undefined;
+    const keep = at - 24 * 60 * 60_000;
+    while (this.sleeps.length && this.sleeps[0]!.to < keep) this.sleeps.shift();
+  }
+
+  /** Awake running time since `since`. */
+  awakeMs(since: number): number {
+    const now = this.now();
+    const from = Math.max(since, this.startedAt);
+    let ms = Math.max(0, now - from);
+    const sleeps =
+      this.asleepAt === undefined
+        ? this.sleeps
+        : [...this.sleeps, { from: this.asleepAt, to: now }];
+    for (const z of sleeps) ms -= Math.max(0, Math.min(z.to, now) - Math.max(z.from, from));
+    return Math.max(0, ms);
   }
 }

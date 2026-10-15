@@ -4,6 +4,7 @@ import { ChatContext, type DogMood, type PackView } from '../../../shared/pack';
 import { leadChat, useLeadChat } from '../lead-chat';
 import '../styles/ask.css';
 import { LeadConversation, usePack } from '../views/Pack';
+import { isAskKey, isTyping } from '../views/nav-keys';
 import { useDialogFocus } from './dialog-focus';
 import { Dog } from './Dog';
 
@@ -33,7 +34,7 @@ export function AskScout({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() === 'k' && (isMac ? e.metaKey : e.ctrlKey) && !e.altKey) {
+      if (isAskKey(e, isMac, isTyping(e.target))) {
         e.preventDefault();
         if (shown) leadChat.toggle();
         else go('pack');

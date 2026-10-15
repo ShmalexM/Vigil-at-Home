@@ -6,11 +6,12 @@
 //
 // Nothing here can change anything: the source it reads has read methods
 // only. Every result goes through the same redaction as the data Vigil's own
-// AI gets (home folders, keys, tokens, email addresses), and results are cut
-// to 50 rows and 64 KB. Rule conditions and exclusions are never shown (a
-// rule's exclusions only as a count), so an agent can't learn how to word its
-// commands around them. A model's label on an event is shown, its reason
-// isn't: that text was written from what the event's own program wrote.
+// AI gets (home folders, user and host names, keys, tokens, email
+// addresses), and results are cut to 50 rows and 64 KB. Rule conditions and
+// exclusions are never shown (a rule's exclusions only as a count), nor (over
+// MCP) which rules a tool request matched, so an agent can't learn how to
+// word its commands around them. A model's label on an event is shown, its
+// reason isn't: that text was written from what the event's own program wrote.
 
 import {
   AgentId,
@@ -24,7 +25,7 @@ import {
   type Severity,
   type ToolsReply,
 } from '@vigil/core';
-import { redactValue } from '@vigil/ai/redact';
+import { localNames, redactValue } from '@vigil/ai/redact';
 import { z } from 'zod';
 import {
   VIGIL_TOOLS,
@@ -63,9 +64,6 @@ const SESSIONS_PER_AGENT = 3;
 /** Rule hits are counted over this many days. */
 export const HIT_DAYS = 7;
 const DAY = 24 * 60 * 60 * 1000;
-
-/** As Vigil's own AI gets data: no user or host name is configured there either. */
-const REDACTION = {};
 
 /** What the tools read. Read methods only: nothing reachable from here writes. */
 export interface VigilToolsSource {
@@ -175,7 +173,18 @@ function def<S extends z.ZodObject>(
 export class VigilTools {
   private readonly defs: Record<VigilToolName, ToolDef>;
 
-  constructor(private readonly src: VigilToolsSource) {
+  /**
+   * Show Vigil's answer to each agent tool request and the rules it matched.
+   * Only for the pack, inside Vigil: over MCP a watched agent could use them
+   * to find out which commands the rules catch.
+   */
+  private readonly verdicts: boolean;
+
+  constructor(
+    private readonly src: VigilToolsSource,
+    opts: { verdicts?: boolean } = {},
+  ) {
+    this.verdicts = opts.verdicts ?? false;
     this.defs = {
       vigil_status: def('Vigil status', z.object({}), () => this.status()),
       list_alerts: def(
@@ -359,7 +368,7 @@ export class VigilTools {
         ...this.alertRow(alert),
         ...(alert.ai?.details ? { explanationDetails: clip(alert.ai.details) } : {}),
       },
-      events: events.map((v) => eventRow(v.event, v.outcome, v.label)),
+      events: events.map((v) => eventRow(v.event, v.outcome, v.label, this.verdicts)),
       ...(alert.eventIds.length > MAX_ROWS ? { more: true } : {}),
     };
   }
@@ -388,9 +397,15 @@ export class VigilTools {
       ...(a.matched ? { matchedOnly: true } : {}),
       ...(a.label ? { label: a.label } : {}),
     });
+    // Over MCP, which tool requests matched a rule stays hidden, so `matched`
+    // passes none of them.
+    const shown =
+      a.matched && !this.verdicts
+        ? views.filter((v) => v.event.kind !== 'agent.tool_request')
+        : views;
     return {
       since: iso(since),
-      events: views.map((v) => eventRow(v.event, v.outcome, v.label)),
+      events: shown.map((v) => eventRow(v.event, v.outcome, v.label, this.verdicts)),
       ...(partial
         ? { note: `Only the newest ${SCAN_ROWS.toLocaleString('en')} events were searched.` }
         : {}),
@@ -489,7 +504,9 @@ export class VigilTools {
     return {
       session: sessionRow(d.session),
       tree: d.tree.slice(0, MAX_ROWS).map(treeRow),
-      events: d.events.slice(0, MAX_ROWS).map((v) => eventRow(v.event, v.outcome, v.label)),
+      events: d.events
+        .slice(0, MAX_ROWS)
+        .map((v) => eventRow(v.event, v.outcome, v.label, this.verdicts)),
       ...(cut ? { more: true } : {}),
     };
   }
@@ -648,12 +665,14 @@ function answerOf(o: EventOutcome): 'deny' | 'ask' | 'none' {
 
 /**
  * One event, flat, with the fields a person would look at, and the AI's
- * label when it has one (not its reason: see the top of this file).
+ * label when it has one (not its reason: see the top of this file). Without
+ * `verdicts`, a tool request leaves out Vigil's answer and the rules it matched.
  */
 export function eventRow(
   e: SensorEvent,
   outcome?: EventOutcome | null,
   label?: EventLabel,
+  verdicts = true,
 ): Record<string, unknown> {
   const r: Record<string, unknown> = { id: e.id, at: iso(e.ts), kind: e.kind };
   const p = 'process' in e ? e.process : undefined;
@@ -731,13 +750,13 @@ export function eventRow(
           ...(e.agent.session ? { session: e.agent.session } : {}),
         },
         // Known once the rules' outcome is stored with it.
-        ...(outcome ? { answer: answerOf(outcome) } : {}),
+        ...(outcome && verdicts ? { answer: answerOf(outcome) } : {}),
       });
       break;
     case 'process.exec':
       break;
   }
-  if (outcome?.matches.length) {
+  if (outcome?.matches.length && (verdicts || e.kind !== 'agent.tool_request')) {
     r['rules'] = outcome.matches.map((m) => ({ rule: m.ruleName, mode: m.mode }));
   }
   if (label) {
@@ -752,7 +771,8 @@ export function eventRow(
  * until it fits, and `truncated` says so.
  */
 function fit(result: Record<string, unknown>): Record<string, unknown> {
-  const out = redactValue(result, REDACTION) as Record<string, unknown>;
+  // As Vigil's own AI gets data: with this Mac's user and host names replaced.
+  const out = redactValue(result, localNames()) as Record<string, unknown>;
   const bytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
   let total = bytes(out);
   if (total <= MAX_RESULT_BYTES) return out;

@@ -263,4 +263,31 @@ describe('launch hashes', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a FIFO at once instead of waiting for a writer',
+    { timeout: 5000 },
+    async () => {
+      const { FileHasher, openNonBlocking, sha256OfFd } = await import('./linux/hash.js');
+      const { execFileSync } = await import('node:child_process');
+      const { closeSync, symlinkSync } = await import('node:fs');
+      const dir = mkdtempSync(join(tmpdir(), 'vigil-hash-'));
+      try {
+        const fifo = join(dir, 'fifo');
+        execFileSync('mkfifo', [fifo]);
+        const started = Date.now();
+        expect(new FileHasher().sha256(fifo)).toBeUndefined();
+        const fd = openNonBlocking(fifo)!;
+        expect(sha256OfFd(fd)).toBeUndefined();
+        closeSync(fd);
+        expect(Date.now() - started).toBeLessThan(2000);
+        // O_NOFOLLOW: a link there doesn't open.
+        writeFileSync(join(dir, 'real'), 'x');
+        symlinkSync(join(dir, 'real'), join(dir, 'link'));
+        expect(openNonBlocking(join(dir, 'link'), true)).toBeUndefined();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });

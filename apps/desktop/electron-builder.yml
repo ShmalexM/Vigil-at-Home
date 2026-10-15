@@ -85,7 +85,8 @@ linux:
   extraResources:
     - from: build/helper/common
       to: helper
-      # Leave out the macOS launchd job and scripts; Linux uses helper/linux/.
+      # Leave out the macOS launchd job and scripts; Linux uses helper/linux/,
+      # which shares lib.sh with them.
       filter:
         ['**/*', '!com.vigilathome.helper.plist', '!install.sh', '!uninstall.sh', '!vigil-helper']
     - from: build/helper/linux-${arch}

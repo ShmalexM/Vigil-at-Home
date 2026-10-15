@@ -33,6 +33,7 @@ import { selfRoots, underSelfRoot } from '@vigil/detection';
 import { z } from 'zod';
 import { ConnectorInput, isSafeConnectorUrl, type ConnectorView } from '../../shared/pack.js';
 import type { Cipher } from '../onboarding/keys.js';
+import { redactDataForPack, redactJsonText } from './redaction.js';
 
 /** A connection with no calls for this long is closed; the next call reopens it. */
 const IDLE_MS = 5 * 60_000;
@@ -72,7 +73,13 @@ export interface ConnectorHub {
   tools(id: string): Promise<RemoteTool[]>;
   /** Tools already known, without connecting. */
   knownTools(id: string): RemoteTool[];
-  call(id: string, tool: string, args: Record<string, unknown>): Promise<string>;
+  /** `signal`: the run asking ended; nothing is sent once it aborts. */
+  call(
+    id: string,
+    tool: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<string>;
 }
 
 interface Live {
@@ -84,6 +91,8 @@ interface Live {
   idle?: NodeJS.Timeout;
   /** The server process, for a stdio connector. */
   pid?: number;
+  /** Stops a connect still under way, closing the server it started. */
+  abort?: AbortController;
 }
 
 const Secrets = z.record(z.string(), z.string());
@@ -108,6 +117,7 @@ export class Connectors implements ConnectorHub {
         record: ConnectorRecord,
         secrets: Record<string, string>,
         onPid: (pid: number) => void,
+        signal: AbortSignal,
       ) => Promise<Client>;
     },
   ) {}
@@ -138,7 +148,7 @@ export class Connectors implements ConnectorHub {
     if (input.kind === 'stdio') this.assertNotVigil(input.command);
     const records = this.list();
     if (records.length >= 20) throw new Error('Twenty connectors is the most Vigil keeps');
-    const id = slug(input.name, new Set(records.map((r) => r.id)));
+    const id = newConnectorId(input.name, new Set(records.map((r) => r.id)));
     const secrets =
       input.kind === 'stdio' ? (input.env ?? {}) : input.token ? { token: input.token } : {};
     if (Object.keys(secrets).length > 0) {
@@ -211,25 +221,41 @@ export class Connectors implements ConnectorHub {
       }
       cursor = page.nextCursor;
     } while (cursor && out.length < MAX_TOOLS);
-    const l = this.live.get(id)!;
-    l.tools = out;
+    const l = this.live.get(id);
+    if (l) l.tools = out;
     this.o.onChange();
     return out;
   }
 
-  async call(id: string, tool: string, args: Record<string, unknown>): Promise<string> {
-    const client = await this.client(id);
+  async call(
+    id: string,
+    tool: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const client = await untilAborted(this.client(id), signal);
+    // Connecting can take a while: the run may have ended meanwhile.
+    signal?.throwIfAborted();
     const result = await client.callTool({ name: tool, arguments: args }, undefined, {
       timeout: CALL_MS,
+      ...(signal ? { signal } : {}),
     });
+    // Secrets in a response (keys, tokens, emails, home paths) are hidden
+    // before anything else sees it: the notebook, the risk judge, a cloud
+    // model. Each text part is redacted whole, and structured content, or a
+    // text part that is JSON, as data with its keys, so a value under a key
+    // like "token", or a key that is itself a token, goes before it is
+    // written out as text. Only then is anything cut. The AI runner redacts tool
+    // results again on their way out.
     const parts = Array.isArray(result.content) ? result.content : [];
     const text = parts
       .map((p: { type: string; text?: string }) =>
-        p.type === 'text' ? (p.text ?? '') : `[${p.type} content not shown]`,
+        p.type === 'text' ? redactJsonText(p.text ?? '') : `[${p.type} content not shown]`,
       )
       .join('\n');
-    const body = text || JSON.stringify(result.structuredContent ?? {});
-    const clipped = body.length > MAX_RESULT_CHARS ? `${body.slice(0, MAX_RESULT_CHARS)}…` : body;
+    const clean = text || redactDataForPack(result.structuredContent ?? {});
+    const clipped =
+      clean.length > MAX_RESULT_CHARS ? `${clean.slice(0, MAX_RESULT_CHARS)}…` : clean;
     return result.isError ? `The tool reported an error: ${clipped}` : clipped;
   }
 
@@ -261,26 +287,54 @@ export class Connectors implements ConnectorHub {
         if (record.kind === 'http' && !isSafeConnectorUrl(record.url ?? ''))
           throw new Error('Use https, or http only for a server on this computer');
         const secrets = this.secretsFor(id);
-        const onPid = (pid: number) => {
-          live.pid = pid;
-          this.o.spawned?.(pid, true);
+        let pid: number | undefined;
+        const onPid = (p: number) => {
+          pid = p;
+          live.pid = p;
+          this.o.spawned?.(p, true);
         };
-        const client = await withTimeout(
-          (this.o.connect ?? connectTo)(record, secrets, onPid),
-          CONNECT_MS,
-          `${record.name} didn’t answer`,
-        );
+        const ended = () => {
+          if (pid === undefined) return;
+          this.o.spawned?.(pid, false);
+          if (live.pid === pid) delete live.pid;
+        };
+        const abort = new AbortController();
+        live.abort = abort;
+        const pending = (this.o.connect ?? connectTo)(record, secrets, onPid, abort.signal);
+        let client: Client;
+        try {
+          client = await withTimeout(pending, CONNECT_MS, `${record.name} didn’t answer`);
+        } catch (err) {
+          // Stop the server now rather than whenever its handshake settles.
+          abort.abort();
+          // Giving up doesn't stop the server starting: close it if it still
+          // arrives, and only then stop tagging its process.
+          void pending
+            .then(
+              (c) => c.close(),
+              () => undefined,
+            )
+            .catch(() => undefined)
+            .finally(ended);
+          throw err;
+        }
+        // Switched off or removed while connecting: don't keep a server nobody will close.
+        if (!this.list().find((r) => r.id === id)?.enabled || this.live.get(id) !== live) {
+          await client.close().catch(() => undefined);
+          ended();
+          throw new Error(`${record.name} is switched off`);
+        }
         live.client = client;
         live.state = 'connected';
         delete live.error;
         return client;
       } catch (err) {
-        this.stopped(live);
         live.state = 'error';
         live.error = err instanceof Error ? err.message.slice(0, 300) : String(err);
         throw err;
       } finally {
         delete live.connecting;
+        delete live.abort;
         this.o.onChange();
       }
     })();
@@ -299,7 +353,10 @@ export class Connectors implements ConnectorHub {
     } catch {
       // Already gone.
     }
-    this.stopped(l);
+    // Still starting: stop the connect, which closes its server and stops
+    // tagging it once it has.
+    if (l.connecting) l.abort?.abort();
+    else this.stopped(l);
   }
 
   private stopped(l: Live): void {
@@ -358,6 +415,7 @@ async function connectTo(
   record: ConnectorRecord,
   secrets: Record<string, string>,
   onPid: (pid: number) => void,
+  signal: AbortSignal,
 ): Promise<Client> {
   const client = new Client({ name: 'vigil-at-home-pack', version: '1' });
   if (record.kind === 'stdio') {
@@ -367,6 +425,10 @@ async function connectTo(
       // Only the basics (PATH, HOME…) and the user's own values for this server.
       env: { ...getDefaultEnvironment(), ...secrets },
       stderr: 'ignore',
+    });
+    // Closing the transport ends the server, even mid-handshake.
+    signal.addEventListener('abort', () => void transport.close().catch(() => undefined), {
+      once: true,
     });
     // Report the pid as soon as the process exists, before the MCP handshake,
     // so the tracker tags the server before it can start anything.
@@ -378,6 +440,9 @@ async function connectTo(
     await client.connect(transport);
   } else {
     const token = secrets['token'];
+    signal.addEventListener('abort', () => void client.close().catch(() => undefined), {
+      once: true,
+    });
     await client.connect(
       new StreamableHTTPClientTransport(new URL(record.url!), {
         ...(token ? { requestInit: { headers: { Authorization: `Bearer ${token}` } } } : {}),
@@ -410,16 +475,34 @@ function realOr(path: string): string {
   }
 }
 
-function slug(name: string, taken: Set<string>): string {
-  const base =
+/**
+ * A connector's name as a slug: the id connectors were given before ids got
+ * a part of their own, and the name rules written then use
+ * (`mcp__<slug>__<tool>`). Never an identity: names repeat.
+ */
+export function connectorSlug(name: string): string {
+  return (
     name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '')
-      .slice(0, 30) || 'connector';
-  if (base === 'vigil' || taken.has(base))
-    return `${base.slice(0, 24)}-${newId().slice(-6).toLowerCase()}`;
-  return base;
+      .slice(0, 30) || 'connector'
+  );
+}
+
+/**
+ * A new connector's id: its name as a slug, then a part that is new each
+ * time (the time in hex and random hex from newId), so an id is never given
+ * twice, even to a connector removed and added again under the same name.
+ * Connectors saved before keep the ids they have.
+ */
+function newConnectorId(name: string, taken: Set<string>): string {
+  const base = connectorSlug(name).slice(0, 19).replace(/-$/, '');
+  for (;;) {
+    const n = newId().toLowerCase();
+    const id = `${base}-${n.slice(0, 12)}${n.slice(16, 24)}`;
+    if (!taken.has(id)) return id;
+  }
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
@@ -433,6 +516,26 @@ function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> 
       (e: unknown) => {
         clearTimeout(t);
         reject(e instanceof Error ? e : new Error(String(e)));
+      },
+    );
+  });
+}
+
+/** `work`, or a rejection as soon as `signal` aborts, whichever comes first. */
+function untilAborted<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return work;
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (v) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(v);
+      },
+      (e: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(e);
       },
     );
   });

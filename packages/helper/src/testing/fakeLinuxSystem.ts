@@ -1,4 +1,6 @@
+import type { OpenedFile, OpenOptions } from '../openedFile.js';
 import type { BinaryName, RunResult, System } from '../system.js';
+import { FakeFs } from './fakeFs.js';
 import type { FakeProcess } from './fakeSystem.js';
 
 interface FakeRule {
@@ -10,18 +12,36 @@ interface FakeRule {
 /** Scripted stand-in for Linux: /proc, nftables and systemctl. */
 export class FakeLinuxSystem implements System {
   readonly platform = 'linux' as const;
-  readonly runs: { bin: BinaryName; args: string[]; input?: string | undefined }[] = [];
+  readonly runs: { bin: BinaryName; args: string[]; input?: string | Buffer | undefined }[] = [];
   readonly signals: { pid: number; signal: string }[] = [];
   readonly processes = new Map<number, FakeProcess>();
   readonly rules: FakeRule[] = [];
   /** Units that are running, as "<scope> <unit>" with scope "system" or "user:<name>". */
   readonly active = new Set<string>();
+  /** `systemctl show` output by unit; a unit not listed reports only its own name. */
+  readonly shown = new Map<string, string>();
   tableExists = false;
   fagenrulesFails = false;
   private nextHandle = 2;
   console: number | undefined = 1000;
+  /**
+   * The helper's pid in this fake. Fixed, so the fake pids tests use never
+   * collide with the test runner's real pid.
+   */
+  pid = 999_999;
 
-  async run(bin: BinaryName, args: string[], opts: { input?: string } = {}): Promise<RunResult> {
+  selfPid(): number {
+    return this.pid;
+  }
+
+  async run(
+    bin: BinaryName,
+    args: string[],
+    opts: { input?: string | Buffer } = {},
+  ): Promise<RunResult> {
+    // ACL reads (commands/transfer.ts) are answered without being logged: no ACLs here.
+    if (bin === 'ls')
+      return { code: 0, stdout: `d--------- 1 root wheel 0 ${args.at(-1)}\n`, stderr: '' };
     this.runs.push({ bin, args, input: opts.input });
     if (bin === 'nft' && args.length === 1) return this.nftScript(args[0]!);
     const ok = (stdout = ''): RunResult => ({ code: 0, stdout, stderr: '' });
@@ -48,6 +68,8 @@ export class FakeLinuxSystem implements System {
           case 'start':
             this.active.add(`${user} ${unit}`);
             return ok();
+          case 'show':
+            return ok(this.shown.get(unit) ?? `Id=${unit}\nNames=${unit}\nExecStart=\n`);
           case 'daemon-reload':
           case 'restart':
           case 'try-restart':
@@ -117,8 +139,12 @@ export class FakeLinuxSystem implements System {
 
   /** /proc/self/mountinfo. */
   mounts = '';
+  /** Paths, file contents and links (fakeFs.ts). */
+  readonly fs = new FakeFs();
   /** Files by path, with their `fileId` (device:inode). */
-  readonly files = new Map<string, string>();
+  readonly files = this.fs.paths;
+  /** Contents and metadata by file id; a file not listed has ctime "1" and size 1. */
+  readonly inodes = this.fs.inodes;
   /** Open files by pid, as `[fd, link]`. */
   readonly fds = new Map<number, [number, string][]>();
   /** Start times by pid, in clock ticks. */
@@ -140,14 +166,25 @@ export class FakeLinuxSystem implements System {
     return this.starts.get(pid);
   }
 
-  fileId(path: string): string | undefined {
+  /** What a /proc/<pid>/exe or /proc/<pid>/fd/<n> link points at; other paths as they are. */
+  private procTarget(path: string): string | undefined {
     const m = /^\/proc\/(\d+)\/(exe|fd\/(\d+))$/.exec(path);
-    if (!m) return this.files.get(path);
+    if (!m) return path;
     const pid = Number(m[1]);
-    const target = m[3]
+    return m[3]
       ? this.procFds(pid).find(([n]) => n === Number(m[3]))?.[1]
       : this.processes.get(pid)?.path;
+  }
+
+  fileId(path: string): string | undefined {
+    const target = this.procTarget(path);
     return target === undefined ? undefined : this.files.get(target);
+  }
+
+  openFile(path: string, opts?: OpenOptions): OpenedFile | undefined {
+    const target = this.procTarget(path);
+    // /proc links are always followed, as the kernel does.
+    return target === undefined ? undefined : this.fs.open(target, target === path ? opts : {});
   }
 
   signal(pid: number, signal: 'SIGSTOP' | 'SIGCONT' | 'SIGKILL'): void {

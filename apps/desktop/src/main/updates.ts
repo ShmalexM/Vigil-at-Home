@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { z } from 'zod';
 import type { UpdateView } from '../shared/updates.js';
+import type { SelfUpdateAssets, SelfUpdater, Staged } from './self-update.js';
 
 /** Where releases are published. Only published releases are visible; drafts never are. */
 export const RELEASES_URL =
@@ -8,6 +9,9 @@ export const RELEASES_URL =
 /** Wait a little after start, then check a few times a day. */
 export const FIRST_CHECK_MS = 60_000;
 export const CHECK_EVERY_MS = 6 * 60 * 60_000;
+/** A downloaded update installs once the computer has been left alone this long. */
+export const IDLE_INSTALL_S = 10 * 60;
+const INSTALL_TICK_MS = 60_000;
 
 const Release = z.object({
   tag_name: z.string().max(100),
@@ -23,7 +27,11 @@ const Releases = z.array(z.unknown());
 
 const Saved = z.object({
   auto: z.boolean().default(true),
+  /** Download and install by itself, where this copy can (see SelfUpdater). */
+  install: z.boolean().default(true),
   dismissed: z.string().max(100).optional(),
+  /** The version that ran last, so the first start of a new one can say it updated. */
+  lastRun: z.string().max(100).optional(),
 });
 type Saved = z.infer<typeof Saved>;
 
@@ -31,13 +39,27 @@ export interface UpdateOptions {
   current: string;
   /** process.arch: arm64 (Apple silicon) or x64 (Intel), matching the DMG names. */
   arch: string;
+  /**
+   * process.platform. Only macOS gets a direct installer link: the Linux .deb
+   * and AppImage can't be told apart from here, and an x64 DMG must never be
+   * offered to an x64 Linux machine. Elsewhere the release page opens instead.
+   */
+  platform?: NodeJS.Platform;
   load: () => unknown;
   save: (s: Saved) => void;
   fetch?: typeof fetch;
   openExternal: (url: string) => Promise<void>;
-  /** Told once per version when a newer release turns up. */
+  /** Told once per version when a newer release turns up and won't install by itself. */
   onFound?: (version: string) => void;
   now?: () => number;
+  /** macOS, packaged: installs updates in place. Elsewhere the user downloads them. */
+  installer?: Pick<SelfUpdater, 'canInstall' | 'stage' | 'swap'>;
+  /** Starts the new version once the swap is done (app.relaunch, then exit). */
+  relaunch?: () => void;
+  /** Seconds since the user last touched the keyboard or mouse. */
+  idleSeconds?: () => number;
+  /** False while something on screen is waiting for the user (a popup, a password dialog). */
+  canRestart?: () => boolean;
 }
 
 /**
@@ -51,6 +73,13 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
   private available: UpdateView['available'];
   private told = new Set<string>();
   private timers: ReturnType<typeof setTimeout>[] = [];
+  private canSelf: boolean | undefined;
+  private staging: string | undefined;
+  private staged: Staged | undefined;
+  private installError: { version: string; error: string } | undefined;
+  /** Quitting: a check still in flight must not start staging. */
+  private stopped = false;
+  private updatedFrom: string | undefined;
 
   constructor(private readonly o: UpdateOptions) {
     super();
@@ -58,7 +87,7 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
 
   private saved(): Saved {
     const r = Saved.safeParse(this.o.load() ?? {});
-    return r.success ? r.data : { auto: true };
+    return r.success ? r.data : { auto: true, install: true };
   }
 
   view(): UpdateView {
@@ -71,19 +100,127 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
       ...(this.error ? { error: this.error } : {}),
       ...(this.available ? { available: this.available } : {}),
       dismissed: !!this.available && s.dismissed === this.available.version,
+      install: s.install,
+      ...(this.updatedFrom ? { updatedFrom: this.updatedFrom } : {}),
+      selfInstall: !!this.canSelf,
+      ...(this.staging ? { preparing: this.staging } : {}),
+      ...(this.staged ? { ready: this.staged.version } : {}),
+      ...(this.installError ? { installError: this.installError.error } : {}),
     };
+  }
+
+  /** Whether this copy installs updates by itself (decided once, at start). */
+  private async selfInstalls(): Promise<boolean> {
+    if (!this.o.installer) return false;
+    this.canSelf ??= await this.o.installer.canInstall().catch(() => false);
+    return this.canSelf;
+  }
+
+  /**
+   * Downloads and checks the available version beside the app, once per
+   * version, unless the user turned automatic installs off. A failure is kept
+   * in words and the version isn't tried again until the next start.
+   */
+  private async prepare(): Promise<void> {
+    const a = this.available;
+    const assets = a?.selfUpdate;
+    if (!a || !assets || !this.saved().install || !(await this.selfInstalls())) return;
+    if (this.stopped || this.staging || this.staged?.version === a.version) return;
+    if (this.installError?.version === a.version) return;
+    // Staging clears the folder beside the app, so an older staged copy goes too.
+    this.staged = undefined;
+    this.staging = a.version;
+    this.emit('changed');
+    try {
+      this.staged = await this.o.installer!.stage({ version: a.version, ...assets });
+    } catch (err) {
+      this.installError = {
+        version: a.version,
+        error: `Couldn’t get ${a.version} ready to install (${err instanceof Error ? err.message : String(err)})`,
+      };
+    } finally {
+      this.staging = undefined;
+      this.emit('changed');
+    }
+  }
+
+  /** Installs now if an update is ready and the user is away. */
+  private maybeInstall(): void {
+    if (this.saved().install) this.install();
+  }
+
+  /**
+   * Swaps in the downloaded version and starts it; the helper keeps blocking
+   * meanwhile. Synchronous from the checks to the relaunch, so nothing (a
+   * quit, a new staging, the user coming back) can happen in between. Waits
+   * while a version is being staged, and while a popup or password dialog
+   * is open. Unless `now` (the user pressed Restart to update), also waits
+   * until the computer has been left alone for {@link IDLE_INSTALL_S}.
+   *
+   * canRestart sees every password dialog the app has open (approvalOpen
+   * counts the dialog programs until they exit), and each closes itself,
+   * as a no, before the app stops waiting on it.
+   *
+   * Accepted: idle time and canRestart are read just before the swap, not
+   * during it. The swap and relaunch take a moment, and relaunching straight
+   * away is safer than leaving a swapped app running.
+   */
+  install(now = false): void {
+    const s = this.staged;
+    if (!s || this.staging || !this.o.installer) return;
+    if (!now && (this.o.idleSeconds?.() ?? 0) < IDLE_INSTALL_S) return;
+    if (this.o.canRestart && !this.o.canRestart()) return;
+    try {
+      this.o.installer.swap(s);
+    } catch (err) {
+      this.staged = undefined;
+      this.installError = {
+        version: s.version,
+        error: `Couldn’t install ${s.version} (${err instanceof Error ? err.message : String(err)})`,
+      };
+      this.emit('changed');
+      return;
+    }
+    this.staged = undefined;
+    this.o.relaunch?.();
+  }
+
+  /** On quit: put a downloaded update in place so the next start runs it. */
+  installOnQuit(): boolean {
+    const s = this.staged;
+    if (!s || this.staging || !this.o.installer || !this.saved().install) return false;
+    // Not under a password dialog or the helper's installer, which checks
+    // the app it installs from. The staged copy is cleared at the next
+    // start, so that run downloads it again and installs it later.
+    if (this.o.canRestart && !this.o.canRestart()) return false;
+    try {
+      this.o.installer.swap(s);
+      this.staged = undefined;
+      return true;
+    } catch (err) {
+      // Accepted: on quit there is no window left to say so, only this log.
+      // A failed swap normally puts the old app back; if even that failed,
+      // the error names where the old copy is.
+      console.error('[updates] could not install on quit:', err);
+      return false;
+    }
   }
 
   /** Starts the automatic checks. */
   start(): void {
+    const s = this.saved();
+    if (s.lastRun && compareVersions(s.lastRun, this.o.current) < 0) this.updatedFrom = s.lastRun;
+    if (s.lastRun !== this.o.current) this.o.save({ ...s, lastRun: this.o.current });
     const tick = () => {
       if (this.saved().auto) void this.check();
     };
     this.timers.push(setTimeout(tick, FIRST_CHECK_MS));
     this.timers.push(setInterval(tick, CHECK_EVERY_MS));
+    if (this.o.installer) this.timers.push(setInterval(() => this.maybeInstall(), INSTALL_TICK_MS));
   }
 
   stop(): void {
+    this.stopped = true;
     for (const t of this.timers) clearTimeout(t);
     this.timers = [];
   }
@@ -98,10 +235,22 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
         signal: AbortSignal.timeout(20_000),
       });
       if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
-      this.available = newest(Releases.parse(await res.json()), this.o.current, this.o.arch);
+      this.available = newest(
+        Releases.parse(await res.json()),
+        this.o.current,
+        this.o.arch,
+        this.o.platform,
+      );
       this.error = undefined;
       const v = this.available?.version;
-      if (v && !this.told.has(v) && this.saved().dismissed !== v) {
+      // A version that failed to install by itself goes back to the user.
+      const selfInstalls =
+        !!this.available?.selfUpdate &&
+        this.saved().install &&
+        this.installError?.version !== v &&
+        (await this.selfInstalls());
+      if (selfInstalls) void this.prepare();
+      else if (v && !this.told.has(v) && this.saved().dismissed !== v) {
         this.told.add(v);
         this.o.onFound?.(v);
       }
@@ -115,8 +264,13 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
     return this.view();
   }
 
-  setAuto(auto: boolean): void {
-    this.o.save({ ...this.saved(), auto });
+  /**
+   * install: check, download and install by itself; notify: check and say so;
+   * manual: only when the user presses Check now.
+   */
+  setMode(mode: 'install' | 'notify' | 'manual'): void {
+    this.o.save({ ...this.saved(), auto: mode !== 'manual', install: mode === 'install' });
+    if (mode === 'install') void this.prepare();
     this.emit('changed');
   }
 
@@ -133,6 +287,11 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
     if (!a) return;
     await this.o.openExternal(a.downloadUrl ?? a.notesUrl);
   }
+
+  /** Opens the release's page on GitHub, to read what changed. */
+  async openNotes(): Promise<void> {
+    if (this.available) await this.o.openExternal(this.available.notesUrl);
+  }
 }
 
 /**
@@ -144,6 +303,7 @@ export function newest(
   raw: unknown[],
   current: string,
   arch: string,
+  platform: NodeJS.Platform = 'darwin',
 ): UpdateView['available'] | undefined {
   const releases = raw.flatMap((item) => {
     const p = Release.safeParse(item);
@@ -158,18 +318,47 @@ export function newest(
     const version = r.tag_name.replace(/^v/, '');
     if (!parseVersion(version) || !isGitHub(r.html_url)) continue;
     if (compareVersions(version, current) <= 0) continue;
+    // A release with nothing to install on this Linux machine isn't an update for it.
+    if (platform === 'linux' && !r.assets.some((a) => isLinuxPackage(a.name, arch))) continue;
     if (!best || compareVersions(version, best.version) > 0) best = { version, r };
   }
   if (!best) return undefined;
-  const dmg = best.r.assets.find(
-    (a) => a.name.endsWith(`-${arch}.dmg`) && isGitHub(a.browser_download_url),
+  const dmg =
+    platform === 'darwin'
+      ? best.r.assets.find(
+          (a) => a.name.endsWith(`-${arch}.dmg`) && isGitHub(a.browser_download_url),
+        )
+      : undefined;
+  const zip =
+    platform === 'darwin'
+      ? best.r.assets.find(
+          (a) => a.name.endsWith(`-${arch}.zip`) && isGitHub(a.browser_download_url),
+        )
+      : undefined;
+  const sums = best.r.assets.find(
+    (a) => a.name === 'SHA256SUMS.txt' && isGitHub(a.browser_download_url),
   );
+  const selfUpdate: Omit<SelfUpdateAssets, 'version'> | undefined =
+    zip && sums
+      ? { zipName: zip.name, zipUrl: zip.browser_download_url, sumsUrl: sums.browser_download_url }
+      : undefined;
   return {
     version: best.version,
     notesUrl: best.r.html_url,
     ...(dmg ? { downloadUrl: dmg.browser_download_url } : {}),
+    ...(selfUpdate ? { selfUpdate } : {}),
     ...(best.r.published_at ? { publishedAt: best.r.published_at } : {}),
   };
+}
+
+/**
+ * A .deb or AppImage for this chip, as electron-builder names them: the
+ * .deb says amd64 and the AppImage x86_64 for x64; both say arm64 for ARM.
+ */
+export function isLinuxPackage(name: string, arch: string): boolean {
+  const tags =
+    arch === 'x64' ? ['amd64.deb', 'x86_64.AppImage'] : [`${arch}.deb`, `${arch}.AppImage`];
+  return tags.some((t) => name.endsWith(`-${t}`));
 }
 
 /** Only ever open links to this project's own pages on github.com. */

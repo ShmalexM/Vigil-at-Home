@@ -55,6 +55,8 @@ export const HelperQuery = z.discriminatedUnion('kind', [
     limit: z.number().int().min(1).max(1000).optional(),
   }),
   z.strictObject({ kind: z.literal('santa.profile') }),
+  /** Which rules are in force (the app's id for the sync) and how Santa's pre-launch rules went. */
+  z.strictObject({ kind: z.literal('detection.status') }),
   z.strictObject({ kind: z.literal('events.subscribe'), since: z.string().max(200).optional() }),
 ]);
 export type HelperQuery = z.infer<typeof HelperQuery>;
@@ -105,6 +107,9 @@ export const SelfGrant = z.strictObject({
 });
 export type SelfGrant = z.infer<typeof SelfGrant>;
 
+/** Most entries one list may have: as many as detection.list.set's 200 parts carry. */
+export const LIST_ENTRIES_MAX = 200 * 1000;
+
 /**
  * The rules Vigil enforces in block mode that the helper can run itself
  * (fastpath.ts), with the user's exceptions. The helper runs them on every
@@ -126,11 +131,50 @@ export type SelfGrant = z.infer<typeof SelfGrant>;
 export const DetectionSync = z.strictObject({
   kind: z.literal('detection.sync'),
   rules: z.array(DetectionRule).max(64),
+  /**
+   * Blocking rules only the app runs (they need its "first seen" baseline or
+   * agent tags). The helper never runs them, but dropping one or changing what
+   * it blocks needs the admin password like any other weakening.
+   */
+  appRules: z
+    .array(
+      z.strictObject({
+        id: z.string().min(1).max(200),
+        name: z.string().max(300),
+        digest: z.string().regex(/^[a-f0-9]{64}$/),
+      }),
+    )
+    .max(500)
+    .optional(),
   exceptions: z.array(RuleExceptionSchema).max(2000),
   selfPaths: SelfPaths.optional(),
   selfImages: SelfImages.optional(),
   selfHashes: SelfHashes.optional(),
   lists: z.record(ListName, Digest),
+  /**
+   * Ids of rules the app runs with an older pattern the linear-time engine
+   * can't run (legacy.ts in @vigil/detection). The helper runs such a rule
+   * only when it had that pattern in that rule already; otherwise it skips
+   * the rule rather than refusing the sync. This grants nothing on its own.
+   */
+  legacy: z.array(z.string().max(256)).max(64).optional(),
+  /**
+   * The contents of the named lists the helper may not have, so rules and
+   * lists go in force together in this one command. A named list it doesn't
+   * carry must already be on the helper with that digest.
+   */
+  entries: z.record(ListName, z.array(z.string().max(255)).max(LIST_ENTRIES_MAX)).optional(),
+  /** The app's id for this sync; detection.status reports the one in force. */
+  syncId: z
+    .string()
+    .regex(/^[A-Za-z0-9-]{1,64}$/)
+    .optional(),
+  /**
+   * When the app stops waiting for this sync (ms since the epoch). After it,
+   * the helper refuses the sync rather than commit it, so a password typed
+   * after the app counted the change as cancelled can't put it in force.
+   */
+  notAfter: z.number().int().positive().optional(),
 });
 export type DetectionSync = z.infer<typeof DetectionSync>;
 
@@ -168,7 +212,36 @@ export interface HelperRequest {
   approval?: string;
 }
 
-export type ErrorCode = 'invalid' | 'refused' | 'failed' | 'not_found';
+/**
+ * `installer-owned`: a refusal to move an item root owns in a folder others
+ * can write to, like an app a package installed in /Applications
+ * (commands/transfer.ts). The app words it for the user.
+ * `owner-cannot-write`: a restore refused because the item's owner can't
+ * write where it goes back, or it has more than one owner; restores run as
+ * the item's owner (commands/quarantine.ts).
+ * `startup-folder-linked`: a startup item whose folder is a link to
+ * somewhere else, which Vigil does not follow (commands/persistence.ts).
+ * `not-your-item`: a startup item in another user's folder, or not the
+ * asking user's own (commands/persistence.ts).
+ */
+export type ErrorCode =
+  | 'invalid'
+  | 'refused'
+  | 'failed'
+  | 'not_found'
+  | 'installer-owned'
+  | 'owner-cannot-write'
+  | 'startup-folder-linked'
+  | 'not-your-item';
+
+/** The codes the app words itself, in one calm line, rather than showing the message. */
+export const APP_WORDED_CODES = [
+  'installer-owned',
+  'owner-cannot-write',
+  'startup-folder-linked',
+  'not-your-item',
+] as const;
+export type AppWordedCode = (typeof APP_WORDED_CODES)[number];
 
 export type HelperResponse =
   | { id: string; ok: true; result: unknown }
@@ -183,6 +256,7 @@ export function isAction(cmd: HelperCommand): cmd is HelperAction {
     'events.subscribe',
     'detection.sync',
     'detection.list.set',
+    'detection.status',
     'self.grant',
     'santa.client.reissue',
   ].includes(cmd.kind);
@@ -224,7 +298,13 @@ export function parseRequest(line: string): HelperRequest | { error: string; id?
   const kind = env.data.command.kind;
   const isQuery =
     typeof kind === 'string' &&
-    ['helper.status', 'helper.journal', 'santa.profile', 'events.subscribe'].includes(kind);
+    [
+      'helper.status',
+      'helper.journal',
+      'santa.profile',
+      'events.subscribe',
+      'detection.status',
+    ].includes(kind);
   const parsed = isQuery
     ? HelperQuery.safeParse(env.data.command)
     : kind === 'detection.sync'

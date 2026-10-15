@@ -21,8 +21,48 @@ describe('AlertService', () => {
     expect((executor as DryRunExecutor).log).toEqual([suspend]);
     expect(alert.containment).toBe('active');
     expect(alert.actionIds).toHaveLength(1);
+    // Recorded as simulated at the time, so the popup can say "would have" truthfully later.
+    expect(store.getAction(alert.actionIds[0]!)?.result?.simulated).toBe(true);
     expect(popups.map((a) => a.id)).toEqual([alert.id]);
     expect(store.ruleMatchCounts(0).get('test.rule')).toBe(1);
+  });
+
+  it('pops up once for a block that repeats while its popup is unanswered', async () => {
+    let now = 1_000_000;
+    const store = memoryStore();
+    const executor = new DryRunExecutor();
+    const svc = new AlertService(store, executor, () => now);
+    const popups: Alert[] = [];
+    svc.on('popup', (a) => popups.push(a));
+    const raise = (path = '/tmp/evil') =>
+      svc.raise({ rule: makeRule(), events: [makeExec(path)], actions: [suspend] });
+    const first = await raise();
+    now += 60 * 60_000; // an hour later, past the repeat window
+    const second = await raise();
+    // The block still ran both times; only the second interruption is skipped.
+    expect(executor.log).toEqual([suspend, suspend]);
+    expect(second.notify).toBe('badge');
+    expect(second.containment).toBe('active');
+    // Another program still pops up.
+    const other = await raise('/tmp/other');
+    expect(popups.map((a) => a.id)).toEqual([first.id, other.id]);
+    // Once the first is answered, the next one pops up again.
+    await svc.decide(first.id, { verdict: 'malicious', release: false });
+    now += 60_000;
+    const third = await raise();
+    expect(popups.at(-1)?.id).toBe(third.id);
+    // And a day later an unanswered popup no longer holds them back.
+    now += 25 * 60 * 60_000;
+    const fourth = await raise();
+    expect(fourth.notify).toBe('popup');
+  });
+
+  it('still pops up every critical block', async () => {
+    const { svc, popups } = setup();
+    const rule = makeRule({ severity: 'critical' });
+    await svc.raise({ rule, events: [makeExec()], actions: [suspend] });
+    await svc.raise({ rule, events: [makeExec()], actions: [suspend] });
+    expect(popups).toHaveLength(2);
   });
 
   it('in alert mode proposes the response instead of running it', async () => {

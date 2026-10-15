@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { chmodSync, existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { APPROVAL_TTL_MS, Approvals, approvalAppleScript } from './approval.js';
+import { APPROVAL_TTL_MS, Approvals, MAX_PENDING, approvalAppleScript } from './approval.js';
 import type { HelperCommand } from './protocol.js';
 
 const dirs: string[] = [];
@@ -17,6 +17,25 @@ function make(now = () => Date.now()) {
 const undo: HelperCommand = { kind: 'file.restore', quarantineId: 'a'.repeat(24) };
 
 describe('approvals', () => {
+  it('leaves a waiting approval alone when its nonce comes with another command', () => {
+    const { dir, a } = make();
+    const n = a.request(undo);
+    const other: HelperCommand = { kind: 'file.restore', quarantineId: 'b'.repeat(24) };
+    Approvals.writeApproval(dir, n);
+    expect(a.consume(n, other)).toBe(false);
+    expect(existsSync(join(dir, n))).toBe(true);
+    expect(a.issuedFor(n, undo)).toBe(true);
+    expect(a.consume(n, undo)).toBe(true);
+  });
+
+  it('keeps at most a fixed number waiting, dropping the oldest', () => {
+    const { a } = make();
+    const first = a.request(undo);
+    const rest = Array.from({ length: MAX_PENDING }, () => a.request(undo));
+    expect(a.issuedFor(first, undo)).toBe(false);
+    expect(rest.every((n) => a.issuedFor(n, undo))).toBe(true);
+  });
+
   it('accepts a matching approval file once', () => {
     const { dir, a } = make();
     const nonce = a.request(undo);

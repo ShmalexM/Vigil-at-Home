@@ -85,4 +85,82 @@ describe('Scheduler', () => {
     expect(calls).toBe(9);
     s.stop();
   });
+
+  it('never gives up on a run: it marks it stuck and holds its job until it ends', async () => {
+    vi.useFakeTimers();
+    const errors: string[] = [];
+    const s = new Scheduler({
+      stuckAfterMs: 1_000,
+      onError: (name, err) => errors.push(`${name}: ${(err as Error).message}`),
+    });
+    let calls = 0;
+    let finish!: () => void;
+    s.every(
+      'slow',
+      5_000,
+      () => {
+        calls++;
+        return calls === 1 ? new Promise<void>((r) => (finish = r)) : undefined;
+      },
+      true,
+    );
+    let other = 0;
+    s.every('other', 5_000, () => void other++, true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(s.status()[0]).toMatchObject({ busy: true, stuck: true, timeouts: 1 });
+    expect(errors).toEqual(['slow: slow still running after 1 s']);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(calls).toBe(1); // never two at once
+    expect(other).toBeGreaterThan(3); // the other slot keeps working
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.status()[0]).toMatchObject({ busy: false, stuck: false, runs: 1, timeouts: 1 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(calls).toBe(2);
+  });
+
+  it('runs a job again on the next cycle once a hung call’s own time limit ends it', async () => {
+    vi.useFakeTimers();
+    const s = new Scheduler({ stuckAfterMs: 30_000 });
+    const callWithLimit = (ms: number) =>
+      Promise.race([
+        new Promise<never>(() => {}), // e.g. a connector that never answers
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('no answer in time')), ms),
+        ),
+      ]);
+    let calls = 0;
+    s.every(
+      'pack-dogs',
+      5_000,
+      async () => {
+        calls++;
+        if (calls === 1) await callWithLimit(2_000);
+      },
+      true,
+    );
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(s.status()[0]).toMatchObject({ busy: false, stuck: false, runs: 1 });
+    expect(s.status()[0]!.lastError).toBe('no answer in time');
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(calls).toBe(2);
+    expect(s.status()[0]!.lastError).toBeUndefined();
+  });
+
+  it('never marks a task with no expected time stuck', async () => {
+    vi.useFakeTimers();
+    const s = new Scheduler({ stuckAfterMs: 1_000 });
+    let finish!: () => void;
+    const long = s.enqueue(
+      'sync',
+      () => new Promise<string>((r) => (finish = () => r('done'))),
+      'routine',
+      { stuckAfterMs: Infinity },
+    );
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(s.active).toBe(1);
+    finish();
+    expect(await long).toBe('done');
+    expect(s.active).toBe(0);
+  });
 });

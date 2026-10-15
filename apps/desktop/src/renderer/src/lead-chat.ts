@@ -64,6 +64,14 @@ export const leadChat = {
   },
 };
 
+/**
+ * Whether an Enter in the message box sends. A held Enter repeats, and one
+ * that started on a suggestion bubble would otherwise send what it dropped in.
+ */
+export function sendsOnEnter(e: { repeat: boolean }): boolean {
+  return !e.repeat;
+}
+
 /** What people ask first, offered while the chat is empty. */
 export const STARTERS = [
   'Is my Mac OK right now?',

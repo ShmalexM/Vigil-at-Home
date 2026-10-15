@@ -38,3 +38,23 @@ export function useLive<T>(
   }, [key, reload, reset, also]);
   return [data, reload];
 }
+
+/**
+ * Re-renders every `ms` and whenever the window is shown or focused, so
+ * relative times ("5 min ago") stay right in a window that stays loaded.
+ */
+export function useClock(ms = 30_000): void {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const bump = () => tick((n) => n + 1);
+    const timer = setInterval(bump, ms);
+    const onVisible = () => document.visibilityState === 'visible' && bump();
+    window.addEventListener('focus', bump);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', bump);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [ms]);
+}

@@ -31,3 +31,5 @@ jobs:
       - run: pnpm exec vitest run packages/detection/src/__tests__/feeds.live.test.ts
         env:
           VIGIL_LIVE_FEEDS: '1'
+          # The maintainer's own abuse.ch key, optional; URLhaus and MalwareBazaar send it when set.
+          ABUSE_CH_AUTH_KEY: ${{ secrets.ABUSE_CH_AUTH_KEY }}

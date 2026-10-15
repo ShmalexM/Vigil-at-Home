@@ -1,6 +1,20 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { newId } from '@vigil/core';
-import type { DiaryTally, DogNote, DogNoteInput, NotesFilter } from '../../shared/pack.js';
+import type {
+  DiaryTally,
+  DogNote,
+  DogNoteInput,
+  NotesFilter,
+  NoteToolCall,
+  NoteToolCallInput,
+  NoteUsage,
+} from '../../shared/pack.js';
+import {
+  redactDataForPack,
+  redactJsonText,
+  redactSerialized,
+  redactTextForPack,
+} from './redaction.js';
 
 /** Notes older than this are dropped. */
 export const NOTE_DAYS = 30;
@@ -9,6 +23,8 @@ const DAY = 24 * 60 * 60_000;
 const MAX_PER_DOG = 2000;
 const TEXT = 2000;
 const LIST = 12;
+/** Tool calls kept per note. */
+const CALLS = 24;
 
 /**
  * Each dog's notebook: what an AI run was asked, what it looked at, what it
@@ -38,35 +54,50 @@ export class Notebook {
       CREATE INDEX IF NOT EXISTS pack_notes_dog_ts ON pack_notes (dog, ts);
       CREATE INDEX IF NOT EXISTS pack_notes_subject ON pack_notes (subject);
     `);
+    // Writes trim the dog that wrote; this catches dogs that went quiet.
+    this.prune();
   }
 
+  /**
+   * Every text field is redacted here before it is cut to size, and the
+   * whole note again, keys included, as the text that is stored.
+   */
   write(input: DogNoteInput): DogNote {
-    const note: DogNote = {
+    const fields: DogNote = {
       id: newId(this.now()),
       at: this.now(),
       dog: input.dog,
       kind: input.kind,
       ok: input.ok,
-      ask: clip(input.ask),
+      ask: clip(redactText(input.ask)),
       ...(input.subject ? { subject: input.subject } : {}),
-      lookedAt: (input.lookedAt ?? []).slice(0, LIST).map((s) => clip(s, 300)),
-      answer: clip(input.answer),
+      lookedAt: (input.lookedAt ?? []).slice(0, LIST).map((s) => clip(redactText(s), 300)),
+      answer: clip(redactText(input.answer)),
       reasons: reasonList(input.reasons),
       ...(input.fromOutside ? { fromOutside: true } : {}),
       ...(input.readReasons?.length ? { readReasons: reasonList(input.readReasons) } : {}),
-      ...(input.thinking ? { thinking: clip(input.thinking, 4000) } : {}),
+      ...(input.thinking ? { thinking: clip(redactText(input.thinking), 4000) } : {}),
       ...(input.provider ? { provider: input.provider } : {}),
       ...(input.model ? { model: input.model } : {}),
+      ...(input.calls?.length ? { calls: input.calls.slice(0, CALLS).map(call) } : {}),
+      ...(input.usage ? { usage: usage(input.usage) } : {}),
     };
+    const body = redactSerialized(fields);
+    const note = JSON.parse(body) as DogNote;
     this.db
       .prepare('INSERT INTO pack_notes (id, ts, dog, subject, body) VALUES (?, ?, ?, ?, ?)')
-      .run(note.id, note.at, note.dog, subjectKey(note.subject), JSON.stringify(note));
-    this.trim(note.dog);
+      .run(fields.id, fields.at, fields.dog, subjectKey(fields.subject), body);
+    this.trim(fields.dog);
     this.onChange();
     return note;
   }
 
-  /** Newest first. */
+  /**
+   * Newest first. Each stored note is redacted again on the way out, keys
+   * included, so notes written before a field was redacted, or before the
+   * redactor learned a secret, never reach the page or its Copy buttons as
+   * they were stored.
+   */
   list(filter: NotesFilter = {}): DogNote[] {
     const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
     const where: string[] = ['ts >= ?'];
@@ -84,7 +115,7 @@ export class Notebook {
         `SELECT body FROM pack_notes WHERE ${where.join(' AND ')} ORDER BY ts DESC, id DESC LIMIT ?`,
       )
       .all(...args, limit) as { body: string }[];
-    return rows.map((r) => JSON.parse(r.body) as DogNote);
+    return rows.map((r) => JSON.parse(redactSerialized(JSON.parse(r.body))) as DogNote);
   }
 
   /** Notes per dog since a time, for the diary. */
@@ -118,6 +149,23 @@ export class Notebook {
     this.onChange();
   }
 
+  /**
+   * Drops notes past the age limit, and each dog's beyond its cap. Run at
+   * startup. Given the dogs that exist, it also drops every note of a dog
+   * that doesn't, whatever its age: one retired while its run was finishing.
+   */
+  prune(dogsHere?: ReadonlySet<string>): void {
+    const dogs = this.db.prepare('SELECT DISTINCT dog FROM pack_notes').all() as { dog: string }[];
+    let gone = false;
+    for (const { dog } of dogs) {
+      if (dogsHere && !dogsHere.has(dog)) {
+        this.db.prepare('DELETE FROM pack_notes WHERE dog = ?').run(dog);
+        gone = true;
+      } else this.trim(dog);
+    }
+    if (gone) this.onChange();
+  }
+
   private trim(dog: string): void {
     this.db.prepare('DELETE FROM pack_notes WHERE ts < ?').run(this.now() - NOTE_DAYS * DAY);
     this.db
@@ -129,8 +177,35 @@ export class Notebook {
   }
 }
 
+/** The subject column, redacted like the note, the same way on write and lookup. */
 function subjectKey(s: DogNote['subject']): string | null {
-  return s ? `${s.kind}:${s.id}` : null;
+  return s ? redactTextForPack(`${s.kind}:${s.id}`) : null;
+}
+
+/** A call as stored: every field redacted whole, then cut to size. */
+function call(c: NoteToolCallInput): NoteToolCall {
+  return {
+    tool: clip(redactText(c.tool), 120),
+    title: clip(redactText(c.title), 200),
+    args: clip(redactData(c.args), 600),
+    outcome: c.outcome,
+    ...(c.reason ? { reason: clip(redactText(c.reason), 300) } : {}),
+    ...(c.result !== undefined ? { result: clip(redactData(c.result), 800) } : {}),
+  };
+}
+
+/** JSON text, even encoded twice, is read as data. */
+const redactText = (text: string) => redactJsonText(text);
+const redactData = redactDataForPack;
+
+function usage(u: NoteUsage): NoteUsage {
+  const whole = (n: number) => (Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0);
+  return {
+    inputTokens: whole(u.inputTokens),
+    cachedInputTokens: whole(u.cachedInputTokens),
+    outputTokens: whole(u.outputTokens),
+    costUsd: typeof u.costUsd === 'number' && u.costUsd >= 0 ? u.costUsd : null,
+  };
 }
 
 function clip(s: string, n = TEXT): string {
@@ -143,5 +218,5 @@ function reasonList(list: readonly string[] | undefined): string[] {
     .map((s) => s.trim())
     .filter(Boolean)
     .slice(0, LIST)
-    .map((s) => clip(s, 600));
+    .map((s) => clip(redactText(s), 600));
 }
