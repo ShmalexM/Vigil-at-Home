@@ -47,6 +47,9 @@ export {
   underSelfRoot,
   DEFAULT_PROTECTED_PATH_GLOBS,
   DEFAULT_NEVER_BLOCK_NETWORKS,
+  PLATFORM_PATH_GLOBS,
+  SHELL_NAMES,
+  shellCommand,
   type SafetyConfig,
 } from './safety.js';
 export {
@@ -56,6 +59,7 @@ export {
   assertExceptionScope,
   type DemotionPolicy,
   type DecisionResult,
+  type UndoBlockResult,
 } from './feedback.js';
 export type { UserOrigin } from './origin.js';
 export * from './state/stores.js';

@@ -71,7 +71,7 @@ export function registerIpc(
     getAlertDetail: (id) => core.alertDetail(id),
     alertEvidence: (id) => core.alertEvidence(id),
     decide: (id, input) => core.decide(id, stripUndefined(input)),
-    reopen: (id) => core.alerts.reopen(id),
+    reopen: (id) => core.reopen(id),
     clearNoticed: (ids) => core.clearNoticed(ids),
     staleAlerts: () => core.staleAlerts(),
     alertCounts: () => ({

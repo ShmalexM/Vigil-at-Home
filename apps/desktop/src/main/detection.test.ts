@@ -179,6 +179,63 @@ describe('Detector', () => {
     expect(executor.log.filter((a) => a.kind === 'santa.rule.set').length).toBeGreaterThan(0);
   });
 
+  it('never blocks /bin/sh on a malicious verdict, and logs why on the alert', async () => {
+    const { core, store, popups, executor } = setup();
+    core.detector!.engine.upsertRule(ownRule('any-sh', '^/bin/sh$', 'alert'));
+    // As Santa's log reports it (2026-10-10): no signature, the command split on spaces.
+    await core.handleEvent({
+      id: 'ev-sh',
+      ts: Date.now(),
+      source: 'santa',
+      kind: 'process.exec',
+      process: {
+        pid: 777,
+        path: '/bin/sh',
+        sha256: 'c'.repeat(64),
+        signing: 'unknown',
+        args: ['/bin/sh', '-c', 'security', 'find-generic-password', '-w', '-s', 'x'],
+      },
+    });
+    const alertId = popups[0]!;
+    await core.decide(alertId, { verdict: 'malicious', release: false });
+    expect(core.detector!.stores.lists.has('user_blocked_sha256', 'c'.repeat(64))).toBe(false);
+    expect(executor.log.filter((a) => a.kind === 'santa.rule.set')).toEqual([]);
+    const denied = store.listActions({ alertId }).find((r) => r.status === 'denied');
+    expect(denied?.action).toMatchObject({ kind: 'santa.rule.set', identifier: 'c'.repeat(64) });
+    expect(denied?.result?.error).toMatch(/did not block \/bin\/sh: .*every script/);
+  });
+
+  it('reopening a malicious verdict unblocks the program through the helper', async () => {
+    const { core, store, popups, executor } = setup();
+    core.detector!.stores.lists.add('known_bad_sha256', BAD, { source: 'test', updatedAt: 1 });
+    await core.handleEvent(exec('/Users/you/Downloads/evil', BAD));
+    const alertId = popups[0]!;
+    await core.decide(alertId, { verdict: 'malicious', release: false });
+    const lists = core.detector!.stores.lists;
+    expect(lists.has('user_blocked_sha256', BAD)).toBe(true);
+
+    // The helper refuses the change (the user cancelled the password): nothing moves.
+    core.detector!.syncHelper = async () => 'declined';
+    expect((await core.reopen(alertId)).status).toBe('resolved');
+    expect(lists.has('user_blocked_sha256', BAD)).toBe(true);
+
+    core.detector!.syncHelper = async () => 'applied';
+    const before = executor.log.length;
+    const reopened = await core.reopen(alertId);
+    expect(reopened.status).toBe('open');
+    expect(reopened.decision).toBeUndefined();
+    expect(lists.has('user_blocked_sha256', BAD)).toBe(false);
+    expect(executor.log.slice(before)).toContainEqual({
+      kind: 'santa.rule.remove',
+      ruleType: 'binary',
+      identifier: BAD,
+    });
+    // The verdict's own block is marked undone; the rule's containment is left as it was.
+    const sets = store.listActions({ alertId }).filter((r) => r.action.kind === 'santa.rule.set');
+    expect(sets.find((r) => r.actor === 'user')?.status).toBe('undone');
+    expect(sets.filter((r) => r.actor === 'rule').every((r) => r.status === 'done')).toBe(true);
+  });
+
   it('lists the engine rules and lets the user change their mode', async () => {
     const { core } = setup();
     const rules = core.rules();

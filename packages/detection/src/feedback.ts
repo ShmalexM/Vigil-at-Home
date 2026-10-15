@@ -2,6 +2,7 @@ import { canChangeMode, newId, type RuleMode, type UserDecision } from '@vigil/c
 import { isAgentField } from './agents/fields.js';
 import type { DetectionEngine } from './engine.js';
 import { assertUserOrigin, type UserOrigin } from './origin.js';
+import { shellCommand } from './safety.js';
 import type { RuleException } from './state/stores.js';
 import type { Detection } from './types.js';
 
@@ -28,6 +29,57 @@ export interface DecisionResult {
   suggestDemotion?: { ruleId: string; from: RuleMode; to: 'alert' | 'shadow'; message: string };
   /** Set when the user confirmed a threat: the Santa rule to add so it cannot start again. */
   santa?: NonNullable<Detection['santa']>;
+  /**
+   * Set when the user confirmed a threat but the program must not be blocked
+   * (part of macOS, a shell, Vigil itself): the block refused and why, in
+   * words for the user. Nothing was added to the user-blocked list.
+   */
+  blockRefused?: { santa: NonNullable<Detection['santa']>; message: string };
+}
+
+/** What taking back a "malicious" verdict changed. */
+export interface UndoBlockResult {
+  /** The hash taken off the user-blocked list, when it was on it. */
+  unlisted?: string;
+  /** The Santa rule to remove: the one the verdict added. */
+  santa?: { kind: 'santa.rule.remove'; ruleType: SantaRuleType; identifier: string };
+}
+
+type SantaRuleType = NonNullable<Detection['santa']>['ruleType'];
+
+/** The Santa rule a "malicious" verdict adds for this detection, if any. */
+function verdictBlock(d: Detection): NonNullable<Detection['santa']> | undefined {
+  if (d.santa) return d.santa;
+  const e = d.event;
+  const sha = 'process' in e ? e.process?.sha256 : undefined;
+  return sha
+    ? {
+        kind: 'santa.rule.set',
+        ruleType: 'binary',
+        identifier: sha,
+        policy: 'block',
+        message: d.alert?.title ?? d.match.ruleId,
+      }
+    : undefined;
+}
+
+/**
+ * Why a confirmed threat was not blocked, in words for the user. A shell
+ * running `-c <command>` names the program it ran: that is what to block.
+ */
+function refusedMessage(d: Detection, why: string): string {
+  const e = d.event;
+  const p = 'process' in e ? e.process : undefined;
+  const cmd = p && shellCommand(p);
+  if (p && cmd) {
+    const shown = cmd.length > 120 ? `${cmd.slice(0, 117)}...` : cmd;
+    const target = cmd.split(/\s+/)[0]?.replace(/^["']|["']$/g, '');
+    return (
+      `Vigil did not block ${p.path}: ${why}. It was only the shell that ran \`${shown}\`. ` +
+      `If ${target} is the threat, block it from its own alert.`
+    );
+  }
+  return `Vigil did not block ${p?.path ?? 'this program'}: ${why}.`;
 }
 
 const QUIETER: Partial<Record<RuleMode, 'alert' | 'shadow'>> = { block: 'alert', alert: 'shadow' };
@@ -106,18 +158,26 @@ export class Feedback {
     if (decision.verdict === 'malicious') {
       const e = d.event;
       const sha = 'process' in e ? e.process?.sha256 : undefined;
+      const santa = verdictBlock(d);
+      // The floor every rule's block passes through, for the rule returned
+      // and for the hash listed: the user-blocked rule turns a listed hash
+      // into a Santa block of its own.
+      const byHash = sha
+        ? {
+            kind: 'santa.rule.set' as const,
+            ruleType: 'binary' as const,
+            identifier: sha,
+            policy: 'block' as const,
+          }
+        : undefined;
+      for (const a of [santa, byHash]) {
+        const why = a && this.engine.refusal(a, e);
+        if (a && why) {
+          result.blockRefused = { santa: a, message: refusedMessage(d, why) };
+          return result;
+        }
+      }
       if (sha) lists.add(USER_BLOCKED_HASHES, sha, { source: 'user', updatedAt: ts });
-      const santa =
-        d.santa ??
-        (sha
-          ? {
-              kind: 'santa.rule.set' as const,
-              ruleType: 'binary' as const,
-              identifier: sha,
-              policy: 'block' as const,
-              message: d.alert?.title ?? ruleId,
-            }
-          : undefined);
       if (santa) result.santa = santa;
       return result;
     }
@@ -173,6 +233,32 @@ export class Feedback {
     assertUserOrigin(origin);
     if (!this.engine.getRule(ruleId)) throw new Error(`no rule ${ruleId}`);
     this.engine._clearMode(ruleId);
+  }
+
+  /**
+   * Take back a "malicious" verdict (the user reopened the alert): the hash
+   * leaves the user-blocked list, and the Santa rule the verdict added is
+   * returned for the app to remove through the helper, which asks the user.
+   * A hash the list does not hold (a block that was refused, or one already
+   * undone) returns nothing to remove.
+   */
+  undoBlock(d: Detection, origin: UserOrigin): UndoBlockResult {
+    assertUserOrigin(origin);
+    const santa = verdictBlock(d);
+    if (!santa) return {};
+    const e = d.event;
+    const sha = 'process' in e ? e.process?.sha256 : undefined;
+    const lists = this.engine.stores.lists;
+    const result: UndoBlockResult = {};
+    if (sha && lists.remove(USER_BLOCKED_HASHES, sha)) result.unlisted = sha;
+    if (result.unlisted || !sha) {
+      result.santa = {
+        kind: 'santa.rule.remove',
+        ruleType: santa.ruleType,
+        identifier: santa.identifier,
+      };
+    }
+    return result;
   }
 
   removeException(id: string, origin: UserOrigin): void {

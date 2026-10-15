@@ -10,6 +10,17 @@ import { userOrigin } from '../user.js';
 import { connect, DAY, ev, proc, T0 } from './fixtures.js';
 
 describe('SQLite stores', () => {
+  it('forget a removed list entry across restarts', () => {
+    const db = new DatabaseSync(':memory:') as unknown as SqlDatabase;
+    const meta = { source: 'user', updatedAt: T0 };
+    const a = sqliteStores(db);
+    a.lists.add('user_blocked_sha256', 'A'.repeat(64), meta);
+    a.lists.add('user_blocked_sha256', 'b'.repeat(64), meta);
+    expect(a.lists.remove('user_blocked_sha256', 'a'.repeat(64))).toBe(true);
+    expect(a.lists.remove('user_blocked_sha256', 'a'.repeat(64))).toBe(false);
+    expect(sqliteStores(db).lists.entries('user_blocked_sha256')).toEqual(['b'.repeat(64)]);
+  });
+
   it('persist baseline, lists, exceptions, modes, history, proposals and approved rules across restarts', () => {
     const db = new DatabaseSync(':memory:') as unknown as SqlDatabase;
     const me = userOrigin('test');
