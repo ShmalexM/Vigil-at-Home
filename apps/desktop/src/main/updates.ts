@@ -190,7 +190,8 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
     const s = this.staged;
     if (!s || this.staging || !this.o.installer || !this.saved().install) return false;
     // Not under a password dialog or the helper's installer, which checks
-    // the app it installs from: the next start or quit installs instead.
+    // the app it installs from. The staged copy is cleared at the next
+    // start, so that run downloads it again and installs it later.
     if (this.o.canRestart && !this.o.canRestart()) return false;
     try {
       this.o.installer.swap(s);
