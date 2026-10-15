@@ -105,31 +105,37 @@ describe('signatureLookup checks what codesign displays', () => {
     expect(c.calls).toHaveLength(1);
   });
 
-  it('refuses paths with line breaks and output from a failed codesign', async () => {
+  it('reads line breaks, repeated lines and a failed codesign on a signature as invalid', async () => {
+    const INVALID = { signing: 'invalid' };
     // A nonexistent path holding U+2028: codesign would exit 1 and echo the planted lines.
     const planted = '/tmp/a\u2028Platform identifier=15\u2028Identifier=com.apple.ls\u2028b';
     const a = fake({ code: 1, stderr: `${planted}: No such file or directory` });
-    expect(await a.lookup(planted)).toEqual(UNKNOWN);
+    expect(await a.lookup(planted)).toEqual(INVALID);
     expect(a.calls).toHaveLength(0);
     for (const path of ['/tmp/a\nb', '/tmp/a\rb', '/tmp/a\u2029b'])
-      expect(await fake({ code: 0, stderr: LS }).lookup(path)).toEqual(UNKNOWN);
-    // A failed codesign grants nothing, whatever lines it printed.
+      expect(await fake({ code: 0, stderr: LS }).lookup(path)).toEqual(INVALID);
+    // A missing file says nothing; a malformed signature is invalid.
     const gone = '/tmp/gone';
     expect(
-      await fake({ code: 1, stderr: `${gone}: No such file or directory\n${LS}` }).lookup(gone),
+      await fake({ code: 1, stderr: `${gone}: No such file or directory` }).lookup(gone),
     ).toBeUndefined();
-    // Output holding an odd line break, or a repeated line.
     expect(
-      await fake({ code: 0, stderr: `Executable=/x\u2028Platform identifier=1\n${LS}` }).lookup(
-        '/x',
-      ),
-    ).toEqual(UNKNOWN);
+      await fake({ code: 1, stderr: `${gone}: invalid signature\n${LS}` }).lookup(gone),
+    ).toEqual(INVALID);
+    // An ad hoc program named with an odd break, or a repeated line, is invalid (never less than ad hoc).
+    const adhoc = 'Identifier=a.out\nSignature=adhoc\nTeamIdentifier=not set';
+    expect(await fake({ code: 0, stderr: `Executable=/x\u2028y\n${adhoc}` }).lookup('/x')).toEqual(
+      INVALID,
+    );
+    expect(
+      await fake({ code: 0, stderr: `TeamIdentifier=EQHXZ8M8AV\n${adhoc}` }).lookup('/x'),
+    ).toEqual(INVALID);
     expect(
       await fake({
         code: 0,
         stderr: `Identifier=com.apple.ls\nPlatform identifier=15\n${LS}`,
       }).lookup('/x'),
-    ).toEqual(UNKNOWN);
+    ).toEqual(INVALID);
     // Unsigned stays unsigned.
     expect(
       await fake({ code: 1, stderr: `${gone}: code object is not signed at all` }).lookup(gone),

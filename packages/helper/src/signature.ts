@@ -45,13 +45,15 @@ const DEVELOPER_ID =
 const APP_STORE = 'certificate leaf[field.1.2.840.113635.100.6.1.9] exists';
 
 /**
- * What a lookup gives when the display can't be trusted: signed, but by
- * nobody it can name. Never undefined, which rules read as least suspicious
- * (`neq 'apple'` is false for a missing field), and never `invalid`, which
- * would alert on every app that fails a check for harmless reasons (a
+ * What a lookup gives when a class can't be confirmed: signed, but by nobody
+ * it can name. Never undefined, which rules read as least suspicious (`neq
+ * 'apple'` is false for a missing field), and never `invalid`, which would
+ * alert on every app that fails a check for harmless reasons (a
  * self-updating bundle, a timeout).
  */
 const unverified = (): SignatureInfo => ({ signing: 'unknown' });
+/** Output a real signature never produces (planted or repeated lines): a tampered name. */
+const tampered = (): SignatureInfo => ({ signing: 'invalid' });
 
 /**
  * The requirement a signature class must pass with `codesign --verify`
@@ -87,16 +89,18 @@ export function signatureLookup(
       // codesign echoes the path in its output, so a path with a line break
       // could plant lines (Platform identifier=, Authority=) ahead of the real ones.
       if (recent.length >= PER_MINUTE || !path.startsWith('/')) return undefined;
-      if (/[\n\r\u2028\u2029]/.test(path)) return unverified();
+      // No real program path holds a line break: treat it as tampering.
+      if (/[\n\r\u2028\u2029]/.test(path)) return tampered();
       recent.push(t);
       const r = await sys.run('codesign', ['-dv', path], { timeoutMs: 10_000 });
       const output = `${r.stderr}\n${r.stdout}`;
       if (/code object is not signed at all/.test(output)) return { signing: 'unsigned' as const };
-      if (ODD_BREAKS.test(output)) return unverified();
-      // A failed codesign (a missing file, say) says nothing, as before.
-      if (r.code !== 0) return undefined;
+      if (ODD_BREAKS.test(output)) return tampered();
+      // A failed codesign says nothing about a missing file; about a signature
+      // it could read (a malformed one), it is invalid.
+      if (r.code !== 0) return /^Identifier=/m.test(output) ? tampered() : undefined;
       const info = parseCodesign(output);
-      if (!info) return /^Identifier=/m.test(output) ? unverified() : undefined;
+      if (!info) return /^Identifier=/m.test(output) ? tampered() : undefined;
       const identifier = /^Identifier=(.+)$/m.exec(output)?.[1]?.trim() ?? '';
       const req = requirementFor(info, identifier);
       if (req === null) return unverified();
