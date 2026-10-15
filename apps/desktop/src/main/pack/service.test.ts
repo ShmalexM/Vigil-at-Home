@@ -260,6 +260,24 @@ describe('the pack', () => {
     expect(view.noAiWhy).toBeUndefined();
   });
 
+  it('never keeps an AI check that was already running when the settings changed', async () => {
+    const status: Partial<PackAiStatus> = { anyReady: false };
+    const statusGate: { wait?: Promise<void> | undefined; entered?: () => void } = {};
+    const { pack } = setup({ status, statusGate });
+    let release!: () => void;
+    statusGate.wait = new Promise<void>((r) => (release = r));
+    const entered = new Promise<void>((r) => (statusGate.entered = r));
+    const old = pack.view();
+    await entered;
+    // The settings change while that check is out; it still answers with what it saw.
+    statusGate.wait = undefined;
+    pack.forgetAiStatus();
+    release();
+    expect((await old).noAi).toBe(true);
+    status.anyReady = true;
+    expect((await pack.view()).noAi).toBe(false);
+  });
+
   it('runs the Lead dog as the user’s own chat, and pack jobs as background work', async () => {
     const { pack, handlers, runs } = setup();
     handlers.push(() => ({ reply: 'Hi!', actions: [] }));

@@ -31,6 +31,8 @@ function fakeAi(
   opts: VigilAiOptions,
   calls: RunRequest<unknown>[],
   signInUrl = 'https://example.test/sign-in',
+  /** States changed outside the app (Ollama started, a CLI signed in), read on every check. */
+  outside: Partial<Record<string, ProviderStatus['state']>> = {},
 ): VigilAi {
   const statuses: ProviderStatus[] = opts.settings.order.map((provider) => ({
     provider,
@@ -39,7 +41,7 @@ function fakeAi(
   return {
     quota: undefined as never,
     listApiModels: async () => [],
-    status: async () => statuses,
+    status: async () => statuses.map((st) => ({ ...st, state: outside[st.provider] ?? st.state })),
     signIn: async () => ({
       url: signInUrl,
       completed: Promise.resolve(true),
@@ -89,6 +91,8 @@ function setup(
     mode?: SetupMode;
     executor?: ActionExecutor;
     signInUrl?: string;
+    outside?: Partial<Record<string, ProviderStatus['state']>>;
+    now?: () => number;
   } = {},
 ) {
   const store = memoryStore();
@@ -105,9 +109,9 @@ function setup(
     openExternal: async (url) => void opened.push(url),
     create: (opts) => {
       made.push(opts);
-      return fakeAi(opts, calls, o.signInUrl);
+      return fakeAi(opts, calls, o.signInUrl, o.outside);
     },
-    now: () => NOW,
+    now: o.now ?? (() => NOW),
   });
   return { store, core, ai, calls, made, opened };
 }
@@ -323,6 +327,29 @@ describe('AiBridge view', () => {
     const on = await ai.packAi().status();
     expect(on.anyReady).toBe(true);
     expect(on.noAiWhy).toBeUndefined();
+  });
+
+  it('says AI changed when a check finds a provider ready that wasn’t, so the chat asks again', async () => {
+    const outside: Partial<Record<string, ProviderStatus['state']>> = { ollama: 'not_installed' };
+    let now = NOW;
+    const { ai } = setup({ outside, now: () => now });
+    let changed = 0;
+    ai.on('changed', () => changed++);
+    await ai.view();
+    await ai.view();
+    expect(changed).toBe(0);
+    delete outside.ollama;
+    await ai.view();
+    expect(changed).toBe(1);
+    await ai.view();
+    expect(changed).toBe(1);
+    // Flipping back right away waits its turn; a later check tells it.
+    outside.ollama = 'error';
+    await ai.view();
+    expect(changed).toBe(1);
+    now += 30_000;
+    await ai.view();
+    expect(changed).toBe(2);
   });
 
   it('opens the vendor sign-in page in the browser', async () => {

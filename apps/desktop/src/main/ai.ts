@@ -134,6 +134,8 @@ const EXPLAIN_NOW_DEADLINE_MS = 90_000;
 const EXPLAIN_BACKGROUND_DEADLINE_MS = 180_000;
 /** Most events of one alert the AI sees. */
 const MAX_EVENTS = 20;
+/** How often a readiness change found by a check is told to the pages. */
+const READY_TOLD_EVERY_MS = 30_000;
 const LABEL_EVERY_MS = 60_000;
 /** The same program or destination is labelled at most once an hour. */
 const REPEAT_MS = 60 * 60_000;
@@ -229,6 +231,9 @@ export class AiBridge extends EventEmitter<{
   note: [helper: HelperId, note: Omit<DogNoteInput, 'dog'>];
 }> {
   private instance: { ai: VigilAi; key: string } | undefined;
+  /** Which providers the last view found ready, to notice one changing outside the app. */
+  private lastReady: string | undefined;
+  private lastReadyToldAt = -Infinity;
   private readonly now: () => number;
   private readonly explaining = new Set<string>();
   private queuedBackground = 0;
@@ -637,6 +642,19 @@ export class AiBridge extends EventEmitter<{
       canShareSignIn: false,
       signInShared: false,
     });
+    // Ollama started, or a CLI signed in, outside the app: tell everyone, so the chat asks again.
+    // At most once in a while, so a provider that flips between ready and not can't keep
+    // every page re-checking; a change held back is told on a later check.
+    const ready = providers
+      .filter((p) => p.state === 'ready')
+      .map((p) => p.provider)
+      .join(',');
+    if (this.lastReady === undefined) this.lastReady = ready;
+    else if (this.lastReady !== ready && this.now() - this.lastReadyToldAt >= READY_TOLD_EVERY_MS) {
+      this.lastReady = ready;
+      this.lastReadyToldAt = this.now();
+      this.emit('changed');
+    }
     const mode = this.o.mode();
     return {
       ...(mode ? { mode } : {}),
