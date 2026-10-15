@@ -28,6 +28,8 @@ export interface ListStore {
   has(list: string, value: string): boolean;
   replace(list: string, entries: Iterable<string>, meta: ListEntryMeta): void;
   add(list: string, entry: string, meta: ListEntryMeta): void;
+  /** Remove one entry as written. True when it was there. */
+  remove(list: string, entry: string): boolean;
   names(): string[];
   size(list: string): number;
   /** Every entry as stored (lower-cased; subnets as written), for copying a list elsewhere. */
@@ -135,6 +137,22 @@ class IndicatorList {
     this.exact.add(entry);
   }
 
+  remove(raw: string): boolean {
+    const entry = raw.trim().toLowerCase();
+    if (this.exact.delete(entry)) return true;
+    const at = this.cidrs.indexOf(entry);
+    if (at < 0) return false;
+    this.cidrs.splice(at, 1);
+    // A BlockList cannot drop a subnet: build it again from what is left.
+    this.blocks = undefined;
+    for (const c of this.cidrs) {
+      const [addr, prefix] = c.split('/');
+      this.blocks ??= new BlockList();
+      this.blocks.addSubnet(addr!, Number(prefix), isIP(addr!) === 4 ? 'ipv4' : 'ipv6');
+    }
+    return true;
+  }
+
   has(raw: string): boolean {
     const v = raw.trim().toLowerCase();
     if (this.exact.has(v)) return true;
@@ -170,6 +188,9 @@ export class MemoryListStore implements ListStore {
     let l = this.lists.get(list);
     if (!l) this.lists.set(list, (l = new IndicatorList()));
     l.add(entry);
+  }
+  remove(list: string, entry: string): boolean {
+    return this.lists.get(list)?.remove(entry) ?? false;
   }
   names(): string[] {
     return [...this.lists.keys()];

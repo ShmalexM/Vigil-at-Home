@@ -20,6 +20,7 @@ import {
   DetectionEngine,
   FeedImporter,
   Feedback,
+  USER_BLOCKED_HASHES,
   RuleEditor,
   RulePipeline,
   RuleReviewer,
@@ -30,6 +31,7 @@ import {
   sqliteStores,
   toolRequestEvent,
   type DecisionResult,
+  type UndoBlockResult,
   type Detection,
   type DetectionRule,
   type EventHistory,
@@ -442,6 +444,34 @@ export class Detector {
         : undefined;
       return { ...result, suggested: suggested?.ok === true };
     }, opts);
+    return { ...value, helper };
+  }
+
+  /**
+   * Take back the user's "malicious" verdict on an alert: the program leaves
+   * the user-blocked list, and the Santa rule the verdict added is returned
+   * for the caller to remove. The list is a block the helper also runs, so the
+   * change goes to the helper like any other; refused there, the entry is put
+   * back and the program stays blocked.
+   */
+  async unlearn(
+    alertId: string,
+    opts: Omit<HelperSyncOptions, 'byUser'> = {},
+  ): Promise<UndoBlockResult & { helper?: HelperSyncOutcome }> {
+    const d = this.store.getAlertDetection(alertId) as Detection | undefined;
+    if (!d) return {};
+    const { value, helper } = await this.change(
+      () => this.feedback.undoBlock(d, userOrigin('alert')),
+      opts,
+    );
+    // Lists are not in the change's snapshot, so a refused change does not roll them back.
+    if (value.unlisted && notApplied(helper)) {
+      this.stores.lists.add(USER_BLOCKED_HASHES, value.unlisted, {
+        source: 'user',
+        updatedAt: this.now(),
+      });
+      return { helper };
+    }
     return { ...value, helper };
   }
 

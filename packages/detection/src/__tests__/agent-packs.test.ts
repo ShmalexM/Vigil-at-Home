@@ -808,6 +808,73 @@ describe('agent rule packs', () => {
         expect(fired(child())).not.toContain('agent-keychain-secret');
       });
 
+      // As Santa's log stored it on a real Mac (2026-10-15): argv joined with
+      // spaces and split again, so the service arrives as two words; no
+      // signature on the child, no parent path.
+      it('is still Claude Code’s own read when Santa’s log splits the arguments on spaces', () => {
+        const split = READ.split(' ');
+        const t = agentTree(NATIVE, { basePid: (pid += 100), args: ['2.1.283'], root: ANTHROPIC });
+        const copy = t.exec(NATIVE, ['2.1.283'], t.root.process, {
+          signing: 'developer_id',
+          ...ANTHROPIC,
+        });
+        const shell = t.exec('/bin/sh', ['/bin/sh', '-c', ...split], copy.process, {
+          signing: 'unknown',
+        });
+        const child = t.exec(
+          '/usr/bin/security',
+          CHILD_ARGS.flatMap((a) => a.split(' ')),
+          shell.process,
+          {
+            ancestors,
+            signing: 'unknown',
+          },
+        );
+        expect(procOf(child)?.args?.slice(-2)).toEqual(['Claude', 'Code-credentials']);
+        expect(fired(shell)).not.toContain('agent-keychain-secret');
+        expect(fired(child)).not.toContain('agent-keychain-secret');
+      });
+
+      it('still alerts on a Santa-split read that is not exactly the command', () => {
+        const split = READ.split(' ');
+        const santa = (command: string[], childArgs: string[]) => {
+          const t = agentTree(NATIVE, {
+            basePid: (pid += 100),
+            args: ['2.1.283'],
+            root: ANTHROPIC,
+          });
+          const copy = t.exec(NATIVE, ['2.1.283'], t.root.process, {
+            signing: 'developer_id',
+            ...ANTHROPIC,
+          });
+          const shell = t.exec('/bin/sh', ['/bin/sh', '-c', ...command], copy.process, {
+            signing: 'unknown',
+          });
+          return t.exec('/usr/bin/security', childArgs, shell.process, {
+            ancestors,
+            signing: 'unknown',
+          });
+        };
+        const childSplit = CHILD_ARGS.flatMap((a) => a.split(' '));
+        const bad = [
+          // Another service than the command named, or one more option.
+          santa(split, [...childSplit.slice(0, -2), 'Chrome', 'Safe', 'Storage']),
+          santa(split, [...childSplit, '-g']),
+          // A command that chains: not a bare command, split or not.
+          santa([...split, ';', 'true'], childSplit),
+          // Exact arguments (no split): what follows the command is $0, not part of it.
+          santa(
+            ['security find-generic-password -a alexmargaris -w -s', '"Claude Code-credentials"'],
+            ['security', 'find-generic-password', '-a', 'alexmargaris', '-w', '-s'],
+          ),
+        ];
+        for (const e of bad)
+          expect(fired(e), JSON.stringify(procOf(e)?.args)).toContain('agent-keychain-secret');
+        // A root only found by `ps` (Claude Code started before Vigil) has no
+        // signature to hand down, so the same read still alerts.
+        expect(fired(pair({}).child())).toContain('agent-keychain-secret');
+      });
+
       it('still alerts on another child, chaining, a second child or an unsigned root', () => {
         const bad = [
           pair(ANTHROPIC, 'echo hi').child(),

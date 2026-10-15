@@ -323,6 +323,14 @@ export class DetectionEngine {
     this.loadRules(rules);
   }
 
+  /**
+   * Why the safety floor refuses this action for this event, or undefined
+   * when it may run. The same floor every rule's actions pass through.
+   */
+  refusal(action: Action, e: DetectionEvent): string | undefined {
+    return this.safety.check(action, e);
+  }
+
   /** The sha256 of Vigil's own programs, which no rule may block (see SafetyConfig). */
   setSelfHashes(hashes: readonly string[]): void {
     this.safety.setSelfHashes(hashes);
