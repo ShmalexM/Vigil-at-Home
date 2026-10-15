@@ -113,6 +113,8 @@ const JOB_PROVIDERS = ['claude', 'codex', 'api', 'ollama'] as const;
 
 export interface PackAiStatus {
   anyReady: boolean;
+  /** Why nothing can talk, when Settings › AI might look otherwise. */
+  noAiWhy?: string;
   judge: { ready: boolean; detail: string };
   leadMayUsePlan: boolean;
 }
@@ -564,6 +566,7 @@ export class PackService {
   >();
   private readonly running = new Set<string>();
   private aiStatus: { at: number; value: PackAiStatus } | undefined;
+  private aiStatusGen = 0;
   private chatting = false;
 
   constructor(private readonly o: PackDeps) {
@@ -724,6 +727,7 @@ export class PackService {
       leadMayUsePlan: ai.leadMayUsePlan,
       judge: ai.judge,
       noAi: !ai.anyReady,
+      ...(ai.noAiWhy ? { noAiWhy: ai.noAiWhy } : {}),
       tools: this.toolViews(),
       connectors: this.o.connectors.view(),
       today: this.o.notebook?.tally(startOfDay(this.now())) ?? [],
@@ -731,10 +735,18 @@ export class PackService {
     };
   }
 
+  /** Settings › AI changed: the next view asks again instead of showing the old answer. */
+  forgetAiStatus(): void {
+    this.aiStatus = undefined;
+    this.aiStatusGen++;
+  }
+
   private async status(): Promise<PackAiStatus> {
     if (this.aiStatus && this.now() - this.aiStatus.at < 60_000) return this.aiStatus.value;
+    const gen = this.aiStatusGen;
     const value = await this.o.ai.status();
-    this.aiStatus = { at: this.now(), value };
+    // A check that started before the settings changed answers its caller but isn't kept.
+    if (gen === this.aiStatusGen) this.aiStatus = { at: this.now(), value };
     return value;
   }
 

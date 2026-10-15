@@ -348,6 +348,9 @@ function start(): void {
   });
   ai.on('busy', (helper, busy) => pack.helperBusy(helper, busy));
   ai.on('note', (helper, note) => pack.helperNote(helper, note));
+  // A switch flipped or a key saved: the chat asks again rather than keep saying no AI for a minute.
+  ai.on('changed', () => pack.forgetAiStatus());
+  setup.on('changed', () => pack.forgetAiStatus());
   pack.start();
   if (demo)
     seedPackDemo(pack, connectors, join(app.getAppPath(), 'src/main/pack/fixtures/demo-mcp.mjs'));
