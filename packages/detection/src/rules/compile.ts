@@ -688,8 +688,11 @@ export function compileCondition(
  * order; a quoted alternative is a literal fallback:
  * `{{remoteHost|remoteAddress}}`, `{{process.parentName|'a program'}}`.
  */
-export const TEMPLATE_RE = /\{\{\s*([^{}]+?)\s*\}\}/g;
-const WHOLE_TEMPLATE = /^\{\{\s*([^{}]+?)\s*\}\}$/;
+// The placeholder keeps its outer spaces: every reader splits on `|` and
+// trims each alternative. Trimming in the pattern (`\s*(...+?)\s*`) made it
+// polynomial on long runs of spaces.
+export const TEMPLATE_RE = /\{\{([^{}]+)\}\}/g;
+const WHOLE_TEMPLATE = /^\{\{([^{}]+)\}\}$/;
 
 /** Field paths a placeholder refers to (for the linter). */
 export function templateFields(placeholder: string): string[] {

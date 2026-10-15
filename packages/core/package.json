@@ -7,7 +7,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./self": "./src/self.ts"
+    "./self": "./src/self.ts",
+    "./email": "./src/email.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"
