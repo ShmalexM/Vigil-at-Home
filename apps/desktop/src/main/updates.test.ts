@@ -154,7 +154,14 @@ describe('UpdateChecker installing by itself', () => {
     return r;
   };
 
-  function selfChecker(o: { stageFails?: boolean; canInstall?: boolean } = {}) {
+  function selfChecker(
+    o: {
+      stageFails?: boolean;
+      swapFails?: boolean;
+      canInstall?: boolean;
+      stageWaits?: Promise<void>;
+    } = {},
+  ) {
     let saved: unknown = {};
     let idle = 0;
     let busy = false;
@@ -177,11 +184,18 @@ describe('UpdateChecker installing by itself', () => {
         canInstall: async () => o.canInstall ?? true,
         stage: async (a) => {
           calls.push(`stage ${a.version} ${a.zipName}`);
+          await o.stageWaits;
           if (o.stageFails) throw new Error('the download doesn’t match the release’s checksum');
-          return { version: a.version, app: '/Applications/.vigil-update/x/Vigil at Home.app' };
+          return {
+            version: a.version,
+            app: '/Applications/.vigil-update/x/Vigil at Home.app',
+            plist: 'p',
+          };
         },
-        swap: async (s) => void calls.push(`swap ${s.version}`),
-        swapSync: (s) => void calls.push(`swapSync ${s.version}`),
+        swap: (s) => {
+          if (o.swapFails) throw new Error('the staged app changed after it was checked');
+          calls.push(`swap ${s.version}`);
+        },
       },
       relaunch: () => calls.push('relaunch'),
       idleSeconds: () => idle,
@@ -224,8 +238,47 @@ describe('UpdateChecker installing by itself', () => {
     expect(calls).toHaveLength(1);
     setBusy(false);
     (c as unknown as { maybeInstall(): void }).maybeInstall();
-    await settle();
     expect(calls.slice(1)).toEqual(['swap 0.1.0-alpha.5', 'relaunch']);
+  });
+
+  it('Restart to update skips the idle wait, but never restarts under a popup or password dialog', async () => {
+    const { c, calls, setBusy } = selfChecker();
+    await c.check();
+    await settle();
+    setBusy(true);
+    c.install(true);
+    expect(calls).toHaveLength(1);
+    setBusy(false);
+    c.install(true);
+    expect(calls.slice(1)).toEqual(['swap 0.1.0-alpha.5', 'relaunch']);
+  });
+
+  it('never swaps while a version is still being staged, at quit or otherwise', async () => {
+    let release!: () => void;
+    const stageWaits = new Promise<void>((r) => (release = r));
+    const { c, calls, setIdle } = selfChecker({ stageWaits });
+    await c.check();
+    await settle();
+    expect(c.view().preparing).toBe('0.1.0-alpha.5');
+    setIdle(IDLE_INSTALL_S);
+    c.install(true);
+    expect(c.installOnQuit()).toBe(false);
+    expect(calls).toEqual(['stage 0.1.0-alpha.5 Vigil-at-Home-0.1.0-alpha.5-arm64.zip']);
+    release();
+    await settle();
+    await settle();
+    expect(c.installOnQuit()).toBe(true);
+  });
+
+  it('keeps the running app and says why when the swap is refused', async () => {
+    const { c, calls, setIdle } = selfChecker({ swapFails: true });
+    await c.check();
+    await settle();
+    setIdle(IDLE_INSTALL_S);
+    c.install();
+    expect(calls).not.toContain('relaunch');
+    expect(c.view().installError).toMatch(/changed after it was checked/);
+    expect(c.view().ready).toBeUndefined();
   });
 
   it('installs a ready update when Vigil quits', async () => {
@@ -233,7 +286,7 @@ describe('UpdateChecker installing by itself', () => {
     await c.check();
     await settle();
     expect(c.installOnQuit()).toBe(true);
-    expect(calls.at(-1)).toBe('swapSync 0.1.0-alpha.5');
+    expect(calls.at(-1)).toBe('swap 0.1.0-alpha.5');
     expect(c.installOnQuit()).toBe(false);
   });
 

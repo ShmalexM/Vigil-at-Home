@@ -297,7 +297,22 @@ function start(): void {
           downloads: join(dataDir, 'updates'),
         })
       : undefined;
-  void installer?.cleanup();
+  installer?.cleanup();
+  // Settles once someone is at the computer: password dialogs wait for this
+  // rather than sit on an empty desk.
+  const whenPresent = () =>
+    new Promise<void>((resolve) => {
+      const check = () => {
+        if (powerMonitor.getSystemIdleTime() >= 30) return false;
+        resolve();
+        return true;
+      };
+      if (check()) return;
+      const t = setInterval(() => check() && clearInterval(t), 3000);
+      t.unref?.();
+    });
+  // Set once the helper syncer exists (below).
+  let selfGrantPending = () => false;
   const updates = new UpdateChecker({
     current: app.getVersion(),
     arch: process.arch,
@@ -314,7 +329,8 @@ function start(): void {
           },
           idleSeconds: () => powerMonitor.getSystemIdleTime(),
           // Never restart under an open alert popup or a password dialog.
-          canRestart: () => !windows.popupVisible() && !helperScriptRunning(),
+          canRestart: () =>
+            !windows.popupVisible() && !helperScriptRunning() && !selfGrantPending(),
         }
       : {}),
     onFound: (version) => {
@@ -329,6 +345,7 @@ function start(): void {
   });
   updates.on('changed', () => windows.broadcast('changed'));
   if (app.isPackaged) updates.start();
+  // Synchronous: the swap is done (or refused) before anything else quits.
   app.on('before-quit', () => {
     updates.stop();
     updates.installOnQuit();
@@ -414,15 +431,7 @@ function start(): void {
     if (store.getSetting('helper.updateAsked', z.string(), '') !== bundle) {
       // After an update that installed while the user was away, the password
       // dialog waits until they are back rather than sitting on an empty desk.
-      const whenPresent = (fn: () => void) => {
-        const t = setInterval(() => {
-          if (powerMonitor.getSystemIdleTime() >= 30) return;
-          clearInterval(t);
-          fn();
-        }, 3000);
-        t.unref?.();
-      };
-      whenPresent(() => {
+      void whenPresent().then(() => {
         // The self grant's password may have re-pinned this app meanwhile.
         if (checkHelperMatch()?.installed !== 'outdated') return;
         void runHelperScript('update', helperDir())
@@ -462,8 +471,11 @@ function start(): void {
     link: helper,
     rules: () => core.detector?.helperRules(),
     ready: selfHashed,
+    // Packaged only: a test run has nobody at the keyboard.
+    ...(app.isPackaged && !demo && !perf ? { present: whenPresent } : {}),
     log: (msg, err) => console.warn(msg, err),
   });
+  selfGrantPending = () => helperSync.selfGrantPending();
   const syncHelperRules = helperSync.sync;
   if (core.detector) core.detector.syncHelper = syncHelperRules;
   helper.on('state', (state) => {

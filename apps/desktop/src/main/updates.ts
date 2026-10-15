@@ -53,7 +53,7 @@ export interface UpdateOptions {
   onFound?: (version: string) => void;
   now?: () => number;
   /** macOS, packaged: installs updates in place. Elsewhere the user downloads them. */
-  installer?: Pick<SelfUpdater, 'canInstall' | 'stage' | 'swap' | 'swapSync'>;
+  installer?: Pick<SelfUpdater, 'canInstall' | 'stage' | 'swap'>;
   /** Starts the new version once the swap is done (app.relaunch, then exit). */
   relaunch?: () => void;
   /** Seconds since the user last touched the keyboard or mouse. */
@@ -77,7 +77,8 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
   private staging: string | undefined;
   private staged: Staged | undefined;
   private installError: { version: string; error: string } | undefined;
-  private installing = false;
+  /** Quitting: a check still in flight must not start staging. */
+  private stopped = false;
   private updatedFrom: string | undefined;
 
   constructor(private readonly o: UpdateOptions) {
@@ -124,7 +125,7 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
     const a = this.available;
     const assets = a?.selfUpdate;
     if (!a || !assets || !this.saved().install || !(await this.selfInstalls())) return;
-    if (this.staging || this.staged?.version === a.version) return;
+    if (this.stopped || this.staging || this.staged?.version === a.version) return;
     if (this.installError?.version === a.version) return;
     // Staging clears the folder beside the app, so an older staged copy goes too.
     this.staged = undefined;
@@ -145,21 +146,29 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
 
   /** Installs now if an update is ready and the user is away. */
   private maybeInstall(): void {
-    if (!this.staged || this.installing || !this.saved().install) return;
-    if ((this.o.idleSeconds?.() ?? 0) < IDLE_INSTALL_S) return;
-    if (this.o.canRestart && !this.o.canRestart()) return;
-    void this.install();
+    if (this.saved().install) this.install();
   }
 
-  /** Swaps in the downloaded version and starts it. The helper keeps blocking meanwhile. */
-  async install(): Promise<void> {
+  /**
+   * Swaps in the downloaded version and starts it; the helper keeps blocking
+   * meanwhile. Synchronous from the checks to the relaunch, so nothing (a
+   * quit, a new staging, the user coming back) can happen in between. Waits
+   * while a version is being staged, and while a popup or password dialog
+   * is open. Unless `now` (the user pressed Restart to update), also waits
+   * until the computer has been left alone for {@link IDLE_INSTALL_S}.
+   *
+   * Accepted: canRestart doesn't see a password dialog the user opened
+   * themselves (a release, a loosening). Those stop waiting after three
+   * minutes, well inside the idle wait, so only pressing Restart to update
+   * with one open can restart under it.
+   */
+  install(now = false): void {
     const s = this.staged;
-    if (!s || this.installing || this.staging || !this.o.installer) return;
-    this.installing = true;
+    if (!s || this.staging || !this.o.installer) return;
+    if (!now && (this.o.idleSeconds?.() ?? 0) < IDLE_INSTALL_S) return;
+    if (this.o.canRestart && !this.o.canRestart()) return;
     try {
-      await this.o.installer.swap(s);
-      this.staged = undefined;
-      this.o.relaunch?.();
+      this.o.installer.swap(s);
     } catch (err) {
       this.staged = undefined;
       this.installError = {
@@ -167,18 +176,18 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
         error: `Couldn’t install ${s.version} (${err instanceof Error ? err.message : String(err)})`,
       };
       this.emit('changed');
-    } finally {
-      this.installing = false;
+      return;
     }
+    this.staged = undefined;
+    this.o.relaunch?.();
   }
 
   /** On quit: put a downloaded update in place so the next start runs it. */
   installOnQuit(): boolean {
     const s = this.staged;
-    if (!s || this.installing || this.staging || !this.o.installer || !this.saved().install)
-      return false;
+    if (!s || this.staging || !this.o.installer || !this.saved().install) return false;
     try {
-      this.o.installer.swapSync(s);
+      this.o.installer.swap(s);
       this.staged = undefined;
       return true;
     } catch (err) {
@@ -201,6 +210,7 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
   }
 
   stop(): void {
+    this.stopped = true;
     for (const t of this.timers) clearTimeout(t);
     this.timers = [];
   }

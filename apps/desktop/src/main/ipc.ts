@@ -172,7 +172,7 @@ export function registerIpc(
     getUpdates: () => updates.view(),
     checkUpdates: () => updates.check(),
     setUpdateMode: (mode) => updates.setMode(mode),
-    installUpdate: () => updates.install(),
+    installUpdate: () => updates.install(true),
     dismissUpdate: () => updates.dismiss(),
     downloadUpdate: () => updates.download(),
     openUpdateNotes: () => updates.openNotes(),
