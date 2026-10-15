@@ -37,12 +37,6 @@ export interface HelperSyncerOptions {
   /** Settles once the self set is complete (an AppImage's programs hashed). */
   ready?: Promise<unknown>;
   log?: (msg: string, err?: unknown) => void;
-  /**
-   * The installed helper is older than this app's and the app is about to
-   * ask to update it: a sync nobody asked for then shows no password dialog
-   * (what the old helper would ask, the new one asks once, in its words).
-   */
-  quiet?: () => boolean;
 }
 
 /** What the helper client says when the password was cancelled or a held change dropped. */
@@ -163,9 +157,8 @@ export class HelperSyncer {
     if (!set) return 'unavailable';
     try {
       if (!this.older) {
-        const quiet = !opts.byUser && !opts.hold && this.opts.quiet?.() === true;
         const out = await this.sendCurrent(rulesKey(set), opts, (syncId) =>
-          this.opts.link.syncRules(set, { ...how(opts), syncId, ...(quiet ? { ask: false } : {}) }),
+          this.opts.link.syncRules(set, { ...how(opts), syncId }),
         );
         if (out !== 'older') return out;
         this.older = true;

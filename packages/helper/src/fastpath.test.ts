@@ -1133,6 +1133,10 @@ describe('what a sync may grant without the password', () => {
         } as typeof shipped),
       ),
     ).toEqual([`change what “${shipped.name}” blocks`]);
+    // Putting back a rule the user edited is worded as an edit.
+    const { fp: edited } = helper();
+    edited.sync(withRule({ ...older, editedFrom: 1 } as typeof shipped));
+    expect(edited.loosening(withRule(shipped))).toEqual([`change what “${shipped.name}” blocks`]);
     // Not the version this helper ships: worded as an edit too.
     const other = {
       ...shipped,

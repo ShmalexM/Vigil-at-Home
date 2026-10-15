@@ -816,8 +816,9 @@ function ownPaths(paths: readonly string[], images: readonly SelfImage[]): strin
 
 /**
  * How the password prompt names a built-in rule that a Vigil release relaxed,
- * when the sync brings it to exactly the version this helper ships. The
- * password is still asked; this only says what it is for.
+ * when the sync brings it, unedited, to exactly the version this helper
+ * ships. The password is still asked; this only says what it is for. Update
+ * an entry when a release changes that rule again.
  */
 const BUILTIN_UPDATES: Record<string, string> = {
   'unsigned-quarantined-exec': 'let Vigil’s own updates past the download check',
@@ -834,10 +835,14 @@ let shippedConditions: Map<string, string> | undefined;
  * ships for that built-in rule: Vigil's own update to it, not an edit.
  */
 function toShipped(r: DetectionRule, n: Planned): boolean {
-  if (!isBuiltinRuleId(r.id) || n.rule.origin !== 'builtin') return false;
+  // A rule the user edited is theirs: putting it back is an edit, worded as one.
+  if (!isBuiltinRuleId(r.id) || n.rule.origin !== 'builtin' || r.editedFrom !== undefined)
+    return false;
   if (!shippedConditions) {
     shippedConditions = new Map();
-    for (const input of [...builtinRulesFor('darwin'), ...builtinRulesFor('linux')]) {
+    // This platform's version wins where a rule differs between them.
+    const other = process.platform === 'linux' ? 'darwin' : 'linux';
+    for (const input of [...builtinRulesFor(other), ...builtinRulesFor(process.platform)]) {
       const shipped = DetectionRule.parse(input);
       shippedConditions.set(shipped.id, canonical(shipped.condition));
     }
