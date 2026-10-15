@@ -48,6 +48,7 @@ describe('SelfUpdater', () => {
     const sum = o.listed ?? createHash('sha256').update(zip).digest('hex');
     const fetched: string[] = [];
     const ran: string[] = [];
+    const dittoArgs: string[] = [];
     const u = new SelfUpdater({
       bundle,
       bundleId: 'app.vigilathome.desktop',
@@ -61,7 +62,8 @@ describe('SelfUpdater', () => {
       run: async (file, args) => {
         ran.push([file.split('/').pop(), ...args.slice(0, 1)].join(' '));
         if (file === '/usr/bin/ditto') {
-          const app = join(args[3]!, 'Vigil at Home.app', 'Contents');
+          dittoArgs.push(...args);
+          const app = join(args.at(-1)!, 'Vigil at Home.app', 'Contents');
           mkdirSync(app, { recursive: true });
           writeFileSync(join(app, 'which'), 'new');
           return '';
@@ -73,13 +75,16 @@ describe('SelfUpdater', () => {
         return '';
       },
     });
-    return { u, root, apps, bundle, fetched, ran };
+    return { u, root, apps, bundle, fetched, ran, dittoArgs };
   }
 
   it('stages a matching download beside the app, then swaps it in and keeps the old one aside', async () => {
-    const { u, bundle, apps, ran } = setup();
+    const { u, bundle, apps, ran, dittoArgs } = setup();
     expect(await u.canInstall()).toBe(true);
     const s = await u.stage(assets);
+    // The new app never carries a download flag, so the "Unsigned download
+    // opened" rule (which needs one) can't stop Vigil's own update.
+    expect(dittoArgs).toContain('--noqtn');
     expect(s.app.startsWith(join(apps, '.vigil-update'))).toBe(true);
     expect(ran).toEqual(['ditto -x', 'plutil -extract', 'plutil -extract', 'codesign --verify']);
     // The zip doesn't linger in the data folder.

@@ -119,7 +119,11 @@ export class SelfUpdater {
       const out = join(this.stageRoot, a.version);
       await rm(this.stageRoot, { recursive: true, force: true });
       await mkdir(out, { recursive: true });
-      await this.run('/usr/bin/ditto', ['-x', '-k', zip, out]);
+      // --noqtn: never carry a download flag onto the new app. The zip has none
+      // (Node's fetch sets none), and an app with the flag and no Developer ID
+      // signature trips the "Unsigned download opened" rule, which would
+      // stop and quarantine Vigil itself.
+      await this.run('/usr/bin/ditto', ['-x', '-k', '--noqtn', zip, out]);
       const apps = (await readdir(out)).filter((n) => n.endsWith('.app'));
       if (apps.length !== 1) throw new Error('the download doesn’t hold exactly one app');
       const app = join(out, apps[0]!);
