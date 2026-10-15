@@ -546,7 +546,10 @@ export class AgentTracker {
     if (!ask || ask.startedAt !== startedAt) return;
     this.signatureAsks.delete(pid);
     const n = ask.node;
-    if (this.find(pid) !== n || !n.psPath || !n.seeded || n.reExeced) return;
+    // A sensor may have named the real program before the answer came (adopt):
+    // it still counts when that is the executable codesign verified.
+    const named = !n.psPath && sig.executable !== undefined && sig.executable === n.path;
+    if (this.find(pid) !== n || (!n.psPath && !named) || !n.seeded || n.reExeced) return;
     if (n.teamId !== undefined || n.signingId !== undefined || !sig.teamId) return;
     n.teamId = sig.teamId;
     if (sig.signingId !== undefined) n.signingId = sig.signingId;

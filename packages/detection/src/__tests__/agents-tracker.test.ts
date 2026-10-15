@@ -1227,6 +1227,21 @@ describe('a seeded agent root’s signature, read from its process', () => {
     expect(c.t.lookup(9500)?.tag?.teamId).toBeUndefined();
   });
 
+  it('accepts an answer that arrives after a sensor named the verified program', () => {
+    const a = seeded();
+    a.t.seed([row()]);
+    a.t.observe(fileOpen(proc({ path: CLAUDE_BIN, pid: 9500, ppid: 530 }), '/tmp/a'));
+    a.t.learnRootSignature(9500, T0, { ...ANTHROPIC, executable: CLAUDE_BIN });
+    expect(a.t.lookup(9500)?.tag).toMatchObject(ANTHROPIC);
+
+    // A sensor named another program: the answer is not about it.
+    const b = seeded();
+    b.t.seed([row()]);
+    b.t.observe(fileOpen(proc({ path: '/tmp/evil', pid: 9500, ppid: 530 }), '/tmp/a'));
+    b.t.learnRootSignature(9500, T0, { ...ANTHROPIC, executable: CLAUDE_BIN });
+    expect(b.t.lookup(9500)?.tag?.teamId).toBeUndefined();
+  });
+
   it('forgets it when the process exits, so a reused pid lends nothing', () => {
     const { t, launch } = seeded();
     t.seed([row()]);

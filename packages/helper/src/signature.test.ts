@@ -37,10 +37,29 @@ describe('parseCodesign', () => {
       'Executable=/tmp/x\nIdentifier=com.anthropic.claude-code\nTeamIdentifier=Q6L2SF6YDW';
     expect(parseCodesign(`${planted}\n${real}`)).toBeUndefined();
     expect(parseCodesign(`Executable=/tmp/x\nTeamIdentifier=Q6L2SF6YDW\n${real}`)).toBeUndefined();
+    const adhoc = 'Identifier=com.apple.ls\nSignature=adhoc\nTeamIdentifier=not set';
+    expect(
+      parseCodesign(`Executable=/tmp/a\nPlatform identifier=15\nPlatform identifier=15\n${adhoc}`),
+    ).toBeUndefined();
+    expect(parseCodesign(`Executable=/tmp/a\nSignature=size=9\n${adhoc}`)).toBeUndefined();
   });
 });
 
 describe('signatureLookup', () => {
+  it('never asks codesign about a path with a line break', async () => {
+    let calls = 0;
+    const sys = {
+      run: async () => {
+        calls++;
+        return { code: 0, stdout: '', stderr: 'Identifier=x' };
+      },
+    } as unknown as System;
+    const lookup = signatureLookup(sys);
+    expect(await lookup('/tmp/a\nPlatform identifier=15\n/b')).toBeUndefined();
+    expect(await lookup('/tmp/a\r/b')).toBeUndefined();
+    expect(calls).toBe(0);
+  });
+
   it('runs codesign one at a time and stops at 60 a minute', async () => {
     let calls = 0;
     const sys = {

@@ -17,7 +17,12 @@ export function parseCodesign(output: string): SignatureInfo | undefined {
   if (/code object is not signed at all/.test(output)) return { signing: 'unsigned' };
   // A path holding a newline can plant lines of its own; the real ones then
   // appear twice, and nothing is trusted.
-  if (once(output, /^Identifier=/gm) !== 1 || once(output, /^TeamIdentifier=/gm) > 1)
+  if (
+    once(output, /^Identifier=/gm) !== 1 ||
+    once(output, /^TeamIdentifier=/gm) > 1 ||
+    once(output, /^Platform identifier=/gm) > 1 ||
+    once(output, /^Signature=/gm) > 1
+  )
     return undefined;
   const identifier = /^Identifier=(.+)$/m.exec(output)?.[1]?.trim();
   if (!identifier) return undefined;
@@ -47,7 +52,10 @@ export function signatureLookup(
     const run = chain.then(async () => {
       const t = now();
       while (recent.length > 0 && t - recent[0]! >= 60_000) recent.shift();
-      if (recent.length >= PER_MINUTE || !path.startsWith('/')) return undefined;
+      // A line break in the path could plant lines in codesign's output
+      // (Authority=, Platform identifier=) ahead of the real ones.
+      if (recent.length >= PER_MINUTE || !path.startsWith('/') || /[\r\n]/.test(path))
+        return undefined;
       recent.push(t);
       const r = await sys.run('codesign', ['-dv', path], { timeoutMs: 10_000 });
       return parseCodesign(`${r.stderr}\n${r.stdout}`);
