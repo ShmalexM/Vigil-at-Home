@@ -57,6 +57,21 @@ export interface TrackerOptions {
    * comes from the start time, so reusing it keeps the id.
    */
   priorStart?(agentId: string, rootPid: number, psStartedAt: number): number | undefined;
+  /**
+   * A watched agent program `ps` listed carries no code signature, so rules
+   * that excuse only a signed agent root cannot excuse it. The app may read
+   * the signature of the program that pid runs now (never of a path ps gave)
+   * and answer with `learnRootSignature`. Once per process seen by `ps`.
+   */
+  onSeededRoot?(root: { pid: number; startedAt: number }): void;
+}
+
+/** A program's code signature, read from a running process. */
+export interface RootSignature {
+  teamId?: string;
+  signingId?: string;
+  /** The executable codesign verified (its `Executable=` line), when it named one. */
+  executable?: string;
 }
 
 const MAX_NODES = 8192;
@@ -76,6 +91,8 @@ const MAX_CONNECTORS = 64;
 const MAX_KEPT_ROOTS = 256;
 /** Tagged processes recently evicted, so a `ps` seed can give them back their tag. */
 const MAX_GHOSTS = 1024;
+/** Seeded roots whose signature was asked for and not yet answered. */
+const MAX_SIGNATURE_ASKS = 256;
 /** After a suggestion, the same program may be suggested again this much later. */
 const CANDIDATE_REARM_MS = 60 * 60_000;
 
@@ -181,9 +198,23 @@ interface Node {
   signingId?: string;
   /** Launch time; with the pid it names a session. */
   startedAt: number;
+  /** The start time `ps` listed, for a seeded process (startedAt may become a session's). */
+  psStartedAt?: number;
   seeded: boolean;
   /** `path` came from `ps` (argv[0] or an unresolved link), not from a sensor. */
   psPath?: true;
+  /**
+   * `teamId`/`signingId` were read from this running process (see
+   * learnRootSignature), not from a sensor. A new `ps` name or a sensor event
+   * without a signature keeps them; a launch or a sensor's signature replaces them.
+   */
+  pidSigned?: true;
+  /**
+   * The executable codesign verified for `pidSigned`. A sensor naming another
+   * program at this pid drops the signature (see adopt): it is not the image
+   * that was checked.
+   */
+  pidSignedPath?: string;
   /** The launch event that last set its program, counted by `exec` (see `mark`). */
   seq?: number;
   /** Program names of the parent, grandparent and so on, nearest first (see mergeAncestors). */
@@ -237,6 +268,15 @@ function mergeAncestors(
   if (!sensor?.length) return tracked ?? sensor;
   if (!tracked || tracked.length <= sensor.length) return sensor;
   return sensor.every((a, i) => tracked[i] === a) ? tracked : sensor;
+}
+
+/** The signature a node read from its own process, to keep across a new `ps` name. */
+function pidSignature(n: Node): { teamId?: string; signingId?: string } {
+  if (!n.pidSigned) return {};
+  const out: { teamId?: string; signingId?: string } = {};
+  if (n.teamId !== undefined) out.teamId = n.teamId;
+  if (n.signingId !== undefined) out.signingId = n.signingId;
+  return out;
 }
 
 function childOf(t: AgentTag | undefined): AgentTag | undefined {
@@ -355,6 +395,8 @@ export class AgentTracker {
   private readonly announced = new Set<string>();
   /** Pids of the connectors Vigil started: their trees are not Vigil's own. */
   private readonly connectors = new Set<number>();
+  /** Seeded agent roots whose signature was asked for, by pid, with the start time ps gave. */
+  private readonly signatureAsks = new Map<number, { node: Node; startedAt: number }>();
 
   constructor(private readonly opts: TrackerOptions) {
     this.maxNodes = opts.maxNodes ?? MAX_NODES;
@@ -381,8 +423,12 @@ export class AgentTracker {
   observe<E extends SensorEvent>(e: E): E {
     this.announceSelf();
     const ev = e as SensorEvent;
-    // A request is not a process; an exit says nothing about the tree and has no path.
-    if (ev.kind === 'agent.tool_request' || ev.kind === 'process.exit') return e;
+    if (ev.kind === 'process.exit') {
+      this.exited(ev.process.pid);
+      return e;
+    }
+    // A request is not a process.
+    if (ev.kind === 'agent.tool_request') return e;
     if (ev.kind === 'process.exec') return this.exec(ev) as E;
     const p = 'process' in ev ? ev.process : undefined;
     if (!p || p.pid <= 0) return e;
@@ -442,10 +488,19 @@ export class AgentTracker {
       // executable, so the path cannot tell whether it is the same process.
       const reparented =
         prev !== undefined && Math.abs(prev.startedAt - r.startedAt) < SAME_START_MS;
-      if (prev && (prev.ppid === r.ppid || reparented)) {
+      // A process ps listed before, now listed with another start time, is a
+      // reused pid even under the same parent: it starts over below.
+      const reborn =
+        prev?.psStartedAt !== undefined &&
+        Math.abs(prev.psStartedAt - r.startedAt) >= SAME_START_MS;
+      if (prev && !reborn && (prev.ppid === r.ppid || reparented)) {
         // ps never overrides what a sensor said; it may update its own hint.
         if (prev.psPath && prev.path !== r.path)
-          this.setProgram(prev, { path: ownString(r.path), args: r.args }, m);
+          this.setProgram(
+            prev,
+            { path: ownString(r.path), args: r.args, ...pidSignature(prev) },
+            m,
+          );
         this.touch(prev); // still running, so not the first to forget
         continue;
       }
@@ -463,6 +518,7 @@ export class AgentTracker {
         path,
         name: basename(path),
         startedAt: r.startedAt,
+        psStartedAt: r.startedAt,
         seeded: true,
         psPath: true,
       };
@@ -473,6 +529,32 @@ export class AgentTracker {
     for (const n of added) this.setAncestors(n);
     // A filled hole lengthens the ancestry of everything below it, not only of the rows ps added.
     for (const n of this.nodes.values()) this.extendAncestors(n);
+    this.retag();
+    for (const n of added) this.askSignature(n);
+  }
+
+  /**
+   * The code signature of the program a seeded agent root runs, read from the
+   * running process (see onSeededRoot). It counts only for the same process
+   * the tracker asked about: the same node, which a reused pid or a launch
+   * would have replaced or taken from `ps`, and the same start time. A
+   * signature a sensor reported already says more, so this never replaces it.
+   * Without a team ID it adds nothing, and the root stays unsigned.
+   */
+  learnRootSignature(pid: number, startedAt: number, sig: RootSignature): void {
+    const ask = this.signatureAsks.get(pid);
+    if (!ask || ask.startedAt !== startedAt) return;
+    this.signatureAsks.delete(pid);
+    const n = ask.node;
+    // A sensor may have named the real program before the answer came (adopt):
+    // it still counts when that is the executable codesign verified.
+    const named = !n.psPath && sig.executable !== undefined && sig.executable === n.path;
+    if (this.find(pid) !== n || (!n.psPath && !named) || !n.seeded || n.reExeced) return;
+    if (n.teamId !== undefined || n.signingId !== undefined || !sig.teamId) return;
+    n.teamId = sig.teamId;
+    if (sig.signingId !== undefined) n.signingId = sig.signingId;
+    n.pidSigned = true;
+    if (sig.executable !== undefined) n.pidSignedPath = sig.executable;
     this.retag();
   }
 
@@ -713,6 +795,11 @@ export class AgentTracker {
   }
 
   private setProgram(n: Node, p: AgentProc, m: CompiledAgentMatcher): void {
+    const kept = n.pidSigned && p.teamId === n.teamId && p.signingId === n.signingId;
+    if (!kept) {
+      delete n.pidSigned;
+      delete n.pidSignedPath;
+    }
     n.path = p.path;
     n.name = basename(p.path);
     if (p.teamId !== undefined) n.teamId = p.teamId;
@@ -737,7 +824,17 @@ export class AgentTracker {
     // ps matched it by argv[0] (an npm Claude Code's process title, say): it stays that agent.
     if (before && n.tag?.depth === 0 && n.tag.id === before.id) n.wasAgent = before.id;
     const signed = [n.teamId, n.signingId];
-    this.setProgram(n, { path: p.path, args: n.args, teamId: p.teamId, signingId: p.signingId }, m);
+    // A sensor's signature wins. Without one, a signature read from this process
+    // stays only for the executable codesign verified, and never once a sensor
+    // says the program is unsigned, ad hoc or invalid.
+    const untrusted = p.signing === 'unsigned' || p.signing === 'adhoc' || p.signing === 'invalid';
+    const sig =
+      p.teamId !== undefined || p.signingId !== undefined
+        ? { teamId: p.teamId, signingId: p.signingId }
+        : !untrusted && n.pidSignedPath !== undefined && n.pidSignedPath === p.path
+          ? pidSignature(n)
+          : {};
+    this.setProgram(n, { path: p.path, args: n.args, ...sig }, m);
     delete n.psPath;
     // A changed signature changes what the tag hands down (see passOn) too.
     if (
@@ -745,6 +842,43 @@ export class AgentTracker {
       (n.tag && (signed[0] !== n.teamId || signed[1] !== n.signingId))
     )
       this.retag();
+  }
+
+  /**
+   * A process exited. A signature read from it belonged to that process, not
+   * its pid, so it goes now: a later process given the same pid (forked
+   * without an exec, which no sensor reports) must not lend it to children.
+   */
+  private exited(pid: number): void {
+    this.signatureAsks.delete(pid);
+    const n = this.find(pid);
+    if (!n?.pidSigned) return;
+    delete n.teamId;
+    delete n.signingId;
+    delete n.pidSigned;
+    delete n.pidSignedPath;
+    this.retag();
+  }
+
+  /**
+   * Ask the app for the signature of a watched agent program `ps` listed:
+   * an agent root, or one running in Vigil's own tree (which lends its
+   * signature, see resolve). Not for one a sensor already described.
+   */
+  private askSignature(n: Node): void {
+    const ask = this.opts.onSeededRoot;
+    if (!ask || !n.psPath || !n.seeded || !n.known || this.find(n.pid) !== n) return;
+    if (n.teamId !== undefined || n.signingId !== undefined) return;
+    const t = n.tag;
+    const root = t?.depth === 0 && t.id !== VIGIL_SELF && t.id !== VIGIL_CONNECTOR;
+    if (!root && t?.id !== VIGIL_SELF) return;
+    // The start time ps gave, before reuseStart may have moved it to a session's.
+    const startedAt = n.psStartedAt ?? n.startedAt;
+    this.signatureAsks.delete(n.pid);
+    this.signatureAsks.set(n.pid, { node: n, startedAt });
+    if (this.signatureAsks.size > MAX_SIGNATURE_ASKS)
+      this.signatureAsks.delete(this.signatureAsks.keys().next().value!);
+    ask({ pid: n.pid, startedAt });
   }
 
   /**

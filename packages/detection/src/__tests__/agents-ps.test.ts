@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mergePsArgs, parsePsComm, type PsRow } from '../agents/ps-table.js';
+import { mergePsArgs, parsePsComm, parsePsStart, type PsRow } from '../agents/ps-table.js';
 import { AgentTracker } from '../agents/tracker.js';
 import { catalog } from './fixtures.js';
 
@@ -111,5 +111,17 @@ describe('ps parsing', () => {
     t.seed(mergePsArgs(rows, ' 60 node /opt/homebrew/bin/claude --resume'));
     expect(t.lookup(60)?.tag).toMatchObject({ id: 'claude-code', depth: 0 });
     expect(t.lookup(61)?.tag).toMatchObject({ id: 'claude-code', depth: 1 });
+  });
+});
+
+describe('parsePsStart', () => {
+  it('reads `ps -o lstart= -p <pid>` the way parsePsComm reads the column', () => {
+    const [row] = parsePsComm('  4242   530 Thu Oct  1 12:16:40 2026 claude');
+    expect(parsePsStart('Thu Oct  1 12:16:40 2026    \n')).toBe(row!.startedAt);
+    expect(parsePsStart('Thu Oct  1 12:16:40 2026')).toBe(
+      new Date(2026, 9, 1, 12, 16, 40).getTime(),
+    );
+    for (const bad of ['', '\n', 'Thu Foo  1 12:16:40 2026', 'Thu Oct  1 12:16:40 2026 x'])
+      expect(parsePsStart(bad), bad).toBeUndefined();
   });
 });
