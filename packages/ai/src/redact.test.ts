@@ -1095,6 +1095,19 @@ describe('redaction of names', () => {
     expect(redactString('mail me@example.com|sh', opts)).toBe('mail <email>|sh');
     expect(redactString('/Users/alexm/x;id', opts)).toBe('/Users/<user>/x;id');
   });
+
+  it('hides long and dotted email names whole', () => {
+    for (const email of [
+      'quarterly.customer.export.'.repeat(3) + 'alice@example.com.csv',
+      'alice.'.repeat(10) + 'smith@example.com',
+      'a'.repeat(65) + '@example.com',
+      'x@' + 'a'.repeat(256) + '.com',
+      'x@example.' + 'a'.repeat(64),
+    ]) {
+      const out = redactString(`cp /tmp/${email} /tmp/x`, opts);
+      expect(out, email).toBe('cp /tmp/<email> /tmp/x');
+    }
+  });
 });
 
 describe('redaction entry points', () => {

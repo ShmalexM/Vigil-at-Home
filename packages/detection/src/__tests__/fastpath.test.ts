@@ -161,6 +161,11 @@ describe('agent rules and the helper', () => {
         id: 'in-reason',
         reasons: ['{{process.agent.session}} ran it'],
       } as Listed,
+      {
+        ...base,
+        id: 'in-spaced-reason',
+        reasons: ['{{ process.agent.id }} ran it'],
+      } as Listed,
     ]).rules.map((r) => r.id);
     expect(ids).toEqual(['on-ancestors', 'on-parent', 'on-download']);
   });
