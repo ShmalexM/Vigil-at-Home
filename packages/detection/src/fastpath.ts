@@ -87,7 +87,7 @@ function scan(rule: object): Scan {
     if (typeof v === 'string') {
       if (key === 'field') s.fields.push(v);
       // Response templates: "{{process.pid}}", "{{remoteHost|remoteAddress}}".
-      for (const m of v.matchAll(/\{\{([^}]+)\}\}/g)) s.fields.push(...m[1]!.split('|'));
+      for (const m of v.matchAll(/\{\{([^{}]+)\}\}/g)) s.fields.push(...m[1]!.split('|'));
       return;
     }
     if (Array.isArray(v)) {

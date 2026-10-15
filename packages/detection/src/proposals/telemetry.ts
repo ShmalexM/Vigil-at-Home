@@ -112,7 +112,9 @@ const SYSTEM_TOOL_DIRS = [
 ];
 const isSystemTool = (p: string) => SYSTEM_TOOL_DIRS.some((d) => p.startsWith(d));
 const RARE_MAX_KEYS = 5000;
-const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+// Bounded, and starting only where a name can start, so it stays linear (as in
+// packages/ai/src/redact.ts).
+const EMAIL = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}\.[A-Za-z]{2,63}/g;
 const HOME_ANYWHERE = /\/Users\/[^/\s'"]+/g;
 /** Long random-looking runs: API keys, bearer tokens, session ids. */
 const TOKEN = /[A-Za-z0-9+/_=-]{32,}/g;
