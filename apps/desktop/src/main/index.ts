@@ -424,6 +424,7 @@ function start(): void {
     rules: () => core.detector?.helperRules(),
     ready: selfHashed,
     log: (msg, err) => console.warn(msg, err),
+    quiet: () => core.helperOutdated,
   });
   const syncHelperRules = helperSync.sync;
   if (core.detector) core.detector.syncHelper = syncHelperRules;

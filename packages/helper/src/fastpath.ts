@@ -35,6 +35,7 @@ import { selfKey, selfRoots, underSelfRoot, type SelfImage } from '@vigil/core/s
 import {
   adoptLegacyUses,
   admitSavedRules,
+  builtinRulesFor,
   compileRule,
   DetectionEngine,
   DetectionRule,
@@ -370,7 +371,7 @@ export class FastPath {
         n.how !== now?.how ||
         n.rule.origin !== ownOrigin(r).origin
       )
-        rules.push(`change what “${r.name}” blocks`);
+        rules.push(toShipped(r, n) ? builtinUpdateWording(r) : `change what “${r.name}” blocks`);
     }
     const had = new Set(this.state.exceptions.map(canonical));
     const added = cmd.exceptions.filter((e) => !had.has(canonical(e)));
@@ -811,6 +812,39 @@ function carriedSelf(cmd: DetectionSync): SelfFields | undefined {
 function ownPaths(paths: readonly string[], images: readonly SelfImage[]): string[] {
   const named = new Set(images.map((i) => selfKey(i.path)));
   return paths.filter((p) => !named.has(selfKey(p)));
+}
+
+/**
+ * How the password prompt names a built-in rule that a Vigil release relaxed,
+ * when the sync brings it to exactly the version this helper ships. The
+ * password is still asked; this only says what it is for.
+ */
+const BUILTIN_UPDATES: Record<string, string> = {
+  'unsigned-quarantined-exec': 'let Vigil’s own updates past the download check',
+};
+
+function builtinUpdateWording(r: DetectionRule): string {
+  return BUILTIN_UPDATES[r.id] ?? `update “${r.name}” to this version of Vigil`;
+}
+
+let shippedConditions: Map<string, string> | undefined;
+
+/**
+ * Whether the sync changes only `r`'s condition, to the one this helper
+ * ships for that built-in rule: Vigil's own update to it, not an edit.
+ */
+function toShipped(r: DetectionRule, n: Planned): boolean {
+  if (!isBuiltinRuleId(r.id) || n.rule.origin !== 'builtin') return false;
+  if (!shippedConditions) {
+    shippedConditions = new Map();
+    for (const input of [...builtinRulesFor('darwin'), ...builtinRulesFor('linux')]) {
+      const shipped = DetectionRule.parse(input);
+      shippedConditions.set(shipped.id, canonical(shipped.condition));
+    }
+  }
+  if (canonical(n.rule.condition) !== shippedConditions.get(r.id)) return false;
+  const rest = (x: DetectionRule) => enforced({ ...x, condition: n.rule.condition });
+  return rest(n.rule) === rest(r);
 }
 
 /** A rule as the helper enforces it, without its wording. */

@@ -269,6 +269,32 @@ describe('helper sync with the self grant apart', () => {
     expect(fast.status().rules).toBe(set.rules.length);
   });
 
+  it('asks nothing on its own while the helper waits to be updated, then asks once', async () => {
+    const l = await connect(await currentHelper());
+    let set = appRules(INSTALLED);
+    let outdated = true;
+    const syncer = new HelperSyncer({ link: l, rules: () => set, quiet: () => outdated });
+    syncer.connected();
+    await syncer.grant();
+    expect(await syncer.sync()).toBe('applied');
+    // A release that loosens what the old helper holds: no dialog yet.
+    set = { ...set, exceptions: [exception] };
+    expect(await syncer.sync()).toBe('unavailable');
+    expect(dialogs).toEqual([]);
+    expect(helperHas(set, exception)).toBe(false);
+    // The user's own change still asks.
+    expect(await syncer.sync({ byUser: true })).toBe('applied');
+    expect(dialogs).toHaveLength(1);
+    // Once the helper is updated, the timer's sync asks as before.
+    set = {
+      ...set,
+      exceptions: [exception, { ...exception, id: 'x2', match: { 'process.path': '/tmp/ok2' } }],
+    };
+    outdated = false;
+    expect(await syncer.sync()).toBe('applied');
+    expect(dialogs).toHaveLength(2);
+  });
+
   it('asks nothing for the installed app', async () => {
     const l = await connect(await currentHelper());
     const set = appRules(INSTALLED);
