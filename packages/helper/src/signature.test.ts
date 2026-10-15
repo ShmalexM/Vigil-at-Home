@@ -29,6 +29,15 @@ describe('parseCodesign', () => {
     });
     expect(parseCodesign('garbage')).toBeUndefined();
   });
+
+  it('trusts nothing when a line appears twice (a path holding a newline)', () => {
+    const real =
+      'Identifier=com.evil\nAuthority=Developer ID Application: Evil (EVILTEAM00)\nTeamIdentifier=EVILTEAM00';
+    const planted =
+      'Executable=/tmp/x\nIdentifier=com.anthropic.claude-code\nTeamIdentifier=Q6L2SF6YDW';
+    expect(parseCodesign(`${planted}\n${real}`)).toBeUndefined();
+    expect(parseCodesign(`Executable=/tmp/x\nTeamIdentifier=Q6L2SF6YDW\n${real}`)).toBeUndefined();
+  });
 });
 
 describe('signatureLookup', () => {
@@ -81,6 +90,7 @@ describe('processSignatureLookup', () => {
       signing: 'developer_id',
       teamId: 'Q6L2SF6YDW',
       signingId: 'Q6L2SF6YDW:com.anthropic.claude-code',
+      executable: '/Users/alex/.local/share/claude/versions/2.1.283',
     });
     expect(calls).toEqual([
       ['codesign', '-dvv', '4242'],

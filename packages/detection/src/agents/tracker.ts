@@ -70,6 +70,8 @@ export interface TrackerOptions {
 export interface RootSignature {
   teamId?: string;
   signingId?: string;
+  /** The executable codesign verified (its `Executable=` line), when it named one. */
+  executable?: string;
 }
 
 const MAX_NODES = 8192;
@@ -207,6 +209,12 @@ interface Node {
    * without a signature keeps them; a launch or a sensor's signature replaces them.
    */
   pidSigned?: true;
+  /**
+   * The executable codesign verified for `pidSigned`. A sensor naming another
+   * program at this pid drops the signature (see adopt): it is not the image
+   * that was checked.
+   */
+  pidSignedPath?: string;
   /** The launch event that last set its program, counted by `exec` (see `mark`). */
   seq?: number;
   /** Program names of the parent, grandparent and so on, nearest first (see mergeAncestors). */
@@ -415,8 +423,12 @@ export class AgentTracker {
   observe<E extends SensorEvent>(e: E): E {
     this.announceSelf();
     const ev = e as SensorEvent;
-    // A request is not a process; an exit says nothing about the tree and has no path.
-    if (ev.kind === 'agent.tool_request' || ev.kind === 'process.exit') return e;
+    if (ev.kind === 'process.exit') {
+      this.exited(ev.process.pid);
+      return e;
+    }
+    // A request is not a process.
+    if (ev.kind === 'agent.tool_request') return e;
     if (ev.kind === 'process.exec') return this.exec(ev) as E;
     const p = 'process' in ev ? ev.process : undefined;
     if (!p || p.pid <= 0) return e;
@@ -476,7 +488,12 @@ export class AgentTracker {
       // executable, so the path cannot tell whether it is the same process.
       const reparented =
         prev !== undefined && Math.abs(prev.startedAt - r.startedAt) < SAME_START_MS;
-      if (prev && (prev.ppid === r.ppid || reparented)) {
+      // A process ps listed before, now listed with another start time, is a
+      // reused pid even under the same parent: it starts over below.
+      const reborn =
+        prev?.psStartedAt !== undefined &&
+        Math.abs(prev.psStartedAt - r.startedAt) >= SAME_START_MS;
+      if (prev && !reborn && (prev.ppid === r.ppid || reparented)) {
         // ps never overrides what a sensor said; it may update its own hint.
         if (prev.psPath && prev.path !== r.path)
           this.setProgram(
@@ -534,6 +551,7 @@ export class AgentTracker {
     n.teamId = sig.teamId;
     if (sig.signingId !== undefined) n.signingId = sig.signingId;
     n.pidSigned = true;
+    if (sig.executable !== undefined) n.pidSignedPath = sig.executable;
     this.retag();
   }
 
@@ -775,7 +793,10 @@ export class AgentTracker {
 
   private setProgram(n: Node, p: AgentProc, m: CompiledAgentMatcher): void {
     const kept = n.pidSigned && p.teamId === n.teamId && p.signingId === n.signingId;
-    if (!kept) delete n.pidSigned;
+    if (!kept) {
+      delete n.pidSigned;
+      delete n.pidSignedPath;
+    }
     n.path = p.path;
     n.name = basename(p.path);
     if (p.teamId !== undefined) n.teamId = p.teamId;
@@ -800,11 +821,16 @@ export class AgentTracker {
     // ps matched it by argv[0] (an npm Claude Code's process title, say): it stays that agent.
     if (before && n.tag?.depth === 0 && n.tag.id === before.id) n.wasAgent = before.id;
     const signed = [n.teamId, n.signingId];
-    // A sensor's signature wins; without one, a signature read from this process stays.
+    // A sensor's signature wins. Without one, a signature read from this process
+    // stays only for the executable codesign verified, and never once a sensor
+    // says the program is unsigned, ad hoc or invalid.
+    const untrusted = p.signing === 'unsigned' || p.signing === 'adhoc' || p.signing === 'invalid';
     const sig =
       p.teamId !== undefined || p.signingId !== undefined
         ? { teamId: p.teamId, signingId: p.signingId }
-        : pidSignature(n);
+        : !untrusted && n.pidSignedPath !== undefined && n.pidSignedPath === p.path
+          ? pidSignature(n)
+          : {};
     this.setProgram(n, { path: p.path, args: n.args, ...sig }, m);
     delete n.psPath;
     // A changed signature changes what the tag hands down (see passOn) too.
@@ -813,6 +839,22 @@ export class AgentTracker {
       (n.tag && (signed[0] !== n.teamId || signed[1] !== n.signingId))
     )
       this.retag();
+  }
+
+  /**
+   * A process exited. A signature read from it belonged to that process, not
+   * its pid, so it goes now: a later process given the same pid (forked
+   * without an exec, which no sensor reports) must not lend it to children.
+   */
+  private exited(pid: number): void {
+    this.signatureAsks.delete(pid);
+    const n = this.find(pid);
+    if (!n?.pidSigned) return;
+    delete n.teamId;
+    delete n.signingId;
+    delete n.pidSigned;
+    delete n.pidSignedPath;
+    this.retag();
   }
 
   /**
