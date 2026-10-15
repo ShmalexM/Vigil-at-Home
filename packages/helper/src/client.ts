@@ -11,7 +11,7 @@ import { randomBytes } from 'node:crypto';
 import type { SensorEvent } from '@vigil/sensors';
 import type { HelperCommand, HelperResponse } from './protocol.js';
 import type { HelperRan } from './fastpath.js';
-import { approvalAppleScript, pkexecArgs } from './approval.js';
+import { APPROVAL_TTL_MS, approvalAppleScript, pkexecArgs } from './approval.js';
 import { ADMIN_ENV, defaultPaths } from './config.js';
 import { hostPlatform, type Platform } from './platform.js';
 
@@ -37,11 +37,12 @@ export type Approver = (
 ) => Promise<boolean>;
 
 /**
- * How long a password dialog stays open. Just under the app's own wait for a
- * release (RELEASE_TIMEOUT_MS, 3 minutes), so a dialog never outlives the
- * call that showed it: timing out means cancelling.
+ * How long a password dialog stays open: a little under the helper's own
+ * wait for the answer (APPROVAL_TTL_MS), since a password typed after that
+ * would be refused anyway, and well under the app's wait for a release.
+ * Timing out means cancelling.
  */
-export const APPROVAL_TIMEOUT_MS = 170_000;
+export const APPROVAL_TIMEOUT_MS = APPROVAL_TTL_MS - 10_000;
 
 let dialogsOpen = 0;
 
@@ -62,22 +63,28 @@ function runDialog(
   signal: AbortSignal | undefined,
 ): Promise<boolean> {
   if (signal?.aborted) return Promise.resolve(false);
-  dialogsOpen++;
   return new Promise((resolve) => {
-    execFile(
-      file,
-      args,
-      {
-        ...(env ? { env } : {}),
-        ...(signal ? { signal } : {}),
-        timeout: APPROVAL_TIMEOUT_MS,
-        killSignal: 'SIGKILL',
-      },
-      (err) => {
-        dialogsOpen--;
-        resolve(!err && !signal?.aborted);
-      },
-    );
+    dialogsOpen++;
+    try {
+      execFile(
+        file,
+        args,
+        {
+          ...(env ? { env } : {}),
+          ...(signal ? { signal } : {}),
+          timeout: APPROVAL_TIMEOUT_MS,
+          killSignal: 'SIGKILL',
+        },
+        (err) => {
+          dialogsOpen--;
+          resolve(!err && !signal?.aborted);
+        },
+      );
+    } catch {
+      // Refused before it started (a bad argument): no dialog, and a no.
+      dialogsOpen--;
+      resolve(false);
+    }
   });
 }
 
@@ -131,8 +138,6 @@ export class HelperClient {
   private readonly pending = new Map<string, (r: HelperResponse) => void>();
   private readonly listeners = new Set<(e: SensorEvent, ran: HelperRan[]) => void>();
   private held: Held[] = [];
-  /** One per open password dialog, so a caller that gave up can close it. */
-  private readonly asking = new Set<AbortController>();
 
   private constructor(
     private readonly sock: Socket,
@@ -177,9 +182,10 @@ export class HelperClient {
 
   /**
    * Send a command; if it needs approval, show the password dialog once and
-   * retry. The dialog also approves any held commands (hold()).
+   * retry. The dialog also approves any held commands (hold()). Aborting
+   * `signal` closes the dialog and counts as a no.
    */
-  async call<T = unknown>(command: HelperCommand): Promise<T> {
+  async call<T = unknown>(command: HelperCommand, signal?: AbortSignal): Promise<T> {
     let resp = await this.send(command);
     if (!resp.ok && 'needsApproval' in resp) {
       const waiting = this.held.filter((h) => !h.approved);
@@ -188,6 +194,7 @@ export class HelperClient {
         resp.nonce,
         prompt,
         waiting.map((h) => h.nonce),
+        signal,
       );
       if (!approved) {
         // A "no" covers the held commands it asked about too: never ask twice.
@@ -252,22 +259,19 @@ export class HelperClient {
   }
 
   /**
-   * Closes every password dialog this client has open; each counts as a no,
-   * even if the user had just answered. For a caller that stopped waiting.
+   * Shows the password dialog. When `signal` aborts (the caller stopped
+   * waiting), the dialog closes and the answer is no, even a yes that
+   * arrives after.
    */
-  cancelApprovals(): void {
-    for (const c of this.asking) c.abort();
-  }
-
-  private async ask(nonce: string, prompt: string, also: string[]): Promise<boolean> {
-    const c = new AbortController();
-    this.asking.add(c);
-    try {
-      const yes = await this.approver(nonce, prompt, also, c.signal).catch(() => false);
-      return yes && !c.signal.aborted;
-    } finally {
-      this.asking.delete(c);
-    }
+  private async ask(
+    nonce: string,
+    prompt: string,
+    also: string[],
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
+    const yes = await this.approver(nonce, prompt, also, signal).catch(() => false);
+    return yes && !signal?.aborted;
   }
 
   /** Refuse every held command without asking, approved or not. */

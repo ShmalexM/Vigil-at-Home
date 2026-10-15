@@ -282,9 +282,13 @@ describe('UpdateChecker installing by itself', () => {
   });
 
   it('installs a ready update when Vigil quits', async () => {
-    const { c, calls } = selfChecker();
+    const { c, calls, setBusy } = selfChecker();
     await c.check();
     await settle();
+    // Not under a password dialog or the helper's installer.
+    setBusy(true);
+    expect(c.installOnQuit()).toBe(false);
+    setBusy(false);
     expect(c.installOnQuit()).toBe(true);
     expect(calls.at(-1)).toBe('swap 0.1.0-alpha.5');
     expect(c.installOnQuit()).toBe(false);

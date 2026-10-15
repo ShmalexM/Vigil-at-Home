@@ -89,13 +89,19 @@ export interface HelperRulesOutcome {
 class HelperTimeout extends Error {}
 
 /**
- * Waits `ms` for the helper. A password dialog the call showed closes when
- * the wait ends (`client`), so an answer after that can't act unseen.
+ * Waits `ms` for the helper. Given a function, it gets a signal that aborts
+ * when the wait ends, so a password dialog the call showed closes with it
+ * and an answer after that can't act unseen.
  */
-function withTimeout<T>(p: Promise<T>, ms: number, client?: HelperClient): Promise<T> {
+function withTimeout<T>(
+  call: Promise<T> | ((signal: AbortSignal) => Promise<T>),
+  ms: number,
+): Promise<T> {
+  const stop = new AbortController();
+  const p = typeof call === 'function' ? call(stop.signal) : call;
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => {
-      client?.cancelApprovals();
+      stop.abort();
       reject(new HelperTimeout('The Vigil helper did not answer'));
     }, ms);
     p.then(
@@ -188,9 +194,8 @@ export class HelperLink
       // Releases make the helper ask for the admin password; call() shows the dialog.
       // A release waits on the user typing their password; containment must be quick.
       const out = await withTimeout(
-        client.call<Outcome>(action),
+        (signal) => client.call<Outcome>(action, signal),
         isRelease(action) ? RELEASE_TIMEOUT_MS : ACTION_TIMEOUT_MS,
-        client,
       );
       if (!out) throw new Error('No answer from the Vigil helper');
       return {
@@ -352,12 +357,14 @@ export class HelperLink
           out = tried.result;
         } else {
           out = await withTimeout(
-            opts.hold
-              ? client.hold<HelperRulesOutcome>(sync, opts.onHeld)
-              : client.call<HelperRulesOutcome>(sync),
+            // A held sync's dialog is approveHeld()'s, shared with what else
+            // is held; it closes on its own (APPROVAL_TIMEOUT_MS).
+            (signal) =>
+              opts.hold
+                ? client.hold<HelperRulesOutcome>(sync, opts.onHeld)
+                : client.call<HelperRulesOutcome>(sync, signal),
             // A sync that loosens the rules waits on the admin password, like a release.
             RELEASE_TIMEOUT_MS,
-            client,
           );
         }
         if (out.applied) {
@@ -426,7 +433,8 @@ export class HelperLink
     if (!client) return null;
     try {
       // No timeout here: the dialog closes itself after APPROVAL_TIMEOUT_MS
-      // (a no), and a lost connection settles it too.
+      // (a no), and a lost connection settles it too. No other call's
+      // timeout closes it.
       await client.call({ kind: 'self.grant', ...selfOf(set) });
       return 'applied';
     } catch (err) {

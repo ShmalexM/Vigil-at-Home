@@ -189,6 +189,9 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
   installOnQuit(): boolean {
     const s = this.staged;
     if (!s || this.staging || !this.o.installer || !this.saved().install) return false;
+    // Not under a password dialog or the helper's installer, which checks
+    // the app it installs from: the next start or quit installs instead.
+    if (this.o.canRestart && !this.o.canRestart()) return false;
     try {
       this.o.installer.swap(s);
       this.staged = undefined;

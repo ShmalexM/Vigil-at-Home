@@ -32,6 +32,13 @@ describe('password dialogs', () => {
     expect(approvalOpen()).toBe(false);
   });
 
+  it('counts nothing open when the dialog program refuses to start', async () => {
+    // A NUL in an argument makes execFile throw before anything runs.
+    const ask = pkexecApprover('/usr/local/bin/vigil-helper', '/bin/true\u0000');
+    await expect(ask(NONCE, 'x')).resolves.toBe(false);
+    expect(approvalOpen()).toBe(false);
+  });
+
   it('a yes counts while nobody gave up', async () => {
     const dialog = join(dir, 'yes.sh');
     writeFileSync(dialog, '#!/bin/sh\nexit 0\n');
@@ -43,7 +50,7 @@ describe('password dialogs', () => {
   });
 });
 
-describe('HelperClient.cancelApprovals', () => {
+describe('HelperClient.call with a signal', () => {
   let server: Server;
   const socket = () => join(dir, 'helper.sock');
   /** Commands the fake helper got with an approval attached. */
@@ -91,11 +98,12 @@ describe('HelperClient.cancelApprovals', () => {
       return new Promise((r) => (answer = r));
     };
     const client = await HelperClient.connect(socket(), approver);
+    const stop = new AbortController();
     try {
-      const call = client.call({ kind: 'process.resume', pid: 42 } as never);
+      const call = client.call({ kind: 'process.resume', pid: 42 } as never, stop.signal);
       await new Promise((r) => setTimeout(r, 50));
       expect(seen?.aborted).toBe(false);
-      client.cancelApprovals();
+      stop.abort();
       expect(seen?.aborted).toBe(true);
       // The user's yes lands just after the app stopped waiting.
       answer(true);
