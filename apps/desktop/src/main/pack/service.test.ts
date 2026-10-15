@@ -243,6 +243,23 @@ describe('the pack', () => {
     expect(pack.dogs()[0]).toMatchObject({ name: 'Rex', breed: 'shepherd', role: 'lead' });
   });
 
+  it('asks about AI again as soon as Settings › AI changes, and says why nothing can talk', async () => {
+    const status: Partial<PackAiStatus> = {
+      anyReady: false,
+      noAiWhy: 'Jev only labels events; it can’t chat.',
+    };
+    const { pack } = setup({ status });
+    expect(await pack.view()).toMatchObject({ noAi: true, noAiWhy: status.noAiWhy });
+    status.anyReady = true;
+    delete status.noAiWhy;
+    // Within the minute it keeps its answer, until told the settings changed.
+    expect((await pack.view()).noAi).toBe(true);
+    pack.forgetAiStatus();
+    const view = await pack.view();
+    expect(view.noAi).toBe(false);
+    expect(view.noAiWhy).toBeUndefined();
+  });
+
   it('runs the Lead dog as the user’s own chat, and pack jobs as background work', async () => {
     const { pack, handlers, runs } = setup();
     handlers.push(() => ({ reply: 'Hi!', actions: [] }));

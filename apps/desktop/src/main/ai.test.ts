@@ -304,6 +304,27 @@ describe('AiBridge view', () => {
     expect(v.jevVia).toBe('typesafe');
   });
 
+  it('tells the chat why nothing can talk when Settings › AI shows only Jev, or all off', async () => {
+    const { ai } = setup({ saved: { typesafe: 'ts-aaaaaaaaaaaaaaaaaa9876' } });
+    ai.setPrefs({ claude: false, codex: false, api: false, ollama: false });
+    expect((await ai.view()).providers.find((p) => p.provider === 'jev')).toMatchObject({
+      state: 'ready',
+    });
+    expect(await ai.packAi().status()).toMatchObject({
+      anyReady: false,
+      noAiWhy: 'Jev only labels events; it can’t chat.',
+    });
+    ai.setPrefs({ jev: false });
+    expect(await ai.packAi().status()).toMatchObject({
+      anyReady: false,
+      noAiWhy: 'Every AI app is switched off.',
+    });
+    ai.setPrefs({ codex: true });
+    const on = await ai.packAi().status();
+    expect(on.anyReady).toBe(true);
+    expect(on.noAiWhy).toBeUndefined();
+  });
+
   it('opens the vendor sign-in page in the browser', async () => {
     const { ai, opened } = setup();
     expect(await ai.signIn('codex')).toEqual({ ok: true });

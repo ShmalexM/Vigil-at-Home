@@ -929,8 +929,18 @@ export class AiBridge extends EventEmitter<{
           ready('ollama') && 'the local model',
         ].filter((x): x is string => typeof x === 'string');
         const planOnly = ready('claude') && !v.anthropicKey && v.prefs.claudePlan;
+        const anyReady = judges.length > 0 || planOnly;
+        // Settings › AI can show Jev as ready while nothing that can chat is.
+        const noAiWhy = anyReady
+          ? undefined
+          : PROVIDER_PREFS.every((k) => !v.prefs[k])
+            ? 'Every AI app is switched off.'
+            : ready('jev')
+              ? 'Jev only labels events; it can’t chat.'
+              : undefined;
         return {
-          anyReady: judges.length > 0 || planOnly,
+          anyReady,
+          ...(noAiWhy ? { noAiWhy } : {}),
           judge: judges.length
             ? { ready: true, detail: `${judges[0]} checks risky calls` }
             : {

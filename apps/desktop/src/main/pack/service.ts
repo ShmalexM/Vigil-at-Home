@@ -113,6 +113,8 @@ const JOB_PROVIDERS = ['claude', 'codex', 'api', 'ollama'] as const;
 
 export interface PackAiStatus {
   anyReady: boolean;
+  /** Why nothing can talk, when Settings › AI might look otherwise. */
+  noAiWhy?: string;
   judge: { ready: boolean; detail: string };
   leadMayUsePlan: boolean;
 }
@@ -724,11 +726,17 @@ export class PackService {
       leadMayUsePlan: ai.leadMayUsePlan,
       judge: ai.judge,
       noAi: !ai.anyReady,
+      ...(ai.noAiWhy ? { noAiWhy: ai.noAiWhy } : {}),
       tools: this.toolViews(),
       connectors: this.o.connectors.view(),
       today: this.o.notebook?.tally(startOfDay(this.now())) ?? [],
       remembered: this.o.memory?.count() ?? 0,
     };
+  }
+
+  /** Settings › AI changed: the next view asks again instead of showing the old answer. */
+  forgetAiStatus(): void {
+    this.aiStatus = undefined;
   }
 
   private async status(): Promise<PackAiStatus> {
