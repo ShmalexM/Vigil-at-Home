@@ -157,10 +157,13 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
    * is open. Unless `now` (the user pressed Restart to update), also waits
    * until the computer has been left alone for {@link IDLE_INSTALL_S}.
    *
-   * Accepted: canRestart doesn't see a password dialog the user opened
-   * themselves (a release, a loosening). Those stop waiting after three
-   * minutes, well inside the idle wait, so only pressing Restart to update
-   * with one open can restart under it.
+   * canRestart sees every password dialog the app has open (approvalOpen
+   * counts the dialog programs until they exit), and each closes itself,
+   * as a no, before the app stops waiting on it.
+   *
+   * Accepted: idle time and canRestart are read just before the swap, not
+   * during it. The swap and relaunch take a moment, and relaunching straight
+   * away is safer than leaving a swapped app running.
    */
   install(now = false): void {
     const s = this.staged;
@@ -191,6 +194,9 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
       this.staged = undefined;
       return true;
     } catch (err) {
+      // Accepted: on quit there is no window left to say so, only this log.
+      // A failed swap normally puts the old app back; if even that failed,
+      // the error names where the old copy is.
       console.error('[updates] could not install on quit:', err);
       return false;
     }

@@ -50,7 +50,11 @@ const DOWNLOAD_HOSTS = new Set([
 /** The name electron-builder gives a Mac release zip (electron-builder.yml). */
 const ZIP_NAME = /^Vigil-at-Home-[0-9][0-9A-Za-z.+-]*-(arm64|x64)\.zip$/;
 
-/** Refuses a response that a redirect took anywhere but GitHub's own release hosts. */
+/**
+ * Refuses a response that a redirect took anywhere but GitHub's own release
+ * hosts. Accepted: only where it landed is checked, not each hop; the
+ * checksum, not the route, is what vouches for the bytes.
+ */
 function checkLanding(res: Response, what: string): void {
   let host = '';
   try {
@@ -202,7 +206,10 @@ export class SelfUpdater {
    * that fails too); if even that fails, the error says where it is.
    *
    * Accepted: if the process dies between the two renames, the app is only
-   * in the staging folder; the window is two system calls long.
+   * in the staging folder; the window is two system calls long. The check
+   * covers the folders and Info.plist, not every file: changing the rest
+   * takes write access to the staged bundle, which is the user's own, the
+   * same access that could change the installed app.
    */
   swap(s: Staged): void {
     if (this.stranded) throw new Error('the previous version still needs to be moved back');

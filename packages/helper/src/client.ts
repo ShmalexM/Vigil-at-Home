@@ -26,21 +26,70 @@ export class HelperCallError extends Error {
 
 /**
  * Shows macOS's admin password dialog; resolves true if the user approved.
- * `also` are more commands' nonces the same password approves.
+ * `also` are more commands' nonces the same password approves. When `signal`
+ * aborts, the dialog closes and the answer is no.
  */
-export type Approver = (nonce: string, prompt: string, also?: string[]) => Promise<boolean>;
+export type Approver = (
+  nonce: string,
+  prompt: string,
+  also?: string[],
+  signal?: AbortSignal,
+) => Promise<boolean>;
+
+/**
+ * How long a password dialog stays open. Just under the app's own wait for a
+ * release (RELEASE_TIMEOUT_MS, 3 minutes), so a dialog never outlives the
+ * call that showed it: timing out means cancelling.
+ */
+export const APPROVAL_TIMEOUT_MS = 170_000;
+
+let dialogsOpen = 0;
+
+/** Whether a password dialog this process showed is still on screen. */
+export function approvalOpen(): boolean {
+  return dialogsOpen > 0;
+}
+
+/**
+ * Runs the program that shows the dialog, counted in {@link approvalOpen}
+ * until it exits. A timeout or an abort kills it, which closes the dialog
+ * and counts as a no.
+ */
+function runDialog(
+  file: string,
+  args: string[],
+  env: NodeJS.ProcessEnv | undefined,
+  signal: AbortSignal | undefined,
+): Promise<boolean> {
+  if (signal?.aborted) return Promise.resolve(false);
+  dialogsOpen++;
+  return new Promise((resolve) => {
+    execFile(
+      file,
+      args,
+      {
+        ...(env ? { env } : {}),
+        ...(signal ? { signal } : {}),
+        timeout: APPROVAL_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
+      },
+      (err) => {
+        dialogsOpen--;
+        resolve(!err && !signal?.aborted);
+      },
+    );
+  });
+}
 
 export function osascriptApprover(helperExecutable = defaultPaths().helperExecutable): Approver {
-  return (nonce, prompt, also = []) =>
-    new Promise((resolve) => {
-      execFile(
-        '/usr/bin/osascript',
-        ['-e', approvalAppleScript(helperExecutable, [nonce, ...also], prompt)],
-        // The approve command runs as root; give it none of the session's environment.
-        { env: ADMIN_ENV },
-        (err) => resolve(!err),
-      );
-    });
+  return (nonce, prompt, also = [], signal) =>
+    runDialog(
+      '/usr/bin/osascript',
+      ['-e', approvalAppleScript(helperExecutable, [nonce, ...also], prompt)],
+      // The approve command runs as root; give it none of the session's environment.
+      ADMIN_ENV,
+      signal,
+    );
 }
 
 /**
@@ -53,10 +102,8 @@ export function pkexecApprover(
   helperExecutable = defaultPaths(undefined, 'linux').helperExecutable,
   pkexec = '/usr/bin/pkexec',
 ): Approver {
-  return (nonce, _prompt, also = []) =>
-    new Promise((resolve) => {
-      execFile(pkexec, pkexecArgs(helperExecutable, [nonce, ...also]), (err) => resolve(!err));
-    });
+  return (nonce, _prompt, also = [], signal) =>
+    runDialog(pkexec, pkexecArgs(helperExecutable, [nonce, ...also]), undefined, signal);
 }
 
 /** The password dialog for this OS. */
@@ -84,6 +131,8 @@ export class HelperClient {
   private readonly pending = new Map<string, (r: HelperResponse) => void>();
   private readonly listeners = new Set<(e: SensorEvent, ran: HelperRan[]) => void>();
   private held: Held[] = [];
+  /** One per open password dialog, so a caller that gave up can close it. */
+  private readonly asking = new Set<AbortController>();
 
   private constructor(
     private readonly sock: Socket,
@@ -135,7 +184,7 @@ export class HelperClient {
     if (!resp.ok && 'needsApproval' in resp) {
       const waiting = this.held.filter((h) => !h.approved);
       const prompt = [resp.prompt, ...waiting.map((h) => h.prompt)].join(' ');
-      const approved = await this.approver(
+      const approved = await this.ask(
         resp.nonce,
         prompt,
         waiting.map((h) => h.nonce),
@@ -190,15 +239,34 @@ export class HelperClient {
     let approved = true;
     if (waiting.length) {
       const [first, ...rest] = waiting;
-      approved = await this.approver(
+      approved = await this.ask(
         first!.nonce,
         waiting.map((h) => h.prompt).join(' '),
         rest.map((h) => h.nonce),
-      ).catch(() => false);
+      );
     }
     for (const h of held) {
       if (!h.approved && !approved) h.settle(new HelperCallError('not approved', 'refused'));
       else h.settle(await this.send(h.command, h.nonce));
+    }
+  }
+
+  /**
+   * Closes every password dialog this client has open; each counts as a no,
+   * even if the user had just answered. For a caller that stopped waiting.
+   */
+  cancelApprovals(): void {
+    for (const c of this.asking) c.abort();
+  }
+
+  private async ask(nonce: string, prompt: string, also: string[]): Promise<boolean> {
+    const c = new AbortController();
+    this.asking.add(c);
+    try {
+      const yes = await this.approver(nonce, prompt, also, c.signal).catch(() => false);
+      return yes && !c.signal.aborted;
+    } finally {
+      this.asking.delete(c);
     }
   }
 

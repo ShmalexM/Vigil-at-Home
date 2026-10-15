@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { app, dialog, Notification, powerMonitor, safeStorage, shell } from 'electron';
 import { z } from 'zod';
+import { approvalOpen } from '@vigil/helper/client';
 import type { HelperInstallResult } from '../shared/ipc.js';
 import { AgentService } from './agents/service.js';
 import { AiBridge } from './ai.js';
@@ -330,7 +331,10 @@ function start(): void {
           idleSeconds: () => powerMonitor.getSystemIdleTime(),
           // Never restart under an open alert popup or a password dialog.
           canRestart: () =>
-            !windows.popupVisible() && !helperScriptRunning() && !selfGrantPending(),
+            !windows.popupVisible() &&
+            !helperScriptRunning() &&
+            !selfGrantPending() &&
+            !approvalOpen(),
         }
       : {}),
     onFound: (version) => {

@@ -88,9 +88,16 @@ export interface HelperRulesOutcome {
 /** The helper's socket is open but it didn't answer in time. */
 class HelperTimeout extends Error {}
 
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+/**
+ * Waits `ms` for the helper. A password dialog the call showed closes when
+ * the wait ends (`client`), so an answer after that can't act unseen.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, client?: HelperClient): Promise<T> {
   return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new HelperTimeout('The Vigil helper did not answer')), ms);
+    const t = setTimeout(() => {
+      client?.cancelApprovals();
+      reject(new HelperTimeout('The Vigil helper did not answer'));
+    }, ms);
     p.then(
       (v) => (clearTimeout(t), resolve(v)),
       (e: unknown) => (clearTimeout(t), reject(e instanceof Error ? e : new Error(String(e)))),
@@ -183,6 +190,7 @@ export class HelperLink
       const out = await withTimeout(
         client.call<Outcome>(action),
         isRelease(action) ? RELEASE_TIMEOUT_MS : ACTION_TIMEOUT_MS,
+        client,
       );
       if (!out) throw new Error('No answer from the Vigil helper');
       return {
@@ -349,6 +357,7 @@ export class HelperLink
               : client.call<HelperRulesOutcome>(sync),
             // A sync that loosens the rules waits on the admin password, like a release.
             RELEASE_TIMEOUT_MS,
+            client,
           );
         }
         if (out.applied) {
@@ -416,7 +425,8 @@ export class HelperLink
     const client = this.client;
     if (!client) return null;
     try {
-      // No timeout: the dialog may stay open, and a lost connection settles it.
+      // No timeout here: the dialog closes itself after APPROVAL_TIMEOUT_MS
+      // (a no), and a lost connection settles it too.
       await client.call({ kind: 'self.grant', ...selfOf(set) });
       return 'applied';
     } catch (err) {
