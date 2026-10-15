@@ -94,10 +94,25 @@ secrets exist; nothing else changes.
 ### Updates
 
 The installed app checks this repo's published GitHub releases a minute after
-it starts and every six hours (Settings › About › Updates can turn that off).
-When a newer version is out it shows a banner and a macOS notification, and
-Download opens the DMG for the Mac's chip. Only published releases count:
-drafts from the Release workflow stay invisible until a maintainer publishes
-them. Pre-releases are offered only to people already on a pre-release. Because
-builds are unsigned, Vigil can't replace itself; once signing is set up, this
-can move to installing updates automatically.
+it starts and every six hours. Only published releases count: drafts from the
+Release workflow stay invisible until a maintainer publishes them.
+Pre-releases are offered only to people already on a pre-release.
+
+On a Mac where the app sits in a folder the user can write (as when it was
+dragged into /Applications), a newer release installs itself:
+
+1. The app downloads the release's zip for its chip and `SHA256SUMS.txt`, and
+   refuses the zip unless its SHA-256 matches.
+2. It unpacks the zip with `ditto` into a hidden `.vigil-update` folder beside
+   the app. It checks the bundle id, the version and `codesign --verify`.
+3. Once nobody has touched the Mac for ten minutes, and no alert popup or
+   password dialog is open, it swaps the new app in and relaunches. It also
+   swaps on quit. The root helper keeps blocking throughout.
+4. The new app finds the helper outdated and asks for the admin password once,
+   waiting until the user is back at the keyboard.
+
+This is the same trust as dragging the DMG in by hand: both rest on this
+repo's GitHub releases. Settings › About › Updates offers Install
+automatically (the default), Tell me, or Only when I ask. A copy run from a
+disk image, a translocated copy or a folder the user can't write falls back
+to a banner, a notification and a Download button.

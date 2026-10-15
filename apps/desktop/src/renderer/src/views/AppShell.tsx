@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { LEVEL_RULES } from '../../../shared/levels';
+import { updateNeedsUser } from '../../../shared/updates';
 import { useLive, vigil } from '../api';
 import { AskScout } from '../components/AskScout';
 import { Shield } from '../components/Shield';
@@ -128,7 +129,7 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
           <Shield height={22} />
           <span className="t-h3">Vigil at Home</span>
           {/* After Later, a quiet reminder here takes over from the banner. */}
-          {updates?.available && updates.dismissed && (
+          {updates?.available && updates.dismissed && updateNeedsUser(updates) && (
             <IconButton
               size="sm"
               className="btn icon-btn sm update-pill"
@@ -224,7 +225,7 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
             </Button>
           </div>
         )}
-        {updates?.available && !updates.dismissed && (
+        {updates?.available && !updates.dismissed && updateNeedsUser(updates) && (
           <div className="attn accent setup-banner">
             <Download size={16} />
             <span className="grow">

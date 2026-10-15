@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { z } from 'zod';
 import type { UpdateView } from '../shared/updates.js';
+import type { SelfUpdateAssets, SelfUpdater, Staged } from './self-update.js';
 
 /** Where releases are published. Only published releases are visible; drafts never are. */
 export const RELEASES_URL =
@@ -8,6 +9,9 @@ export const RELEASES_URL =
 /** Wait a little after start, then check a few times a day. */
 export const FIRST_CHECK_MS = 60_000;
 export const CHECK_EVERY_MS = 6 * 60 * 60_000;
+/** A downloaded update installs once the computer has been left alone this long. */
+export const IDLE_INSTALL_S = 10 * 60;
+const INSTALL_TICK_MS = 60_000;
 
 const Release = z.object({
   tag_name: z.string().max(100),
@@ -23,6 +27,8 @@ const Releases = z.array(z.unknown());
 
 const Saved = z.object({
   auto: z.boolean().default(true),
+  /** Download and install by itself, where this copy can (see SelfUpdater). */
+  install: z.boolean().default(true),
   dismissed: z.string().max(100).optional(),
 });
 type Saved = z.infer<typeof Saved>;
@@ -41,9 +47,17 @@ export interface UpdateOptions {
   save: (s: Saved) => void;
   fetch?: typeof fetch;
   openExternal: (url: string) => Promise<void>;
-  /** Told once per version when a newer release turns up. */
+  /** Told once per version when a newer release turns up and won't install by itself. */
   onFound?: (version: string) => void;
   now?: () => number;
+  /** macOS, packaged: installs updates in place. Elsewhere the user downloads them. */
+  installer?: Pick<SelfUpdater, 'canInstall' | 'stage' | 'swap' | 'swapSync'>;
+  /** Starts the new version once the swap is done (app.relaunch, then exit). */
+  relaunch?: () => void;
+  /** Seconds since the user last touched the keyboard or mouse. */
+  idleSeconds?: () => number;
+  /** False while something on screen is waiting for the user (a popup, a password dialog). */
+  canRestart?: () => boolean;
 }
 
 /**
@@ -57,6 +71,11 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
   private available: UpdateView['available'];
   private told = new Set<string>();
   private timers: ReturnType<typeof setTimeout>[] = [];
+  private canSelf: boolean | undefined;
+  private staging: string | undefined;
+  private staged: Staged | undefined;
+  private installError: { version: string; error: string } | undefined;
+  private installing = false;
 
   constructor(private readonly o: UpdateOptions) {
     super();
@@ -64,7 +83,7 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
 
   private saved(): Saved {
     const r = Saved.safeParse(this.o.load() ?? {});
-    return r.success ? r.data : { auto: true };
+    return r.success ? r.data : { auto: true, install: true };
   }
 
   view(): UpdateView {
@@ -77,7 +96,91 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
       ...(this.error ? { error: this.error } : {}),
       ...(this.available ? { available: this.available } : {}),
       dismissed: !!this.available && s.dismissed === this.available.version,
+      install: s.install,
+      selfInstall: !!this.canSelf,
+      ...(this.staging ? { preparing: this.staging } : {}),
+      ...(this.staged ? { ready: this.staged.version } : {}),
+      ...(this.installError ? { installError: this.installError.error } : {}),
     };
+  }
+
+  /** Whether this copy installs updates by itself (decided once, at start). */
+  private async selfInstalls(): Promise<boolean> {
+    if (!this.o.installer) return false;
+    this.canSelf ??= await this.o.installer.canInstall().catch(() => false);
+    return this.canSelf;
+  }
+
+  /**
+   * Downloads and checks the available version beside the app, once per
+   * version, unless the user turned automatic installs off. A failure is kept
+   * in words and the version isn't tried again until the next start.
+   */
+  private async prepare(): Promise<void> {
+    const a = this.available;
+    const assets = a?.selfUpdate;
+    if (!a || !assets || !this.saved().install || !(await this.selfInstalls())) return;
+    if (this.staging || this.staged?.version === a.version) return;
+    if (this.installError?.version === a.version) return;
+    // Staging clears the folder beside the app, so an older staged copy goes too.
+    this.staged = undefined;
+    this.staging = a.version;
+    this.emit('changed');
+    try {
+      this.staged = await this.o.installer!.stage({ version: a.version, ...assets });
+    } catch (err) {
+      this.installError = {
+        version: a.version,
+        error: `Couldn’t get ${a.version} ready to install (${err instanceof Error ? err.message : String(err)})`,
+      };
+    } finally {
+      this.staging = undefined;
+      this.emit('changed');
+    }
+  }
+
+  /** Installs now if an update is ready and the user is away. */
+  private maybeInstall(): void {
+    if (!this.staged || this.installing || !this.saved().install) return;
+    if ((this.o.idleSeconds?.() ?? 0) < IDLE_INSTALL_S) return;
+    if (this.o.canRestart && !this.o.canRestart()) return;
+    void this.install();
+  }
+
+  /** Swaps in the downloaded version and starts it. The helper keeps blocking meanwhile. */
+  async install(): Promise<void> {
+    const s = this.staged;
+    if (!s || this.installing || this.staging || !this.o.installer) return;
+    this.installing = true;
+    try {
+      await this.o.installer.swap(s);
+      this.staged = undefined;
+      this.o.relaunch?.();
+    } catch (err) {
+      this.staged = undefined;
+      this.installError = {
+        version: s.version,
+        error: `Couldn’t install ${s.version} (${err instanceof Error ? err.message : String(err)})`,
+      };
+      this.emit('changed');
+    } finally {
+      this.installing = false;
+    }
+  }
+
+  /** On quit: put a downloaded update in place so the next start runs it. */
+  installOnQuit(): boolean {
+    const s = this.staged;
+    if (!s || this.installing || this.staging || !this.o.installer || !this.saved().install)
+      return false;
+    try {
+      this.o.installer.swapSync(s);
+      this.staged = undefined;
+      return true;
+    } catch (err) {
+      console.error('[updates] could not install on quit:', err);
+      return false;
+    }
   }
 
   /** Starts the automatic checks. */
@@ -87,6 +190,7 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
     };
     this.timers.push(setTimeout(tick, FIRST_CHECK_MS));
     this.timers.push(setInterval(tick, CHECK_EVERY_MS));
+    if (this.o.installer) this.timers.push(setInterval(() => this.maybeInstall(), INSTALL_TICK_MS));
   }
 
   stop(): void {
@@ -112,7 +216,14 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
       );
       this.error = undefined;
       const v = this.available?.version;
-      if (v && !this.told.has(v) && this.saved().dismissed !== v) {
+      // A version that failed to install by itself goes back to the user.
+      const selfInstalls =
+        !!this.available?.selfUpdate &&
+        this.saved().install &&
+        this.installError?.version !== v &&
+        (await this.selfInstalls());
+      if (selfInstalls) void this.prepare();
+      else if (v && !this.told.has(v) && this.saved().dismissed !== v) {
         this.told.add(v);
         this.o.onFound?.(v);
       }
@@ -126,8 +237,13 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
     return this.view();
   }
 
-  setAuto(auto: boolean): void {
-    this.o.save({ ...this.saved(), auto });
+  /**
+   * install: check, download and install by itself; notify: check and say so;
+   * manual: only when the user presses Check now.
+   */
+  setMode(mode: 'install' | 'notify' | 'manual'): void {
+    this.o.save({ ...this.saved(), auto: mode !== 'manual', install: mode === 'install' });
+    if (mode === 'install') void this.prepare();
     this.emit('changed');
   }
 
@@ -186,10 +302,24 @@ export function newest(
           (a) => a.name.endsWith(`-${arch}.dmg`) && isGitHub(a.browser_download_url),
         )
       : undefined;
+  const zip =
+    platform === 'darwin'
+      ? best.r.assets.find(
+          (a) => a.name.endsWith(`-${arch}.zip`) && isGitHub(a.browser_download_url),
+        )
+      : undefined;
+  const sums = best.r.assets.find(
+    (a) => a.name === 'SHA256SUMS.txt' && isGitHub(a.browser_download_url),
+  );
+  const selfUpdate: Omit<SelfUpdateAssets, 'version'> | undefined =
+    zip && sums
+      ? { zipName: zip.name, zipUrl: zip.browser_download_url, sumsUrl: sums.browser_download_url }
+      : undefined;
   return {
     version: best.version,
     notesUrl: best.r.html_url,
     ...(dmg ? { downloadUrl: dmg.browser_download_url } : {}),
+    ...(selfUpdate ? { selfUpdate } : {}),
     ...(best.r.published_at ? { publishedAt: best.r.published_at } : {}),
   };
 }

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { compareVersions, isLinuxPackage, newest, UpdateChecker } from './updates.js';
+import { updateNeedsUser } from '../shared/updates.js';
+import {
+  compareVersions,
+  IDLE_INSTALL_S,
+  isLinuxPackage,
+  newest,
+  UpdateChecker,
+} from './updates.js';
 
 const release = (tag: string, o: { draft?: boolean; prerelease?: boolean } = {}) => ({
   tag_name: `v${tag}`,
@@ -114,8 +121,8 @@ describe('UpdateChecker', () => {
     expect(opened[0]).toMatch(/0\.1\.0-alpha\.3-arm64\.dmg$/);
     c.dismiss();
     expect(c.view().dismissed).toBe(true);
-    c.setAuto(false);
-    expect(c.view()).toMatchObject({ auto: false, dismissed: true });
+    c.setMode('manual');
+    expect(c.view()).toMatchObject({ auto: false, install: false, dismissed: true });
   });
 
   it('opens the release page for What’s new', async () => {
@@ -130,6 +137,131 @@ describe('UpdateChecker', () => {
   it('reports a failed check in words', async () => {
     const { c } = checker(null, false);
     expect((await c.check()).error).toMatch(/403/);
+  });
+});
+
+describe('UpdateChecker installing by itself', () => {
+  const withZip = (tag: string) => {
+    const r = release(tag);
+    const base = `https://github.com/ShmalexM/Vigil-at-Home/releases/download/v${tag}/`;
+    r.assets.push(
+      {
+        name: `Vigil-at-Home-${tag}-arm64.zip`,
+        browser_download_url: `${base}Vigil-at-Home-${tag}-arm64.zip`,
+      },
+      { name: 'SHA256SUMS.txt', browser_download_url: `${base}SHA256SUMS.txt` },
+    );
+    return r;
+  };
+
+  function selfChecker(o: { stageFails?: boolean; canInstall?: boolean } = {}) {
+    let saved: unknown = {};
+    let idle = 0;
+    let busy = false;
+    const calls: string[] = [];
+    const found: string[] = [];
+    const c = new UpdateChecker({
+      current: '0.1.0-alpha.4',
+      arch: 'arm64',
+      platform: 'darwin',
+      load: () => saved,
+      save: (s) => void (saved = s),
+      fetch: (async () => ({
+        ok: true,
+        status: 200,
+        json: async () => [withZip('0.1.0-alpha.5')],
+      })) as never,
+      openExternal: async () => {},
+      onFound: (v) => found.push(v),
+      installer: {
+        canInstall: async () => o.canInstall ?? true,
+        stage: async (a) => {
+          calls.push(`stage ${a.version} ${a.zipName}`);
+          if (o.stageFails) throw new Error('the download doesn’t match the release’s checksum');
+          return { version: a.version, app: '/Applications/.vigil-update/x/Vigil at Home.app' };
+        },
+        swap: async (s) => void calls.push(`swap ${s.version}`),
+        swapSync: (s) => void calls.push(`swapSync ${s.version}`),
+      },
+      relaunch: () => calls.push('relaunch'),
+      idleSeconds: () => idle,
+      canRestart: () => !busy,
+    });
+    return {
+      c,
+      calls,
+      found,
+      setIdle: (s: number) => (idle = s),
+      setBusy: (b: boolean) => (busy = b),
+    };
+  }
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it('offers the zip and checksums for this chip', () => {
+    const a = newest([withZip('0.1.0-alpha.5')], '0.1.0-alpha.4', 'arm64');
+    expect(a?.selfUpdate?.zipName).toBe('Vigil-at-Home-0.1.0-alpha.5-arm64.zip');
+    expect(a?.selfUpdate?.sumsUrl).toMatch(/\/SHA256SUMS\.txt$/);
+    expect(newest([withZip('0.1.0-alpha.5')], '0.1.0-alpha.4', 'x64')?.selfUpdate).toBeUndefined();
+    expect(
+      newest([withZip('0.1.0-alpha.5')], '0.1.0-alpha.4', 'arm64', 'linux')?.selfUpdate,
+    ).toBeUndefined();
+  });
+
+  it('downloads quietly, then installs only once the user is away and nothing is on screen', async () => {
+    const { c, calls, found, setIdle, setBusy } = selfChecker();
+    const v = await c.check();
+    await settle();
+    // No notification and no banner: it needs nothing from the user.
+    expect(found).toEqual([]);
+    expect(c.view()).toMatchObject({ ready: '0.1.0-alpha.5', selfInstall: true, install: true });
+    expect(updateNeedsUser(c.view())).toBe(false);
+    expect(v.available?.version).toBe('0.1.0-alpha.5');
+    (c as unknown as { maybeInstall(): void }).maybeInstall();
+    expect(calls).toEqual(['stage 0.1.0-alpha.5 Vigil-at-Home-0.1.0-alpha.5-arm64.zip']);
+    setIdle(IDLE_INSTALL_S);
+    setBusy(true);
+    (c as unknown as { maybeInstall(): void }).maybeInstall();
+    expect(calls).toHaveLength(1);
+    setBusy(false);
+    (c as unknown as { maybeInstall(): void }).maybeInstall();
+    await settle();
+    expect(calls.slice(1)).toEqual(['swap 0.1.0-alpha.5', 'relaunch']);
+  });
+
+  it('installs a ready update when Vigil quits', async () => {
+    const { c, calls } = selfChecker();
+    await c.check();
+    await settle();
+    expect(c.installOnQuit()).toBe(true);
+    expect(calls.at(-1)).toBe('swapSync 0.1.0-alpha.5');
+    expect(c.installOnQuit()).toBe(false);
+  });
+
+  it('falls back to telling the user when the download fails its checks', async () => {
+    const { c, found } = selfChecker({ stageFails: true });
+    await c.check();
+    await settle();
+    expect(c.view().installError).toMatch(/checksum/);
+    expect(updateNeedsUser(c.view())).toBe(true);
+    // It isn't retried; the next check tells the user instead.
+    await c.check();
+    await settle();
+    expect(found).toEqual(['0.1.0-alpha.5']);
+  });
+
+  it('tells the user instead when this copy can’t replace itself, or they chose Tell me', async () => {
+    const ro = selfChecker({ canInstall: false });
+    await ro.c.check();
+    expect(ro.found).toEqual(['0.1.0-alpha.5']);
+    expect(updateNeedsUser(ro.c.view())).toBe(true);
+
+    const told = selfChecker();
+    told.c.setMode('notify');
+    await told.c.check();
+    await settle();
+    expect(told.calls).toEqual([]);
+    expect(told.found).toEqual(['0.1.0-alpha.5']);
+    expect(told.c.view()).toMatchObject({ auto: true, install: false });
   });
 });
 

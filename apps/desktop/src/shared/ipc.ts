@@ -271,7 +271,8 @@ export const calls = {
   // Update notices (main/updates.ts).
   getUpdates: z.tuple([]),
   checkUpdates: z.tuple([]),
-  setUpdateAuto: z.tuple([z.boolean()]),
+  setUpdateMode: z.tuple([z.enum(['install', 'notify', 'manual'])]),
+  installUpdate: z.tuple([]),
   dismissUpdate: z.tuple([]),
   downloadUpdate: z.tuple([]),
   openUpdateNotes: z.tuple([]),
@@ -700,7 +701,8 @@ export interface CallResults {
   stopSharingCodexSignIn: void;
   getUpdates: UpdateView;
   checkUpdates: UpdateView;
-  setUpdateAuto: void;
+  setUpdateMode: void;
+  installUpdate: void;
   dismissUpdate: void;
   downloadUpdate: void;
   openUpdateNotes: void;

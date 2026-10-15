@@ -12,6 +12,7 @@ import { Shield } from '../components/Shield';
 import { Button, Chip, IconButton, LevelPill, SeverityMark } from '../components/ui';
 import { timeAgo } from '../format';
 import { isNoticed, needsDecision } from '../../../shared/attention';
+import { updateNeedsUser } from '../../../shared/updates';
 
 /** Rows the popover lists before handing over to the app. */
 export const POPOVER_ROWS = 5;
@@ -118,7 +119,7 @@ export function Popover() {
         <Button kind="primary" className="grow" onClick={() => void vigil.openMain('home')}>
           Open Vigil
         </Button>
-        {updates?.available && (
+        {updates?.available && updateNeedsUser(updates) && (
           <Button
             className="update-pill"
             icon={<Download size={14} />}
