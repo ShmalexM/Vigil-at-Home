@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { app, dialog, Notification, powerMonitor, safeStorage, shell } from 'electron';
+import { HelperCallError } from '@vigil/helper/client';
 import { z } from 'zod';
 import { approvalOpen } from '@vigil/helper/client';
 import type { HelperInstallResult } from '../shared/ipc.js';
@@ -160,13 +161,23 @@ function start(): void {
   // Sensors can't report while Vigil is closed or the computer sleeps, so a
   // gap from then is not a quiet sensor.
   const awake = new AwakeClock(Date.now());
+  // Santa doesn't sync while the Mac sleeps, so a missed sync counts from waking.
+  let awakeSince = Date.now();
   powerMonitor.on('suspend', () => awake.suspend());
-  powerMonitor.on('resume', () => awake.resume());
+  powerMonitor.on('resume', () => {
+    awake.resume();
+    awakeSince = Date.now();
+  });
+  const helperSensors = helperSensorsFrom(() =>
+    helper.query<{ sensors?: HelperSensors }>('helper.status'),
+  );
   const probe = {
     ...macProbe(
       (source) => store.lastEventAt(source),
       () => helper.state,
-      helperSensorsFrom(() => helper.query<{ sensors?: HelperSensors }>('helper.status')),
+      helperSensors,
+      process.platform,
+      () => awakeSince,
     ),
     awakeMs: (since: number) => awake.awakeMs(since),
   };
@@ -233,6 +244,8 @@ function start(): void {
               await helper.tryConnect();
               return helper.ping();
             },
+            // Whether Santa's installed profile predates its client certificate.
+            async () => (await helperSensors().catch(() => null))?.santa ?? null,
             // The labelling model set in AI settings; `ai` is created below, and checks run later.
             () => {
               try {
@@ -411,6 +424,24 @@ function start(): void {
     uninstall: unlessDemo(demo, async () =>
       afterHelperScript(await runHelperScript('uninstall', helperDir())),
     ),
+    // Home's repair for a Santa that can't sync. The helper asks for the
+    // admin password; afterwards setup offers the profile again if Santa's
+    // installed one predates the certificate.
+    repairSantaSync: async () => {
+      try {
+        const mobileconfig = await helper.reissueSantaClient();
+        if (!mobileconfig) return { ok: false, error: 'The Vigil helper isn’t running' };
+        writeFileSync(santaProfilePath, mobileconfig);
+        return { ok: true };
+      } catch (err) {
+        if (err instanceof HelperCallError && err.code === 'refused')
+          return { ok: false, error: 'cancelled' };
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      } finally {
+        await reportHealth(core.sensors, probe);
+        setup.emit('changed');
+      }
+    },
   });
   windows.createTray();
   windows.applyTheme(core.theme(), core.appearance());
