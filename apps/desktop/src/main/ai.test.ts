@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   PromptLogEntry,
   ProviderStatus,
@@ -343,13 +343,26 @@ describe('AiBridge view', () => {
     expect(changed).toBe(1);
     await ai.view();
     expect(changed).toBe(1);
-    // Flipping back right away waits its turn; a later check tells it.
-    outside.ollama = 'error';
-    await ai.view();
-    expect(changed).toBe(1);
-    now += 30_000;
-    await ai.view();
-    expect(changed).toBe(2);
+    // A change right after waits its turn, then is told with no further check.
+    vi.useFakeTimers();
+    try {
+      outside.ollama = 'error';
+      await ai.view();
+      expect(changed).toBe(1);
+      now += 30_000;
+      vi.advanceTimersByTime(30_000);
+      expect(changed).toBe(2);
+      // Flipping back and forth within the wait tells nothing new.
+      delete outside.ollama;
+      await ai.view();
+      outside.ollama = 'error';
+      await ai.view();
+      now += 30_000;
+      vi.advanceTimersByTime(30_000);
+      expect(changed).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('opens the vendor sign-in page in the browser', async () => {

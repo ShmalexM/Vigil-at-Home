@@ -234,6 +234,9 @@ export class AiBridge extends EventEmitter<{
   /** Which providers the last view found ready, to notice one changing outside the app. */
   private lastReady: string | undefined;
   private lastReadyToldAt = -Infinity;
+  /** What the newest check found, waiting to be told while a change is held back. */
+  private pendingReady: string | undefined;
+  private readyTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly now: () => number;
   private readonly explaining = new Set<string>();
   private queuedBackground = 0;
@@ -644,17 +647,13 @@ export class AiBridge extends EventEmitter<{
     });
     // Ollama started, or a CLI signed in, outside the app: tell everyone, so the chat asks again.
     // At most once in a while, so a provider that flips between ready and not can't keep
-    // every page re-checking; a change held back is told on a later check.
-    const ready = providers
-      .filter((p) => p.state === 'ready')
-      .map((p) => p.provider)
-      .join(',');
-    if (this.lastReady === undefined) this.lastReady = ready;
-    else if (this.lastReady !== ready && this.now() - this.lastReadyToldAt >= READY_TOLD_EVERY_MS) {
-      this.lastReady = ready;
-      this.lastReadyToldAt = this.now();
-      this.emit('changed');
-    }
+    // every page re-checking; a change held back is told when the wait is over.
+    this.noticeReady(
+      providers
+        .filter((p) => p.state === 'ready')
+        .map((p) => p.provider)
+        .join(','),
+    );
     const mode = this.o.mode();
     return {
       ...(mode ? { mode } : {}),
@@ -666,6 +665,28 @@ export class AiBridge extends EventEmitter<{
       ...offView(this.offFix()),
       checkedAt: this.now(),
     };
+  }
+
+  private noticeReady(ready: string): void {
+    if (this.lastReady === undefined) {
+      this.lastReady = ready;
+      return;
+    }
+    this.pendingReady = ready;
+    if (ready === this.lastReady || this.readyTimer) return;
+    const wait = this.lastReadyToldAt + READY_TOLD_EVERY_MS - this.now();
+    if (wait <= 0) return this.tellReady();
+    this.readyTimer = setTimeout(() => {
+      this.readyTimer = undefined;
+      if (this.pendingReady !== this.lastReady) this.tellReady();
+    }, wait);
+    this.readyTimer.unref?.();
+  }
+
+  private tellReady(): void {
+    this.lastReady = this.pendingReady;
+    this.lastReadyToldAt = this.now();
+    this.emit('changed');
   }
 
   /** Opens the vendor's sign-in page. The login stays with the vendor's own CLI. */
