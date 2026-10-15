@@ -242,6 +242,28 @@ describe('helper sync with the self grant apart', () => {
     expect(fast.self().paths).toEqual([DOWNLOADS]);
   });
 
+  it('waits for the user before the self grant asks, while rule syncs go on', async () => {
+    const l = await connect(await currentHelper());
+    const set = appRules(DOWNLOADS);
+    let arrive!: () => void;
+    const back = new Promise<void>((r) => (arrive = r));
+    const syncer = new HelperSyncer({ link: l, rules: () => set, present: () => back });
+    syncer.connected();
+    expect(await syncer.sync()).toBe('applied');
+    expect(dialogs.filter(selfDialog)).toHaveLength(0);
+    expect(syncer.selfGrantPending()).toBe(false);
+    // Back: the dialog opens, and counts as open until it is answered.
+    answer = (prompt) => (prompt.includes(DOWNLOADS) ? undefined : true);
+    arrive();
+    await until(() => dialogs.some(selfDialog));
+    expect(syncer.selfGrantPending()).toBe(true);
+    dialogs.find(selfDialog)!.answer(true);
+    await syncer.grant();
+    expect(dialogs.filter(selfDialog)).toHaveLength(1);
+    expect(fast.self().paths).toEqual([DOWNLOADS]);
+    expect(syncer.selfGrantPending()).toBe(false);
+  });
+
   it('keeps the rules when the grant is declined, and asks again only on reconnect or a change', async () => {
     const l = await connect(await currentHelper());
     let set = appRules(DOWNLOADS);

@@ -296,6 +296,11 @@ export class Windows {
     this.popup?.hide();
   }
 
+  /** An alert popup is on screen, waiting for the user. */
+  popupVisible(): boolean {
+    return !!this.popup && !this.popup.isDestroyed() && this.popup.isVisible();
+  }
+
   /** Close `win` once it has been hidden for `ms`; showing it again cancels that. */
   private releaseWhenHidden(win: BrowserWindow, ms: number): void {
     const cancel = () => {

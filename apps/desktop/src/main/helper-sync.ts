@@ -36,6 +36,11 @@ export interface HelperSyncerOptions {
   rules: () => HelperRuleSet | undefined;
   /** Settles once the self set is complete (an AppImage's programs hashed). */
   ready?: Promise<unknown>;
+  /**
+   * Settles once the user is at the computer. A self grant may ask for the
+   * password, so it waits for this; rule syncs never do.
+   */
+  present?: () => Promise<unknown>;
   log?: (msg: string, err?: unknown) => void;
 }
 
@@ -55,6 +60,8 @@ export class HelperSyncer {
   private selfDeclined: string | undefined;
   /** The grant in flight, if any. */
   private granting: Promise<void> | undefined;
+  /** Grants sent to the helper and not yet answered. */
+  private asking = 0;
   /** The helper predates self.grant. */
   private older = false;
   /** Older helper: the self set it took last, sent with every rule sync. */
@@ -105,15 +112,22 @@ export class HelperSyncer {
     return run;
   }
 
+  /** A self grant is being sent, so its password dialog may be open. */
+  selfGrantPending(): boolean {
+    return this.asking > 0;
+  }
+
   private async grantNow(generation: number): Promise<void> {
     await this.opts.ready;
+    await this.opts.present?.();
     // Loop: the set may change while a dialog is open.
     for (;;) {
       const set = this.opts.rules();
       if (!set) return;
       const key = selfKey(set);
       if (key === this.selfSent || key === this.selfDeclined) return;
-      const outcome = await this.grantOnce(set, generation);
+      this.asking++;
+      const outcome = await this.grantOnce(set, generation).finally(() => this.asking--);
       if (generation !== this.generation) return;
       if (outcome === 'applied') this.selfSent = key;
       else if (outcome === 'declined') this.selfDeclined = key;

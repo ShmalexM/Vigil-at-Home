@@ -397,6 +397,15 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
         }),
       ),
       exec(devTool),
+      // Vigil after it installed its own update: ad hoc signed, never flagged
+      // as a download (self-update.ts unpacks with ditto --noqtn).
+      exec(
+        proc({
+          path: '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home',
+          signing: 'adhoc',
+          signingId: 'app.vigilathome.desktop',
+        }),
+      ),
     ],
   },
   'quarantine-removed': {

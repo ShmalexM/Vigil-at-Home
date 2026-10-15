@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { app, dialog, Notification, powerMonitor, safeStorage, shell } from 'electron';
 import { z } from 'zod';
+import { approvalOpen } from '@vigil/helper/client';
 import type { HelperInstallResult } from '../shared/ipc.js';
 import { AgentService } from './agents/service.js';
 import { AiBridge } from './ai.js';
@@ -14,6 +15,7 @@ import {
   helperBundleDir,
   helperInstallCommand,
   helperMatch,
+  helperScriptRunning,
   runHelperScript,
   unlessDemo,
 } from './helper-install.js';
@@ -42,6 +44,7 @@ import {
   type HelperSensors,
 } from './sensor-health.js';
 import { VigilCore } from './service.js';
+import { bundleOf, SelfUpdater } from './self-update.js';
 import { UpdateChecker } from './updates.js';
 import { wantsX11 } from './display.js';
 import { restrictWebContents, Windows } from './windows.js';
@@ -282,8 +285,35 @@ function start(): void {
   ai.labelEventsFrom(core);
   ai.reviewRulesFrom(core);
 
-  // Tells the user when a newer release is out. Unsigned builds can't update
-  // themselves, so it offers the DMG; nothing installs without the user.
+  // Keeps Vigil current. On a Mac where the app sits in a folder the user can
+  // write, a newer release downloads, is checked against its published
+  // checksums, and installs while the user is away (or at quit). Elsewhere it
+  // says a release is out and offers the DMG.
+  const appBundle = process.platform === 'darwin' ? bundleOf(process.execPath) : undefined;
+  const installer =
+    appBundle && app.isPackaged && !demo
+      ? new SelfUpdater({
+          bundle: appBundle,
+          bundleId: 'app.vigilathome.desktop',
+          downloads: join(dataDir, 'updates'),
+        })
+      : undefined;
+  installer?.cleanup();
+  // Settles once someone is at the computer: password dialogs wait for this
+  // rather than sit on an empty desk.
+  const whenPresent = () =>
+    new Promise<void>((resolve) => {
+      const check = () => {
+        if (powerMonitor.getSystemIdleTime() >= 30) return false;
+        resolve();
+        return true;
+      };
+      if (check()) return;
+      const t = setInterval(() => check() && clearInterval(t), 3000);
+      t.unref?.();
+    });
+  // Set once the helper syncer exists (below).
+  let selfGrantPending = () => false;
   const updates = new UpdateChecker({
     current: app.getVersion(),
     arch: process.arch,
@@ -291,6 +321,22 @@ function start(): void {
     load: () => store.getSetting('updates', z.unknown(), {}),
     save: (s) => store.setSetting('updates', s),
     openExternal: (url) => shell.openExternal(url),
+    ...(installer
+      ? {
+          installer,
+          relaunch: () => {
+            app.relaunch();
+            app.quit();
+          },
+          idleSeconds: () => powerMonitor.getSystemIdleTime(),
+          // Never restart under an open alert popup or a password dialog.
+          canRestart: () =>
+            !windows.popupVisible() &&
+            !helperScriptRunning() &&
+            !selfGrantPending() &&
+            !approvalOpen(),
+        }
+      : {}),
     onFound: (version) => {
       if (!Notification.isSupported()) return;
       const n = new Notification({
@@ -303,7 +349,11 @@ function start(): void {
   });
   updates.on('changed', () => windows.broadcast('changed'));
   if (app.isPackaged) updates.start();
-  app.on('before-quit', () => updates.stop());
+  // Synchronous: the swap is done (or refused) before anything else quits.
+  app.on('before-quit', () => {
+    updates.stop();
+    updates.installOnQuit();
+  });
 
   // The pack: Vigil's own AI agents as dogs. The Lead dog talks with the user
   // and manages the pack; every tool call goes through the pack's gate, and
@@ -386,7 +436,9 @@ function start(): void {
   if (helperAtStart?.installed === 'outdated' && app.isPackaged) {
     const bundle = helperAtStart.bundle;
     if (store.getSetting('helper.updateAsked', z.string(), '') !== bundle) {
-      setTimeout(() => {
+      // After an update that installed while the user was away, the password
+      // dialog waits until they are back rather than sitting on an empty desk.
+      void whenPresent().then(() => {
         // The self grant's password may have re-pinned this app meanwhile.
         if (checkHelperMatch()?.installed !== 'outdated') return;
         void runHelperScript('update', helperDir())
@@ -396,7 +448,7 @@ function start(): void {
             if (!r.ok && r.error !== 'cancelled') console.error('[helper] update failed:', r.error);
             windows.broadcast('changed');
           });
-      }, 3000).unref?.();
+      });
     }
   }
 
@@ -426,8 +478,11 @@ function start(): void {
     link: helper,
     rules: () => core.detector?.helperRules(),
     ready: selfHashed,
+    // Packaged only: a test run has nobody at the keyboard.
+    ...(app.isPackaged && !demo && !perf ? { present: whenPresent } : {}),
     log: (msg, err) => console.warn(msg, err),
   });
+  selfGrantPending = () => helperSync.selfGrantPending();
   const syncHelperRules = helperSync.sync;
   if (core.detector) core.detector.syncHelper = syncHelperRules;
   helper.on('state', (state) => {
