@@ -11,7 +11,9 @@ import {
   SANTA_UNVERIFIED,
   type Probe,
 } from './checks.js';
-import { KeyStore, type Cipher } from './keys.js';
+import { FeedKeyStore, KeyStore, type Cipher } from './keys.js';
+import { calls } from '../../shared/ipc.js';
+import { feedKeyNote, keyedFeeds } from '../../shared/setup.js';
 import {
   FAPOLICYD_ALLOW_RULES,
   LOCAL_MODEL,

@@ -144,6 +144,12 @@ export interface HealthProbe {
   now(): number;
   /** When the Mac last woke (or the app started): Santa can't have synced while asleep. */
   awakeSince?(): number;
+  /**
+   * How long, since `since`, Vigil has been running with the computer awake.
+   * A sensor can't send anything while the app is closed or the computer
+   * sleeps, so only that time counts towards a sensor being quiet.
+   */
+  awakeMs?(since: number): number;
   /** Which OS's layers to check; defaults to macOS. */
   platform?: NodeJS.Platform;
 }
@@ -242,16 +248,18 @@ export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
     }
     // Rule updates (blocks included) reach Santa only through its syncs.
     const syncProblem =
-      id === 'santa' ? santaSyncProblem(fromHelper?.santa, p.now(), p.awakeSince?.()) : undefined;
+      id === 'santa'
+        ? santaSyncProblem(reportedSensors?.santa, p.now(), p.awakeSince?.())
+        : undefined;
     if (syncProblem) {
       return { ...base, state: 'degraded', note: syncProblem, repair: 'santa-sync' };
     }
     // Shown on the row for reference only: a port probe can cause one too.
-    const refusal = id === 'santa' ? fromHelper?.santa?.lastRefusal : undefined;
+    const refusal = id === 'santa' ? reportedSensors?.santa?.lastRefusal : undefined;
     // Compatibility mode is a detail too: Santa keeps syncing meanwhile.
     const compatUntil =
-      id === 'santa' && !fromHelper?.santa?.clientCertRequired
-        ? fromHelper?.santa?.compatUntil
+      id === 'santa' && !reportedSensors?.santa?.clientCertRequired
+        ? reportedSensors?.santa?.compatUntil
         : undefined;
     const shown = {
       ...base,
@@ -263,9 +271,14 @@ export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
     );
     const last = times.length ? Math.max(...times) : null;
     if (last === null) return { ...shown, state: 'ok', note: 'Starting; no events yet' };
-    const quiet = p.now() - last;
-    if (quiet > QUIET_AFTER_MS[id]) {
-      return { ...shown, state: 'degraded', note: `No events for ${minutes(quiet)} minutes` };
+    const awake = p.awakeMs?.(last) ?? p.now() - last;
+    if (awake > QUIET_AFTER_MS[id]) {
+      // The note says how long it really has been.
+      return {
+        ...shown,
+        state: 'degraded',
+        note: `No events for ${minutes(p.now() - last)} minutes`,
+      };
     }
     return { ...shown, state: 'ok' };
   };

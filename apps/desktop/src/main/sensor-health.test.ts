@@ -1,11 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AwakeClock,
   checkHealth,
+  feedHealth,
+  helperSensorsFrom,
   QUIET_AFTER_MS,
+  reportFeedHealth,
+  reportHealth,
   santaSyncProblem,
   type HealthProbe,
   type HelperSantaSync,
 } from './sensor-health.js';
+import { SensorRegistry } from './sensors.js';
+import { computeStatus } from './status.js';
 
 function probe(over: Partial<HealthProbe> & { installed?: string[]; procs?: string[] } = {}) {
   const installed = new Set(over.installed ?? []);
@@ -352,5 +359,64 @@ describe("Santa's syncs with the helper", () => {
         installedAt: NOW - 60 * MIN,
       }),
     ).toMatchObject({ state: 'degraded', repair: 'santa-sync' });
+  });
+});
+
+describe('AwakeClock', () => {
+  it('adds up awake time across sleeps, so a sensor dead over many wakes still counts', () => {
+    let t = 0;
+    const min = 60_000;
+    const clock = new AwakeClock(0, () => t);
+    // Five cycles of 10 minutes awake, then an hour asleep.
+    for (let i = 0; i < 5; i++) {
+      t += 10 * min;
+      clock.suspend();
+      t += 60 * min;
+      clock.resume();
+    }
+    expect(clock.awakeMs(0)).toBe(50 * min);
+    // Asleep right now: the time so far doesn't count.
+    clock.suspend();
+    t += 30 * min;
+    expect(clock.awakeMs(0)).toBe(50 * min);
+    // Nothing from before Vigil started counts.
+    expect(new AwakeClock(t, () => t + min).awakeMs(0)).toBe(min);
+  });
+});
+
+describe('feedHealth', () => {
+  it('adds one quiet line while a feed is held back, and takes it away after', () => {
+    const registry = new SensorRegistry();
+    let changes = 0;
+    registry.on('changed', () => changes++);
+    const before = computeStatus([], registry.list());
+
+    reportFeedHealth(registry, [{ name: 'Feodo Tracker' }, { name: 'URLhaus' }]);
+    expect(registry.get('threat-feeds')).toBeUndefined();
+    expect(changes).toBe(0);
+
+    reportFeedHealth(registry, [{ name: 'Feodo Tracker', heldBack: true }, { name: 'URLhaus' }]);
+    const line = registry.get('threat-feeds');
+    expect(line).toMatchObject({ state: 'ok' });
+    expect(line?.note).toMatch(/^Stale: Feodo Tracker kept its last list/);
+    // Neither the level nor the reasons change, so nothing badges or pops up.
+    expect(computeStatus([], registry.list())).toEqual(before);
+
+    // Reporting the same thing again is not a change.
+    reportFeedHealth(registry, [{ name: 'Feodo Tracker', heldBack: true }]);
+    expect(changes).toBe(1);
+
+    reportFeedHealth(registry, [{ name: 'Feodo Tracker' }]);
+    expect(registry.get('threat-feeds')).toBeUndefined();
+    expect(changes).toBe(2);
+  });
+
+  it('names every held-back feed in the one line', () => {
+    expect(
+      feedHealth([
+        { name: 'A', heldBack: true },
+        { name: 'B', heldBack: true },
+      ])?.note,
+    ).toMatch(/^Stale: A, B kept their last list/);
   });
 });

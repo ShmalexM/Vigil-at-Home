@@ -252,7 +252,7 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
                 </Button>
               </div>
             ))}
-        {updates?.available && !updates.dismissed && (
+        {updates?.available && !updates.dismissed && updateNeedsUser(updates) && (
           <div className="attn accent setup-banner">
             <Download size={16} />
             <span className="grow">

@@ -412,6 +412,19 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       store: rules,
       log,
       onRuleSync: ({ at, req }) => auth.ruleSynced(at, presentedCertificate(req?.socket)),
+      // A block already stored that names one of these programs never reaches Santa.
+      refuse: (rule) => {
+        if (rule.policy === 'ALLOWLIST' || rule.policy === 'REMOVE') return undefined;
+        if (rule.rule_type !== 'BINARY' && rule.rule_type !== 'CDHASH') return undefined;
+        const own = ownHashes.owner(rule.identifier);
+        return own ? `it would block ${own}` : undefined;
+      },
+      // Never longer than a block by hash waits for them (OWN_HASHES_WAIT_MS).
+      ready: () =>
+        Promise.race([
+          ownHashes.ready(),
+          new Promise<void>((resolve) => setTimeout(resolve, OWN_HASHES_WAIT_MS).unref()),
+        ]),
       eventDetailUrl: 'vigil://santa/event?sha256=%file_sha%',
       eventDetailText: 'Open Vigil',
     });

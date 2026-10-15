@@ -271,6 +271,7 @@ export function systemProbe(
   home = homedir(),
   helperAnswers?: () => Promise<boolean>,
   helperSanta?: Probe['helperSanta'],
+  classifierModel?: () => string | undefined,
 ): Probe {
   // Finder-launched apps get a minimal PATH. Vendor CLIs installed with npm
   // are node scripts, so node has to be findable too.
@@ -286,6 +287,7 @@ export function systemProbe(
     platform: process.platform,
     ...(helperAnswers ? { helperAnswers } : {}),
     ...(helperSanta ? { helperSanta } : {}),
+    ...(classifierModel ? { classifierModel } : {}),
     exists: (path) => existsSync(path),
     executable: (path) => {
       try {

@@ -74,6 +74,15 @@ export interface SyncServerOptions {
    * with the request that ended it (absent when dispatch() is called directly).
    */
   onRuleSync?: (o: { at: number; req?: IncomingMessage }) => void;
+  /**
+   * Why a stored rule must not reach Santa, or undefined when it may: the
+   * helper refuses blocks naming its own or its sensors' programs by hash.
+   * Such a rule is left out of a clean sync and sent as REMOVE otherwise, so
+   * one Santa already has is taken back; every other rule syncs as usual.
+   */
+  refuse?: (rule: SantaRule) => string | undefined;
+  /** Waited on before each preflight, so `refuse` has what it needs. */
+  ready?: () => Promise<void>;
   /** For tests. */
   now?: () => number;
 }
@@ -118,7 +127,10 @@ export class SantaSyncServer {
   private readonly refusedLogged = new Set<string>();
   private inFlight = 0;
   private readonly opts: Required<
-    Omit<SyncServerOptions, 'onEvent' | 'eventDetailUrl' | 'eventDetailText' | 'log' | 'onRuleSync'>
+    Omit<
+      SyncServerOptions,
+      'onEvent' | 'eventDetailUrl' | 'eventDetailText' | 'log' | 'onRuleSync' | 'refuse' | 'ready'
+    >
   > &
     SyncServerOptions;
 
@@ -179,6 +191,7 @@ export class SantaSyncServer {
       throw new HttpError(415, 'binary proto transfer is not supported');
     }
     const body = await this.readJson(req);
+    if (stage === 'preflight') await this.opts.ready?.();
     return this.dispatch(stage, machineId, body, req);
   }
 

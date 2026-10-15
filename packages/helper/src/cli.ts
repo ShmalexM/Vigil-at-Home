@@ -30,7 +30,12 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { Approvals } from './approval.js';
 import { HelperClient } from './client.js';
-import { defaultPaths, SANTA_SYNC_PORT } from './config.js';
+import { pinFor } from './appPin.js';
+import { AppPinStore } from './pinStore.js';
+import { pinRemove } from './pinRemove.js';
+import { runFsChild } from './commands/fsChild.js';
+import { daemonAnswers } from './socketProbe.js';
+import { defaultPaths, installedSelf, SANTA_SYNC_PORT } from './config.js';
 import { runDaemon } from './daemon.js';
 import { ensureOsquery, removeOsquery } from './osquery.js';
 import { ensureLinuxOsquery, removeLinuxOsquery } from './linuxOsquery.js';
@@ -175,8 +180,8 @@ async function main(argv: string[]): Promise<number> {
     default:
       console.error(
         'usage: vigil-helper daemon | approve <nonce>… | santa-profile | santa-reissue | ' +
-          'osquery-config | ' +
-          'osquery-flags | osquery-setup | osquery-remove',
+          'osquery-config | osquery-flags | osquery-setup | osquery-remove | ' +
+          'pin-app <path> | pin-remove',
       );
       return 2;
   }
