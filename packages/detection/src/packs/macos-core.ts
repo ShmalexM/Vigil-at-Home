@@ -23,6 +23,30 @@ function rule(r: PackRule): DetectionRuleInput {
 }
 
 export const UNTRUSTED_SIGNING = ['unsigned', 'adhoc', 'invalid'];
+
+/**
+ * Where Vigil's own releases download from: this repo's release assets on
+ * github.com, or the GitHub host those links redirect to, which names the
+ * repo by its numeric id (1389784855). Only the repo's owner can publish
+ * there. Vigil's builds are ad hoc signed, so without this a Vigil update
+ * dragged in from the DMG would be stopped and quarantined as an unsigned
+ * download.
+ *
+ * Only this rule uses it, and only on the process's own download record:
+ * chain rules key on the nearest downloaded ancestor, and exempting Vigil
+ * there would also exempt programs Vigil starts for the user (connectors).
+ *
+ * The origin comes from the browser's download record, which a program
+ * already running as the user could forge. Such a program could just as
+ * well remove the download flag, which skips the rule anyway, so the
+ * exemption gives it nothing new. Anything else (other repos, other hosts,
+ * look-alikes, plain http) still matches.
+ */
+export const VIGIL_RELEASE_DOWNLOADS = [
+  '^https://github\\.com/shmalexm/vigil-at-home/releases/download/v[0-9][0-9a-z.+-]*/vigil-at-home-[0-9][0-9a-z.+-]*\\.(dmg|zip)$',
+  '^https://(objects|release-assets)\\.githubusercontent\\.com/github-production-release-asset(-2e65be)?/1389784855/[0-9a-z-]+([?].*)?$',
+];
+
 export const SHELLS = ['sh', 'bash', 'zsh', 'dash', 'ksh'];
 export const SCRIPT_RUNNERS = [
   'osascript',
@@ -466,6 +490,15 @@ export const macosCoreRules: DetectionRuleInput[] = [
       all: [
         { field: 'process.quarantine', op: 'exists' },
         { field: 'process.signing', op: 'in', value: UNTRUSTED_SIGNING },
+        // Vigil's own release, downloaded by hand. See VIGIL_RELEASE_DOWNLOADS.
+        {
+          not: {
+            field: 'process.quarantine.originUrl',
+            op: 'regex',
+            nocase: true,
+            value: VIGIL_RELEASE_DOWNLOADS,
+          },
+        },
       ],
     },
     response: [SUSPEND, { kind: 'file.quarantine', path: '{{process.path}}' }],
