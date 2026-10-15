@@ -35,7 +35,8 @@ import { regexProblem } from '../rules/compile.js';
 import { lintRule } from '../rules/lint.js';
 import { memoryStores } from '../state/stores.js';
 import { DetectionRule, type DetectionEvent, type DetectionProcessRef } from '../types.js';
-import { agentTree, CLAUDE_BIN, exec, fileOpen, proc, T0 } from './fixtures.js';
+import { AgentTracker } from '../agents/tracker.js';
+import { agentTree, catalog, CLAUDE_BIN, exec, fileOpen, proc, T0 } from './fixtures.js';
 
 const home = '/Users/alex';
 const NODE = '/opt/homebrew/Cellar/node/22.9.0/bin/node';
@@ -773,6 +774,69 @@ describe('agent rule packs', () => {
       ];
       for (const e of bad)
         expect(fired(e), JSON.stringify(procOf(e)?.args)).toContain('agent-keychain-secret');
+    });
+
+    describe('a Claude Code that started before Vigil (real Mac, 2026-10-15)', () => {
+      /**
+       * Found only by a `ps` seed (argv[0] `claude`, no signature); `sig` is what
+       * reading its running process gave (see AgentTracker.learnRootSignature).
+       */
+      const seededClaude = (pid: number, sig?: { teamId?: string; signingId?: string }) => {
+        const asked: number[] = [];
+        const t = new AgentTracker({ matcher: catalog, onSeededRoot: (r) => asked.push(r.pid) });
+        t.seed([{ pid, ppid: 530, startedAt: T0, path: 'claude', args: ['claude'] }]);
+        expect(asked).toEqual([pid]);
+        if (sig) t.learnRootSignature(pid, T0, sig);
+        let next = pid + 1;
+        // Santa's launch line: the parent's pid, but no path for a parent it never saw launch.
+        const launch = (path: string, args: string[], ppid = pid) =>
+          t.observe(exec(proc({ path, args, pid: next++, ppid, signing: 'apple' })));
+        return {
+          security: (service: string) =>
+            launch('/usr/bin/security', ['security', 'find-generic-password', ...own(service)]),
+          bareShell: (service: string) => {
+            const cmd = `security find-generic-password -a "alexmargaris" -w -s "${service}"`;
+            const shell = launch('/bin/sh', ['/bin/sh', '-c', cmd]);
+            const sec = launch(
+              '/usr/bin/security',
+              ['security', 'find-generic-password', ...own(service)],
+              procOf(shell)!.pid,
+            );
+            return [shell, sec];
+          },
+        };
+      };
+
+      it('lets it read its own sign-in once its process shows the Anthropic signature', () => {
+        for (const sig of [ANTHROPIC, ANTHROPIC_FULL]) {
+          const c = seededClaude(94_000, sig);
+          expect(fired(c.security('Claude Code-credentials'))).not.toContain(
+            'agent-keychain-secret',
+          );
+          for (const e of c.bareShell('Claude Code-credentials'))
+            expect(fired(e), JSON.stringify(procOf(e))).not.toContain('agent-keychain-secret');
+          // Any other keychain read still alerts.
+          expect(fired(c.security('Chrome Safe Storage'))).toContain('agent-keychain-secret');
+        }
+      });
+
+      it('still alerts when its process is unsigned, another team’s, or never verified', () => {
+        for (const sig of [
+          undefined,
+          {},
+          { teamId: 'EQHXZ8M8AV', signingId: 'EQHXZ8M8AV:com.example.claude' },
+          // Anthropic's team but another of its programs.
+          { teamId: 'Q6L2SF6YDW', signingId: 'Q6L2SF6YDW:com.anthropic.claudefordesktop' },
+        ]) {
+          const c = seededClaude(95_000, sig);
+          expect(fired(c.security('Claude Code-credentials')), JSON.stringify(sig)).toContain(
+            'agent-keychain-secret',
+          );
+          // One command, one alert: on the shell that holds it (see via in agent-watch.ts).
+          const [shell] = c.bareShell('Claude Code-credentials');
+          expect(fired(shell!), JSON.stringify(sig)).toContain('agent-keychain-secret');
+        }
+      });
     });
 
     describe('the security a bare sh -c starts (real Mac, 2026-10-08)', () => {

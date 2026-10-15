@@ -41,6 +41,7 @@ import {
   type Proposal,
   type PsRow,
   type ReviewState,
+  type RootSignature,
   type RuleException,
   type SqliteDetectionStores,
   type TrackerOptions,
@@ -130,7 +131,7 @@ export interface DetectorOptions {
   /** Vigil's own pid: its process tree is tagged `vigil-self` (its AI helpers). */
   selfPid?: number;
   /** What the agent service hears from the process tracker. */
-  agentHooks?: Pick<TrackerOptions, 'onSession' | 'onMiss' | 'onCandidate'>;
+  agentHooks?: Pick<TrackerOptions, 'onSession' | 'onMiss' | 'onCandidate' | 'onSeededRoot'>;
   /** Which built-in rule pack to load; defaults to this machine's platform. */
   platform?: string;
 }
@@ -379,6 +380,11 @@ export class Detector {
   /** Processes `ps` listed (those running before Vigil, or missed): the tracker learns them. */
   seedProcesses(rows: PsRow[], since?: number): void {
     this.tracker.seed(rows, since);
+  }
+
+  /** The signature read from a seeded agent root's running process (see onSeededRoot). */
+  learnRootSignature(pid: number, startedAt: number, sig: RootSignature): void {
+    this.tracker.learnRootSignature(pid, startedAt, sig);
   }
 
   private outcome(kind: SensorEvent['kind'], detections: Detection[]): EventOutcome {

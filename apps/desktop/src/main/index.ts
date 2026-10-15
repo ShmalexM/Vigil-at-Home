@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { app, dialog, Notification, powerMonitor, safeStorage, shell } from 'electron';
 import { z } from 'zod';
 import type { HelperInstallResult } from '../shared/ipc.js';
+import { rootSignatureReader } from './agents/ps.js';
 import { AgentService } from './agents/service.js';
 import { AiBridge } from './ai.js';
 import { Store } from './db/store.js';
@@ -117,6 +118,8 @@ function start(): void {
   // app running as the same user, so this does not keep the abuse.ch key from them. That
   // is the platform's limit, and the key is for a free feed, so it is stored the same way.
   const feedKeys = new FeedKeyStore(join(dataDir, 'feed-keys.json'), cipher);
+  // An agent that started before Vigil has no signature from a launch; read it from its process.
+  const rootSignature = rootSignatureReader();
   const detector = new Detector(db, store, core.alerts, (e, o) => core.ingest(e, o), {
     installedAt: core.installedAt(),
     selfPaths: self.app,
@@ -130,6 +133,17 @@ function start(): void {
       onSession: (s) => agents.onSession(s),
       onMiss: (ppid) => agents.onMiss(ppid),
       onCandidate: (c) => agents.onCandidate(c),
+      ...(rootSignature
+        ? {
+            onSeededRoot: ({ pid, startedAt }) => {
+              rootSignature(pid, startedAt)
+                .then((sig) => sig && detector.learnRootSignature(pid, startedAt, sig))
+                .catch((err: unknown) =>
+                  console.error('[agents] could not read a seeded agent’s signature:', err),
+                );
+            },
+          }
+        : {}),
     },
   });
   core.detector = detector;
