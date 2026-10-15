@@ -30,6 +30,8 @@ const Saved = z.object({
   /** Download and install by itself, where this copy can (see SelfUpdater). */
   install: z.boolean().default(true),
   dismissed: z.string().max(100).optional(),
+  /** The version that ran last, so the first start of a new one can say it updated. */
+  lastRun: z.string().max(100).optional(),
 });
 type Saved = z.infer<typeof Saved>;
 
@@ -76,6 +78,7 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
   private staged: Staged | undefined;
   private installError: { version: string; error: string } | undefined;
   private installing = false;
+  private updatedFrom: string | undefined;
 
   constructor(private readonly o: UpdateOptions) {
     super();
@@ -97,6 +100,7 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
       ...(this.available ? { available: this.available } : {}),
       dismissed: !!this.available && s.dismissed === this.available.version,
       install: s.install,
+      ...(this.updatedFrom ? { updatedFrom: this.updatedFrom } : {}),
       selfInstall: !!this.canSelf,
       ...(this.staging ? { preparing: this.staging } : {}),
       ...(this.staged ? { ready: this.staged.version } : {}),
@@ -185,6 +189,9 @@ export class UpdateChecker extends EventEmitter<{ changed: [] }> {
 
   /** Starts the automatic checks. */
   start(): void {
+    const s = this.saved();
+    if (s.lastRun && compareVersions(s.lastRun, this.o.current) < 0) this.updatedFrom = s.lastRun;
+    if (s.lastRun !== this.o.current) this.o.save({ ...s, lastRun: this.o.current });
     const tick = () => {
       if (this.saved().auto) void this.check();
     };

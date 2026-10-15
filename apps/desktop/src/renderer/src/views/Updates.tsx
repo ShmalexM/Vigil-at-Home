@@ -27,7 +27,7 @@ export function UpdatesRow() {
             : u.available
               ? `Version ${u.available.version} is available. You have ${u.current}.`
               : u.lastCheckedAt
-                ? `Up to date, checked ${checkedAt(u.lastCheckedAt)}`
+                ? `Up to date${u.updatedFrom ? ` (updated from ${u.updatedFrom})` : ''}, checked ${checkedAt(u.lastCheckedAt)}`
                 : u.auto
                   ? 'Not checked yet. Vigil checks a minute after it starts, then every 6 hours.'
                   : 'Not checked yet. Press Check now.';

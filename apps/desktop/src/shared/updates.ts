@@ -33,6 +33,8 @@ export interface UpdateView {
   preparing?: string;
   /** A checked version waiting beside the app; it installs once the computer is left alone. */
   ready?: string;
+  /** This run is the first of a new version: the one it replaced. */
+  updatedFrom?: string;
   /** Why the last automatic install didn't happen, in words. */
   installError?: string;
 }

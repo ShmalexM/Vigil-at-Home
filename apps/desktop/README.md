@@ -111,6 +111,12 @@ dragged into /Applications), a newer release installs itself:
 4. The new app finds the helper outdated and asks for the admin password once,
    waiting until the user is back at the keyboard.
 
+Like the Claude and Codex desktop apps, a downloaded update shows a quiet
+"Restart to update" button in the menu-bar popover and the sidebar for anyone
+who wants it now. Nobody has to press it, and there is never a Finder
+"Replace" dialog. The first start of the new version notes it under
+Settings › About › Updates ("updated from …").
+
 This is the same trust as dragging the DMG in by hand: both rest on this
 repo's GitHub releases. Settings › About › Updates offers Install
 automatically (the default), Tell me, or Only when I ask. A copy run from a

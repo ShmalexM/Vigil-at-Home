@@ -1,4 +1,4 @@
-import { CircleCheck, Download, Power, Settings } from 'lucide-react';
+import { CircleCheck, Download, Power, RotateCw, Settings } from 'lucide-react';
 import { useClock, useLive, vigil } from '../api';
 import {
   NeedsYouLine,
@@ -119,7 +119,18 @@ export function Popover() {
         <Button kind="primary" className="grow" onClick={() => void vigil.openMain('home')}>
           Open Vigil
         </Button>
-        {updates?.available && updateNeedsUser(updates) && (
+        {/* Like Claude's and Codex's apps: ready in the background, one optional click to apply now. */}
+        {updates?.ready && (
+          <Button
+            className="update-pill"
+            icon={<RotateCw size={14} />}
+            title={`Restart to update to Vigil at Home ${updates.ready}. It also updates by itself when you step away.`}
+            onClick={() => void vigil.installUpdate()}
+          >
+            Restart to update
+          </Button>
+        )}
+        {updates?.available && !updates.ready && updateNeedsUser(updates) && (
           <Button
             className="update-pill"
             icon={<Download size={14} />}

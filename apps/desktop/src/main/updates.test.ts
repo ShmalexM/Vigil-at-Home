@@ -265,6 +265,28 @@ describe('UpdateChecker installing by itself', () => {
   });
 });
 
+describe('UpdateChecker after an update', () => {
+  it('says once which version it replaced', () => {
+    let saved: unknown = { lastRun: '0.1.0-alpha.4' };
+    const make = () =>
+      new UpdateChecker({
+        current: '0.1.0-alpha.5',
+        arch: 'arm64',
+        load: () => saved,
+        save: (s) => void (saved = s),
+        openExternal: async () => {},
+      });
+    const c = make();
+    c.start();
+    c.stop();
+    expect(c.view().updatedFrom).toBe('0.1.0-alpha.4');
+    const again = make();
+    again.start();
+    again.stop();
+    expect(again.view().updatedFrom).toBeUndefined();
+  });
+});
+
 describe('newest on Linux', () => {
   const withLinux = (tag: string) => {
     const r = release(tag);

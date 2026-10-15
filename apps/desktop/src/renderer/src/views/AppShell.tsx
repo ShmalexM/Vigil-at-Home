@@ -9,6 +9,7 @@ import {
   History as HistoryIcon,
   House,
   ListChecks,
+  RotateCw,
   Settings as SettingsIcon,
   SlidersHorizontal,
   Wrench,
@@ -128,6 +129,17 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
         <div className="row brand">
           <Shield height={22} />
           <span className="t-h3">Vigil at Home</span>
+          {/* A downloaded update: one optional click applies it now, as in Claude's and Codex's apps. */}
+          {updates?.ready && (
+            <IconButton
+              size="sm"
+              className="btn icon-btn sm update-pill"
+              label={`Restart to update to Vigil at Home ${updates.ready}`}
+              onClick={() => void vigil.installUpdate()}
+            >
+              <RotateCw size={15} />
+            </IconButton>
+          )}
           {/* After Later, a quiet reminder here takes over from the banner. */}
           {updates?.available && updates.dismissed && updateNeedsUser(updates) && (
             <IconButton
