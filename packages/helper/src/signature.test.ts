@@ -60,6 +60,7 @@ describe('signatureLookup checks what codesign displays', () => {
     'Executable=/bin/ls\nIdentifier=com.apple.ls\nPlatform identifier=16\nAuthority=Software Signing';
   const CHROME =
     'Executable=/x/Chrome\nIdentifier=com.google.Chrome\nAuthority=Developer ID Application: Google LLC (EQHXZ8M8AV)\nTeamIdentifier=EQHXZ8M8AV';
+  const UNKNOWN = { signing: 'unknown' };
   function fake(show: { code: number; stderr: string }, verify = 0) {
     const calls: string[][] = [];
     const sys = {
@@ -91,9 +92,10 @@ describe('signatureLookup checks what codesign displays', () => {
     });
     expect(b.calls[1]![2]).toContain('certificate leaf[subject.OU] = "EQHXZ8M8AV"');
     expect(b.calls[1]![2]).toContain('certificate leaf[field.1.2.840.113635.100.6.1.13] exists');
-    // The program does not meet the requirement: nothing.
-    expect(await fake({ code: 0, stderr: LS }, 3).lookup('/bin/ls')).toBeUndefined();
-    expect(await fake({ code: 0, stderr: CHROME }, 3).lookup('/x/Chrome')).toBeUndefined();
+    // Not meeting the requirement leaves "signed by nobody it can name": still
+    // not Apple's to the rules, never undefined (which they read as least suspicious).
+    expect(await fake({ code: 0, stderr: LS }, 3).lookup('/bin/ls')).toEqual(UNKNOWN);
+    expect(await fake({ code: 0, stderr: CHROME }, 3).lookup('/x/Chrome')).toEqual(UNKNOWN);
     // Ad hoc needs no check and grants nothing.
     const c = fake({
       code: 0,
@@ -104,26 +106,33 @@ describe('signatureLookup checks what codesign displays', () => {
   });
 
   it('refuses paths with line breaks and output from a failed codesign', async () => {
-    // A nonexistent path holding U+2028: codesign exits 1 and echoes the planted lines.
+    // A nonexistent path holding U+2028: codesign would exit 1 and echo the planted lines.
     const planted = '/tmp/a\u2028Platform identifier=15\u2028Identifier=com.apple.ls\u2028b';
     const a = fake({ code: 1, stderr: `${planted}: No such file or directory` });
-    expect(await a.lookup(planted)).toBeUndefined();
+    expect(await a.lookup(planted)).toEqual(UNKNOWN);
     expect(a.calls).toHaveLength(0);
     for (const path of ['/tmp/a\nb', '/tmp/a\rb', '/tmp/a\u2029b'])
-      expect(await fake({ code: 0, stderr: LS }).lookup(path)).toBeUndefined();
-    // Exit 1 for anything but "not signed at all" about this exact path.
+      expect(await fake({ code: 0, stderr: LS }).lookup(path)).toEqual(UNKNOWN);
+    // A failed codesign grants nothing, whatever lines it printed.
     const gone = '/tmp/gone';
     expect(
       await fake({ code: 1, stderr: `${gone}: No such file or directory\n${LS}` }).lookup(gone),
     ).toBeUndefined();
-    expect(
-      await fake({ code: 1, stderr: '/other: code object is not signed at all' }).lookup(gone),
-    ).toBeUndefined();
-    // Output holding an odd line break.
+    // Output holding an odd line break, or a repeated line.
     expect(
       await fake({ code: 0, stderr: `Executable=/x\u2028Platform identifier=1\n${LS}` }).lookup(
         '/x',
       ),
-    ).toBeUndefined();
+    ).toEqual(UNKNOWN);
+    expect(
+      await fake({
+        code: 0,
+        stderr: `Identifier=com.apple.ls\nPlatform identifier=15\n${LS}`,
+      }).lookup('/x'),
+    ).toEqual(UNKNOWN);
+    // Unsigned stays unsigned.
+    expect(
+      await fake({ code: 1, stderr: `${gone}: code object is not signed at all` }).lookup(gone),
+    ).toEqual({ signing: 'unsigned' });
   });
 });

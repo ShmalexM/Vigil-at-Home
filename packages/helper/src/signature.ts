@@ -45,6 +45,15 @@ const DEVELOPER_ID =
 const APP_STORE = 'certificate leaf[field.1.2.840.113635.100.6.1.9] exists';
 
 /**
+ * What a lookup gives when the display can't be trusted: signed, but by
+ * nobody it can name. Never undefined, which rules read as least suspicious
+ * (`neq 'apple'` is false for a missing field), and never `invalid`, which
+ * would alert on every app that fails a check for harmless reasons (a
+ * self-updating bundle, a timeout).
+ */
+const unverified = (): SignatureInfo => ({ signing: 'unknown' });
+
+/**
  * The requirement a signature class must pass with `codesign --verify`
  * before it counts: what `codesign -dv` prints is display text, so it never
  * grants a class by itself. Undefined when there is nothing to check
@@ -60,8 +69,8 @@ function requirementFor(info: SignatureInfo, identifier: string): string | undef
   const team = `certificate leaf[subject.OU] = "${info.teamId}"`;
   if (info.signing === 'developer_id')
     return `anchor apple generic and ${id} and ${DEVELOPER_ID} and ${team}`;
-  if (info.signing === 'app_store')
-    return `anchor apple generic and ${id} and ${APP_STORE} and ${team}`;
+  // Apple re-signs App Store apps with its own leaf: its OU is not the team.
+  if (info.signing === 'app_store') return `anchor apple generic and ${id} and ${APP_STORE}`;
   return `anchor apple generic and ${id} and ${team}`;
 }
 
@@ -77,25 +86,25 @@ export function signatureLookup(
       while (recent.length > 0 && t - recent[0]! >= 60_000) recent.shift();
       // codesign echoes the path in its output, so a path with a line break
       // could plant lines (Platform identifier=, Authority=) ahead of the real ones.
-      if (recent.length >= PER_MINUTE || !path.startsWith('/') || /[\n\r\u2028\u2029]/.test(path))
-        return undefined;
+      if (recent.length >= PER_MINUTE || !path.startsWith('/')) return undefined;
+      if (/[\n\r\u2028\u2029]/.test(path)) return unverified();
       recent.push(t);
       const r = await sys.run('codesign', ['-dv', path], { timeoutMs: 10_000 });
       const output = `${r.stderr}\n${r.stdout}`;
-      if (ODD_BREAKS.test(output)) return undefined;
-      if (r.code !== 0) {
-        // codesign exits 1 for an unsigned program; anything else is a failure.
-        const unsigned = r.stderr.trim() === `${path}: code object is not signed at all`;
-        return unsigned ? { signing: 'unsigned' as const } : undefined;
-      }
+      if (/code object is not signed at all/.test(output)) return { signing: 'unsigned' as const };
+      if (ODD_BREAKS.test(output)) return unverified();
+      // A failed codesign (a missing file, say) says nothing, as before.
+      if (r.code !== 0) return undefined;
       const info = parseCodesign(output);
-      if (!info || info.signing === 'unsigned') return undefined;
+      if (!info) return /^Identifier=/m.test(output) ? unverified() : undefined;
       const identifier = /^Identifier=(.+)$/m.exec(output)?.[1]?.trim() ?? '';
       const req = requirementFor(info, identifier);
-      if (req === null) return undefined;
+      if (req === null) return unverified();
       if (req !== undefined) {
-        const v = await sys.run('codesign', ['--verify', `-R=${req}`, path], { timeoutMs: 10_000 });
-        if (v.code !== 0) return undefined;
+        const v = await sys
+          .run('codesign', ['--verify', `-R=${req}`, path], { timeoutMs: 10_000 })
+          .catch(() => undefined);
+        if (v?.code !== 0) return unverified();
       }
       return info;
     });
