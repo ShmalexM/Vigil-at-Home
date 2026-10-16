@@ -16,6 +16,6 @@
   },
   "dependencies": {
     "@vigil/core": "workspace:*",
-    "zod": "^4.1.0"
+    "zod": "^4.6.6"
   }
 }

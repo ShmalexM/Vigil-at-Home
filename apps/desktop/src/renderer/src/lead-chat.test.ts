@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const sayToLead = vi.fn();
 vi.mock('./api', () => ({ vigil: { sayToLead: (...a: unknown[]) => sayToLead(...a) } }));
-const { STARTERS, contextStarter, leadChat, leadChatState, resetLeadChat } =
+const { STARTERS, contextStarter, leadChat, leadChatState, resetLeadChat, sendsOnEnter } =
   await import('./lead-chat');
 const snapshot = async () => leadChatState();
 
@@ -10,6 +10,11 @@ describe('the Lead dog chat box', () => {
   beforeEach(() => {
     resetLeadChat();
     sayToLead.mockReset();
+  });
+
+  it('sends on a single Enter, never on a held one', () => {
+    expect(sendsOnEnter({ repeat: false })).toBe(true);
+    expect(sendsOnEnter({ repeat: true })).toBe(false);
   });
 
   it('sends with where the person is, and empties the box', async () => {

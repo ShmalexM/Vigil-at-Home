@@ -47,7 +47,7 @@ import { showSuggestion } from '../components/RuleSuggestions';
 import { onRovingKeyDown, rovingKeyDown, rovingTabIndex } from '../components/roving';
 import { BREEDS, Dog, breedName } from '../components/Dog';
 import { useToast } from '../components/Toasts';
-import { STARTERS, contextStarter, leadChat, useLeadChat } from '../lead-chat';
+import { STARTERS, contextStarter, leadChat, sendsOnEnter, useLeadChat } from '../lead-chat';
 import { Button, Card, Chip, Segmented } from '../components/ui';
 import { timeAgo } from '../format';
 import '../styles/dog.css';
@@ -66,8 +66,19 @@ export function usePack({ settings = true }: { settings?: boolean } = {}): [
   () => void,
 ] {
   const [pack, setPack] = useState<PackView>();
+  const asked = useRef(0);
+  const shown = useRef(0);
   const reload = useRef(() => {
-    vigil.getPack().then(setPack, (err: unknown) => console.error(err));
+    // An answer older than the one on screen would bring back old state; any newer one lands.
+    const n = ++asked.current;
+    vigil.getPack().then(
+      (p) => {
+        if (n < shown.current) return;
+        shown.current = n;
+        setPack(p);
+      },
+      (err: unknown) => console.error(err),
+    );
   }).current;
   useEffect(() => {
     reload();
@@ -317,6 +328,7 @@ export function LeadConversation({
   const lead = pack.dogs.find((d) => d.role === 'lead')!;
   const { draft, sending, error } = useLeadChat();
   const log = useRef<HTMLDivElement>(null);
+  const box = useRef<HTMLTextAreaElement>(null);
   const names = new Map(pack.dogs.map((d) => [d.id, d]));
   const canSend = !!draft.trim() && !sending && !pack.noAi;
   // Answers that arrive while the chat is open come in word by word; the rest are just there.
@@ -346,8 +358,14 @@ export function LeadConversation({
                     key={s}
                     type="button"
                     className="starter"
-                    disabled={pack.noAi || sending}
-                    onClick={() => send(s)}
+                    // Drops the words in the box to send or change, AI or not.
+                    onClick={() => {
+                      leadChat.setDraft(s);
+                      requestAnimationFrame(() => {
+                        box.current?.focus();
+                        box.current?.setSelectionRange(s.length, s.length);
+                      });
+                    }}
                   >
                     {s}
                   </button>
@@ -381,8 +399,11 @@ export function LeadConversation({
       </div>
       {pack.noAi && (
         <span className="t-small no-ai">
+          {pack.noAiWhy && `${pack.noAiWhy} `}
           <button type="button" className="link" onClick={() => openSettings()}>
-            Set up an AI in Settings
+            {pack.noAiWhy
+              ? 'Turn on Claude, Codex or a local model in Settings'
+              : 'Set up an AI in Settings'}
           </button>{' '}
           so {lead.name} can talk.
         </span>
@@ -400,6 +421,7 @@ export function LeadConversation({
         }}
       >
         <textarea
+          ref={box}
           className="field"
           rows={2}
           value={draft}
@@ -411,7 +433,7 @@ export function LeadConversation({
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
-              if (canSend) send(draft);
+              if (canSend && sendsOnEnter(e)) send(draft);
             }
           }}
         />

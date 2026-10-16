@@ -1104,6 +1104,47 @@ describe('what a sync may grant without the password', () => {
     expect(helper(file).fp.loosening(bare({ selfPaths: [SELF] }))).toEqual([`never block ${SELF}`]);
   });
 
+  it('names a release’s update to a built-in rule for what it is, and still asks', () => {
+    const { fp } = helper();
+    // Blocking, as on a Mac that turned blocking on for it.
+    const { effectiveMode: _m, ...listed } = new DetectionEngine(macosCoreRules, memoryStores())
+      .listRules()
+      .find((r) => r.id === 'unsigned-quarantined-exec')!;
+    const shipped = { ...listed, mode: 'block' } as DetectionSync['rules'][number];
+    // The rule as an earlier release shipped it: no exemption for Vigil's own downloads.
+    const conditions = (shipped.condition as { all: unknown[] }).all;
+    const older = {
+      ...shipped,
+      condition: { all: conditions.filter((c) => !JSON.stringify(c).includes('1389784855')) },
+    } as typeof shipped;
+    expect(older.condition).not.toEqual(shipped.condition);
+    const withRule = (rule: typeof shipped) => bare({ selfPaths: [SELF], rules: [rule] });
+    fp.sync(withRule(older));
+    expect(fp.status().rules).toBe(1);
+    expect(fp.loosening(withRule(shipped))).toEqual([
+      'let Vigil’s own updates past the download check',
+    ]);
+    // Anything else changed with it is an edit, worded as one.
+    expect(
+      fp.loosening(
+        withRule({
+          ...shipped,
+          exclusions: [{ field: 'process.path', op: 'eq', value: '/tmp/x' }],
+        } as typeof shipped),
+      ),
+    ).toEqual([`change what “${shipped.name}” blocks`]);
+    // Putting back a rule the user edited is worded as an edit.
+    const { fp: edited } = helper();
+    edited.sync(withRule({ ...older, editedFrom: 1 } as typeof shipped));
+    expect(edited.loosening(withRule(shipped))).toEqual([`change what “${shipped.name}” blocks`]);
+    // Not the version this helper ships: worded as an edit too.
+    const other = {
+      ...shipped,
+      condition: { all: [...conditions.slice(0, 1)] },
+    } as typeof shipped;
+    expect(fp.loosening(withRule(other))).toEqual([`change what “${shipped.name}” blocks`]);
+  });
+
   it('asks before weakening a policy that has no block rules yet', () => {
     const { fp } = helper();
     fp.sync(bare({ selfPaths: [SELF] }));

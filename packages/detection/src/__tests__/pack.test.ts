@@ -386,6 +386,38 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
         ),
         { mode: 'alert', actions: ['process.suspend', 'file.quarantine'] },
       ],
+      // Near misses of Vigil's own release links still count as unknown downloads.
+      ...[
+        'https://github.com/someone/Vigil-at-Home/releases/download/v0.1.0/Vigil-at-Home-0.1.0-arm64.dmg',
+        'https://github.com/ShmalexM/Vigil-at-Home-evil/releases/download/v0.1.0/Vigil-at-Home-0.1.0-arm64.dmg',
+        'http://github.com/ShmalexM/Vigil-at-Home/releases/download/v0.1.0/Vigil-at-Home-0.1.0-arm64.dmg',
+        'https://github.com.evil.test/ShmalexM/Vigil-at-Home/releases/download/v0.1.0/Vigil-at-Home-0.1.0-arm64.dmg',
+        'https://evil.test/https://github.com/ShmalexM/Vigil-at-Home/releases/download/v0.1.0/Vigil-at-Home-0.1.0-arm64.dmg',
+        'https://github.com/ShmalexM/Vigil-at-Home/releases/download/v0.1.0/Vigil-at-Home-0.1.0-arm64.dmg.evil.test',
+        'https://github.com/ShmalexM/Vigil-at-Home/releases/download/v0.1.0/../../../../someone/x/releases/download/v1/Vigil-at-Home-1-arm64.dmg',
+        'https://github.com/ShmalexM/Vigil-at-Home/releases/download/v0.1.0/payload.pkg',
+        'https://github.com/ShmalexM/Vigil-at-Home/archive/refs/heads/main.zip',
+        'https://release-assets.githubusercontent.com/github-production-release-asset/1389784856/0a1b2c3d-1111-2222-3333-444455556666?sp=r',
+        'https://release-assets.githubusercontent.com/github-production-release-asset/13897848550/0a1b2c3d?sp=r',
+        'https://release-assets.githubusercontent.com.evil.test/github-production-release-asset/1389784855/0a1b2c3d?sp=r',
+        'https://evil-githubusercontent.com/github-production-release-asset/1389784855/0a1b2c3d?sp=r',
+        // Too long to be a real link: cut to the 4,096 characters a pattern
+        // sees, these end in .dmg or a bare asset id, but must still fire.
+        `https://github.com/ShmalexM/Vigil-at-Home/releases/download/v0.1.0/Vigil-at-Home-0.1.0${'1'.repeat(4096)}.dmg.exe`,
+        `https://github.com/ShmalexM/Vigil-at-Home/releases/download/v0.1.0/Vigil-at-Home-0.1.0-arm64.dmg?${'a'.repeat(4096)}`,
+        `https://release-assets.githubusercontent.com/github-production-release-asset/1389784855/0a1b2c3d?${'a'.repeat(4096)}`,
+        'https://github.com/ShmalexM/Vigil-at-Home/releases/download/v0.1.0/Vigil-at-Home-0.1.0-arm64.dmg.exe?download=1',
+        'https://github.com/ShmalexM/Vigil-at-Home/releases/download/v0.1.0/Vigil-at-Home-0.1.0-arm64.dmg/x?download=1',
+      ].map((originUrl): [DetectionEvent, Want] => [
+        exec(
+          proc({
+            path: '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home',
+            signing: 'adhoc',
+            quarantine: { originUrl },
+          }),
+        ),
+        { mode: 'alert', actions: ['process.suspend', 'file.quarantine'] },
+      ]),
     ],
     good: [
       exec(
@@ -397,6 +429,24 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
         }),
       ),
       exec(devTool),
+      // Vigil's own release, dragged in from its DMG: ad hoc signed and
+      // flagged as a download from this repo's releases, by either link form.
+      ...[
+        'https://github.com/ShmalexM/Vigil-at-Home/releases/download/v0.1.0-alpha.5/Vigil-at-Home-0.1.0-alpha.5-arm64.dmg',
+        'https://github.com/shmalexm/vigil-at-home/releases/download/v0.2.0/Vigil-at-Home-0.2.0-x64.zip',
+        'https://github.com/ShmalexM/Vigil-at-Home/releases/download/v0.1.0-alpha.5/Vigil-at-Home-0.1.0-alpha.5-arm64.dmg?download=1',
+        'https://github.com/ShmalexM/Vigil-at-Home/releases/download/v0.1.0-alpha.5/Vigil-at-Home-0.1.0-alpha.5-arm64.dmg#top',
+        'https://release-assets.githubusercontent.com/github-production-release-asset/1389784855/0a1b2c3d-1111-2222-3333-444455556666?sp=r&sv=2018-11-09&response-content-disposition=attachment%3B%20filename%3DVigil-at-Home-0.1.0-alpha.5-arm64.dmg',
+        'https://objects.githubusercontent.com/github-production-release-asset-2e65be/1389784855/0a1b2c3d-1111-2222-3333-444455556666?X-Amz-Algorithm=AWS4-HMAC-SHA256',
+      ].map((originUrl) =>
+        exec(
+          proc({
+            path: '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home',
+            signing: 'adhoc',
+            quarantine: { originUrl },
+          }),
+        ),
+      ),
     ],
   },
   'quarantine-removed': {

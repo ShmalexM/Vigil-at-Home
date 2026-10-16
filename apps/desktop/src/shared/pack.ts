@@ -297,6 +297,8 @@ export interface PackView {
   judge: { ready: boolean; detail: string };
   /** No AI is set up, so nobody can talk yet. */
   noAi: boolean;
+  /** Why, when Settings › AI might look set up (everything switched off, or only Jev). */
+  noAiWhy?: string;
   tools: ToolView[];
   connectors: ConnectorView[];
   /** What each dog did since midnight, from the notebooks. */

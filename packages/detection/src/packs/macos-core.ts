@@ -23,6 +23,37 @@ function rule(r: PackRule): DetectionRuleInput {
 }
 
 export const UNTRUSTED_SIGNING = ['unsigned', 'adhoc', 'invalid'];
+
+/**
+ * Where Vigil's own releases download from: this repo's release assets on
+ * github.com, or the GitHub host those links redirect to, which names the
+ * repo by its numeric id (1389784855). Only the repo's owner can publish
+ * there. Vigil's builds are ad hoc signed, so without this a Vigil update
+ * dragged in from the DMG would be stopped and quarantined as an unsigned
+ * download.
+ *
+ * Each pattern pins the scheme, host and path in full and allows only a
+ * query or fragment after them (a link with ?download=1 is the same file).
+ * Every part has a length bound, so no URL near the 4,096 characters a
+ * pattern sees (compile.ts clip) can match: an overlong one, cut short to
+ * end in .dmg, still fires.
+ *
+ * Only this rule uses it, and only on the process's own download record:
+ * chain rules key on the nearest downloaded ancestor, and exempting Vigil
+ * there would also exempt programs Vigil starts for the user (connectors).
+ *
+ * Accepted: the origin says which repo a download came from, not which
+ * program it is; anything under it is published by the repo's owner. The
+ * origin is the download record macOS keeps, which a program running as the
+ * user can write (and downloaders write it for what they fetch). Such a
+ * program can already skip this rule by leaving the origin empty, which
+ * never matches it, so naming this repo gives it nothing new.
+ */
+export const VIGIL_RELEASE_DOWNLOADS = [
+  '^https://github\\.com/shmalexm/vigil-at-home/releases/download/v[0-9][0-9a-z.+-]{0,63}/vigil-at-home-[0-9][0-9a-z.+-]{0,63}\\.(dmg|zip)([?#][^\\s]{0,1024})?$',
+  '^https://(objects|release-assets)\\.githubusercontent\\.com/github-production-release-asset(-2e65be)?/1389784855/[0-9a-z-]{1,64}([?#][^\\s]{0,3072})?$',
+];
+
 export const SHELLS = ['sh', 'bash', 'zsh', 'dash', 'ksh'];
 export const SCRIPT_RUNNERS = [
   'osascript',
@@ -466,6 +497,15 @@ export const macosCoreRules: DetectionRuleInput[] = [
       all: [
         { field: 'process.quarantine', op: 'exists' },
         { field: 'process.signing', op: 'in', value: UNTRUSTED_SIGNING },
+        // Vigil's own release, downloaded by hand. See VIGIL_RELEASE_DOWNLOADS.
+        {
+          not: {
+            field: 'process.quarantine.originUrl',
+            op: 'regex',
+            nocase: true,
+            value: VIGIL_RELEASE_DOWNLOADS,
+          },
+        },
       ],
     },
     response: [SUSPEND, { kind: 'file.quarantine', path: '{{process.path}}' }],

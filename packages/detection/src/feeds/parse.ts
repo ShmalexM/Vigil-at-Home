@@ -4,7 +4,8 @@ import type { FeedSource } from './sources.js';
 export function parseFeed(text: string, format: FeedSource['format']): string[] {
   const out: string[] = [];
   for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.replace(/[#;].*$/, '').trim();
+    const comment = rawLine.search(/[#;]/);
+    const line = (comment < 0 ? rawLine : rawLine.slice(0, comment)).trim();
     if (!line) continue;
     const fields = line.split(/[\s,]+/);
     if (format === 'hosts') {

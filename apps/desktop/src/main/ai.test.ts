@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   PromptLogEntry,
   ProviderStatus,
@@ -31,6 +31,8 @@ function fakeAi(
   opts: VigilAiOptions,
   calls: RunRequest<unknown>[],
   signInUrl = 'https://example.test/sign-in',
+  /** States changed outside the app (Ollama started, a CLI signed in), read on every check. */
+  outside: Partial<Record<string, ProviderStatus['state']>> = {},
 ): VigilAi {
   const statuses: ProviderStatus[] = opts.settings.order.map((provider) => ({
     provider,
@@ -39,7 +41,7 @@ function fakeAi(
   return {
     quota: undefined as never,
     listApiModels: async () => [],
-    status: async () => statuses,
+    status: async () => statuses.map((st) => ({ ...st, state: outside[st.provider] ?? st.state })),
     signIn: async () => ({
       url: signInUrl,
       completed: Promise.resolve(true),
@@ -89,6 +91,8 @@ function setup(
     mode?: SetupMode;
     executor?: ActionExecutor;
     signInUrl?: string;
+    outside?: Partial<Record<string, ProviderStatus['state']>>;
+    now?: () => number;
   } = {},
 ) {
   const store = memoryStore();
@@ -105,9 +109,9 @@ function setup(
     openExternal: async (url) => void opened.push(url),
     create: (opts) => {
       made.push(opts);
-      return fakeAi(opts, calls, o.signInUrl);
+      return fakeAi(opts, calls, o.signInUrl, o.outside);
     },
-    now: () => NOW,
+    now: o.now ?? (() => NOW),
   });
   return { store, core, ai, calls, made, opened };
 }
@@ -302,6 +306,63 @@ describe('AiBridge view', () => {
     expect(v.providers.find((p) => p.provider === 'api')).toMatchObject({ state: 'optional' });
     expect(v.providers.find((p) => p.provider === 'jev')).toMatchObject({ state: 'ready' });
     expect(v.jevVia).toBe('typesafe');
+  });
+
+  it('tells the chat why nothing can talk when Settings › AI shows only Jev, or all off', async () => {
+    const { ai } = setup({ saved: { typesafe: 'ts-aaaaaaaaaaaaaaaaaa9876' } });
+    ai.setPrefs({ claude: false, codex: false, api: false, ollama: false });
+    expect((await ai.view()).providers.find((p) => p.provider === 'jev')).toMatchObject({
+      state: 'ready',
+    });
+    expect(await ai.packAi().status()).toMatchObject({
+      anyReady: false,
+      noAiWhy: 'Jev only labels events; it can’t chat.',
+    });
+    ai.setPrefs({ jev: false });
+    expect(await ai.packAi().status()).toMatchObject({
+      anyReady: false,
+      noAiWhy: 'Every AI app is switched off.',
+    });
+    ai.setPrefs({ codex: true });
+    const on = await ai.packAi().status();
+    expect(on.anyReady).toBe(true);
+    expect(on.noAiWhy).toBeUndefined();
+  });
+
+  it('says AI changed when a check finds a provider ready that wasn’t, so the chat asks again', async () => {
+    const outside: Partial<Record<string, ProviderStatus['state']>> = { ollama: 'not_installed' };
+    let now = NOW;
+    const { ai } = setup({ outside, now: () => now });
+    let changed = 0;
+    ai.on('changed', () => changed++);
+    await ai.view();
+    await ai.view();
+    expect(changed).toBe(0);
+    delete outside.ollama;
+    await ai.view();
+    expect(changed).toBe(1);
+    await ai.view();
+    expect(changed).toBe(1);
+    // A change right after waits its turn, then is told with no further check.
+    vi.useFakeTimers();
+    try {
+      outside.ollama = 'error';
+      await ai.view();
+      expect(changed).toBe(1);
+      now += 30_000;
+      vi.advanceTimersByTime(30_000);
+      expect(changed).toBe(2);
+      // Flipping back and forth within the wait tells nothing new.
+      delete outside.ollama;
+      await ai.view();
+      outside.ollama = 'error';
+      await ai.view();
+      now += 30_000;
+      vi.advanceTimersByTime(30_000);
+      expect(changed).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('opens the vendor sign-in page in the browser', async () => {

@@ -7,8 +7,9 @@
 // System Settings > General > Device Management.
 //
 // The profile points at files instead of embedding them (ServerAuthRootsFile,
-// FileAccessPolicyPlist), so Vigil can rotate its certificate and change file
-// protections later without asking the user to reinstall the profile.
+// ClientAuthCertificateFile, FileAccessPolicyPlist), so Vigil can rotate its
+// certificates and change file protections later without asking the user to
+// reinstall the profile.
 
 import { randomUUID } from 'node:crypto';
 import { toPlist, type PlistValue } from '../plist.js';
@@ -18,6 +19,7 @@ export const SANTA_PREFERENCE_DOMAIN = 'com.northpolesec.santa';
 export const DEFAULT_PATHS = {
   supportDir: '/Library/Application Support/Vigil',
   syncCaPem: '/Library/Application Support/Vigil/santa-sync/ca.pem',
+  syncClientP12: '/Library/Application Support/Vigil/santa-sync/client.p12',
   fileAccessPolicy: '/Library/Application Support/Vigil/santa-file-access.plist',
   santaLog: '/var/db/santa/santa.log',
 } as const;
@@ -27,6 +29,12 @@ export interface SantaProfileOptions {
   /** Reverse-DNS prefix for payload identifiers. */
   identifierPrefix?: string;
   caPemPath?: string;
+  /**
+   * Password of Santa's client identity (tls.ts). When set, Santa presents
+   * that certificate on every sync; the helper's server requires it.
+   */
+  clientCertPassword?: string;
+  clientCertPath?: string;
   fileAccessPolicyPath?: string;
   /** Opened by the button in Santa's block dialog. %file_sha% etc. are filled in by Santa. */
   eventDetailUrl?: string;
@@ -57,6 +65,11 @@ export function santaProfile(opts: SantaProfileOptions): string {
     BannedBlockMessage: 'Vigil blocked this program. Open Vigil to see why, or to allow it.',
     FileAccessBlockMessage: 'Vigil stopped this program from reading a protected file.',
   };
+  if (opts.clientCertPassword !== undefined) {
+    // A PKCS#12 file Santa opens itself, so nothing goes into a keychain.
+    santaSettings.ClientAuthCertificateFile = opts.clientCertPath ?? DEFAULT_PATHS.syncClientP12;
+    santaSettings.ClientAuthCertificatePassword = opts.clientCertPassword;
+  }
   if (opts.eventDetailUrl) santaSettings.EventDetailURL = opts.eventDetailUrl;
   if (opts.eventDetailText) santaSettings.EventDetailText = opts.eventDetailText;
 

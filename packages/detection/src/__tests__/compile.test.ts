@@ -88,8 +88,8 @@ const bad = (...parts: string[]) => parts.join('');
 
 describe('regexProblem', () => {
   it('rejects catastrophic patterns and backreferences', () => {
-    expect(regexProblem('(a+)+$')).toMatch(/nested/);
-    expect(regexProblem('(.*)*x')).toMatch(/nested/);
+    expect(regexProblem(bad('(a+', ')+$'))).toMatch(/nested/);
+    expect(regexProblem(bad('(.*', ')*x'))).toMatch(/nested/);
     expect(regexProblem('(a|b+){2,}')).toMatch(/nested/);
     expect(regexProblem('(a)\\1')).toMatch(/backreference/);
     expect(regexProblem('x'.repeat(300))).toMatch(/longer/);
@@ -182,5 +182,11 @@ describe('templates', () => {
     expect(resolveTemplateValue('{{process.pid}}', e)).toBe(77);
     expect(resolveTemplateValue('pid {{process.pid}}', e)).toBe('pid 77');
     expect(resolveTemplateValue('{{process.sha256}}', e)).toBeUndefined();
+  });
+  it('reads placeholders written with spaces', () => {
+    expect(resolveTemplateValue('{{ process.pid }}', e)).toBe(77);
+    expect(renderTemplate("{{ remoteHost | 'a host' }} and {{  process.name  }}", e)).toBe(
+      'a host and x',
+    );
   });
 });

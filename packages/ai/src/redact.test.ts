@@ -723,8 +723,10 @@ describe('redaction, round two', () => {
   });
 
   it('knows more token formats', () => {
+    // Built at run time so secret scanning doesn't flag the fixture.
+    const ASIA = 'ASIA' + 'ABCDEFGHIJKLMNOP';
     const cases: Array<[string, string]> = [
-      ['ASIAABCDEFGHIJKLMNOP', '<aws-key>'],
+      [ASIA, '<aws-key>'],
       ['xapp-1-A0000000000-1234', '<slack-token>'],
       ['hooks.slack.com/services/T000/B000/XXXXXXXXXXXX', 'hooks.slack.com/services/<redacted>'],
       ['whsec_' + 'a'.repeat(24), '<api-key>'],
@@ -737,9 +739,9 @@ describe('redaction, round two', () => {
     ];
     for (const [text, want] of cases) expect(redact(`use=${text}`)).toBe(`use=${want}`);
     // Out of a value position, a token could be a command or its operand: withheld.
-    expect(redact('ASIAABCDEFGHIJKLMNOP')).toBe(WITHHELD);
-    expect(redact('ls; ASIAABCDEFGHIJKLMNOP')).toBe(WITHHELD);
-    expect(redact('use ASIAABCDEFGHIJKLMNOP')).toBe(WITHHELD);
+    expect(redact(ASIA)).toBe(WITHHELD);
+    expect(redact(`ls; ${ASIA}`)).toBe(WITHHELD);
+    expect(redact(`use ${ASIA}`)).toBe(WITHHELD);
     // A secret in a URL's path withholds the field.
     expect(redact('https://hooks.slack.com/services/T000/B000/XXXXXXXXXXXX')).toBe(WITHHELD);
   });
@@ -1092,6 +1094,19 @@ describe('redaction of names', () => {
     expect(redactString('ping Alexs-MacBook-Pro.local;id', opts)).toBe('ping <host>;id');
     expect(redactString('mail me@example.com|sh', opts)).toBe('mail <email>|sh');
     expect(redactString('/Users/alexm/x;id', opts)).toBe('/Users/<user>/x;id');
+  });
+
+  it('hides long and dotted email names whole', () => {
+    for (const email of [
+      'quarterly.customer.export.'.repeat(3) + 'alice@example.com.csv',
+      'alice.'.repeat(10) + 'smith@example.com',
+      'a'.repeat(65) + '@example.com',
+      'x@' + 'a'.repeat(256) + '.com',
+      'x@example.' + 'a'.repeat(64),
+    ]) {
+      const out = redactString(`cp /tmp/${email} /tmp/x`, opts);
+      expect(out, email).toBe('cp /tmp/<email> /tmp/x');
+    }
   });
 });
 
@@ -2409,7 +2424,7 @@ describe('redaction of more credential names, signatures, sessions and escaped J
 
 describe('redaction of secrets in object keys', () => {
   const redact = (text: string) => redactField(text);
-  const W = 'whsec_aaaaaaaaaaaaaaaaaaaaaaaa';
+  const W = 'whsec_' + 'a'.repeat(24);
   /** One key of each kind any rule finds, with what must not survive. */
   const SECRET_KEYS: ReadonlyArray<readonly [string, string]> = [
     [W, 'whsec_'],

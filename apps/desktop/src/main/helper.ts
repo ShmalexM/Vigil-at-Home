@@ -88,9 +88,22 @@ export interface HelperRulesOutcome {
 /** The helper's socket is open but it didn't answer in time. */
 class HelperTimeout extends Error {}
 
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+/**
+ * Waits `ms` for the helper. Given a function, it gets a signal that aborts
+ * when the wait ends, so a password dialog the call showed closes with it
+ * and an answer after that can't act unseen.
+ */
+function withTimeout<T>(
+  call: Promise<T> | ((signal: AbortSignal) => Promise<T>),
+  ms: number,
+): Promise<T> {
+  const stop = new AbortController();
+  const p = typeof call === 'function' ? call(stop.signal) : call;
   return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new HelperTimeout('The Vigil helper did not answer')), ms);
+    const t = setTimeout(() => {
+      stop.abort();
+      reject(new HelperTimeout('The Vigil helper did not answer'));
+    }, ms);
     p.then(
       (v) => (clearTimeout(t), resolve(v)),
       (e: unknown) => (clearTimeout(t), reject(e instanceof Error ? e : new Error(String(e)))),
@@ -181,7 +194,7 @@ export class HelperLink
       // Releases make the helper ask for the admin password; call() shows the dialog.
       // A release waits on the user typing their password; containment must be quick.
       const out = await withTimeout(
-        client.call<Outcome>(action),
+        (signal) => client.call<Outcome>(action, signal),
         isRelease(action) ? RELEASE_TIMEOUT_MS : ACTION_TIMEOUT_MS,
       );
       if (!out) throw new Error('No answer from the Vigil helper');
@@ -243,6 +256,28 @@ export class HelperLink
     } catch (err) {
       // A closed or hung connection: drop it and start reconnecting.
       this.dropped(client, err);
+      throw err;
+    }
+  }
+
+  /**
+   * Repair for a Santa that can't sync: the helper issues Santa a new client
+   * certificate and serves it without one until Santa presents it. That
+   * loosens the sync port, so the helper asks for the admin password first
+   * (a cancelled dialog throws a HelperCallError with code refused). Returns
+   * the Santa profile to install again, or null while unconnected.
+   */
+  async reissueSantaClient(): Promise<string | null> {
+    const client = this.client;
+    if (!client) return null;
+    try {
+      const out = await withTimeout(
+        client.call<{ mobileconfig: string }>({ kind: 'santa.client.reissue' }),
+        RELEASE_TIMEOUT_MS,
+      );
+      return out.mobileconfig;
+    } catch (err) {
+      if (!(err instanceof HelperCallError)) this.dropped(client);
       throw err;
     }
   }
@@ -344,9 +379,12 @@ export class HelperLink
           out = tried.result;
         } else {
           out = await withTimeout(
-            opts.hold
-              ? client.hold<HelperRulesOutcome>(sync, opts.onHeld)
-              : client.call<HelperRulesOutcome>(sync),
+            // A held sync's dialog is approveHeld()'s, shared with what else
+            // is held; it closes on its own (APPROVAL_TIMEOUT_MS).
+            (signal) =>
+              opts.hold
+                ? client.hold<HelperRulesOutcome>(sync, opts.onHeld)
+                : client.call<HelperRulesOutcome>(sync, signal),
             // A sync that loosens the rules waits on the admin password, like a release.
             RELEASE_TIMEOUT_MS,
           );
@@ -416,7 +454,9 @@ export class HelperLink
     const client = this.client;
     if (!client) return null;
     try {
-      // No timeout: the dialog may stay open, and a lost connection settles it.
+      // No timeout here: the dialog closes itself after APPROVAL_TIMEOUT_MS
+      // (a no), and a lost connection settles it too. No other call's
+      // timeout closes it.
       await client.call({ kind: 'self.grant', ...selfOf(set) });
       return 'applied';
     } catch (err) {
