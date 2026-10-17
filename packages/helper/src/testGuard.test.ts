@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RuleStore } from '@vigil/sensors';
 import { Approvals } from './approval.js';
-import { testRunFromEnv } from './client.js';
+import { HelperClient, refuseInstalledHelperInTests, testRunFromEnv } from './client.js';
+import { defaultPaths, linuxPaths, macPaths } from './config.js';
 import { Executor } from './executor.js';
 import { Journal } from './journal.js';
 import { parseRequest } from './protocol.js';
@@ -241,9 +242,31 @@ describe('the test-run tag on requests', () => {
     }
   });
 
-  it('comes from VIGIL_TEST_RUN_ID, when that is a valid id', () => {
-    expect(testRunFromEnv({ VIGIL_TEST_RUN_ID: 'e2e-1' })).toBe('e2e-1');
-    expect(testRunFromEnv({ VIGIL_TEST_RUN_ID: 'not valid!' })).toBeUndefined();
-    expect(testRunFromEnv({})).toBeUndefined();
+  it('comes from VIGIL_TEST_RUN_ID under the e2e harness, when that is a valid id', () => {
+    const e2e = { VIGIL_E2E: '1' };
+    expect(testRunFromEnv({ ...e2e, VIGIL_TEST_RUN_ID: 'e2e-1' })).toBe('e2e-1');
+    expect(testRunFromEnv({ ...e2e, VIGIL_TEST_RUN_ID: 'not valid!' })).toBeUndefined();
+    expect(testRunFromEnv(e2e)).toBeUndefined();
+    // The CLI or the app outside the harness never tags, whatever the environment holds.
+    expect(testRunFromEnv({ VIGIL_TEST_RUN_ID: 'e2e-1' })).toBeUndefined();
+  });
+});
+
+describe('a test connecting to the installed helper', () => {
+  it('is refused unless the run opted in', async () => {
+    for (const socket of [macPaths().socket, linuxPaths().socket]) {
+      expect(() => refuseInstalledHelperInTests(socket, TEST)).toThrow(
+        /refusing to connect a test to the installed helper/,
+      );
+      expect(() => refuseInstalledHelperInTests(socket, OPTED_IN)).not.toThrow();
+      // The app itself, outside any test.
+      expect(() => refuseInstalledHelperInTests(socket, {})).not.toThrow();
+    }
+    // Any other socket (an isolated helper's) is fine.
+    expect(() => refuseInstalledHelperInTests('/tmp/vigil-e2e-x/helper.sock', TEST)).not.toThrow();
+    // Vitest is a test context: connect() refuses before opening the socket.
+    await expect(
+      HelperClient.connect(defaultPaths().socket, async () => false),
+    ).rejects.toMatchObject({ code: 'refused' });
   });
 });

@@ -298,6 +298,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       ],
     },
     syncPort,
+    rulesTestRunFile: join(paths.supportDir, 'rules-test-run.json'),
     ...(linux
       ? {}
       : {

@@ -9,9 +9,25 @@ import type { HelperClient } from '../client.js';
 import type { JournalEntry } from '../journal.js';
 import type { HelperAction } from '../protocol.js';
 import type { PersistenceRecord } from '../commands/persistence.js';
+import type { SantaRule } from '@vigil/sensors';
 
-/** The command that reverses a journal entry still in force. */
-export function releaseFor(e: JournalEntry): HelperAction | undefined {
+const SET_POLICY: Partial<Record<SantaRule['policy'], 'block' | 'silent_block' | 'allow'>> = {
+  BLOCKLIST: 'block',
+  SILENT_BLOCKLIST: 'silent_block',
+  ALLOWLIST: 'allow',
+};
+
+/**
+ * The command that reverses a journal entry still in force, given the
+ * journal's other entries; `keep` when it must be left alone: a Santa rule
+ * someone else set on the same program after the run, which replaced the
+ * run's. A run's rule that replaced an earlier one is undone by putting that
+ * one back, never by removing the program's rule outright.
+ */
+export function releaseFor(
+  e: JournalEntry,
+  journal: readonly JournalEntry[] = [],
+): HelperAction | 'keep' | undefined {
   const cmd = e.command;
   switch (cmd.kind) {
     case 'process.suspend':
@@ -24,8 +40,33 @@ export function releaseFor(e: JournalEntry): HelperAction | undefined {
       const rec = e.undo?.persistence as PersistenceRecord | undefined;
       return { kind: 'persistence.enable', path: rec?.quarantine.originalPath ?? cmd.path };
     }
-    case 'santa.rule.set':
-      return { kind: 'santa.rule.remove', ruleType: cmd.ruleType, identifier: cmd.identifier };
+    case 'santa.rule.set': {
+      const latest = journal
+        .filter((o) => {
+          const c = o.command;
+          return (
+            o.state === 'active' &&
+            c.kind === 'santa.rule.set' &&
+            c.ruleType === cmd.ruleType &&
+            c.identifier === cmd.identifier
+          );
+        })
+        .sort((a, b) => a.createdAt - b.createdAt)
+        .at(-1);
+      if (latest && latest.id !== e.id) return 'keep';
+      const previous = e.undo?.previous as SantaRule | null | undefined;
+      if (!previous)
+        return { kind: 'santa.rule.remove', ruleType: cmd.ruleType, identifier: cmd.identifier };
+      const policy = SET_POLICY[previous.policy];
+      if (!policy) return undefined;
+      return {
+        kind: 'santa.rule.set',
+        ruleType: cmd.ruleType,
+        identifier: cmd.identifier,
+        policy,
+        ...(previous.custom_msg ? { message: previous.custom_msg } : {}),
+      };
+    }
     default:
       return undefined;
   }
@@ -35,6 +76,8 @@ export interface TeardownReport {
   testRun: string;
   /** Summaries of what was undone. */
   undone: string[];
+  /** The run's Santa rules a later rule of someone else's replaced: left as they are. */
+  kept: string[];
   /** What could not be undone, with why. */
   failed: { summary: string; error: string }[];
   /** Whether the run's blocking rules were taken off the helper. */
@@ -55,12 +98,16 @@ export class TeardownError extends Error {
 
 const JOURNAL_LIMIT = 1000;
 
-async function tagged(client: HelperClient, testRun: string): Promise<JournalEntry[]> {
-  const entries = await client.call<JournalEntry[]>({
-    kind: 'helper.journal',
-    limit: JOURNAL_LIMIT,
-  });
-  return entries.filter((e) => e.testRun === testRun && e.state === 'active');
+async function journal(client: HelperClient): Promise<JournalEntry[]> {
+  return client.call<JournalEntry[]>({ kind: 'helper.journal', limit: JOURNAL_LIMIT });
+}
+
+/** The run's entries still in force, with what undoes each. */
+async function leftovers(client: HelperClient, testRun: string) {
+  const all = await journal(client);
+  return all
+    .filter((e) => e.testRun === testRun && e.state === 'active')
+    .map((e) => ({ e, release: releaseFor(e, all) }));
 }
 
 /**
@@ -73,10 +120,20 @@ export async function teardownTestRun(
   client: HelperClient,
   testRun: string,
 ): Promise<TeardownReport> {
-  const report: TeardownReport = { testRun, undone: [], failed: [], clearedRules: false };
+  const report: TeardownReport = {
+    testRun,
+    undone: [],
+    kept: [],
+    failed: [],
+    clearedRules: false,
+  };
   // Newest first: a later action may rest on an earlier one.
-  for (const e of (await tagged(client, testRun)).sort((a, b) => b.createdAt - a.createdAt)) {
-    const release = releaseFor(e);
+  const pending = (await leftovers(client, testRun)).sort((a, b) => b.e.createdAt - a.e.createdAt);
+  for (const { e, release } of pending) {
+    if (release === 'keep') {
+      report.kept.push(e.summary);
+      continue;
+    }
     if (!release) {
       report.failed.push({ summary: e.summary, error: 'no way to undo it' });
       continue;
@@ -91,9 +148,15 @@ export async function teardownTestRun(
 
   // Rules the run handed the helper keep blocking with the app closed (its
   // fast path): take them off. The user's app hands its own back when it
-  // next connects.
+  // next connects. A helper that can't say whose rules are in force fails
+  // the teardown rather than pass it unchecked.
   const status = await client.call<{ testRun?: string | null }>({ kind: 'detection.status' });
-  if (status.testRun === testRun) {
+  if (status.testRun === undefined) {
+    report.failed.push({
+      summary: "the helper's blocking rules",
+      error: 'this helper does not report which test run set them',
+    });
+  } else if (status.testRun === testRun) {
     try {
       await client.call({ kind: 'detection.sync', rules: [], exceptions: [], lists: {} });
       report.clearedRules = true;
@@ -105,9 +168,16 @@ export async function teardownTestRun(
     }
   }
 
-  // Check, rather than trust the replies.
+  // Check, rather than trust the replies: what is left must be only rules
+  // someone else's later rule replaced.
   const failedSummaries = new Set(report.failed.map((f) => f.summary));
-  for (const e of await tagged(client, testRun)) {
+  for (const { e, release } of await leftovers(client, testRun)) {
+    if (release === 'keep') {
+      // A rule put back above leaves the run's entry replaced, and so kept.
+      if (!report.kept.includes(e.summary) && !report.undone.includes(e.summary))
+        report.kept.push(e.summary);
+      continue;
+    }
     if (!failedSummaries.has(e.summary))
       report.failed.push({ summary: e.summary, error: 'still in force after its undo' });
   }

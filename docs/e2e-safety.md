@@ -34,15 +34,22 @@ ignores all three.
 
 ## The guard
 
-Any code from `packages/helper` that runs in a test context refuses to enforce
-on the real machine. A test context is any of these:
+Helper code refuses to enforce on the real machine when the process running
+it is in a test context. A test context is any of these:
 
 - Vitest
 - `NODE_ENV=test`
 - `VIGIL_E2E` is set
 - `VIGIL_TEST_RUN_ID` is set
 
-The guard has two layers (`packages/helper/src/testGuard.ts`):
+The guard has three layers (`packages/helper/src/testGuard.ts` and
+`client.ts`):
+
+- The client refuses to connect to the installed helper's socket
+  (`/var/run/vigil-helper.sock` or `/run/vigil-helper.sock`). The helper runs
+  in its own process and can't tell a test's request from the app's, so a test
+  that calls `HelperClient.connect()` with the default socket gets a `refused`
+  error before anything is sent.
 
 - The real system (`realSystem()` in `system.ts`) refuses these operations:
   - pf blocks, rule loads and turning pf on
@@ -54,8 +61,10 @@ The guard has two layers (`packages/helper/src/testGuard.ts`):
   `persistence.disable`, `file.quarantine` and Santa block rules when the
   system under it is the real one.
 
-Reads and undos still run. The installed helper runs under launchd or systemd
-without any of these variables, so the guard never applies to it.
+Reads and undos still run. The installed helper and the app run without any
+of these variables, so the guard never applies to them. Only code that runs in
+the test's own process is covered. A test that starts some other program to
+talk to the helper is not covered.
 
 ### Opting in: `VIGIL_ALLOW_REAL_ENFORCEMENT=1`
 
@@ -70,8 +79,10 @@ integration tests (`ci.yml`).
 processes. So it runs only when the run opts in. When it does:
 
 1. **It tags every action with a test-run id.** The harness makes an id
-   (`e2e-<date>-<random>`, or `VIGIL_TEST_RUN_ID` if you set one). The app
-   sends it with every helper request. The helper records it on each journal
+   (`e2e-<date>-<random>`, or `VIGIL_TEST_RUN_ID` if you set one). The app,
+   started by the harness with `VIGIL_E2E`, sends it with every helper request.
+   A process without `VIGIL_E2E` never sends a tag, whatever
+   `VIGIL_TEST_RUN_ID` says. The helper records it on each journal
    entry (`testRun`). Blocks the helper's own rules make while the app is
    closed carry the id too, as long as the helper has not restarted since the
    run gave it those rules.
@@ -79,9 +90,18 @@ processes. So it runs only when the run opts in. When it does:
    (`packages/helper/src/testing/teardown.ts`) does three things:
    - It reads the helper journal and undoes every entry with the run's id that
      is still active: unblocks, resumes, re-enables startup items, restores
-     quarantined files and removes Santa rules.
+     quarantined files and takes back Santa rules.
+   - It never undoes the user's own enforcement:
+     - A Santa rule the run set over an existing rule is replaced by that
+       earlier rule, not removed.
+     - A Santa rule someone else set on the same program after the run is
+       left as it is.
+     - If the user blocks an address the run had already blocked, the block
+       becomes theirs and the teardown leaves it.
    - If the helper still runs the blocking rules the run gave it, the teardown
-     removes them.
+     removes them. The helper keeps the run's id for those rules in its state
+     folder, so a restart doesn't lose it. If the helper can't report the id,
+     the teardown fails.
    - It reads the journal again.
 3. **If anything stays in force, the run fails.** The output names each
    leftover and prints `TEARDOWN FAILED`.

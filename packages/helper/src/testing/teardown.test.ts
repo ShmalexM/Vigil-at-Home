@@ -1,6 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { RuleStore } from '@vigil/sensors';
+import { Approvals } from '../approval.js';
+import { Executor } from '../executor.js';
+import { Journal } from '../journal.js';
+import { FakeSystem } from './fakeSystem.js';
 import { HelperClient } from '../client.js';
 import { defaultPaths } from '../config.js';
 import type { JournalEntry } from '../journal.js';
@@ -124,6 +130,130 @@ describe('teardown of an opted-in run', () => {
       run.close();
       user.close();
     }
+  });
+});
+
+describe("teardown leaves the user's own enforcement alone", () => {
+  const BIN = 'b'.repeat(64);
+  const rule = () => new RuleStore(helper.paths.santaRules).get('BINARY', BIN)?.rule;
+
+  it("puts back the Santa rule the run replaced, rather than removing the user's", async () => {
+    approve = true;
+    const user = await connect();
+    const run = await connect('e2e-santa-a');
+    try {
+      await user.call({
+        kind: 'santa.rule.set',
+        ruleType: 'binary',
+        identifier: BIN,
+        policy: 'block',
+        message: 'blocked by me',
+      });
+      await run.call({
+        kind: 'santa.rule.set',
+        ruleType: 'binary',
+        identifier: BIN,
+        policy: 'silent_block',
+      });
+      expect(rule()?.policy).toBe('SILENT_BLOCKLIST');
+
+      const report = await teardownTestRun(user, 'e2e-santa-a');
+      expect(report.undone).toHaveLength(1);
+      expect(rule()).toMatchObject({ policy: 'BLOCKLIST', custom_msg: 'blocked by me' });
+    } finally {
+      run.close();
+      await user.call({ kind: 'santa.rule.remove', ruleType: 'binary', identifier: BIN });
+      user.close();
+    }
+  });
+
+  it('keeps a Santa rule the user set on the same program after the run', async () => {
+    approve = true;
+    const user = await connect();
+    const run = await connect('e2e-santa-b');
+    try {
+      await run.call({
+        kind: 'santa.rule.set',
+        ruleType: 'binary',
+        identifier: BIN,
+        policy: 'block',
+      });
+      await user.call({
+        kind: 'santa.rule.set',
+        ruleType: 'binary',
+        identifier: BIN,
+        policy: 'block',
+      });
+
+      const report = await teardownTestRun(user, 'e2e-santa-b');
+      expect(report.undone).toEqual([]);
+      expect(report.kept).toHaveLength(1);
+      expect(rule()?.policy).toBe('BLOCKLIST');
+    } finally {
+      run.close();
+      await user.call({ kind: 'santa.rule.remove', ruleType: 'binary', identifier: BIN });
+      user.close();
+    }
+  });
+
+  it('keeps a block the user asked for after the run made the same one', async () => {
+    approve = true;
+    const user = await connect();
+    const run = await connect('e2e-net-a');
+    try {
+      await run.call({ kind: 'network.block', address: '192.0.2.77' });
+      await user.call({ kind: 'network.block', address: '192.0.2.77' });
+
+      const report = await teardownTestRun(user, 'e2e-net-a');
+      expect(report.undone).toEqual([]);
+      expect(helper.sys.pfTable.has('192.0.2.77')).toBe(true);
+    } finally {
+      run.close();
+      await user.call({ kind: 'network.unblock', address: '192.0.2.77' });
+      user.close();
+    }
+  });
+});
+
+describe('the run whose rules are in force', () => {
+  it('is remembered across a helper restart', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vigil-rules-run-'));
+    const make = () =>
+      new Executor({
+        sys: new FakeSystem(),
+        journal: new Journal(join(dir, 'journal.json')),
+        approvals: new Approvals({
+          dir: join(dir, 'approvals'),
+          requiredOwnerUid: process.getuid!(),
+        }),
+        rules: new RuleStore(join(dir, 'rules.json')),
+        quarantine: { quarantineDir: join(dir, 'Quarantine') },
+        syncPort: 47821,
+        rulesTestRunFile: join(dir, 'rules-test-run.json'),
+      });
+    try {
+      expect(make().rulesTestRun).toBeUndefined();
+      const first = make();
+      (first as unknown as { setRulesTestRun(t?: string): void }).setRulesTestRun('e2e-restart');
+      expect(make().rulesTestRun).toBe('e2e-restart');
+      (first as unknown as { setRulesTestRun(t?: string): void }).setRulesTestRun(undefined);
+      expect(make().rulesTestRun).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails the teardown when the helper cannot say', async () => {
+    const calls: unknown[] = [];
+    const client = {
+      call: async (cmd: { kind: string }) => {
+        calls.push(cmd.kind);
+        return cmd.kind === 'helper.journal' ? [] : {};
+      },
+    } as unknown as HelperClient;
+    await expect(teardownTestRun(client, 'e2e-old')).rejects.toThrow(
+      /does not report which test run set them/,
+    );
   });
 });
 

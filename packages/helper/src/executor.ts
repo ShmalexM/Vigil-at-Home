@@ -8,6 +8,7 @@
 // contain.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import {
   IdentityApprovalNeeded,
   type RuleStore,
@@ -103,6 +104,11 @@ export interface ExecutorDeps {
   ownHashes?: { ready(): Promise<void>; owner(identifier: string): string | undefined };
   /** How long a block by hash waits for ownHashes' first pass (default OWN_HASHES_WAIT_MS). */
   ownHashesWaitMs?: number;
+  /**
+   * Where the test run that put the blocking rules in force is kept, so a
+   * helper restart doesn't lose it (teardown.ts needs it). In memory only when absent.
+   */
+  rulesTestRunFile?: string;
   /** Re-pins the app a self grant covers, with the grant's password (appPin.ts). */
   repin?: {
     /** Before the password is asked for: the app the grant would pin (pinCandidate). */
@@ -150,14 +156,40 @@ export class Executor {
   readonly firewall: NetworkFirewall;
   /** The test run of the command being executed, for record(). */
   private readonly context = new AsyncLocalStorage<ExecContext>();
+  private rulesRun: string | undefined;
+
+  constructor(private readonly d: ExecutorDeps) {
+    this.firewall = d.sys.platform === 'linux' ? new NftFirewall(d.sys) : new Firewall(d.sys);
+    if (d.rulesTestRunFile) {
+      try {
+        const saved = JSON.parse(readFileSync(d.rulesTestRunFile, 'utf8')) as { testRun?: unknown };
+        if (typeof saved.testRun === 'string') this.rulesRun = saved.testRun;
+      } catch {
+        // None saved: the rules in force are no test run's.
+      }
+    }
+  }
+
   /**
    * The test run whose sync put the blocking rules in force, if one did: what
    * the fast path then does on its own is that run's too (daemon.ts).
    */
-  rulesTestRun: string | undefined;
+  get rulesTestRun(): string | undefined {
+    return this.rulesRun;
+  }
 
-  constructor(private readonly d: ExecutorDeps) {
-    this.firewall = d.sys.platform === 'linux' ? new NftFirewall(d.sys) : new Firewall(d.sys);
+  private setRulesTestRun(testRun: string | undefined): void {
+    if (testRun === this.rulesRun) return;
+    this.rulesRun = testRun;
+    const file = this.d.rulesTestRunFile;
+    if (!file) return;
+    if (!testRun) {
+      rmSync(file, { force: true });
+      return;
+    }
+    const tmp = `${file}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify({ testRun }), { mode: 0o600 });
+    renameSync(tmp, file);
   }
 
   private self(): SelfSet {
@@ -517,7 +549,12 @@ export class Executor {
         const existing = journal
           .active()
           .find((e) => e.kind === 'network.block' && e.undo?.address === address);
-        if (existing) return this.outcome(existing);
+        if (existing) {
+          // The user asking for a block a test made keeps it past the test's teardown.
+          const testRun = this.context.getStore()?.testRun;
+          if (!testRun) journal.claim(existing.id, undefined);
+          return this.outcome(existing);
+        }
         return this.record(cmd, `blocked network traffic with ${address}`, { address });
       }
       case 'network.unblock': {
@@ -629,7 +666,7 @@ export class Executor {
         } catch (err) {
           throw policyError(err);
         }
-        if (synced.applied) this.rulesTestRun = this.context.getStore()?.testRun;
+        if (synced.applied) this.setRulesTestRun(this.context.getStore()?.testRun);
         if (!this.d.preexec || !synced.applied) return { ...synced, preexec: null };
         // The rules and lists are in force and saved: answer now. Santa's
         // pre-launch rules follow in the background; detection.status says how.

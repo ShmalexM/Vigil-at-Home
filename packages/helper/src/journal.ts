@@ -89,6 +89,19 @@ export class Journal {
     this.save();
   }
 
+  /**
+   * A request from someone else for what this entry already holds (the same
+   * address blocked again) makes it theirs: untagged when the user asked, so
+   * a test's teardown never undoes it.
+   */
+  claim(id: string, testRun: string | undefined): void {
+    const e = this.get(id);
+    if (!e || e.testRun === testRun) return;
+    if (testRun) e.testRun = testRun;
+    else delete e.testRun;
+    this.save();
+  }
+
   active(): JournalEntry[] {
     return this.data.entries.filter((e) => e.state === 'active');
   }
