@@ -151,7 +151,9 @@ const INTERPRETERS = new Set([
 
 /** A program name without its version: python3.12 and python3 are python, perl5.34 is perl. */
 function unversioned(name: string): string {
-  return name.replace(/[-\d.]+$/, '');
+  let end = name.length;
+  while (end > 0 && /[-\d.]/.test(name[end - 1]!)) end--;
+  return name.slice(0, end);
 }
 
 /**
@@ -347,7 +349,8 @@ function passOn(n: Node | undefined): AgentTag | undefined {
 function isShellCommand(name: string, args: readonly string[] | undefined): boolean {
   if (!COMMAND_SHELLS.has(name) || !args) return false;
   for (let i = 1; i < args.length && i < 4; i++) {
-    if (/^-[A-Za-z]*c[A-Za-z]*$/.test(args[i]!)) return true;
+    const a = args[i]!;
+    if (/^-[A-Za-z]+$/.test(a) && a.includes('c')) return true;
   }
   return false;
 }

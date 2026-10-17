@@ -255,6 +255,36 @@ describe('HelperLink', () => {
     link.stop();
   });
 
+  it('closes a release’s password dialog when the app stops waiting on it, and only that one', async () => {
+    vi.useFakeTimers();
+    try {
+      const signals: (AbortSignal | undefined)[] = [];
+      const fake = fakeClient(() => ({}));
+      // Each call waits on its dialog until its signal aborts.
+      (fake.client as unknown as { call: unknown }).call = (
+        _cmd: unknown,
+        signal?: AbortSignal,
+      ) => {
+        signals.push(signal);
+        return new Promise(() => {});
+      };
+      const link = new HelperLink(socket(), async () => fake.client);
+      await link.tryConnect();
+      const first = link.execute({ kind: 'process.resume', pid: 1 } as never);
+      await vi.advanceTimersByTimeAsync(RELEASE_TIMEOUT_MS / 2);
+      const second = link.execute({ kind: 'process.resume', pid: 2 } as never);
+      await vi.advanceTimersByTimeAsync(RELEASE_TIMEOUT_MS / 2 + 1);
+      await first;
+      expect(signals.map((s) => s?.aborted)).toEqual([true, false]);
+      await vi.advanceTimersByTimeAsync(RELEASE_TIMEOUT_MS);
+      await second;
+      expect(signals[1]?.aborted).toBe(true);
+      link.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('sends the sync again with the lists the helper says it lacks', async () => {
     let first = true;
     const fake = fakeClient((cmd) => {

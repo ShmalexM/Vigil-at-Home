@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { compareVersions, isLinuxPackage, newest, UpdateChecker } from './updates.js';
+import { updateNeedsUser } from '../shared/updates.js';
+import {
+  compareVersions,
+  IDLE_INSTALL_S,
+  isLinuxPackage,
+  newest,
+  UpdateChecker,
+} from './updates.js';
 
 const release = (tag: string, o: { draft?: boolean; prerelease?: boolean } = {}) => ({
   tag_name: `v${tag}`,
@@ -114,8 +121,8 @@ describe('UpdateChecker', () => {
     expect(opened[0]).toMatch(/0\.1\.0-alpha\.3-arm64\.dmg$/);
     c.dismiss();
     expect(c.view().dismissed).toBe(true);
-    c.setAuto(false);
-    expect(c.view()).toMatchObject({ auto: false, dismissed: true });
+    c.setMode('manual');
+    expect(c.view()).toMatchObject({ auto: false, install: false, dismissed: true });
   });
 
   it('opens the release page for What’s new', async () => {
@@ -130,6 +137,210 @@ describe('UpdateChecker', () => {
   it('reports a failed check in words', async () => {
     const { c } = checker(null, false);
     expect((await c.check()).error).toMatch(/403/);
+  });
+});
+
+describe('UpdateChecker installing by itself', () => {
+  const withZip = (tag: string) => {
+    const r = release(tag);
+    const base = `https://github.com/ShmalexM/Vigil-at-Home/releases/download/v${tag}/`;
+    r.assets.push(
+      {
+        name: `Vigil-at-Home-${tag}-arm64.zip`,
+        browser_download_url: `${base}Vigil-at-Home-${tag}-arm64.zip`,
+      },
+      { name: 'SHA256SUMS.txt', browser_download_url: `${base}SHA256SUMS.txt` },
+    );
+    return r;
+  };
+
+  function selfChecker(
+    o: {
+      stageFails?: boolean;
+      swapFails?: boolean;
+      canInstall?: boolean;
+      stageWaits?: Promise<void>;
+    } = {},
+  ) {
+    let saved: unknown = {};
+    let idle = 0;
+    let busy = false;
+    const calls: string[] = [];
+    const found: string[] = [];
+    const c = new UpdateChecker({
+      current: '0.1.0-alpha.4',
+      arch: 'arm64',
+      platform: 'darwin',
+      load: () => saved,
+      save: (s) => void (saved = s),
+      fetch: (async () => ({
+        ok: true,
+        status: 200,
+        json: async () => [withZip('0.1.0-alpha.5')],
+      })) as never,
+      openExternal: async () => {},
+      onFound: (v) => found.push(v),
+      installer: {
+        canInstall: async () => o.canInstall ?? true,
+        stage: async (a) => {
+          calls.push(`stage ${a.version} ${a.zipName}`);
+          await o.stageWaits;
+          if (o.stageFails) throw new Error('the download doesn’t match the release’s checksum');
+          return {
+            version: a.version,
+            app: '/Applications/.vigil-update/x/Vigil at Home.app',
+            plist: 'p',
+          };
+        },
+        swap: (s) => {
+          if (o.swapFails) throw new Error('the staged app changed after it was checked');
+          calls.push(`swap ${s.version}`);
+        },
+      },
+      relaunch: () => calls.push('relaunch'),
+      idleSeconds: () => idle,
+      canRestart: () => !busy,
+    });
+    return {
+      c,
+      calls,
+      found,
+      setIdle: (s: number) => (idle = s),
+      setBusy: (b: boolean) => (busy = b),
+    };
+  }
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it('offers the zip and checksums for this chip', () => {
+    const a = newest([withZip('0.1.0-alpha.5')], '0.1.0-alpha.4', 'arm64');
+    expect(a?.selfUpdate?.zipName).toBe('Vigil-at-Home-0.1.0-alpha.5-arm64.zip');
+    expect(a?.selfUpdate?.sumsUrl).toMatch(/\/SHA256SUMS\.txt$/);
+    expect(newest([withZip('0.1.0-alpha.5')], '0.1.0-alpha.4', 'x64')?.selfUpdate).toBeUndefined();
+    expect(
+      newest([withZip('0.1.0-alpha.5')], '0.1.0-alpha.4', 'arm64', 'linux')?.selfUpdate,
+    ).toBeUndefined();
+  });
+
+  it('downloads quietly, then installs only once the user is away and nothing is on screen', async () => {
+    const { c, calls, found, setIdle, setBusy } = selfChecker();
+    const v = await c.check();
+    await settle();
+    // No notification and no banner: it needs nothing from the user.
+    expect(found).toEqual([]);
+    expect(c.view()).toMatchObject({ ready: '0.1.0-alpha.5', selfInstall: true, install: true });
+    expect(updateNeedsUser(c.view())).toBe(false);
+    expect(v.available?.version).toBe('0.1.0-alpha.5');
+    (c as unknown as { maybeInstall(): void }).maybeInstall();
+    expect(calls).toEqual(['stage 0.1.0-alpha.5 Vigil-at-Home-0.1.0-alpha.5-arm64.zip']);
+    setIdle(IDLE_INSTALL_S);
+    setBusy(true);
+    (c as unknown as { maybeInstall(): void }).maybeInstall();
+    expect(calls).toHaveLength(1);
+    setBusy(false);
+    (c as unknown as { maybeInstall(): void }).maybeInstall();
+    expect(calls.slice(1)).toEqual(['swap 0.1.0-alpha.5', 'relaunch']);
+  });
+
+  it('Restart to update skips the idle wait, but never restarts under a popup or password dialog', async () => {
+    const { c, calls, setBusy } = selfChecker();
+    await c.check();
+    await settle();
+    setBusy(true);
+    c.install(true);
+    expect(calls).toHaveLength(1);
+    setBusy(false);
+    c.install(true);
+    expect(calls.slice(1)).toEqual(['swap 0.1.0-alpha.5', 'relaunch']);
+  });
+
+  it('never swaps while a version is still being staged, at quit or otherwise', async () => {
+    let release!: () => void;
+    const stageWaits = new Promise<void>((r) => (release = r));
+    const { c, calls, setIdle } = selfChecker({ stageWaits });
+    await c.check();
+    await settle();
+    expect(c.view().preparing).toBe('0.1.0-alpha.5');
+    setIdle(IDLE_INSTALL_S);
+    c.install(true);
+    expect(c.installOnQuit()).toBe(false);
+    expect(calls).toEqual(['stage 0.1.0-alpha.5 Vigil-at-Home-0.1.0-alpha.5-arm64.zip']);
+    release();
+    await settle();
+    await settle();
+    expect(c.installOnQuit()).toBe(true);
+  });
+
+  it('keeps the running app and says why when the swap is refused', async () => {
+    const { c, calls, setIdle } = selfChecker({ swapFails: true });
+    await c.check();
+    await settle();
+    setIdle(IDLE_INSTALL_S);
+    c.install();
+    expect(calls).not.toContain('relaunch');
+    expect(c.view().installError).toMatch(/changed after it was checked/);
+    expect(c.view().ready).toBeUndefined();
+  });
+
+  it('installs a ready update when Vigil quits', async () => {
+    const { c, calls, setBusy } = selfChecker();
+    await c.check();
+    await settle();
+    // Not under a password dialog or the helper's installer.
+    setBusy(true);
+    expect(c.installOnQuit()).toBe(false);
+    setBusy(false);
+    expect(c.installOnQuit()).toBe(true);
+    expect(calls.at(-1)).toBe('swap 0.1.0-alpha.5');
+    expect(c.installOnQuit()).toBe(false);
+  });
+
+  it('falls back to telling the user when the download fails its checks', async () => {
+    const { c, found } = selfChecker({ stageFails: true });
+    await c.check();
+    await settle();
+    expect(c.view().installError).toMatch(/checksum/);
+    expect(updateNeedsUser(c.view())).toBe(true);
+    // It isn't retried; the next check tells the user instead.
+    await c.check();
+    await settle();
+    expect(found).toEqual(['0.1.0-alpha.5']);
+  });
+
+  it('tells the user instead when this copy can’t replace itself, or they chose Tell me', async () => {
+    const ro = selfChecker({ canInstall: false });
+    await ro.c.check();
+    expect(ro.found).toEqual(['0.1.0-alpha.5']);
+    expect(updateNeedsUser(ro.c.view())).toBe(true);
+
+    const told = selfChecker();
+    told.c.setMode('notify');
+    await told.c.check();
+    await settle();
+    expect(told.calls).toEqual([]);
+    expect(told.found).toEqual(['0.1.0-alpha.5']);
+    expect(told.c.view()).toMatchObject({ auto: true, install: false });
+  });
+});
+
+describe('UpdateChecker after an update', () => {
+  it('says once which version it replaced', () => {
+    let saved: unknown = { lastRun: '0.1.0-alpha.4' };
+    const make = () =>
+      new UpdateChecker({
+        current: '0.1.0-alpha.5',
+        arch: 'arm64',
+        load: () => saved,
+        save: (s) => void (saved = s),
+        openExternal: async () => {},
+      });
+    const c = make();
+    c.start();
+    c.stop();
+    expect(c.view().updatedFrom).toBe('0.1.0-alpha.4');
+    const again = make();
+    again.start();
+    again.stop();
+    expect(again.view().updatedFrom).toBeUndefined();
   });
 });
 

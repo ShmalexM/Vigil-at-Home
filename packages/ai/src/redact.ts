@@ -1,4 +1,5 @@
 import { hostname, userInfo } from 'node:os';
+import { emailSpans } from '@vigil/core/email';
 
 export interface RedactionOptions {
   /** The Mac's short user name, replaced where it names a folder or an address. */
@@ -1491,7 +1492,6 @@ function addJson(
 // reviewer needs: <user> and <host> are this Mac's own names.
 
 const HOME = /\/(?:Users|home)\/([^/\s"'`$;&|<>(){}#\\]+)/g;
-const EMAIL = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}\.[A-Za-z]{2,63}/g;
 const HOST_LABEL = /\.[A-Za-z0-9-]+/y;
 
 function escapeRegExp(text: string): string {
@@ -1526,12 +1526,7 @@ function addNames(text: string, options: NameOptions, f: Findings): void {
     const [start, end] = matchRange(m);
     f.name(start, end, '<user>');
   }
-  if (text.includes('@')) {
-    EMAIL.lastIndex = 0;
-    for (let m = EMAIL.exec(text); m; m = EMAIL.exec(text)) {
-      f.name(m.index, m.index + m[0].length, '<email>');
-    }
-  }
+  for (const [start, end] of emailSpans(text)) f.name(start, end, '<email>');
   const word = (name: string) =>
     new RegExp(`(?<![A-Za-z0-9_.%+-])${escapeRegExp(name)}(?![A-Za-z0-9_-])`, 'gi');
   if (worthHiding(options.username)) {

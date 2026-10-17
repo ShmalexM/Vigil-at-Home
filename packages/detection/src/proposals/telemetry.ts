@@ -1,3 +1,4 @@
+import { replaceEmails } from '@vigil/core/email';
 import type { DetectionEngine } from '../engine.js';
 import type { EventHistory } from '../state/stores.js';
 import type { DetectionEvent, DetectionEventKind } from '../types.js';
@@ -112,23 +113,18 @@ const SYSTEM_TOOL_DIRS = [
 ];
 const isSystemTool = (p: string) => SYSTEM_TOOL_DIRS.some((d) => p.startsWith(d));
 const RARE_MAX_KEYS = 5000;
-const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 const HOME_ANYWHERE = /\/Users\/[^/\s'"]+/g;
 /** Long random-looking runs: API keys, bearer tokens, session ids. */
 const TOKEN = /[A-Za-z0-9+/_=-]{32,}/g;
 
 /** A command line with home folders, emails and anything token-like removed. */
 export function redactCommandLine(c: string): string {
-  return c
-    .replace(HOME_ANYWHERE, '~')
-    .replace(EMAIL, '<email>')
-    .replace(TOKEN, '<token>')
-    .slice(0, 240);
+  return replaceEmails(c.replace(HOME_ANYWHERE, '~')).replace(TOKEN, '<token>').slice(0, 240);
 }
 
 export function redactPath(p: string | undefined): string {
   if (!p) return 'unknown';
-  return p.replace(HOME, '~').replace(EMAIL, '<email>');
+  return replaceEmails(p.replace(HOME, '~'));
 }
 
 function top<T>(m: Map<string, T>, n: number, score: (t: T) => number): Array<[string, T]> {
@@ -257,7 +253,7 @@ export function summarizeTelemetry(opts: {
         label: f.label,
         count: 1,
       };
-      if (f.reason) entry.reason = f.reason.replace(EMAIL, '<email>').slice(0, 200);
+      if (f.reason) entry.reason = replaceEmails(f.reason).slice(0, 200);
       if (f.commandLine) entry.example = redactCommandLine(f.commandLine);
       flagged.set(key, entry);
     }

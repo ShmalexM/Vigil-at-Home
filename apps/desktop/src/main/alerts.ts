@@ -116,6 +116,12 @@ export class AlertService extends EventEmitter<AlertEvents> {
       // A burst interrupts once: the rest of a pile only adds to the badge.
       if (alert.notify === 'popup' && this.openPileOf(pile.key, at)) alert.notify = 'badge';
     }
+    // The same rule on the same program interrupts once while that popup is
+    // still unanswered. The response still runs; only the popup is skipped.
+    if (alert.notify === 'popup' && !d.standalone && d.rule.severity !== 'critical') {
+      const key = interruptKey(d.rule.id, d.events[0]!);
+      if (key && this.openInterruptOf(key, at)) alert.notify = 'badge';
+    }
     this.store.tx(() => {
       for (const e of d.events) this.store.insertEvent(e);
       this.store.saveAlert(alert);
@@ -155,6 +161,19 @@ export class AlertService extends EventEmitter<AlertEvents> {
     return this.store
       .listAlerts({ status: 'open' })
       .find((a) => a.pile?.key === key && !a.decision && at - a.createdAt <= REPEAT_WINDOW_MS);
+  }
+
+  /**
+   * An open, undecided alert that already popped up for the same rule and
+   * program within the last {@link INTERRUPT_WINDOW_MS}.
+   */
+  private openInterruptOf(key: string, at: number): Alert | undefined {
+    return this.store.listAlerts({ status: 'open' }).find((a) => {
+      if (a.notify !== 'popup' || a.decision || at - a.createdAt > INTERRUPT_WINDOW_MS)
+        return false;
+      const first = a.eventIds[0] ? this.store.getEvent(a.eventIds[0]) : undefined;
+      return !!first && interruptKey(a.ruleId, first) === key;
+    });
   }
 
   /**
@@ -435,6 +454,21 @@ export function repeatKey(d: Detection): string | undefined {
     d.subject ?? null,
     d.events.map(({ id: _id, ts: _ts, raw: _raw, ...rest }) => sorted(rest)),
   ]);
+}
+
+/** How long an unanswered popup keeps later ones for the same rule and program quiet. */
+export const INTERRUPT_WINDOW_MS = 24 * 60 * 60_000;
+
+/**
+ * Who a popup is about: the rule and the program behind its first event,
+ * outside an agent. Unlike {@link pileOf} this holds for blocks too, so a
+ * launch Santa blocks every hour pops up once rather than every hour.
+ */
+export function interruptKey(ruleId: string, e: SensorEvent): string | undefined {
+  const proc = 'process' in e ? e.process : undefined;
+  // An agent's alerts pile per run and pop up again for each new burst.
+  if (proc?.agent || !proc?.path) return undefined;
+  return JSON.stringify([ruleId, 'program', proc.path]);
 }
 
 /**

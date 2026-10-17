@@ -89,7 +89,7 @@ const MAX_REGEX_LENGTH = 256;
  * `evil.test?.example.com` don't count. No nested quantifier, so it stays cheap.
  */
 export function domainUrlRegex(domain: string): string {
-  const esc = domain.replace(/\./g, '\\.');
+  const esc = domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return String.raw`^https?://([^/?#@]*@)?([^/?#@:]*\.)?` + esc + String.raw`\.?(:\d*)?([/?#\\]|$)`;
 }
 

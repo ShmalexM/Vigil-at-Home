@@ -134,6 +134,8 @@ const EXPLAIN_NOW_DEADLINE_MS = 90_000;
 const EXPLAIN_BACKGROUND_DEADLINE_MS = 180_000;
 /** Most events of one alert the AI sees. */
 const MAX_EVENTS = 20;
+/** How often a readiness change found by a check is told to the pages. */
+const READY_TOLD_EVERY_MS = 30_000;
 const LABEL_EVERY_MS = 60_000;
 /** The same program or destination is labelled at most once an hour. */
 const REPEAT_MS = 60 * 60_000;
@@ -229,6 +231,12 @@ export class AiBridge extends EventEmitter<{
   note: [helper: HelperId, note: Omit<DogNoteInput, 'dog'>];
 }> {
   private instance: { ai: VigilAi; key: string } | undefined;
+  /** Which providers the last view found ready, to notice one changing outside the app. */
+  private lastReady: string | undefined;
+  private lastReadyToldAt = -Infinity;
+  /** What the newest check found, waiting to be told while a change is held back. */
+  private pendingReady: string | undefined;
+  private readyTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly now: () => number;
   private readonly explaining = new Set<string>();
   private queuedBackground = 0;
@@ -637,6 +645,15 @@ export class AiBridge extends EventEmitter<{
       canShareSignIn: false,
       signInShared: false,
     });
+    // Ollama started, or a CLI signed in, outside the app: tell everyone, so the chat asks again.
+    // At most once in a while, so a provider that flips between ready and not can't keep
+    // every page re-checking; a change held back is told when the wait is over.
+    this.noticeReady(
+      providers
+        .filter((p) => p.state === 'ready')
+        .map((p) => p.provider)
+        .join(','),
+    );
     const mode = this.o.mode();
     return {
       ...(mode ? { mode } : {}),
@@ -648,6 +665,28 @@ export class AiBridge extends EventEmitter<{
       ...offView(this.offFix()),
       checkedAt: this.now(),
     };
+  }
+
+  private noticeReady(ready: string): void {
+    if (this.lastReady === undefined) {
+      this.lastReady = ready;
+      return;
+    }
+    this.pendingReady = ready;
+    if (ready === this.lastReady || this.readyTimer) return;
+    const wait = this.lastReadyToldAt + READY_TOLD_EVERY_MS - this.now();
+    if (wait <= 0) return this.tellReady();
+    this.readyTimer = setTimeout(() => {
+      this.readyTimer = undefined;
+      if (this.pendingReady !== this.lastReady) this.tellReady();
+    }, wait);
+    this.readyTimer.unref?.();
+  }
+
+  private tellReady(): void {
+    this.lastReady = this.pendingReady;
+    this.lastReadyToldAt = this.now();
+    this.emit('changed');
   }
 
   /** Opens the vendor's sign-in page. The login stays with the vendor's own CLI. */
@@ -929,8 +968,18 @@ export class AiBridge extends EventEmitter<{
           ready('ollama') && 'the local model',
         ].filter((x): x is string => typeof x === 'string');
         const planOnly = ready('claude') && !v.anthropicKey && v.prefs.claudePlan;
+        const anyReady = judges.length > 0 || planOnly;
+        // Settings › AI can show Jev as ready while nothing that can chat is.
+        const noAiWhy = anyReady
+          ? undefined
+          : PROVIDER_PREFS.every((k) => !v.prefs[k])
+            ? 'Every AI app is switched off.'
+            : ready('jev')
+              ? 'Jev only labels events; it can’t chat.'
+              : undefined;
         return {
-          anyReady: judges.length > 0 || planOnly,
+          anyReady,
+          ...(noAiWhy ? { noAiWhy } : {}),
           judge: judges.length
             ? { ready: true, detail: `${judges[0]} checks risky calls` }
             : {
