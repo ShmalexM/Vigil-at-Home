@@ -21,6 +21,12 @@ import {
   unlessDemo,
 } from './helper-install.js';
 import { HelperLink } from './helper.js';
+import {
+  HelperScriptOutcome,
+  helperVersionInfo,
+  installedHelperAt,
+  LAST_HELPER_SCRIPT,
+} from './helper-version.js';
 import { HelperSyncer } from './helper-sync.js';
 import { registerIpc } from './ipc.js';
 import { systemProbe } from './onboarding/checks.js';
@@ -180,6 +186,20 @@ function start(): void {
       () => awakeSince,
     ),
     awakeMs: (since: number) => awake.awakeMs(since),
+    // Only where this app carries a helper it could update to.
+    helperVersion: (running: Parameters<typeof helperVersionInfo>[0]['running']) =>
+      core.helperInstallable
+        ? helperVersionInfo({
+            running,
+            bundled: {
+              version: app.getVersion(),
+              commit: typeof __VIGIL_COMMIT__ === 'string' ? __VIGIL_COMMIT__ : '',
+            },
+            installedAt: installedHelperAt(),
+            updatePending: core.helperOutdated,
+            last: store.getSetting(LAST_HELPER_SCRIPT, HelperScriptOutcome.nullable(), null),
+          })
+        : null,
   };
 
   // A development build installs the helper that `pnpm build:helper` made.
@@ -216,18 +236,26 @@ function start(): void {
   };
   const helperAtStart = checkHelperMatch();
   // Installing or removing the helper shows the system's own password dialog.
-  const afterHelperScript = async (r: HelperInstallResult) => {
+  const afterHelperScript = async (r: HelperInstallResult, kind?: 'install' | 'update') => {
+    // Kept so the helper's row can say why an update didn't go through.
+    if (kind) {
+      store.setSetting(LAST_HELPER_SCRIPT, {
+        kind,
+        at: Date.now(),
+        ok: r.ok,
+        ...(r.error ? { error: r.error } : {}),
+      } satisfies HelperScriptOutcome);
+    }
     checkHelperMatch();
     await helper.reconnect();
     await reportHealth(core.sensors, probe);
     return r;
   };
 
-  const installHelper = unlessDemo(demo, async () =>
-    afterHelperScript(
-      await runHelperScript(core.helperOutdated ? 'update' : 'install', helperDir()),
-    ),
-  );
+  const installHelper = unlessDemo(demo, async () => {
+    const kind = core.helperOutdated ? 'update' : 'install';
+    return afterHelperScript(await runHelperScript(kind, helperDir()), kind);
+  });
 
   const keys = new KeyStore(join(dataDir, 'api-keys.json'), cipher);
   const setup: OnboardingService = new OnboardingService({
@@ -473,7 +501,7 @@ function start(): void {
         // The self grant's password may have re-pinned this app meanwhile.
         if (checkHelperMatch()?.installed !== 'outdated') return;
         void runHelperScript('update', helperDir())
-          .then(afterHelperScript)
+          .then((r) => afterHelperScript(r, 'update'))
           .then((r) => {
             store.setSetting('helper.updateAsked', bundle);
             if (!r.ok && r.error !== 'cancelled') console.error('[helper] update failed:', r.error);

@@ -52,11 +52,21 @@ import { OwnHashes } from './ownHashes.js';
 import {
   ensureOsquery,
   defaultOsqueryPaths,
+  OSQUERY_LABEL,
   osqueryShellRunner,
   santaReportsLaunchItems,
   type OsqueryPaths,
 } from './osquery.js';
 import { HelperServer } from './server.js';
+import {
+  ErrorTally,
+  helperBuild,
+  OsqueryRestarts,
+  osqueryJob,
+  LaunchItemsMode,
+  type OsqueryRestartStatus,
+  type RepeatedError,
+} from './health.js';
 import { PreexecSync } from './preexec.js';
 import { signatureLookup } from './signature.js';
 import { linuxPackageIndex } from './packageTrust.js';
@@ -145,7 +155,19 @@ export interface SensorHealth {
     /** How often Santa is told to sync, in seconds. */
     syncIntervalSeconds: number;
   };
-  osquery: { installed: boolean; lastEventAt: number | null };
+  osquery: {
+    installed: boolean;
+    lastEventAt: number | null;
+    /** macOS: how often osquery restarted, and whether a restart waits on the backoff. */
+    restarts?: OsqueryRestartStatus;
+  };
+  /** The helper itself. */
+  helper: {
+    /** The build running, or null when run from source (tests, development). */
+    build: { version: string; commit: string } | null;
+    /** Problems the helper logged more than once in the last day, most frequent first. */
+    repeatedErrors: RepeatedError[];
+  };
 }
 
 export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise<void>> {
@@ -154,7 +176,13 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   // and network blocks go through nftables (see executor.ts).
   const linux = sys.platform === 'linux';
   const paths = opts.paths ?? defaultPaths(undefined, linux ? 'linux' : 'darwin');
-  const log = opts.log ?? ((m: string) => console.error(`[vigil-helper] ${m}`));
+  const errors = new ErrorTally();
+  const writeLog = opts.log ?? ((m: string) => console.error(`[vigil-helper] ${m}`));
+  const log = (m: string) => {
+    errors.note(m);
+    writeLog(m);
+  };
+  const osqueryRestarts = new OsqueryRestarts();
   const syncPort = opts.syncPort ?? SANTA_SYNC_PORT;
 
   if (process.getuid?.() !== 0) log('warning: not running as root; most actions will fail');
@@ -227,7 +255,12 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
         lastRefusal: clientAuth?.lastRefusal ?? null,
         syncIntervalSeconds: live.sync?.fullSyncIntervalSeconds ?? 600,
       },
-      osquery: { installed: existsSync(bins.osquery), lastEventAt: seen?.osquery ?? null },
+      osquery: {
+        installed: existsSync(bins.osquery),
+        lastEventAt: seen?.osquery ?? null,
+        ...(linux ? {} : { restarts: osqueryRestarts.status() }),
+      },
+      helper: { build: helperBuild(), repeatedErrors: errors.repeated() },
     };
   };
 
@@ -469,6 +502,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
 
   // Start osquery with Vigil's queries once it is installed, and keep it loaded.
   const osqueryPaths = opts.osquery ?? defaultOsqueryPaths();
+  const launchItems = new LaunchItemsMode();
   const keepOsquery = () => {
     if (opts.osquery === false || process.getuid?.() !== 0) return;
     if (linux) {
@@ -482,15 +516,24 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     if (!osqueryPaths) return;
     // osquery's startup-item query slows to a 5 minute safety net only while
     // Santa is actually reporting (it can be installed but not yet approved).
-    const santaAt = hub.lastEventAt().santa;
-    const santaLive = santaAt !== null && Date.now() - santaAt < 10 * 60 * 1000;
-    ensureOsquery(sys, osqueryPaths, {
-      santaReportsLaunchItems: santaLive && santaReportsLaunchItems(),
-    })
-      .then((state) => {
-        if (state === 'started' || state === 'restarted') log(`osquery ${state}`);
-      })
-      .catch((err: Error) => log(`could not start osquery: ${err.message}`));
+    // Slowing down waits out short quiet spells; Santa going quiet speeds it
+    // back up within 15 minutes, without waiting on the restart backoff.
+    const slow = launchItems.want(hub.lastEventAt().santa, Date.now()) && santaReportsLaunchItems();
+    void (async () => {
+      osqueryRestarts.observe(await osqueryJob(sys, `system/${OSQUERY_LABEL}`));
+      const state = await ensureOsquery(
+        sys,
+        osqueryPaths,
+        { santaReportsLaunchItems: slow },
+        {
+          mayRestart: osqueryRestarts.mayRestart() || launchItems.urgent(),
+          restartPending: osqueryRestarts.pending,
+        },
+      );
+      osqueryRestarts.after(state);
+      launchItems.applied(state, slow, osqueryRestarts.pending);
+      if (state === 'started' || state === 'restarted') log(`osquery ${state}`);
+    })().catch((err: Error) => log(`could not start osquery: ${err.message}`));
   };
   keepOsquery();
   const osqueryTimer = setInterval(

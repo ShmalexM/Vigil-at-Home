@@ -9,6 +9,7 @@ import {
   reportHealth,
   santaSyncProblem,
   type HealthProbe,
+  type HelperOsqueryRestarts,
   type HelperSantaSync,
 } from './sensor-health.js';
 import { SensorRegistry } from './sensors.js';
@@ -169,6 +170,109 @@ describe('checkHealth', () => {
     );
     expect(h['osquery']?.state).toBe('ok');
     expect(h['santa']?.state).toBe('not_installed');
+  });
+
+  it('flags osquery restarting over and over, with how it stopped', async () => {
+    const now = 1_000_000_000;
+    const restarts: HelperOsqueryRestarts = {
+      lastHour: 1,
+      lastDay: 1,
+      lastAt: now - 60_000,
+      exitsLastDay: 0,
+      lastExit: null,
+      restartDeferredUntil: null,
+    };
+    const check = (r: HelperOsqueryRestarts) =>
+      byId(
+        probe({
+          procs: ['osqueryd'],
+          helper: () => 'connected',
+          helperSensors: async () => ({
+            osquery: { installed: true, lastEventAt: now - 1000, restarts: r },
+          }),
+        }),
+      );
+    // One restart is a config change going in.
+    expect((await check(restarts))['osquery']?.state).toBe('ok');
+    const often = await check({
+      ...restarts,
+      lastHour: 2,
+      lastDay: 9,
+      exitsLastDay: 7,
+      lastExit: 'signal 9',
+      restartDeferredUntil: now + 60_000,
+    });
+    expect(often['osquery']).toMatchObject({
+      state: 'degraded',
+      note: 'Restarted 9 times in the last day; it stopped by itself 7 times (last: signal 9); Vigil is waiting before the next one',
+    });
+    expect(computeStatus([], Object.values(often)).reasons).toContain(
+      `osquery: ${often['osquery']!.note}`,
+    );
+  });
+
+  it('flags the same helper error repeating, with how often', async () => {
+    const message = 'santa postflight mismatch: sent #, received NaN, processed NaN';
+    const check = (lastDay: number) =>
+      byId(
+        probe({
+          helper: () => 'connected',
+          helperSensors: async () => ({
+            helper: {
+              build: null,
+              repeatedErrors: [{ message, lastHour: 6, lastDay, lastAt: 1 }],
+            },
+          }),
+        }),
+      );
+    expect((await check(3))['helper']?.state).toBe('ok');
+    expect((await check(144))['helper']).toMatchObject({
+      state: 'degraded',
+      note: `The same error 144 times in the last day (6 in the last hour): ${message}`,
+    });
+  });
+
+  it('says the helper is out of date, which build runs, and why the update failed', async () => {
+    const reported: unknown[] = [];
+    const h = await byId(
+      probe({
+        helper: () => 'connected',
+        helperSensors: async () => ({ helper: { build: null, repeatedErrors: [] } }),
+        helperVersion: (running) => {
+          reported.push(running);
+          return {
+            running: null,
+            bundled: '0.1.0-alpha.6 (abc1234)',
+            installedAt: Date.UTC(2026, 9, 6),
+            updatePending: true,
+            lastFailure: { at: 5, reason: 'the password dialog was closed before it ran' },
+          };
+        },
+      }),
+    );
+    expect(reported).toEqual([null]);
+    expect(h['helper']?.state).toBe('degraded');
+    expect(h['helper']?.note).toMatch(
+      /^Out of date: running a build from .+, this app ships 0\.1\.0-alpha\.6 \(abc1234\); the last update failed: the password dialog was closed before it ran$/,
+    );
+    expect(h['helper']?.helperVersion?.running).toBeNull();
+
+    // Up to date: shown, but fine.
+    const current = await byId(
+      probe({
+        helper: () => 'connected',
+        helperVersion: () => ({
+          running: '0.1.0-alpha.7 (def5678)',
+          bundled: '0.1.0-alpha.7 (def5678)',
+          installedAt: null,
+          updatePending: false,
+        }),
+      }),
+    );
+    expect(current['helper']).toMatchObject({
+      state: 'ok',
+      helperVersion: { running: '0.1.0-alpha.7 (def5678)' },
+    });
   });
 
   describe('on Linux', () => {

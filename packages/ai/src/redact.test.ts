@@ -230,7 +230,15 @@ function growthOf(size: number, measure: (size: number) => number): Growth {
  * MAX_GROWTH times as much, and no pass may reach MAX_PASS_MS.
  */
 function expectLinearGrowth(label: string, size: number, measure: (size: number) => number): void {
-  const { small, large, growth, slowest } = growthOf(size, measure);
+  expectGrowth(label, size, growthOf(size, measure));
+}
+
+/** Judges a growthOf result; see expectLinearGrowth. */
+function expectGrowth(
+  label: string,
+  size: number,
+  { small, large, growth, slowest }: Growth,
+): void {
   const report = `${label}: ${small.toFixed(2)} ms at ${Math.floor(size / STEP)}, ${large.toFixed(2)} ms at ${size}`;
   expect(growth, `${report}, more than linear`).toBeLessThan(MAX_GROWTH);
   expect(slowest, `${report}, a pass over ${MAX_PASS_MS} ms`).toBeLessThan(MAX_PASS_MS);
@@ -263,17 +271,50 @@ describe('the linear-time check', () => {
     }
   });
 
-  it('fails a quadratic function, timed for real', () => {
+  it('fails a quadratic function, timed for real', { timeout: 90_000 }, () => {
     // Searches the text read so far from the start, once per 8 characters,
-    // for a character it doesn't hold: n * n / 16 characters read. About 0.2 s
-    // at the full size.
+    // for a character it doesn't hold: n * n / 16 characters read.
     const quadratic = (n: number) => {
       const text = 'a'.repeat(n);
       let found = 0;
       for (let end = 8; end <= n; end += 8) found += text.slice(0, end).indexOf('b');
       return found;
     };
-    expect(() => expectLinear('quadratic', 512 * 1024, quadratic)).toThrow(/more than linear/);
+    // indexOf runs at memory speed, which varies several-fold across runners:
+    // on a fast one the small input can finish under MIN_TIMED_MS, and the
+    // floor then hides the growth. So each pass runs the search reps times at
+    // both sizes, which keeps the growth, with reps set until the checker's
+    // own warmed small pass costs at least twice the floor.
+    const size = 1 << 20;
+    const smallSize = size / STEP;
+    const target = 2 * MIN_TIMED_MS;
+    let reps = 1;
+    const measure = (n: number) =>
+      costOf(() => {
+        for (let i = 0; i < reps; i++) quadratic(n);
+      });
+    // reps for a pass that cost `cost`: twice the target, as a single run costs
+    // more than one of many and the guess tends to land short.
+    const rescale = (cost: number) =>
+      Math.min(reps * 64, Math.ceil((reps * 2 * target) / Math.max(cost, 0.01)));
+    for (let attempt = 1; ; attempt++) {
+      // A first guess from warmed samples, as growthOf warms up too.
+      measure(smallSize);
+      measure(smallSize);
+      const sample = Math.min(measure(smallSize), measure(smallSize), measure(smallSize));
+      if (sample < target) reps = rescale(sample);
+      // The measurement the checker judges must itself clear the floor.
+      const growth = growthOf(size, measure);
+      if (growth.small >= target) {
+        expect(() => expectGrowth('quadratic', size, growth)).toThrow(/more than linear/);
+        return;
+      }
+      if (attempt === 4)
+        throw new Error(
+          `calibration did not reach ${target} ms: ${growth.small.toFixed(2)} ms at ${reps} reps`,
+        );
+      reps = Math.max(reps * 2, rescale(growth.small));
+    }
   });
 });
 
