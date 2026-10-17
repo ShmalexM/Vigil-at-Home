@@ -17,6 +17,7 @@ import { Card, Chip, LevelPill, SectionHead, SeverityMark, StatusMark } from '..
 import { timeAgo } from '../format';
 import { isNoticed, needsDecision } from '../../../shared/attention';
 import { LEVEL_RULES } from '../../../shared/levels';
+import type { SensorView } from '../../../shared/ipc';
 import {
   diaryLines,
   foundLines,
@@ -281,6 +282,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
                       {new Date(s.compatUntil).toLocaleDateString()}, or until it first uses it
                     </span>
                   )}
+                  {s.helperVersion && <HelperVersionLine v={s.helperVersion} />}
                   {s.repair === 'santa-sync' && <RepairSantaSync go={go} />}
                   {(s.state === 'not_installed' || s.state === 'down') &&
                     !(s.id === 'helper' && status.helperInstallable) && (
@@ -333,6 +335,19 @@ export function HomeView({ go }: { go: (r: string) => void }) {
         </button>
       )}
     </div>
+  );
+}
+
+/** Which helper runs next to the one this app ships; the row's note says why an update failed. */
+function HelperVersionLine({ v }: { v: NonNullable<SensorView['helperVersion']> }) {
+  const installed = v.installedAt !== null ? new Date(v.installedAt).toLocaleDateString() : null;
+  const running = v.running
+    ? `Running ${v.running}${installed ? `, installed ${installed}` : ''}`
+    : `Running a build from before helpers reported their version${installed ? `, installed ${installed}` : ''}`;
+  return (
+    <span className="t-small" style={{ color: 'var(--tx3)', textAlign: 'right' }}>
+      {running}. {v.updatePending ? `This app ships ${v.bundled}.` : 'It matches this app.'}
+    </span>
   );
 }
 
