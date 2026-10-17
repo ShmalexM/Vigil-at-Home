@@ -7,6 +7,8 @@
 // So the helper can never be used to resume or restore something it did not
 // contain.
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import {
   IdentityApprovalNeeded,
   type RuleStore,
@@ -48,6 +50,7 @@ import {
   type PersistenceRecord,
 } from './commands/persistence.js';
 import { disableLinuxPersistence, restoreLinuxPersistence } from './commands/linuxPersistence.js';
+import { isEnforcing, refuseRealEnforcement } from './testGuard.js';
 
 export interface ExecutorDeps {
   sys: System;
@@ -101,6 +104,11 @@ export interface ExecutorDeps {
   ownHashes?: { ready(): Promise<void>; owner(identifier: string): string | undefined };
   /** How long a block by hash waits for ownHashes' first pass (default OWN_HASHES_WAIT_MS). */
   ownHashesWaitMs?: number;
+  /**
+   * Where the test run that put the blocking rules in force is kept, so a
+   * helper restart doesn't lose it (teardown.ts needs it). In memory only when absent.
+   */
+  rulesTestRunFile?: string;
   /** Re-pins the app a self grant covers, with the grant's password (appPin.ts). */
   repin?: {
     /** Before the password is asked for: the app the grant would pin (pinCandidate). */
@@ -138,11 +146,50 @@ const POLICY: Record<string, Exclude<RulePolicy, 'REMOVE'>> = {
   allow: 'ALLOWLIST',
 };
 
+/** Who asked for a command, beyond the command itself. */
+export interface ExecContext {
+  /** The opted-in test run that sent it (testGuard.ts); recorded on its journal entries. */
+  testRun?: string;
+}
+
 export class Executor {
   readonly firewall: NetworkFirewall;
+  /** The test run of the command being executed, for record(). */
+  private readonly context = new AsyncLocalStorage<ExecContext>();
+  private rulesRun: string | undefined;
 
   constructor(private readonly d: ExecutorDeps) {
     this.firewall = d.sys.platform === 'linux' ? new NftFirewall(d.sys) : new Firewall(d.sys);
+    if (d.rulesTestRunFile) {
+      try {
+        const saved = JSON.parse(readFileSync(d.rulesTestRunFile, 'utf8')) as { testRun?: unknown };
+        if (typeof saved.testRun === 'string') this.rulesRun = saved.testRun;
+      } catch {
+        // None saved: the rules in force are no test run's.
+      }
+    }
+  }
+
+  /**
+   * The test run whose sync put the blocking rules in force, if one did: what
+   * the fast path then does on its own is that run's too (daemon.ts).
+   */
+  get rulesTestRun(): string | undefined {
+    return this.rulesRun;
+  }
+
+  private setRulesTestRun(testRun: string | undefined): void {
+    if (testRun === this.rulesRun) return;
+    this.rulesRun = testRun;
+    const file = this.d.rulesTestRunFile;
+    if (!file) return;
+    if (!testRun) {
+      rmSync(file, { force: true });
+      return;
+    }
+    const tmp = `${file}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify({ testRun }), { mode: 0o600 });
+    renameSync(tmp, file);
   }
 
   private self(): SelfSet {
@@ -237,7 +284,11 @@ export class Executor {
     return b?.bound;
   }
 
-  async execute(cmd: HelperCommand, approval?: string): Promise<ExecOutcome> {
+  execute(cmd: HelperCommand, approval?: string, ctx: ExecContext = {}): Promise<ExecOutcome> {
+    return this.context.run(ctx, () => this.executeIn(cmd, approval));
+  }
+
+  private async executeIn(cmd: HelperCommand, approval?: string): Promise<ExecOutcome> {
     let bound: PinCandidate | undefined;
     // Refuse what Linux can't do before asking for a password for it.
     if (this.d.sys.platform === 'linux') checkLinuxBlock(cmd);
@@ -431,6 +482,8 @@ export class Executor {
       summary,
     };
     if (undo) entry.undo = undo;
+    const testRun = this.context.getStore()?.testRun;
+    if (testRun) entry.testRun = testRun;
     return this.outcome(this.d.journal.add(entry));
   }
 
@@ -441,6 +494,8 @@ export class Executor {
 
   private async run(cmd: HelperCommand): Promise<unknown> {
     const { sys, journal } = this.d;
+    // Tests never contain anything on the machine they run on unless they opt in.
+    if (sys.real && isEnforcing(cmd)) refuseRealEnforcement(cmd.kind);
     if (cmd.kind === 'santa.rule.set' && cmd.policy !== 'allow') {
       if (this.isOwnHash(cmd.identifier))
         throw new ActionError('refused', 'that program is part of Vigil');
@@ -494,7 +549,12 @@ export class Executor {
         const existing = journal
           .active()
           .find((e) => e.kind === 'network.block' && e.undo?.address === address);
-        if (existing) return this.outcome(existing);
+        if (existing) {
+          // The user asking for a block a test made keeps it past the test's teardown.
+          const testRun = this.context.getStore()?.testRun;
+          if (!testRun) journal.claim(existing.id, undefined);
+          return this.outcome(existing);
+        }
         return this.record(cmd, `blocked network traffic with ${address}`, { address });
       }
       case 'network.unblock': {
@@ -606,6 +666,7 @@ export class Executor {
         } catch (err) {
           throw policyError(err);
         }
+        if (synced.applied) this.setRulesTestRun(this.context.getStore()?.testRun);
         if (!this.d.preexec || !synced.applied) return { ...synced, preexec: null };
         // The rules and lists are in force and saved: answer now. Santa's
         // pre-launch rules follow in the background; detection.status says how.
@@ -617,6 +678,7 @@ export class Executor {
           ...(this.d.fastPath?.status() ?? {}),
           syncId: this.d.fastPath?.syncId() ?? null,
           preexec: this.preexecState,
+          testRun: this.rulesTestRun ?? null,
         };
       case 'self.grant': {
         if (!this.d.fastPath) throw new ActionError('failed', 'helper rules are not set up');

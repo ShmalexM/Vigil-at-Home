@@ -132,7 +132,11 @@ export class HelperServer {
       return;
     }
     try {
-      const out = await this.opts.executor.execute(req.command, req.approval);
+      const out = await this.opts.executor.execute(
+        req.command,
+        req.approval,
+        req.testRun ? { testRun: req.testRun } : {},
+      );
       if (out.kind === 'needs_approval') {
         this.send(sock, {
           id: req.id,

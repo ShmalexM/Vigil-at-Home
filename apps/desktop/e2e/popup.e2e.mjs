@@ -15,6 +15,7 @@ import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright-core';
+import { isolatedRun } from './harness.mjs';
 
 const appDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const out = resolve(process.argv[2] ?? join(appDir, 'e2e-results'));
@@ -38,11 +39,13 @@ function screenshot(name) {
   }
 }
 
+// A throwaway profile and an isolated helper: nothing reaches the real ones.
+const isolated = await isolatedRun();
 const app = await electron.launch({
   // The electron package exports the path of its downloaded binary.
   executablePath: createRequire(join(appDir, 'package.json'))('electron'),
   args: [...(mac ? [] : ['--no-sandbox']), appDir],
-  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '1' },
+  env: { ...isolated.env, ELECTRON_ENABLE_LOGGING: '1' },
 });
 
 async function windowByHash(hash, timeout = 15000) {
@@ -174,6 +177,7 @@ try {
   screenshot('screen-error');
 } finally {
   await app.close().catch(() => {});
+  await isolated.cleanup();
 }
 
 writeFileSync(join(out, 'results.json'), JSON.stringify(results, null, 2));
