@@ -11,6 +11,7 @@ import {
   ListChecks,
   RotateCw,
   Settings as SettingsIcon,
+  ShieldCheck,
   SlidersHorizontal,
   Wrench,
 } from 'lucide-react';
@@ -26,6 +27,7 @@ import { AgentsView } from './Agents';
 import { AlertsView } from './Alerts';
 import { HistoryView } from './History';
 import { HomeView } from './Home';
+import { InForceView } from './InForce';
 import { isTyping, navKey, navKeys, navShortcut } from './nav-keys';
 import { PackPage } from './Pack';
 import { SetupWizard } from './onboarding/SetupWizard';
@@ -53,6 +55,7 @@ export const ADVANCED_NAV: NavItem[] = [
   { id: 'pack', label: 'Pack', icon: <DogIcon size={16} /> },
   { id: 'activity', label: 'Activity', icon: <Activity size={16} /> },
   { id: 'usage', label: 'Usage', icon: <ChartSpline size={16} /> },
+  { id: 'in-force', label: 'In force', icon: <ShieldCheck size={16} /> },
 ];
 
 /** ⌘1…⌘9 follow the sidebar's own order. */
@@ -277,6 +280,7 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
         {section === 'pack' && <PackPage />}
         {section === 'activity' && <ActivityView selected={param} go={go} />}
         {section === 'usage' && <UsageView />}
+        {section === 'in-force' && <InForceView go={go} />}
         {section === 'settings' && <SettingsView go={go} />}
         <AskScout page={section} selected={param} go={go} />
       </main>

@@ -510,6 +510,32 @@ export class Detector {
     this.engine.setSelfHashes(hashes);
   }
 
+  /**
+   * Take `entry` off one of the user's own block lists here. Only once the
+   * helper has taken it off (In force, with the password): dropped here
+   * first, the next sync would leave it to retire there for a week. False
+   * when it wasn't on the list.
+   */
+  dropUserBlock(list: string, entry: string): boolean {
+    const lists = this.stores.lists;
+    const value = entry.toLowerCase();
+    if (!list.startsWith('user_blocked_') || !lists.has(list, value)) return false;
+    lists.replace(
+      list,
+      lists.entries(list).filter((e) => e !== value),
+      { source: 'user', updatedAt: this.now() },
+    );
+    return true;
+  }
+
+  /** The user's own block lists here, entry by entry. */
+  userBlocks(): { list: string; entry: string }[] {
+    return this.stores.lists
+      .names()
+      .filter((n) => n.startsWith('user_blocked_'))
+      .flatMap((list) => this.stores.lists.entries(list).map((entry) => ({ list, entry })));
+  }
+
   hasRule(id: string): boolean {
     return this.engine.getRule(id) !== undefined;
   }

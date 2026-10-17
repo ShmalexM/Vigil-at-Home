@@ -882,6 +882,15 @@ export class Store {
         );
   }
 
+  /** Actions with this status, oldest first. */
+  listActionsByStatus(status: ActionRecord['status']): ActionRecord[] {
+    return this.all(
+      ActionRecord,
+      'SELECT body FROM actions WHERE status = ? ORDER BY requested_at',
+      status,
+    );
+  }
+
   /** Containment a rule carried out since `since`, counting ones the user later released. */
   countRuleBlocksSince(since: number): number {
     const row = this.stmt(
