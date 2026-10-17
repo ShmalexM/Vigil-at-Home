@@ -351,8 +351,8 @@ export class SantaSyncServer {
     if (!session) return {};
     this.sessions.delete(machineId);
     this.lastSyncAt = this.opts.now();
-    const received = Number(pick(body, 'rules_received') ?? NaN);
-    const processed = Number(pick(body, 'rules_processed') ?? NaN);
+    const received = postflightCount(body, 'rules_received');
+    const processed = postflightCount(body, 'rules_processed');
     // Only advance when Santa says it applied everything we sent; otherwise
     // the same changes go out again next time.
     if (received === session.rules.length && processed === session.rules.length) {
@@ -360,8 +360,9 @@ export class SantaSyncServer {
       this.lastRuleSyncAt = this.lastSyncAt;
       this.opts.onRuleSync?.({ at: this.lastSyncAt, ...(req ? { req } : {}) });
     } else {
+      const shown = (n: number | null) => (n === null ? 'an unreadable count' : String(n));
       this.opts.log?.(
-        `santa postflight mismatch: sent ${session.rules.length}, received ${received}, processed ${processed}`,
+        `santa postflight mismatch: sent ${session.rules.length}, received ${shown(received)}, processed ${shown(processed)}`,
       );
     }
     return {};
@@ -397,6 +398,22 @@ export class SantaSyncServer {
       throw new HttpError(400, 'bad json');
     }
   }
+}
+
+/**
+ * A rule count from Santa's postflight, or null when it isn't a count.
+ * Santa writes its sync messages with protobuf's default JSON options, which
+ * leave out fields holding zero (rules_received is a plain uint32), so after
+ * a sync that sent nothing the field is missing: that is 0, not unknown.
+ */
+export function postflightCount(body: unknown, field: string): number | null {
+  // Only an object can leave a count out; null, a list or a string confirms nothing.
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return null;
+  const v = pick(body, field);
+  if (v === undefined || v === null) return 0;
+  // uint32 arrives as a number; a protobuf JSON writer may also quote it.
+  const n = typeof v === 'number' ? v : typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : NaN;
+  return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
 function syncEventId(kind: string, raw: unknown): string {

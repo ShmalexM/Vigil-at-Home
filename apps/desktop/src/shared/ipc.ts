@@ -356,6 +356,14 @@ export interface SensorView {
    * before it), until when at the latest. A detail only.
    */
   compatUntil?: number;
+  /** The helper: which build runs, which this app ships, and how the last update went. */
+  helperVersion?: {
+    running: string | null;
+    bundled: string;
+    installedAt: number | null;
+    updatePending: boolean;
+    lastFailure?: { at: number; reason: string };
+  };
 }
 
 /** Proof that Vigil is running, for the "it's working" line. Today is since local midnight. */
