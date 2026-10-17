@@ -84,6 +84,14 @@ export function registerIpc(
     clearStale: (ids) => core.clearStale(ids),
     clearNoticedUpTo: (at) => core.clearNoticedUpTo(at),
     undoAction: (id) => core.alerts.undo(id),
+    getInForce: () =>
+      core.inForce?.view() ?? Promise.resolve({ helper: 'unavailable', items: [], check: null }),
+    releaseInForce: async (key) => {
+      if (!core.inForce) return { ok: false, error: 'Vigil’s helper isn’t set up here.' };
+      const out = await core.inForce.release(key);
+      windows.broadcast('changed');
+      return out;
+    },
     approveProposal: (id) => core.alerts.approveProposal(id),
     rejectProposal: (id) => core.alerts.rejectProposal(id),
     listRules: () => core.rules(),

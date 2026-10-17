@@ -5,6 +5,7 @@ import type { SelfImage } from '@vigil/core/self';
 import {
   LIST_PART_MAX,
   defaultPaths,
+  type JournalEntry,
   type HelperRan,
   type PreexecOutcome,
   type RuleExceptionSchema,
@@ -50,6 +51,22 @@ export interface HelperRuleSet {
   lists: Record<string, string[]>;
   /** Rules that run an older pattern the linear-time engine can't (legacy.ts). */
   legacy?: string[];
+}
+
+/** One entry of a user's block list on the helper; `retiredAt` when the app dropped it. */
+export interface HelperUserBlock {
+  list: string;
+  entry: string;
+  retiredAt?: number;
+}
+
+/** What the helper enforces now (HelperLink.inForce). */
+export interface HelperInForce {
+  journal: JournalEntry[];
+  /** Missing from a helper from before this read. */
+  userBlocks?: HelperUserBlock[];
+  /** Santa's pre-launch rules the helper set from blocking rules. */
+  preexec?: PreexecOutcome['installed'];
 }
 
 /** What is Vigil's own, as the helper takes it in a self grant. */
@@ -256,6 +273,75 @@ export class HelperLink
     } catch (err) {
       // A closed or hung connection: drop it and start reconnecting.
       this.dropped(client, err);
+      throw err;
+    }
+  }
+
+  /**
+   * What the helper has in force: every active journal entry and the user's
+   * block lists entry by entry, retired ones with when they were dropped.
+   * Null while unconnected. A helper from before these reads gives its last
+   * 1000 journal entries and no block lists (`userBlocks` undefined).
+   */
+  async inForce(): Promise<HelperInForce | null> {
+    const client = this.client;
+    if (!client) return null;
+    const ask = <T>(cmd: Parameters<HelperClient['call']>[0]) =>
+      withTimeout(client.call<T>(cmd), QUERY_TIMEOUT_MS);
+    try {
+      let journal: JournalEntry[];
+      try {
+        journal = await ask<JournalEntry[]>({ kind: 'helper.journal', active: true, limit: 1000 });
+      } catch (err) {
+        if (!(err instanceof HelperCallError && err.code === 'invalid')) throw err;
+        const recent = await ask<JournalEntry[]>({ kind: 'helper.journal', limit: 1000 });
+        journal = recent.filter((e) => e.state === 'active');
+      }
+      const status = await ask<{
+        userBlocks?: HelperUserBlock[];
+        preexec?: { installed?: PreexecOutcome['installed'] } | 'pending' | null;
+      }>({ kind: 'detection.status' });
+      const preexec = typeof status.preexec === 'object' ? status.preexec?.installed : undefined;
+      return {
+        journal,
+        ...(status.userBlocks ? { userBlocks: status.userBlocks } : {}),
+        ...(preexec ? { preexec } : {}),
+      };
+    } catch (err) {
+      if (!(err instanceof HelperCallError)) this.dropped(client, err);
+      throw err;
+    }
+  }
+
+  /**
+   * Take one entry off a user's block list on the helper, retired copy
+   * included, so it stops blocking now. Always asks for the admin password
+   * (a cancelled dialog throws a HelperCallError with code refused). With
+   * `hold`, the password is asked for by the next dialog instead (a
+   * release's) or by approveHeld(); `onHeld` says when it is waiting, and
+   * the caller must then call approveHeld() or dropHeld().
+   */
+  async unblock(
+    list: string,
+    entry: string,
+    opts: { hold?: boolean; onHeld?: () => void } = {},
+  ): Promise<{ unblocked: boolean }> {
+    const client = this.client;
+    if (!client) throw new Error('The Vigil helper is not connected');
+    const cmd = { kind: 'detection.list.unblock' as const, list, entry };
+    try {
+      // A held unblock has no timer of its own: the caller settles it with
+      // approveHeld() or dropHeld(), and a closed connection refuses it. A
+      // timer started now would run while another dialog is open and could
+      // report a failure the held command later turns into a success.
+      if (opts.hold) return await client.hold<{ unblocked: boolean }>(cmd, opts.onHeld);
+      return await withTimeout(
+        (signal) => client.call<{ unblocked: boolean }>(cmd, signal),
+        RELEASE_TIMEOUT_MS,
+      );
+    } catch (err) {
+      if (!(err instanceof HelperCallError || err instanceof HelperTimeout))
+        this.dropped(client, err);
       throw err;
     }
   }

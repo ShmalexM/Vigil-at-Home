@@ -33,6 +33,7 @@ import { EventLog } from './events.js';
 import { BATTERY_SLOWDOWN, type PowerMode } from './power.js';
 import type { Store } from './db/store.js';
 import { FEED_CHECK_MS, notApplied, type Detector } from './detection.js';
+import type { InForce } from './in-force.js';
 import { RuleEditing } from './rule-editing.js';
 import type { ActionExecutor } from './executor.js';
 import { Scheduler } from './scheduler.js';
@@ -110,6 +111,8 @@ export class VigilCore {
   readonly feed = new EventEmitter<{ events: [number] }>();
   /** Vigil's AI runs and plan limits, for the Usage page. */
   readonly usage: UsageService;
+  /** What Vigil enforces now, and releasing it (in-force.ts). Set when the helper link exists. */
+  inForce: InForce | undefined;
   /** The rule engine, once attached. Without it events are stored unanalysed. */
   detector: Detector | undefined;
   /** Sees every stored event and its outcome (the AI picks ones to label). Must be cheap. */
