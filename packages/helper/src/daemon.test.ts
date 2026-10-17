@@ -97,6 +97,7 @@ beforeAll(async () => {
   sys = new FakeSystem();
   sys.console = process.getuid!() === 0 ? 501 : undefined;
   stop = await runDaemon({
+    osProgramRoots: [],
     paths,
     syncPort: port,
     sys,
@@ -368,6 +369,7 @@ describe('helper daemon with the sync port taken', () => {
     busySys.console = process.getuid!() === 0 ? 501 : undefined;
     try {
       stopBusy = await runDaemon({
+        osProgramRoots: [],
         paths: busyPaths,
         syncPort: busyPort,
         sys: busySys,
@@ -578,6 +580,7 @@ describe('helper upgrade with a Santa profile from before the client certificate
       const s = new FakeSystem();
       s.console = process.getuid!() === 0 ? 501 : undefined;
       const stopIt = await runDaemon({
+        osProgramRoots: [],
         paths: upPaths,
         syncPort: upPort,
         sys: s,
@@ -767,6 +770,7 @@ describe('recovering a Santa that cannot sync', () => {
     const s = new FakeSystem();
     s.console = process.getuid!() === 0 ? 501 : undefined;
     const stopIt = await runDaemon({
+      osProgramRoots: [],
       paths: rePaths,
       syncPort: rePort,
       sys: s,
@@ -885,6 +889,7 @@ describe('a required flag the helper cannot write down', () => {
     const s = new FakeSystem();
     s.console = process.getuid!() === 0 ? 501 : undefined;
     const stopIt = await runDaemon({
+      osProgramRoots: [],
       paths: flagPaths,
       syncPort: flagPort,
       sys: s,
@@ -948,6 +953,7 @@ describe('compatibility mode after an upgrade', () => {
       const s = new FakeSystem();
       s.console = process.getuid!() === 0 ? 501 : undefined;
       const stopIt = await runDaemon({
+        osProgramRoots: [],
         paths: compatPaths,
         syncPort: compatPort,
         sys: s,

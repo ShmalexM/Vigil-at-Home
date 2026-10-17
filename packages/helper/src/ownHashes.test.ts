@@ -16,7 +16,7 @@ import { DetectionEngine, macosCoreRules, memoryStores } from '@vigil/detection'
 import { fastPathRules, listDigest } from '@vigil/detection/fastpath';
 import { RuleStore, SantaSyncServer } from '@vigil/sensors';
 import { Approvals } from './approval.js';
-import { ownProgramRoots } from './config.js';
+import { OS_PROGRAM_ROOTS, ownProgramRoots } from './config.js';
 import { Executor } from './executor.js';
 import { FastPath } from './fastpath.js';
 import type { ActionOutcome } from './executor.js';
@@ -188,6 +188,33 @@ describe('OwnHashes', () => {
     await own.refresh();
     const real = realpathSync.native('/bin/sh');
     expect(own.owner(sha(readFileSync(real)))).toBe(real);
+  });
+
+  // Review of #189: a copy of any OS tool (curl, ssh, python3) in /tmp has its hash.
+  it('covers every folder of the system’s programs in the background set', () => {
+    expect(OS_PROGRAM_ROOTS.darwin).toEqual(
+      expect.arrayContaining(['/bin', '/sbin', '/usr/bin', '/usr/sbin', '/usr/libexec']),
+    );
+    expect(OS_PROGRAM_ROOTS.linux).toEqual(expect.arrayContaining(['/usr/bin', '/usr/sbin']));
+  });
+
+  it('refuses a block naming an OS tool’s hash, wherever the copy ran', async () => {
+    const env = realpathSync.native('/usr/bin/env');
+    const os = new OwnHashes({ roots: [env], cdhashes: false, ownerUid: 0 });
+    await os.refresh();
+    const ex = new Executor({
+      sys: new FakeSystem(),
+      journal: new Journal(join(dir, 'journal.json')),
+      approvals: new Approvals({ dir: join(dir, 'approvals'), requiredOwnerUid: ownerUid }),
+      rules: new RuleStore(join(dir, 'rules.json')),
+      quarantine: { quarantineDir: join(dir, 'Quarantine') },
+      syncPort: 47821,
+      ownHashes: os,
+    });
+    const identifier = sha(readFileSync(env));
+    await expect(
+      ex.execute({ kind: 'santa.rule.set', ruleType: 'binary', identifier, policy: 'block' }),
+    ).rejects.toMatchObject({ code: 'refused', message: expect.stringContaining(env) });
   });
 });
 

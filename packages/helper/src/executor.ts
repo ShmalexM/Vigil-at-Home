@@ -204,8 +204,9 @@ export class Executor {
   }
 
   /**
-   * The program of the helper's, a sensor's or the installed app's that
-   * blocking this hash would block, once the first pass over them is done
+   * The program of the helper's, a sensor's, the installed app's or the
+   * operating system's that blocking this hash would block, once the first
+   * pass over them is done
    * (or after a while, with what is known by then).
    */
   private async ownProgram(identifier: string): Promise<string | undefined> {
@@ -500,7 +501,7 @@ export class Executor {
       if (this.isOwnHash(cmd.identifier))
         throw new ActionError('refused', 'that program is part of Vigil');
       const own = await this.ownProgram(cmd.identifier);
-      if (own) throw new ActionError('refused', `that is ${own}, which Vigil relies on`);
+      if (own) throw new ActionError('refused', `that is ${own}, which no block by hash may name`);
     }
     if (sys.platform === 'linux' && cmd.kind.startsWith('santa.')) return this.runLinuxBlock(cmd);
     switch (cmd.kind) {

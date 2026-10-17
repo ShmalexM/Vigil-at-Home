@@ -352,6 +352,26 @@ export const PLATFORM_PROGRAM_ROOTS: Record<Platform, readonly string[]> = {
 };
 
 /**
+ * Every folder of the operating system's own programs, hashed in the
+ * background (daemon.ts osHashes) so that no block by hash names one of them,
+ * wherever a copy of it runs: on 2026-10-10 Santa's log reported /bin/sh with
+ * no signature, and a copy of curl or python3 in /tmp would look the same.
+ * macOS: the folders SIP protects (about 2,200 programs). Linux: the
+ * distribution's folders; /bin and /sbin are often links to these.
+ */
+export const OS_PROGRAM_ROOTS: Record<Platform, readonly string[]> = {
+  darwin: [
+    '/bin',
+    '/sbin',
+    '/usr/bin',
+    '/usr/sbin',
+    '/usr/libexec',
+    '/System/Library/CoreServices',
+  ],
+  linux: ['/usr/bin', '/usr/sbin', '/usr/libexec', '/usr/lib/systemd', '/bin', '/sbin'],
+};
+
+/**
  * Where the programs live that no block by hash may name (ownHashes.ts): the
  * helper's launcher and the runtime it runs under, Santa's and osquery's
  * programs, the installed app, and the system's own programs

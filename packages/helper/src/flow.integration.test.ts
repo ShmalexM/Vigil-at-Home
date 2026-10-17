@@ -263,6 +263,7 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
     }
 
     stop = await runDaemon({
+      osProgramRoots: [],
       paths,
       sys,
       approvalOwnerUid: 0,
