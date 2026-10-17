@@ -21,10 +21,10 @@ import {
   unlessDemo,
 } from './helper-install.js';
 import { HelperLink } from './helper.js';
-import { helperSocketFor, userDataFor } from './test-isolation.js';
 import { HelperSyncer } from './helper-sync.js';
 import { registerIpc } from './ipc.js';
 import { systemProbe } from './onboarding/checks.js';
+import { helperSocketFor, userDataFor } from './test-isolation.js';
 import { demoProbe } from './onboarding/demo.js';
 import { FeedKeyStore, KeyStore, type Cipher } from './onboarding/keys.js';
 import { linuxDistro, type LinuxDistro } from './onboarding/plan.js';
