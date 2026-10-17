@@ -64,20 +64,6 @@ export const PLATFORM_PATH_GLOBS = [
 /** Shells: blocking one by hash stops every script that uses it, Vigil's included. */
 export const SHELL_NAMES = ['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'tcsh', 'csh', 'fish'];
 
-/**
- * Where package managers install shells (Homebrew, MacPorts, Nix, Linux
- * /usr/local). A shell named like one in a download or temp folder can still
- * be blocked: any program may call itself `sh`.
- */
-export const SHELL_HOME_GLOBS = [
-  '/usr/local/**',
-  '/opt/homebrew/**',
-  '/opt/local/**',
-  '/nix/**',
-  '/run/current-system/**',
-  '/snap/**',
-];
-
 const baseName = (path: string): string => path.slice(path.lastIndexOf('/') + 1);
 
 /**
@@ -150,7 +136,6 @@ export class SafetyFloor {
   private readonly protectedFiles: ((path: string) => boolean)[];
   private readonly appleTools = APPLE_TOOL_GLOBS.map((g) => globMatcher(g));
   private readonly platformPaths = PLATFORM_PATH_GLOBS.map((g) => globMatcher(g));
-  private readonly shellHomes = SHELL_HOME_GLOBS.map((g) => globMatcher(g));
   private readonly systemPersistence = SYSTEM_PERSISTENCE_GLOBS.map((g) => globMatcher(g));
   private readonly selfPaths: string[];
   private selfHashes: Set<string>;
@@ -211,7 +196,10 @@ export class SafetyFloor {
    * Why this program must never be blocked by hash, or undefined if it may
    * be. Stricter than {@link processProtection}: a block stops the program
    * everywhere, not just this instance, so no part of the operating system
-   * and no installed shell may be blocked, whatever the signing field says.
+   * may be blocked, whatever the signing field says. Only paths the OS
+   * itself protects count (PLATFORM_PATH_GLOBS, under SIP on macOS): a shell
+   * Homebrew, MacPorts or Nix installed sits in a folder the user's account
+   * can write, so a program there named `bash` may be anything.
    */
   blockProtection(p: ProcessRef | undefined): string | undefined {
     if (!p) return 'there is no process to act on';
@@ -219,9 +207,6 @@ export class SafetyFloor {
       return SHELL_NAMES.includes(baseName(p.path))
         ? `${p.path} is the macOS shell; blocking it would stop every script on the Mac`
         : `${p.path} is part of macOS; blocking it would stop it for everything on the Mac`;
-    }
-    if (SHELL_NAMES.includes(baseName(p.path)) && this.shellHomes.some((fits) => fits(p.path))) {
-      return `${p.path} is an installed shell; blocking it would stop every script that uses it`;
     }
     return this.processProtection(p);
   }

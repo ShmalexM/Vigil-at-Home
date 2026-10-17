@@ -53,13 +53,29 @@ describe('rules that pick a program by its hash', () => {
     }
   });
 
-  it('leave other Apple tools and installed shells alone too, but not a copy elsewhere', () => {
-    for (const path of ['/usr/bin/curl', '/opt/homebrew/bin/bash']) {
-      for (const d of engine().evaluate(exec(path))) expect(d.execute).toEqual([]);
-    }
+  it('leave other Apple tools alone too, but not a copy elsewhere', () => {
+    for (const d of engine().evaluate(exec('/usr/bin/curl'))) expect(d.execute).toEqual([]);
     const copy = engine()
       .evaluate(exec('/tmp/sh'))
       .find((d) => d.match.ruleId === 'user-blocked-hash')!;
     expect(copy.execute.map((a) => a.kind)).toEqual(['process.kill', 'santa.rule.set']);
+  });
+
+  // Review of #189: folders the user's account can write are not the OS's.
+  it('stop and block a known-bad hash under Homebrew, /usr/local or Nix', () => {
+    for (const path of [
+      '/opt/homebrew/bin/fish',
+      '/opt/homebrew/Cellar/x/1/bin/bash',
+      '/usr/local/bin/sh',
+      '/nix/store/abc-bash/bin/bash',
+    ]) {
+      const d = engine()
+        .evaluate(exec(path))
+        .find((x) => x.match.ruleId === 'known-bad-hash')!;
+      expect(
+        d.execute.map((a) => a.kind),
+        path,
+      ).toEqual(['process.kill', 'santa.rule.set']);
+    }
   });
 });

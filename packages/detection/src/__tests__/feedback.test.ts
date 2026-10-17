@@ -142,14 +142,28 @@ describe('user decisions', () => {
     ).toBeUndefined();
   });
 
+  // Review of #189: these folders are the user's to write, so a program
+  // there named like a shell may be anything.
+  it.each([
+    '/opt/homebrew/bin/fish',
+    '/opt/homebrew/Cellar/x/1/bin/bash',
+    '/usr/local/bin/sh',
+    '/nix/store/abc-bash/bin/bash',
+  ])('blocks %s by hash on a malicious verdict, like any other program', (path) => {
+    const eng = new DetectionEngine([anyExec], memoryStores());
+    const p = proc({ path, sha256: 'b'.repeat(64), signing: 'unknown' });
+    const d = eng.evaluate(exec(p))[0]!;
+    const res = new Feedback(eng, undefined, () => T0).recordDecision(d, malicious, me);
+    expect(res.blockRefused).toBeUndefined();
+    expect(eng.stores.lists.has(USER_BLOCKED_HASHES, 'b'.repeat(64))).toBe(true);
+  });
+
   it.each([
     ['/usr/bin/python3', 'part of macOS'],
     ['/usr/libexec/xpcproxy', 'part of macOS'],
     ['/sbin/launchd', 'part of macOS'],
     ['/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder', 'part of macOS'],
     ['/Library/Apple/usr/bin/x', 'part of macOS'],
-    ['/opt/homebrew/bin/zsh', 'installed shell'],
-    ['/usr/local/bin/bash', 'installed shell'],
   ])('refuses to block %s whatever its signing field says', (path, why) => {
     const eng = new DetectionEngine([anyExec], memoryStores());
     const p = proc({ path, sha256: 'a'.repeat(64), signing: 'unknown' });

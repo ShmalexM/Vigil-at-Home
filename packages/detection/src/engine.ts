@@ -530,7 +530,7 @@ export class DetectionEngine {
   private resolveResponse(rule: DetectionRule, e: DetectionEvent, downgrades: string[]): Action[] {
     // A rule that picks the program by its hash acts on every run of it, so
     // even a kill alone works like a block by hash: none for a program no
-    // block may name (part of the OS, an installed shell, Vigil). On
+    // block may name (part of the OS, or Vigil). On
     // 2026-10-10 user-blocked-hash on /bin/sh stopped every shell on the Mac.
     const proc = 'process' in e ? e.process : undefined;
     if (proc && rule.response.length && matchesProgramHash(rule.condition)) {
