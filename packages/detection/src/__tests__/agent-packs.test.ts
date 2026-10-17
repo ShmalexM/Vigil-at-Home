@@ -26,7 +26,6 @@ import {
   SCRIPT_WRITE_RE,
   SECRET_PATH_RES,
   SECRET_READ_RE,
-  TAMPER_RE_CASED,
   TAMPER_RES_NOCASE,
   UPLOAD_RES,
 } from '../packs/agent-watch.js';
@@ -389,6 +388,9 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
       [bash('sudo launchctl bootout system/com.vigilathome.helper'), DENY],
       [bash('sudo pfctl -F all'), DENY],
       [bash('killall Santa'), DENY],
+      // A path written another way reads the same (rules/command-paths.ts).
+      [bash('sudo rm -rf //Library/./PrivilegedHelperTools/vigil-helper.d'), DENY],
+      [bash('rm "$HOME"/Library/Application\\ Support/Vigil\\ at\\ Home/vigil.db'), DENY],
       [write(`${home}/Library/Application Support/Vigil at Home/vigil.db`), DENY],
       [write('/var/db/santa/rules.db', 'Edit'), DENY],
       // The same files by the firmlink, the /private links and in another case.
@@ -534,7 +536,6 @@ describe('agent rule packs', () => {
       ENV_DUMP_RE,
       ...PERSIST_RES,
       ...TAMPER_RES_NOCASE,
-      TAMPER_RE_CASED,
       KEYCHAIN_SECRET_RE,
       AGENT_CONFIG_RE,
       CONFIG_WRITE_RE,
@@ -1121,6 +1122,47 @@ describe('agent rule packs', () => {
     });
 
     // Real Mac, 2026-10-17: 940 of 977 alerts in two weeks were these shapes.
+    // Review of #189: the narrowing must still catch these.
+    it('reads a path however it is written, relative or not', () => {
+      const loud = [
+        // Relative to a folder the agent changed into.
+        'cd /Library/PrivilegedHelperTools && sudo rm -rf vigil-helper.d',
+        'cd /Applications && sudo mv Santa.app /tmp/',
+        'cd ~/Library/Application\\ Support && rm -rf Vigil\\ at\\ Home/',
+        'rm -rf ./vigil-helper.d',
+        // The same path written another way.
+        'sudo rm -rf //Library/PrivilegedHelperTools/vigil-helper.d',
+        'sudo rm -rf /Library/./PrivilegedHelperTools/vigil-helper.d',
+        'sudo rm -rf /Library/Logs/../PrivilegedHelperTools/vigil-helper',
+        'sudo rm -rf /Library/PrivilegedHelperTools/{x,vigil-helper.d}',
+        'rm "$HOME"/Library/Application\\ Support/Vigil\\ at\\ Home/vigil.db',
+        'rm -r ${HOME}/Library/Application\\ Support/Vigil\\ at\\ Home',
+        'sudo rm /private/var/db/santa/rules.db',
+        // Santa's rules database, changed with sqlite3.
+        'sudo sqlite3 /var/db/santa/rules.db "DELETE FROM rules"',
+        // Linux: the socket and approvals.
+        'sudo rm /run/vigil-helper.sock',
+        'sudo rm -r /run/vigil-approvals',
+        // No trailing slash.
+        'sudo rm -r "/Library/Application Support/Vigil"',
+        'sudo rm -r /opt/osquery',
+        // A profile, the older Santa's launch job, osquery.
+        'sudo profiles remove -identifier com.vigilathome.santa',
+        'sudo rm /Library/LaunchDaemons/com.google.santa.daemon.plist',
+        'sudo launchctl bootout system/io.osquery.agent',
+        'sudo killall osqueryd',
+      ];
+      for (const c of loud) expect(fired(sh(c)), c).toContain('agent-guard-tamper');
+      const quiet = [
+        'sqlite3 -readonly /var/db/santa/rules.db "select count(*) from rules"',
+        'rm -r ~/src/vigil-helper-notes/',
+        'cp ~/Movies/Vigil\\ at\\ Home/tour.mp4 /tmp/',
+        'sudo profiles list',
+        'ls /Library/PrivilegedHelperTools/vigil-helper.d',
+      ];
+      for (const c of quiet) expect(fired(sh(c)), c).not.toContain('agent-guard-tamper');
+    });
+
     it('takes only where Vigil, Santa and osquery are installed, not a folder named like them', () => {
       const sandbox = '/private/tmp/vigil-helper-test.wpocnG';
       const quiet = [

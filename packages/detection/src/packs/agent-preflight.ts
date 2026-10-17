@@ -123,7 +123,7 @@ export const agentPreflightRules: DetectionRuleInput[] = [
     fidelity: 'high',
     condition: {
       any: [
-        { all: [BASH, tamper('command')] },
+        { all: [BASH, tamper('commandPaths')] },
         {
           all: [
             WRITES,
