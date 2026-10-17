@@ -46,12 +46,13 @@ vh_prepare
 vh_build "$SRC/node" "$SRC/helper.mjs"
 # A downloaded app's files carry the quarantine flag; the copies don't need it.
 xattr -cr "$DEST/versions/$VH_VERSION" 2>/dev/null || true
-# Nothing uses DEST/current before the new launcher, so a first install, or
+# Nothing uses DEST/current before the new launcher and launchd job, so a first install, or
 # one over the layout from before versions, can point it at the new version now.
 vh_current
 [ -n "$VH_CURRENT" ] || vh_switch "$VH_VERSION"
 
-# The launcher and launchd job run the helper through DEST/current, the same
+# The launcher and launchd job run the helper through DEST/current (the job
+# starts node itself, never through the /bin/sh launcher), the same
 # for every version. Write them first, so the switch is the one step that
 # changes which helper runs.
 vh_put 755 "$SRC/vigil-helper" "$TOOLS/vigil-helper"
