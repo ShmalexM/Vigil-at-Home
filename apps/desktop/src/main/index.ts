@@ -24,7 +24,7 @@ import { HelperLink } from './helper.js';
 import { HelperSyncer } from './helper-sync.js';
 import { registerIpc } from './ipc.js';
 import { systemProbe } from './onboarding/checks.js';
-import { helperSocketFor, userDataFor } from './test-isolation.js';
+import { helperConnectFor, helperSocketFor, userDataFor } from './test-isolation.js';
 import { demoProbe } from './onboarding/demo.js';
 import { FeedKeyStore, KeyStore, type Cipher } from './onboarding/keys.js';
 import { linuxDistro, type LinuxDistro } from './onboarding/plan.js';
@@ -109,7 +109,10 @@ function start(): void {
 
   // Actions go to the privileged helper. Until it is installed and answering,
   // they are simulated and the UI says so.
-  const helper = new HelperLink(helperSocketFor(app.isPackaged, process.env));
+  const helper = new HelperLink(
+    helperSocketFor(app.isPackaged, process.env),
+    helperConnectFor(app.isPackaged, process.env),
+  );
   const core = new VigilCore(store, helper, true);
   const demo = !app.isPackaged && !!process.env['VIGIL_DEMO'];
   // The .app bundle or install folder when packaged; the Electron binary in development.

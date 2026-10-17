@@ -298,4 +298,23 @@ describe('releaseFor', () => {
     ).toEqual({ kind: 'santa.rule.remove', ruleType: 'binary', identifier: 'ab' });
     expect(releaseFor(entry({ kind: 'process.kill', pid: 9 }))).toBeUndefined();
   });
+
+  it('goes by journal order, newest first, when two rules share a millisecond', () => {
+    const set = {
+      kind: 'santa.rule.set',
+      ruleType: 'binary',
+      identifier: 'ab',
+      policy: 'block',
+    } as const;
+    const runs = { ...entry(set), id: 'run', testRun: 'e2e-x' };
+    const users = { ...entry(set), id: 'user' };
+    // The user's rule came after the run's: the run's is replaced, so kept.
+    expect(releaseFor(runs, [users, runs])).toBe('keep');
+    // The run's came last: it is the one in force, and it is taken back.
+    expect(releaseFor(runs, [runs, users])).toEqual({
+      kind: 'santa.rule.remove',
+      ruleType: 'binary',
+      identifier: 'ab',
+    });
+  });
 });

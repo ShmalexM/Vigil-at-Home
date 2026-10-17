@@ -58,7 +58,13 @@ export async function isolatedRun() {
   return {
     helper,
     userData,
-    env: { ...baseEnv(), VIGIL_USER_DATA: userData, VIGIL_HELPER_SOCKET: helper.socket },
+    env: {
+      ...baseEnv(),
+      VIGIL_USER_DATA: userData,
+      VIGIL_HELPER_SOCKET: helper.socket,
+      // The app answers this helper's password dialog itself, so no real one opens.
+      VIGIL_HELPER_APPROVALS: helper.paths.approvalsDir,
+    },
     async cleanup() {
       await helper.stop();
       rmSync(userData, { recursive: true, force: true });

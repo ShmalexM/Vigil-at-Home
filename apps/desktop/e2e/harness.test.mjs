@@ -43,6 +43,7 @@ describe('isolatedRun', () => {
       expect(iso.env.VIGIL_E2E).toBe('1');
       expect(iso.env.VIGIL_HELPER_SOCKET).toBe(iso.helper.socket);
       expect(iso.env.VIGIL_USER_DATA).toBe(iso.userData);
+      expect(iso.env.VIGIL_HELPER_APPROVALS).toBe(iso.helper.paths.approvalsDir);
       expect(iso.env).not.toHaveProperty('VIGIL_ALLOW_REAL_ENFORCEMENT');
       expect(iso.env).not.toHaveProperty('VIGIL_TEST_RUN_ID');
       expect(existsSync(iso.helper.socket)).toBe(true);

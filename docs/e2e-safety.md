@@ -24,10 +24,14 @@ for pf, Santa, launchd and signals. The e2e harness
 (`apps/desktop/e2e/harness.mjs`) starts one for each run and points the app at
 it. The app gets a throwaway profile, so the real `vigil.db` is never opened.
 
-**The app** (development builds only) reads three variables. A packaged app
-ignores all three.
+**The app** (development builds only) reads four variables. A packaged app
+ignores all four.
 
 - `VIGIL_HELPER_SOCKET`: the helper socket to connect to.
+- `VIGIL_HELPER_APPROVALS`: that isolated helper's approvals folder. The app
+  answers the helper's password requests by writing approvals there, so no
+  real admin dialog opens. The installed helper accepts only root-owned
+  approvals in its own folder, so this can't approve anything there.
 - `VIGIL_USER_DATA`: the profile folder to use.
 - `VIGIL_E2E=1`: with no `VIGIL_HELPER_SOCKET`, the app connects to no helper
   at all, unless the run opted in (see below).

@@ -19,7 +19,8 @@ const SET_POLICY: Partial<Record<SantaRule['policy'], 'block' | 'silent_block' |
 
 /**
  * The command that reverses a journal entry still in force, given the
- * journal's other entries; `keep` when it must be left alone: a Santa rule
+ * journal's other entries, newest first as helper.journal lists them
+ * (createdAt can tie within a millisecond); `keep` when it must be left alone: a Santa rule
  * someone else set on the same program after the run, which replaced the
  * run's. A run's rule that replaced an earlier one is undone by putting that
  * one back, never by removing the program's rule outright.
@@ -41,18 +42,15 @@ export function releaseFor(
       return { kind: 'persistence.enable', path: rec?.quarantine.originalPath ?? cmd.path };
     }
     case 'santa.rule.set': {
-      const latest = journal
-        .filter((o) => {
-          const c = o.command;
-          return (
-            o.state === 'active' &&
-            c.kind === 'santa.rule.set' &&
-            c.ruleType === cmd.ruleType &&
-            c.identifier === cmd.identifier
-          );
-        })
-        .sort((a, b) => a.createdAt - b.createdAt)
-        .at(-1);
+      const latest = journal.find((o) => {
+        const c = o.command;
+        return (
+          o.state === 'active' &&
+          c.kind === 'santa.rule.set' &&
+          c.ruleType === cmd.ruleType &&
+          c.identifier === cmd.identifier
+        );
+      });
       if (latest && latest.id !== e.id) return 'keep';
       const previous = e.undo?.previous as SantaRule | null | undefined;
       if (!previous)
@@ -127,9 +125,8 @@ export async function teardownTestRun(
     failed: [],
     clearedRules: false,
   };
-  // Newest first: a later action may rest on an earlier one.
-  const pending = (await leftovers(client, testRun)).sort((a, b) => b.e.createdAt - a.e.createdAt);
-  for (const { e, release } of pending) {
+  // Newest first, as the journal lists them: a later action may rest on an earlier one.
+  for (const { e, release } of await leftovers(client, testRun)) {
     if (release === 'keep') {
       report.kept.push(e.summary);
       continue;
