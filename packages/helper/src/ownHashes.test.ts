@@ -169,7 +169,12 @@ describe('OwnHashes', () => {
 
   it('covers the system’s own programs, after Vigil’s', () => {
     const mac = ownProgramRoots('darwin', '/Library/PrivilegedHelperTools/vigil-helper', '/rt');
-    expect(mac.slice(-4)).toEqual(['/bin', '/sbin', '/usr/bin', '/usr/sbin']);
+    expect(mac).toEqual(
+      expect.arrayContaining(['/bin', '/sbin', '/usr/bin/env', '/usr/bin/osascript']),
+    );
+    expect(mac.indexOf('/bin')).toBeGreaterThan(mac.indexOf('/Applications/Vigil at Home.app'));
+    // Not all of /usr/bin: over a thousand programs to hash at every start.
+    expect(mac).not.toContain('/usr/bin');
     const linux = ownProgramRoots('linux', '/usr/libexec/vigil-helper', '/rt');
     expect(linux).toEqual(expect.arrayContaining(['/bin/sh', '/usr/bin/bash', '/usr/bin/env']));
     // Not all of /usr/bin on Linux: it holds thousands of packaged programs.

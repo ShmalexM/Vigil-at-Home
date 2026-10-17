@@ -313,23 +313,31 @@ export function installedSelf(platform: Platform = 'darwin'): string[] {
 }
 
 /**
- * The operating system's own programs that Vigil, its installer and every
- * script on the computer run through: on macOS all of /bin, /sbin, /usr/bin
- * and /usr/sbin (about 1,200 files, on the read-only system volume); on Linux,
- * where those folders hold thousands of packaged programs, the shells and the
- * tools the helper's install and password dialog start. On 2026-10-10 a block
- * by hash on /bin/sh stopped every shell on the Mac, the password dialog
- * Vigil needed to undo it included.
+ * The operating system's own programs that Vigil, its installer and its
+ * password dialogs run, which no block by hash may name: on macOS all of
+ * /bin and /sbin (the shells and core tools, about 90 files) and the tools
+ * in /usr/bin and /usr/sbin that the helper, install.sh and the dialogs
+ * start; on Linux the shells and the same kind of tools. Not all of /usr/bin:
+ * that is over a thousand programs to hash at every start, and the app's
+ * safety floor already keeps rules off every system folder by path
+ * (PLATFORM_PATH_GLOBS in @vigil/detection). On 2026-10-10 a block by hash
+ * on /bin/sh stopped every shell on the Mac, the password dialog Vigil
+ * needed to undo it included.
  */
+const MAC_TOOLS = [
+  ...['env', 'osascript', 'sudo', 'security', 'codesign', 'plutil', 'chflags', 'id'],
+  ...['install', 'mktemp', 'xattr', 'find', 'readlink', 'touch', 'sort', 'tail'],
+  ...['uname', 'dirname', 'shasum'],
+].map((t) => `/usr/bin/${t}`);
 export const PLATFORM_PROGRAM_ROOTS: Record<Platform, readonly string[]> = {
-  darwin: ['/bin', '/sbin', '/usr/bin', '/usr/sbin'],
+  darwin: ['/bin', '/sbin', ...MAC_TOOLS, '/usr/sbin/chown', '/usr/sbin/lsof'],
   linux: [
     ...['sh', 'bash', 'dash', 'zsh', 'ksh', 'mksh'].flatMap((s) => [`/bin/${s}`, `/usr/bin/${s}`]),
-    '/usr/bin/env',
-    '/usr/bin/sudo',
-    '/usr/bin/pkexec',
-    '/usr/bin/systemctl',
+    ...['env', 'sudo', 'pkexec', 'systemctl', 'install', 'mktemp', 'find', 'nft'].map(
+      (t) => `/usr/bin/${t}`,
+    ),
     '/bin/systemctl',
+    '/usr/sbin/nft',
   ],
 };
 
