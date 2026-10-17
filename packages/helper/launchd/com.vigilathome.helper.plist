@@ -10,7 +10,9 @@
   not through the vigil-helper launcher: that is a /bin/sh script, and on
   2026-10-10 a block on /bin/sh's hash would have kept the helper from
   starting again. install.sh stops the job before it switches `current`, so
-  launchd never starts it halfway through a switch. launchd starts a daemon
+  launchd never starts it halfway through a switch; should two installs
+  overlap, the helper exits when its Node and helper.mjs come from two
+  versions (versionMismatch in config.ts). launchd starts a daemon
   with an empty environment; PATH below is the one the launcher sets.
 -->
 <plist version="1.0">

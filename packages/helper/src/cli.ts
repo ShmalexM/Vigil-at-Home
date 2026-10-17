@@ -35,7 +35,7 @@ import { AppPinStore } from './pinStore.js';
 import { pinRemove } from './pinRemove.js';
 import { runFsChild } from './commands/fsChild.js';
 import { daemonAnswers } from './socketProbe.js';
-import { defaultPaths, installedSelf, SANTA_SYNC_PORT } from './config.js';
+import { defaultPaths, installedSelf, SANTA_SYNC_PORT, versionMismatch } from './config.js';
 import { runDaemon } from './daemon.js';
 import { ensureOsquery, removeOsquery } from './osquery.js';
 import { ensureLinuxOsquery, removeLinuxOsquery } from './linuxOsquery.js';
@@ -49,6 +49,13 @@ async function main(argv: string[]): Promise<number> {
       // One file operation as a user, started by the daemon (commands/fsChild.ts).
       return runFsChild();
     case 'daemon': {
+      // Node and helper.mjs from two versions (an install switched `current`
+      // between launchd's two reads of it): exit, and launchd starts both again.
+      const mismatch = versionMismatch(process.execPath, process.argv[1]);
+      if (mismatch) {
+        console.error(`Not starting: ${mismatch}; launchd starts the helper again.`);
+        return 75;
+      }
       const stop = await runDaemon();
       const shutdown = () => {
         stop().finally(() => process.exit(0));

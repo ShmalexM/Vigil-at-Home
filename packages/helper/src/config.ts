@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { installedRoots } from '@vigil/core/self';
 import { hostPlatform, type Platform } from './platform.js';
@@ -350,6 +351,30 @@ export const PLATFORM_PROGRAM_ROOTS: Record<Platform, readonly string[]> = {
     '/usr/sbin/nft',
   ],
 };
+
+/**
+ * Why this helper should not run: launchd starts it as
+ * `vigil-helper.d/current/node vigil-helper.d/current/helper.mjs`, reading
+ * `current` twice, and an install that switches it in between would pair one
+ * version's Node with another's helper.mjs. Node reports its own real path,
+ * so the real helper.mjs must sit beside it. Undefined when they match, or
+ * when this Node isn't an installed version (development, tests).
+ */
+export function versionMismatch(
+  execPath: string,
+  script: string | undefined,
+  realpath: (p: string) => string = realpathSync,
+): string | undefined {
+  if (!/\/vigil-helper\.d\/versions\/[^/]+\/node$/.test(execPath) || !script) return undefined;
+  let real: string;
+  try {
+    real = realpath(script);
+  } catch {
+    return `${script} is gone`;
+  }
+  const dir = execPath.slice(0, execPath.lastIndexOf('/'));
+  return real === `${dir}/helper.mjs` ? undefined : `${real} is not the helper beside ${execPath}`;
+}
 
 /**
  * Every folder of the operating system's own programs, hashed in the
