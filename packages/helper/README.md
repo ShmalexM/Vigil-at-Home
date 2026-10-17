@@ -185,7 +185,9 @@ an event while working fine; Santa logs every program launch.
 ## Checked on a real Mac
 
 `src/helper.mac.test.ts` runs every action against a real macOS 15 system as root
-(`VIGIL_MAC_INTEGRATION=1 pnpm --filter @vigil/helper test:mac`, on GitHub's hosted Macs):
+(`VIGIL_MAC_INTEGRATION=1 VIGIL_ALLOW_REAL_ENFORCEMENT=1 pnpm --filter @vigil/helper test:mac`,
+on GitHub's hosted Macs). Without `VIGIL_ALLOW_REAL_ENFORCEMENT=1`, the helper's code refuses
+to enforce from a test; see [docs/e2e-safety.md](../../docs/e2e-safety.md):
 
 - The stock `/etc/pf.conf` evaluates `com.apple/*`, so a block in `com.apple/vigil`
   really stops traffic to that address, unblocking brings it back, and blocks are

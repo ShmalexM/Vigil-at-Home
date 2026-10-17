@@ -231,7 +231,9 @@ const t0 = Date.now();
 const app = await electron.launch({
   executablePath: createRequire(join(appDir, 'package.json'))('electron'),
   args: [...(mac ? [] : ['--no-sandbox']), appDir],
-  env: { ...process.env, VIGIL_PERF: '1', VIGIL_USER_DATA: userData },
+  // VIGIL_E2E keeps the app off the installed helper (src/main/test-isolation.ts),
+  // as on a CI runner, which has none: the load's actions are only simulated.
+  env: { ...process.env, VIGIL_PERF: '1', VIGIL_USER_DATA: userData, VIGIL_E2E: '1' },
 });
 const pid = app.process().pid;
 

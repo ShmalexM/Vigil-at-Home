@@ -21,6 +21,8 @@ export interface JournalEntry {
   createdAt: number;
   undoneAt?: number;
   summary: string;
+  /** The test run that asked for it (testGuard.ts), so its teardown can undo it. */
+  testRun?: string;
 }
 
 interface JournalFile {
@@ -84,6 +86,19 @@ export class Journal {
     if (!e) return;
     e.state = 'undone';
     e.undoneAt = this.now();
+    this.save();
+  }
+
+  /**
+   * A request from someone else for what this entry already holds (the same
+   * address blocked again) makes it theirs: untagged when the user asked, so
+   * a test's teardown never undoes it.
+   */
+  claim(id: string, testRun: string | undefined): void {
+    const e = this.get(id);
+    if (!e || e.testRun === testRun) return;
+    if (testRun) e.testRun = testRun;
+    else delete e.testRun;
     this.save();
   }
 
