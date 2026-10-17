@@ -942,6 +942,55 @@ describe('blocking rules in the helper', () => {
     expect(await fast.check(exec(7103, BAD))).toEqual([]);
   });
 
+  it('takes an entry off the user block list at once, with the password', async () => {
+    const MINE = 'c'.repeat(64);
+    const KEEP = 'd'.repeat(64);
+    const { sync, lists } = appSet({ user_blocked_sha256: [MINE, KEEP] });
+    await syncWith(sync, lists);
+    // The app drops it: it retires, so it still blocks and says until when.
+    await sendLists(['user_blocked_sha256'], { user_blocked_sha256: [KEEP] });
+    expect(fast.userBlocks()).toEqual([
+      { list: 'user_blocked_sha256', entry: KEEP },
+      { list: 'user_blocked_sha256', entry: MINE, retiredAt: clock },
+    ]);
+    const status = await client.call<{ userBlocks: unknown[] }>({ kind: 'detection.status' });
+    expect(status.userBlocks).toHaveLength(2);
+
+    const unblock = { kind: 'detection.list.unblock', list: 'user_blocked_sha256', entry: MINE };
+    // A no leaves it blocking.
+    await expect(client.call(unblock as never)).rejects.toMatchObject({ code: 'refused' });
+    expect(prompts.at(-1)).toContain(MINE);
+    expect(fast.blocksWith('user_blocked_sha256', MINE)).toBe(true);
+
+    approve = true;
+    expect(await client.call(unblock as never)).toEqual({ unblocked: true });
+    expect(fast.userBlocks()).toEqual([{ list: 'user_blocked_sha256', entry: KEEP }]);
+    sys.processes.set(7201, { path: '/tmp/payload', started: 'T' });
+    expect(await fast.check(exec(7201, MINE))).toEqual([]);
+    sys.processes.set(7202, { path: '/tmp/payload', started: 'T' });
+    expect((await fast.check(exec(7202, KEEP))).length).toBeGreaterThan(0);
+    // It stays off after a restart, and the next sync doesn't retire it again.
+    const again = makeFastPath(executor);
+    again.load();
+    expect(again.blocksWith('user_blocked_sha256', MINE)).toBe(false);
+    await sendLists(['user_blocked_sha256'], { user_blocked_sha256: [KEEP] });
+    expect(fast.blocksWith('user_blocked_sha256', MINE)).toBe(false);
+    // Nothing left to take off: refused before any password is asked for.
+    prompts.length = 0;
+    await expect(client.call(unblock as never)).rejects.toMatchObject({ code: 'not_found' });
+    expect(prompts).toEqual([]);
+  });
+
+  it('takes nothing out of a list the user does not fill', async () => {
+    await expect(
+      client.call({
+        kind: 'detection.list.unblock',
+        list: 'known_bad_sha256',
+        entry: BAD,
+      } as never),
+    ).rejects.toMatchObject({ code: 'invalid' });
+  });
+
   it('refuses a list that would drop more than it may in a week', async () => {
     const many = Array.from({ length: RETIRED_TEST_MAX + 1 }, (_, i) =>
       i.toString(16).padStart(64, '0'),

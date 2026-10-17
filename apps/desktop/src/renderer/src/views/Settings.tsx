@@ -93,7 +93,7 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
         <Card>
           <SectionHead
             title="Advanced pages"
-            sub="Alerts, Rules, Agents, Pack, Activity and Usage. Also under Advanced in the sidebar."
+            sub="Alerts, Rules, Agents, Pack, Activity, Usage and In force. Also under Advanced in the sidebar."
           />
           <div className="row" style={{ flexWrap: 'wrap' }}>
             {ADVANCED_NAV.map((n) => (

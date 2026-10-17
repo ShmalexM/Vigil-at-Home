@@ -44,6 +44,7 @@ import {
   NotesFilter,
   MemoryInput,
 } from './pack.js';
+import type { InForceReleaseResult, InForceView } from './in-force.js';
 import type { AppearanceSettings } from './themes.js';
 
 const DogRef = z.string().regex(/^[a-z0-9-]{1,64}$/);
@@ -203,6 +204,10 @@ export const calls = {
   /** Every Noticed alert raised up to this time (when the user opened the confirm). */
   clearNoticedUpTo: z.tuple([z.number().int().nonnegative()]),
   undoAction: z.tuple([Id]),
+  /** Everything Vigil enforces now, and what the startup check makes of it. */
+  getInForce: z.tuple([]),
+  /** Release one of those, with the admin password. Takes InForceItem.key. */
+  releaseInForce: z.tuple([z.string().min(3).max(400)]),
   approveProposal: z.tuple([Id]),
   rejectProposal: z.tuple([Id]),
   listRules: z.tuple([]),
@@ -661,6 +666,8 @@ export interface CallResults {
   clearStale: number;
   clearNoticedUpTo: number;
   undoAction: ActionRecord;
+  getInForce: InForceView;
+  releaseInForce: InForceReleaseResult;
   approveProposal: ActionRecord;
   rejectProposal: void;
   listRules: RuleView[];

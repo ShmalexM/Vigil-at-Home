@@ -45,6 +45,8 @@ export function HomeView({ go }: { go: (r: string) => void }) {
   useClock();
   const [status] = useLive(() => vigil.getStatus());
   const [alerts] = useLive(() => vigil.listAlerts('open'));
+  // The startup check: blocks that are dangerous or forgotten (main/in-force.ts).
+  const [inForce] = useLive(() => vigil.getInForce());
   const allNeeds = needsRows((alerts ?? []).filter(needsDecision));
   // The biggest pile gets Scout's card instead of a row.
   const bigPile = allNeeds.reduce<(typeof allNeeds)[number] | undefined>(
@@ -140,6 +142,15 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               <span className="t-small grow">{status.aiOff}.</span>
               <button type="button" className="btn sm ghost" onClick={() => go('settings/ai')}>
                 Open AI settings
+              </button>
+            </div>
+          )}
+          {inForce?.check && (
+            <div className="attn poor" role="status">
+              <TriangleAlert size={17} />
+              <span className="grow">{inForce.check.message}</span>
+              <button type="button" className="btn sm" onClick={() => go('in-force')}>
+                Review and release
               </button>
             </div>
           )}

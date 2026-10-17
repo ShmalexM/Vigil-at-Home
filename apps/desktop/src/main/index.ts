@@ -21,6 +21,7 @@ import {
   unlessDemo,
 } from './helper-install.js';
 import { HelperLink } from './helper.js';
+import { InForce, systemHashes } from './in-force.js';
 import { HelperSyncer } from './helper-sync.js';
 import { registerIpc } from './ipc.js';
 import { systemProbe } from './onboarding/checks.js';
@@ -516,11 +517,34 @@ function start(): void {
   selfGrantPending = () => helperSync.selfGrantPending();
   const syncHelperRules = helperSync.sync;
   if (core.detector) core.detector.syncHelper = syncHelperRules;
+  // What Vigil enforces, for the In force page; on the first connection the
+  // startup check looks for blocks that are dangerous or forgotten, and Home
+  // shows what it finds.
+  // On Linux /bin is usually /usr/bin, too many programs to hash at startup.
+  core.inForce = new InForce(
+    core,
+    helper,
+    process.platform === 'darwin' ? systemHashes() : undefined,
+  );
+  let inForceChecked = false;
+  const checkInForce = async () => {
+    if (inForceChecked) return;
+    inForceChecked = true;
+    try {
+      const { check } = await core.inForce!.view();
+      if (!check) return;
+      console.warn(`[in-force] ${check.message}`);
+      windows.broadcast('changed');
+    } catch (err) {
+      console.warn('[in-force] startup check failed:', err);
+    }
+  };
   helper.on('state', (state) => {
     void checkHealth();
     if (state === 'connected') {
       void saveSantaProfile();
       helperSync.connected();
+      void checkInForce();
     }
   });
   if (HELPER_PLATFORMS.has(process.platform)) {

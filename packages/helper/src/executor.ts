@@ -15,7 +15,13 @@ import {
   type RuleType,
   type SantaRule,
 } from '@vigil/sensors';
-import type { DetectionSync, HelperAction, HelperCommand, SelfGrant } from './protocol.js';
+import type {
+  DetectionListUnblock,
+  DetectionSync,
+  HelperAction,
+  HelperCommand,
+  SelfGrant,
+} from './protocol.js';
 import { needsApproval } from './protocol.js';
 import { Journal, type JournalEntry } from './journal.js';
 import type { System } from './system.js';
@@ -328,6 +334,14 @@ export class Executor {
       }
       if (approval === this.grantWaiting) this.grantWaiting = undefined;
       if (grants.length) bound = this.takePin(approval);
+    } else if (cmd.kind === 'detection.list.unblock') {
+      // Nothing to approve for an entry that isn't blocking.
+      if (!this.d.fastPath?.blocksWith(cmd.list, cmd.entry))
+        throw new ActionError('not_found', `${cmd.entry} is not on your block list`);
+      if (!approval || !this.d.approvals.consume(approval, cmd)) {
+        const nonce = this.d.approvals.request(cmd);
+        return { kind: 'needs_approval', nonce, prompt: unblockPrompt(cmd) };
+      }
     } else if (needsApproval(cmd)) {
       // Check the release can actually happen before bothering the user.
       this.findContainment(cmd as HelperAction);
@@ -594,7 +608,12 @@ export class Executor {
           ...this.d.statusExtra?.(),
         };
       case 'helper.journal':
-        return journal.recent(cmd.limit ?? 100);
+        return cmd.active
+          ? journal
+              .active()
+              .slice(-(cmd.limit ?? 1000))
+              .reverse()
+          : journal.recent(cmd.limit ?? 100);
       case 'detection.sync': {
         if (!this.d.fastPath) throw new ActionError('failed', 'helper rules are not set up');
         // From here to the save nothing waits, so a detection.status read
@@ -612,9 +631,14 @@ export class Executor {
         this.startPreexec(cmd.rules);
         return { ...synced, preexec: 'pending' };
       }
+      case 'detection.list.unblock': {
+        if (!this.d.fastPath) throw new ActionError('failed', 'helper rules are not set up');
+        return { unblocked: this.d.fastPath.unblock(cmd.list, cmd.entry) };
+      }
       case 'detection.status':
         return {
           ...(this.d.fastPath?.status() ?? {}),
+          userBlocks: this.d.fastPath?.userBlocks() ?? [],
           syncId: this.d.fastPath?.syncId() ?? null,
           preexec: this.preexecState,
         };
@@ -758,6 +782,10 @@ export function selfPrompt(grants: string[]): string {
   const shown = grants.slice(0, 3).join('; ');
   const more = grants.length > 3 ? ` and ${grants.length - 3} more` : '';
   return `Vigil wants to keep its blocking rules off its own programs: ${shown}${more}.`;
+}
+
+function unblockPrompt(cmd: DetectionListUnblock): string {
+  return `Vigil wants to stop blocking ${cmd.entry}, which you put on your block list.`;
 }
 
 /** The Santa commands Linux can carry out: blocking or unblocking a program by hash. */

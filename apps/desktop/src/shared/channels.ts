@@ -12,6 +12,8 @@ export const CALL_NAMES = [
   'clearStale',
   'clearNoticedUpTo',
   'undoAction',
+  'getInForce',
+  'releaseInForce',
   'approveProposal',
   'rejectProposal',
   'listRules',

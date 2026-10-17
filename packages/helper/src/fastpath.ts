@@ -60,6 +60,7 @@ import {
   type DetectionListSet,
   type DetectionSync,
   type SelfGrant,
+  USER_LIST_PREFIX,
 } from './protocol.js';
 
 /** An action the helper ran for a rule, sent to the app with the event. */
@@ -590,6 +591,51 @@ export class FastPath {
       if (!this.opts.fileId || this.opts.fileId(i.path) !== i.id)
         throw new PolicyRefused(`${i.path} is not the AppImage Vigil runs from`);
     }
+  }
+
+  /**
+   * The user's own block lists entry by entry, retired entries with when
+   * they were dropped (they block until RETIRE_MS after that). Feed lists are
+   * left out: they run to thousands of entries nobody blocked by hand.
+   */
+  userBlocks(): { list: string; entry: string; retiredAt?: number }[] {
+    const out: { list: string; entry: string; retiredAt?: number }[] = [];
+    const names = new Set([...Object.keys(this.state.lists), ...Object.keys(this.state.retired)]);
+    for (const list of names) {
+      if (!list.startsWith(USER_LIST_PREFIX)) continue;
+      for (const entry of this.state.lists[list] ?? []) out.push({ list, entry });
+      for (const [entry, at] of Object.entries(this.state.retired[list] ?? {}))
+        if (this.now() - at < RETIRE_MS) out.push({ list, entry, retiredAt: at });
+    }
+    return out;
+  }
+
+  /** Whether `entry` blocks through `list`, in the list or retired from it. */
+  blocksWith(list: string, entry: string): boolean {
+    return this.userBlocks().some((b) => b.list === list && b.entry === entry);
+  }
+
+  /**
+   * Take one entry out of a user's block list and its retired entries, so it
+   * stops blocking now rather than a week after the app drops it. The
+   * executor asks for the password first. False when it wasn't blocking.
+   */
+  unblock(list: string, entry: string): boolean {
+    if (!list.startsWith(USER_LIST_PREFIX) || !this.blocksWith(list, entry)) return false;
+    const lists = { ...this.state.lists };
+    if (lists[list]) lists[list] = lists[list].filter((e) => e !== entry);
+    const retired = { ...this.state.retired };
+    if (retired[list]) {
+      const r: Record<string, number> = Object.create(null) as Record<string, number>;
+      for (const [e, at] of Object.entries(retired[list])) if (e !== entry) r[e] = at;
+      if (Object.keys(r).length) retired[list] = r;
+      else delete retired[list];
+    }
+    this.apply({ ...this.state, rev: this.state.rev + 1, lists, retired }, [
+      ...this.running.values(),
+    ]);
+    this.save();
+    return true;
   }
 
   status(): { rev: number; rules: number; lists: Record<string, number>; retired: number } {

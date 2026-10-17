@@ -12,7 +12,8 @@
 // otherwise drive the app and release its own block. So does a detection.sync
 // that weakens the helper's own rules, a self.grant that names anything
 // new as Vigil's own (FastPath.loosening, FastPath.selfLoosening), and a
-// santa.client.reissue while the sync port requires Santa's certificate.
+// santa.client.reissue while the sync port requires Santa's certificate,
+// and a detection.list.unblock, which always does.
 
 import { z } from 'zod';
 import {
@@ -53,6 +54,8 @@ export const HelperQuery = z.discriminatedUnion('kind', [
   z.strictObject({
     kind: z.literal('helper.journal'),
     limit: z.number().int().min(1).max(1000).optional(),
+    /** Only what is still in force, however long ago it began. */
+    active: z.literal(true).optional(),
   }),
   z.strictObject({ kind: z.literal('santa.profile') }),
   /** Which rules are in force (the app's id for the sync) and how Santa's pre-launch rules went. */
@@ -202,8 +205,32 @@ export type DetectionListSet = z.infer<typeof DetectionListSet>;
 export const SantaClientReissue = z.strictObject({ kind: z.literal('santa.client.reissue') });
 export type SantaClientReissue = z.infer<typeof SantaClientReissue>;
 
+/** The lists the user fills by hand ("Block it"): the only ones an entry can be taken out of. */
+export const USER_LIST_PREFIX = 'user_blocked_';
+
+/**
+ * The user stops blocking one entry of their own block list. An entry a list
+ * drops keeps blocking for a week (DetectionSync), so taking it out on
+ * purpose goes through the helper: it leaves the list and its retired
+ * entries at once. A Santa rule on the same program is released on its own
+ * (santa.rule.remove). This loosens protection, so it always needs the
+ * admin password.
+ */
+export const DetectionListUnblock = z.strictObject({
+  kind: z.literal('detection.list.unblock'),
+  list: ListName.refine((n) => n.startsWith(USER_LIST_PREFIX), 'is not a list the user fills'),
+  entry: z.string().min(1).max(255),
+});
+export type DetectionListUnblock = z.infer<typeof DetectionListUnblock>;
+
 export type HelperCommand =
-  HelperAction | HelperQuery | DetectionSync | DetectionListSet | SelfGrant | SantaClientReissue;
+  | HelperAction
+  | HelperQuery
+  | DetectionSync
+  | DetectionListSet
+  | DetectionListUnblock
+  | SelfGrant
+  | SantaClientReissue;
 
 export interface HelperRequest {
   id: string;
@@ -256,6 +283,7 @@ export function isAction(cmd: HelperCommand): cmd is HelperAction {
     'events.subscribe',
     'detection.sync',
     'detection.list.set',
+    'detection.list.unblock',
     'detection.status',
     'self.grant',
     'santa.client.reissue',
@@ -311,11 +339,13 @@ export function parseRequest(line: string): HelperRequest | { error: string; id?
       ? DetectionSync.safeParse(env.data.command)
       : kind === 'detection.list.set'
         ? DetectionListSet.safeParse(env.data.command)
-        : kind === 'self.grant'
-          ? SelfGrant.safeParse(env.data.command)
-          : kind === 'santa.client.reissue'
-            ? SantaClientReissue.safeParse(env.data.command)
-            : HelperAction.safeParse(env.data.command);
+        : kind === 'detection.list.unblock'
+          ? DetectionListUnblock.safeParse(env.data.command)
+          : kind === 'self.grant'
+            ? SelfGrant.safeParse(env.data.command)
+            : kind === 'santa.client.reissue'
+              ? SantaClientReissue.safeParse(env.data.command)
+              : HelperAction.safeParse(env.data.command);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     return withId(

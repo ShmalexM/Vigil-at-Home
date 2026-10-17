@@ -85,6 +85,25 @@ describe('request validation', () => {
     }
   });
 
+  it('takes an entry off a block list the user fills, and asks only for what is in force', () => {
+    const sha = 'a'.repeat(64);
+    const unblock = req({
+      kind: 'detection.list.unblock',
+      list: 'user_blocked_sha256',
+      entry: sha,
+    });
+    expect(unblock).toMatchObject({ command: { kind: 'detection.list.unblock', entry: sha } });
+    // The executor asks for the password itself; it is not a core release.
+    expect(needsApproval((unblock as { command: HelperCommand }).command)).toBe(false);
+    expect(
+      req({ kind: 'detection.list.unblock', list: 'known_bad_sha256', entry: sha }),
+    ).toHaveProperty('error');
+    expect(req({ kind: 'helper.journal', active: true })).toMatchObject({
+      command: { kind: 'helper.journal', active: true },
+    });
+    expect(req({ kind: 'helper.journal', active: false })).toHaveProperty('error');
+  });
+
   it('rejects anything else', () => {
     expect(req({ kind: 'exec', cmd: 'rm -rf /' })).toHaveProperty('error');
     expect(req({ kind: 'toString' })).toHaveProperty('error');
