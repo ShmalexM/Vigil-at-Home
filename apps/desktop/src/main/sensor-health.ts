@@ -4,6 +4,7 @@ import type { EventSource } from '@vigil/core';
 import type { HelperState } from './helper.js';
 import type { SensorRegistry } from './sensors.js';
 import type { SensorHealth } from './status.js';
+import { outdatedNote, type HelperBuild, type HelperVersionInfo } from './helper-version.js';
 
 /** How often the Protection card is re-checked. */
 export const HEALTH_CHECK_MS = 60_000;
@@ -67,10 +68,61 @@ export interface HelperSantaSync {
   syncIntervalSeconds?: number;
 }
 
+/** How often osquery restarted, from helper.status (macOS helpers from 0.1.0-alpha.7). */
+export interface HelperOsqueryRestarts {
+  lastHour: number;
+  lastDay: number;
+  lastAt: number | null;
+  /** Of those, osquery exiting by itself rather than the helper restarting it. */
+  exitsLastDay: number;
+  lastExit: string | null;
+  restartDeferredUntil: number | null;
+}
+
+/** A problem the helper logged more than once in the last day. */
+export interface HelperRepeatedError {
+  message: string;
+  lastHour: number;
+  lastDay: number;
+  lastAt: number;
+}
+
 /** What helper.status reports about the sensors, when the helper has that (PR #14). */
 export interface HelperSensors {
   santa?: { installed: boolean; lastEventAt: number | null } & HelperSantaSync;
-  osquery?: { installed: boolean; lastEventAt: number | null };
+  osquery?: {
+    installed: boolean;
+    lastEventAt: number | null;
+    restarts?: HelperOsqueryRestarts;
+  };
+  /** The helper itself; older helpers don't report it. */
+  helper?: { build?: HelperBuild | null; repeatedErrors?: HelperRepeatedError[] };
+}
+
+/** osquery restarting this often means something keeps knocking it over. */
+export const OSQUERY_RESTARTS_WARN = { lastHour: 3, lastDay: 6 } as const;
+/** The same helper error this many times in a day is a fault, not a blip. */
+export const REPEATED_ERROR_WARN = 10;
+
+/** Why osquery's restarts need a look, or undefined when they don't. */
+export function osqueryRestartProblem(r: HelperOsqueryRestarts | undefined): string | undefined {
+  if (!r) return undefined;
+  if (r.lastHour < OSQUERY_RESTARTS_WARN.lastHour && r.lastDay < OSQUERY_RESTARTS_WARN.lastDay)
+    return undefined;
+  const times = (n: number) => (n === 1 ? 'once' : `${n} times`);
+  const exits =
+    r.exitsLastDay > 0
+      ? `; it stopped by itself ${times(r.exitsLastDay)}${r.lastExit ? ` (last: ${r.lastExit})` : ''}`
+      : '';
+  const waiting = r.restartDeferredUntil !== null ? '; Vigil is waiting before the next one' : '';
+  return `Restarted ${times(r.lastDay)} in the last day${exits}${waiting}`;
+}
+
+/** The helper's most repeated error, when one keeps coming back. */
+export function repeatedErrorNote(errors: HelperRepeatedError[] | undefined): string | undefined {
+  const top = errors?.find((e) => e.lastDay >= REPEATED_ERROR_WARN);
+  if (!top) return undefined;
+  return `The same error ${top.lastDay} times in the last day (${top.lastHour} in the last hour): ${top.message}`;
 }
 
 /** Santa missing this many syncs in a row means its syncs are failing. */
@@ -152,6 +204,11 @@ export interface HealthProbe {
   awakeMs?(since: number): number;
   /** Which OS's layers to check; defaults to macOS. */
   platform?: NodeJS.Platform;
+  /**
+   * The helper this app ships and whether the installed one matches, given
+   * the build the running helper reports. Absent where the app carries no helper.
+   */
+  helperVersion?(running: HelperBuild | null | undefined): HelperVersionInfo | null;
 }
 
 const PGREP_TIMEOUT_MS = 10_000;
@@ -211,15 +268,26 @@ export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
   const helperState: HelperState =
     fromHelper === 'failed' && now === 'connected' ? 'not_running' : now;
   const reportedSensors = fromHelper === 'failed' ? null : fromHelper;
+  const helperVersion =
+    helperState === 'not_installed'
+      ? null
+      : (p.helperVersion?.(reportedSensors?.helper?.build) ?? null);
+  // Out of date first: an old helper is missing fixes, whatever else it logs.
+  const helperProblem =
+    (helperVersion && outdatedNote(helperVersion)) ??
+    repeatedErrorNote(reportedSensors?.helper?.repeatedErrors);
   const helper: SensorHealth = {
     id: 'helper',
     name: 'Vigil helper',
     detail: 'Suspends, firewalls and quarantines',
     ...(helperState === 'connected'
-      ? { state: 'ok' }
+      ? helperProblem
+        ? { state: 'degraded', note: helperProblem }
+        : { state: 'ok' }
       : helperState === 'not_running'
         ? { state: 'down', note: 'Installed but not answering' }
         : { state: 'not_installed', note: 'Blocks are simulated until it is installed' }),
+    ...(helperVersion ? { helperVersion } : {}),
   };
 
   const sensor = async (
@@ -254,6 +322,9 @@ export async function checkHealth(p: HealthProbe): Promise<SensorHealth[]> {
     if (syncProblem) {
       return { ...base, state: 'degraded', note: syncProblem, repair: 'santa-sync' };
     }
+    const restartProblem =
+      id === 'osquery' ? osqueryRestartProblem(reportedSensors?.osquery?.restarts) : undefined;
+    if (restartProblem) return { ...base, state: 'degraded', note: restartProblem };
     // Shown on the row for reference only: a port probe can cause one too.
     const refusal = id === 'santa' ? reportedSensors?.santa?.lastRefusal : undefined;
     // Compatibility mode is a detail too: Santa keeps syncing meanwhile.
@@ -367,7 +438,8 @@ export async function reportHealth(registry: SensorRegistry, probe: HealthProbe)
       prev?.state !== h.state ||
       prev?.note !== h.note ||
       prev?.lastRefusal?.at !== h.lastRefusal?.at ||
-      prev?.compatUntil !== h.compatUntil
+      prev?.compatUntil !== h.compatUntil ||
+      JSON.stringify(prev?.helperVersion) !== JSON.stringify(h.helperVersion)
     )
       registry.report(h);
   }

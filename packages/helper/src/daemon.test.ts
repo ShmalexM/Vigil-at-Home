@@ -258,7 +258,19 @@ describe('helper daemon', () => {
         lastRefusal: { at: expect.any(Number), reason: 'wrong_certificate' },
         syncIntervalSeconds: 600,
       },
-      osquery: { installed: false, lastEventAt: null },
+      osquery: {
+        installed: false,
+        lastEventAt: null,
+        restarts: {
+          lastHour: 0,
+          lastDay: 0,
+          lastAt: null,
+          exitsLastDay: 0,
+          lastExit: null,
+          restartDeferredUntil: null,
+        },
+      },
+      helper: { build: null, repeatedErrors: [] },
     });
     // 397 days, renewed 30 days before.
     expect(status.sensors.santa.clientCertExpiresAt! - Date.now()).toBeGreaterThan(

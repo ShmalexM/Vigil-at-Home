@@ -133,6 +133,9 @@ jobs:
           sleep 20
       - name: Run the flow
         working-directory: apps/desktop
+        # A throwaway runner: the flow may enforce for real (docs/e2e-safety.md).
+        env:
+          VIGIL_ALLOW_REAL_ENFORCEMENT: '1'
         run: node e2e/flow.e2e.mjs "$GITHUB_WORKSPACE/bench-results"
       - if: always()
         run: node packages/bench/scripts/summary.mjs bench-results >> "$GITHUB_STEP_SUMMARY"

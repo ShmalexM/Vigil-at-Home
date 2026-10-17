@@ -21,9 +21,16 @@ import {
   unlessDemo,
 } from './helper-install.js';
 import { HelperLink } from './helper.js';
+import {
+  HelperScriptOutcome,
+  helperVersionInfo,
+  installedHelperAt,
+  LAST_HELPER_SCRIPT,
+} from './helper-version.js';
 import { HelperSyncer } from './helper-sync.js';
 import { registerIpc } from './ipc.js';
 import { systemProbe } from './onboarding/checks.js';
+import { helperConnectFor, helperSocketFor, userDataFor } from './test-isolation.js';
 import { demoProbe } from './onboarding/demo.js';
 import { FeedKeyStore, KeyStore, type Cipher } from './onboarding/keys.js';
 import { linuxDistro, type LinuxDistro } from './onboarding/plan.js';
@@ -73,7 +80,9 @@ const distro = thisDistro();
 // The resource check (perf/measure.mjs) runs the app against a throwaway
 // profile and drives it from the main process.
 const perf = !app.isPackaged && !!process.env['VIGIL_PERF'];
-if (perf && process.env['VIGIL_USER_DATA']) app.setPath('userData', process.env['VIGIL_USER_DATA']);
+// A throwaway profile for tests (test-isolation.ts); development builds only.
+const testUserData = userDataFor(app.isPackaged, process.env);
+if (testUserData) app.setPath('userData', testUserData);
 
 if (wantsX11(process.platform, process.argv, process.env))
   app.commandLine.appendSwitch('ozone-platform', 'x11');
@@ -106,7 +115,10 @@ function start(): void {
 
   // Actions go to the privileged helper. Until it is installed and answering,
   // they are simulated and the UI says so.
-  const helper = new HelperLink();
+  const helper = new HelperLink(
+    helperSocketFor(app.isPackaged, process.env),
+    helperConnectFor(app.isPackaged, process.env),
+  );
   const core = new VigilCore(store, helper, true);
   const demo = !app.isPackaged && !!process.env['VIGIL_DEMO'];
   // The .app bundle or install folder when packaged; the Electron binary in development.
@@ -180,6 +192,20 @@ function start(): void {
       () => awakeSince,
     ),
     awakeMs: (since: number) => awake.awakeMs(since),
+    // Only where this app carries a helper it could update to.
+    helperVersion: (running: Parameters<typeof helperVersionInfo>[0]['running']) =>
+      core.helperInstallable
+        ? helperVersionInfo({
+            running,
+            bundled: {
+              version: app.getVersion(),
+              commit: typeof __VIGIL_COMMIT__ === 'string' ? __VIGIL_COMMIT__ : '',
+            },
+            installedAt: installedHelperAt(),
+            updatePending: core.helperOutdated,
+            last: store.getSetting(LAST_HELPER_SCRIPT, HelperScriptOutcome.nullable(), null),
+          })
+        : null,
   };
 
   // A development build installs the helper that `pnpm build:helper` made.
@@ -216,18 +242,26 @@ function start(): void {
   };
   const helperAtStart = checkHelperMatch();
   // Installing or removing the helper shows the system's own password dialog.
-  const afterHelperScript = async (r: HelperInstallResult) => {
+  const afterHelperScript = async (r: HelperInstallResult, kind?: 'install' | 'update') => {
+    // Kept so the helper's row can say why an update didn't go through.
+    if (kind) {
+      store.setSetting(LAST_HELPER_SCRIPT, {
+        kind,
+        at: Date.now(),
+        ok: r.ok,
+        ...(r.error ? { error: r.error } : {}),
+      } satisfies HelperScriptOutcome);
+    }
     checkHelperMatch();
     await helper.reconnect();
     await reportHealth(core.sensors, probe);
     return r;
   };
 
-  const installHelper = unlessDemo(demo, async () =>
-    afterHelperScript(
-      await runHelperScript(core.helperOutdated ? 'update' : 'install', helperDir()),
-    ),
-  );
+  const installHelper = unlessDemo(demo, async () => {
+    const kind = core.helperOutdated ? 'update' : 'install';
+    return afterHelperScript(await runHelperScript(kind, helperDir()), kind);
+  });
 
   const keys = new KeyStore(join(dataDir, 'api-keys.json'), cipher);
   const setup: OnboardingService = new OnboardingService({
@@ -473,7 +507,7 @@ function start(): void {
         // The self grant's password may have re-pinned this app meanwhile.
         if (checkHelperMatch()?.installed !== 'outdated') return;
         void runHelperScript('update', helperDir())
-          .then(afterHelperScript)
+          .then((r) => afterHelperScript(r, 'update'))
           .then((r) => {
             store.setSetting('helper.updateAsked', bundle);
             if (!r.ok && r.error !== 'cancelled') console.error('[helper] update failed:', r.error);

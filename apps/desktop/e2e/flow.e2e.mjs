@@ -8,6 +8,9 @@
 // osquery installed before the helper so the helper runs it, and sudo without
 // a password (GitHub's Mac runners). Never run it on a Mac you care about: it
 // installs a pf block on 1.1.1.1 for a few seconds and writes a launch agent.
+// So it refuses to start unless VIGIL_ALLOW_REAL_ENFORCEMENT=1, tags what it
+// asks the helper to do with a test-run id, and at the end undoes whatever
+// that id still has in force; anything left fails the run (docs/e2e-safety.md).
 //
 // Scenarios:
 //   1. Infostealer reads Chrome passwords: the event is simulated (Santa can't
@@ -36,12 +39,14 @@ import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright-core';
+import { realRun, sudoApprover, teardownRealRun } from './harness.mjs';
 
 const appDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const out = resolve(process.argv[2] ?? join(appDir, 'e2e-results'));
 mkdirSync(out, { recursive: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const HELPER = '/Library/PrivilegedHelperTools/vigil-helper';
+const HELPER_SOCKET = '/var/run/vigil-helper.sock';
 const HOME = homedir();
 const STAND_IN_DIR = '/private/tmp/vigil-e2e';
 const C2 = '1.1.1.1';
@@ -52,6 +57,8 @@ if (process.platform !== 'darwin') {
   console.log('The flow check needs macOS.');
   process.exit(1);
 }
+// Exits here unless the run opted in to enforcing on this Mac.
+const run = realRun('flow.e2e.mjs');
 
 const results = { checks: [], scenarios: {}, timings: [], images: [] };
 function check(name, ok, detail) {
@@ -215,7 +222,8 @@ const app = await electron.launch({
   args: [appDir],
   // VIGIL_PERF: a development build exposes its main-process objects to the
   // test and skips first-run setup; VIGIL_USER_DATA keeps a throwaway profile.
-  env: { ...process.env, VIGIL_PERF: '1', VIGIL_USER_DATA: userData, ELECTRON_ENABLE_LOGGING: '1' },
+  // VIGIL_TEST_RUN_ID (in run.env) tags every helper request with this run.
+  env: { ...run.env, VIGIL_PERF: '1', VIGIL_USER_DATA: userData, ELECTRON_ENABLE_LOGGING: '1' },
 });
 
 const main = (fn, arg) => app.evaluate(fn, arg);
@@ -789,13 +797,7 @@ try {
     check('app closed: helper blocked the address with the app closed', blocked);
     check('app closed: address is really unreachable', blocked && !reachable(C2));
     beacon.kill('SIGKILL');
-    execFileSync(
-      'sudo',
-      ['-n', 'pfctl', '-a', 'com.apple/vigil', '-t', 'vigil_blocked', '-T', 'flush'],
-      {
-        stdio: 'ignore',
-      },
-    );
+    // The teardown below undoes this block, with the rest of the run's.
   }
 } catch (err) {
   check('run completed', false, { error: String(err?.stack ?? err) });
@@ -804,6 +806,23 @@ try {
   rmSync(AGENT_PLIST, { force: true });
   rmSync(STAND_IN_DIR, { recursive: true, force: true });
   await app.close().catch(() => {});
+  rmSync(userData, { recursive: true, force: true });
+}
+
+// Undo everything this run still has in force on the helper: blocks, paused
+// processes, turned-off startup items, and the rules it handed the helper.
+try {
+  const report = await teardownRealRun({
+    testRun: run.testRun,
+    socket: HELPER_SOCKET,
+    approver: sudoApprover(HELPER),
+  });
+  check('teardown: the run left nothing in force', true, report);
+} catch (err) {
+  console.error(`\n!!! TEARDOWN FAILED: ${err?.message ?? err}\n`);
+  check('teardown: the run left nothing in force', false, {
+    error: String(err?.message ?? err),
+  });
 }
 
 results.passed = results.checks.filter((c) => c.ok).length;

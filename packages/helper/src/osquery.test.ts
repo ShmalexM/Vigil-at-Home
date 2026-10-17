@@ -72,6 +72,21 @@ describe('osquery setup', () => {
     expect(launchctl()).toEqual(['kickstart']);
   });
 
+  it('holds back a restart when told to, and makes it at a later check', async () => {
+    writeFileSync(p.osqueryd, '');
+    await ensureOsquery(sys, p);
+    sys.runs.length = 0;
+    const changed = { santaReportsLaunchItems: true };
+    expect(await ensureOsquery(sys, p, changed, { mayRestart: false })).toBe('deferred');
+    // The config is written now, and osquery left running on the old one.
+    expect(readFileSync(p.config, 'utf8')).toBe(osqueryConfig(changed));
+    expect(launchctl()).toEqual([]);
+    // Nothing differs on disk any more, so only the pending flag restarts it.
+    expect(await ensureOsquery(sys, p, changed)).toBe('unchanged');
+    expect(await ensureOsquery(sys, p, changed, { restartPending: true })).toBe('restarted');
+    expect(launchctl()).toEqual(['kickstart']);
+  });
+
   it("keeps osquery's own config and job and puts them back on removal", async () => {
     writeFileSync(p.osqueryd, '');
     await ensureOsquery(sys, p); // creates the folders

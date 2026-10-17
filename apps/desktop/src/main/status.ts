@@ -1,4 +1,5 @@
 import type { Alert } from '@vigil/core';
+import type { HelperVersionInfo } from './helper-version.js';
 import { isNoticed, needsDecision } from '../shared/attention.js';
 import { pileUp, untouched } from '../shared/piles.js';
 
@@ -28,6 +29,8 @@ export interface SensorHealth {
    * before it), until when at the latest. A detail only.
    */
   compatUntil?: number;
+  /** The helper: which build runs, which this app ships, and how the last update went. */
+  helperVersion?: HelperVersionInfo;
 }
 
 export interface Status {

@@ -128,12 +128,21 @@ export function osqueryShellRunner(
   };
 }
 
-export type OsqueryState = 'not-installed' | 'unchanged' | 'started' | 'restarted';
+/** deferred: the config changed (or still waits), but restarting now is held back. */
+export type OsqueryState = 'not-installed' | 'unchanged' | 'started' | 'restarted' | 'deferred';
+
+export interface OsqueryRestartOptions {
+  /** False holds back a restart the config needs; the state is then 'deferred'. */
+  mayRestart?: boolean;
+  /** A config written earlier whose restart was held back: restart even if nothing changed now. */
+  restartPending?: boolean;
+}
 
 export async function ensureOsquery(
   sys: System,
   p: OsqueryPaths = defaultOsqueryPaths(),
   config: OsqueryConfigOptions = {},
+  restart: OsqueryRestartOptions = {},
 ): Promise<OsqueryState> {
   if (!existsSync(p.osqueryd)) return 'not-installed';
   mkdirSync(dirname(p.config), { recursive: true, mode: 0o755 });
@@ -163,7 +172,9 @@ export async function ensureOsquery(
     if (r.code !== 0) throw new Error(`launchctl bootstrap osquery failed: ${r.stderr.trim()}`);
     return 'started';
   }
-  if (changed) {
+  if (changed || restart.restartPending) {
+    // osquery reads its config only at start; the new one waits on disk.
+    if (restart.mayRestart === false) return 'deferred';
     await sys.run('launchctl', ['kickstart', '-k', target]);
     return 'restarted';
   }

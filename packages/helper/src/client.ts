@@ -9,11 +9,18 @@ import { connect, type Socket } from 'node:net';
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import type { SensorEvent } from '@vigil/sensors';
-import type { HelperCommand, HelperResponse } from './protocol.js';
+import { TestRunId, type HelperCommand, type HelperResponse } from './protocol.js';
 import type { HelperRan } from './fastpath.js';
 import { APPROVAL_TTL_MS, approvalAppleScript, pkexecArgs } from './approval.js';
-import { ADMIN_ENV, defaultPaths } from './config.js';
+import { ADMIN_ENV, defaultPaths, linuxPaths, macPaths } from './config.js';
 import { hostPlatform, type Platform } from './platform.js';
+import {
+  ALLOW_REAL_ENFORCEMENT_ENV,
+  E2E_ENV,
+  inTestContext,
+  realEnforcementAllowed,
+  TEST_RUN_ENV,
+} from './testGuard.js';
 
 export class HelperCallError extends Error {
   constructor(
@@ -133,6 +140,33 @@ function result<T>(resp: HelperResponse): T {
   throw new HelperCallError(resp.error, resp.code);
 }
 
+/**
+ * VIGIL_TEST_RUN_ID when the e2e harness started this process (VIGIL_E2E)
+ * and it is a valid run id; otherwise nothing is tagged.
+ */
+export function testRunFromEnv(env: Record<string, string | undefined> = process.env) {
+  const id = env[TEST_RUN_ENV];
+  return env[E2E_ENV] && id && TestRunId.safeParse(id).success ? id : undefined;
+}
+
+/**
+ * Throws when a test would talk to the installed helper without opting in
+ * (testGuard.ts). The helper can't tell a test's request from the app's, so
+ * the test refuses on its own side.
+ */
+export function refuseInstalledHelperInTests(
+  socketPath: string,
+  env: Record<string, string | undefined> = process.env,
+): void {
+  const installed = [macPaths().socket, linuxPaths().socket];
+  if (!installed.includes(socketPath) || !inTestContext(env) || realEnforcementAllowed(env)) return;
+  throw new HelperCallError(
+    `refusing to connect a test to the installed helper at ${socketPath}; use an isolated ` +
+      `helper, or set ${ALLOW_REAL_ENFORCEMENT_ENV}=1 on a throwaway machine (docs/e2e-safety.md)`,
+    'refused',
+  );
+}
+
 export class HelperClient {
   private buf = '';
   private readonly pending = new Map<string, (r: HelperResponse) => void>();
@@ -142,6 +176,7 @@ export class HelperClient {
   private constructor(
     private readonly sock: Socket,
     private readonly approver: Approver,
+    private readonly testRun: string | undefined,
   ) {
     sock.setEncoding('utf8');
     sock.on('data', (chunk: string) => this.onData(chunk));
@@ -155,13 +190,20 @@ export class HelperClient {
     });
   }
 
+  /**
+   * `testRun` tags every request so the helper records it on what it does
+   * (testGuard.ts); it defaults to VIGIL_TEST_RUN_ID, which only an opted-in
+   * test run sets.
+   */
   static connect(
     socketPath = defaultPaths().socket,
     approver: Approver = defaultApprover(),
+    testRun = testRunFromEnv(),
   ): Promise<HelperClient> {
     return new Promise((resolve, reject) => {
+      refuseInstalledHelperInTests(socketPath);
       const sock = connect(socketPath);
-      sock.once('connect', () => resolve(new HelperClient(sock, approver)));
+      sock.once('connect', () => resolve(new HelperClient(sock, approver, testRun)));
       sock.once('error', reject);
     });
   }
@@ -285,7 +327,10 @@ export class HelperClient {
     const id = randomBytes(8).toString('hex');
     return new Promise((resolve) => {
       this.pending.set(id, resolve);
-      this.sock.write(JSON.stringify({ id, command, ...(approval ? { approval } : {}) }) + '\n');
+      const tag = this.testRun ? { testRun: this.testRun } : {};
+      this.sock.write(
+        JSON.stringify({ id, command, ...(approval ? { approval } : {}), ...tag }) + '\n',
+      );
     });
   }
 
