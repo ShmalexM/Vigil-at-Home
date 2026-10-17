@@ -1120,6 +1120,41 @@ describe('agent rule packs', () => {
       }
     });
 
+    // Real Mac, 2026-10-17: 940 of 977 alerts in two weeks were these shapes.
+    it('takes only where Vigil, Santa and osquery are installed, not a folder named like them', () => {
+      const sandbox = '/private/tmp/vigil-helper-test.wpocnG';
+      const quiet = [
+        `cp /tmp/vigil-helper-test.wpocnG/bundle/node ${sandbox}/Library/PrivilegedHelperTools/.vigil-helper-upgrade.J9uXjZ/new/node`,
+        `chmod 755 ${sandbox}/Library/PrivilegedHelperTools/.vigil-helper-upgrade.J9uXjZ/launcher.new`,
+        `mv ${sandbox}/Library/PrivilegedHelperTools/vigil-helper.d ${sandbox}/old`,
+        `rm -f ${sandbox}/Library/PrivilegedHelperTools/.vigil-helper-install.lock/pid`,
+        `cp x ${sandbox}/Library/LaunchDaemons/com.vigilathome.helper.plist`,
+        'rm /tmp/vigil-helper-test.d9i64U/fail-bootstrap',
+        `/bin/sh ${sandbox}/bin/launchctl bootout system/com.vigilathome.helper`,
+        `/bin/mv -n ${home}/Downloads/vigil-at-home-tour.mp4 "${home}/Movies/Vigil at Home/2026-10-downloads/vigil-at-home-tour.mp4"`,
+        `/bin/mv -n "${home}/Downloads/Vigil at Home Codebase Tour.html" "${home}/Documents/Projects/Vigil at Home/Downloaded References/"`,
+        'cp ~/src/vigil-helper-notes.md /tmp/',
+      ];
+      for (const c of quiet) expect(fired(sh(c)), c).not.toContain('agent-guard-tamper');
+      const loud = [
+        'sudo rm -rf /Library/PrivilegedHelperTools/vigil-helper.d',
+        'sudo mv /Library/LaunchDaemons/com.vigilathome.helper.plist /tmp/',
+        'sudo rm "/Library/Application Support/Vigil/helper-rules.json"',
+        'rm ~/Library/LaunchAgents/com.vigilathome.app.plist',
+        `cp /tmp/x "${home}/Library/Application Support/Vigil at Home/vigil.db"`,
+        'sudo rm -rf /var/db/santa/rules.db',
+        'sudo rm /Library/LaunchDaemons/com.northpolesec.santa.plist',
+        'sudo mv /Applications/Santa.app /tmp/',
+        'sudo cp /tmp/x.conf /var/osquery/osquery.conf',
+        'sudo rm -rf /opt/osquery/lib',
+        'sudo tee /Library/Managed\\ Preferences/com.northpolesec.santa.plist < /tmp/p',
+        'sudo rm /etc/systemd/system/vigil-helper.service',
+        'sudo rm -rf /var/lib/vigil/rules.json',
+        'sudo /bin/launchctl bootout system/com.vigilathome.helper',
+      ];
+      for (const c of loud) expect(fired(sh(c)), c).toContain('agent-guard-tamper');
+    });
+
     it('lets an agent read Vigil’s database, but not change it or write a copy there', () => {
       const db = '~/Library/Application\\ Support/Vigil\\ at\\ Home/vigil.db';
       const dir = `"${home}/Library/Application Support/Vigil at Home`;
