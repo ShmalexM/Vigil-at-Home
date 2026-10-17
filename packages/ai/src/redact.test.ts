@@ -263,17 +263,27 @@ describe('the linear-time check', () => {
     }
   });
 
-  it('fails a quadratic function, timed for real', () => {
+  it('fails a quadratic function, timed for real', { timeout: 60_000 }, () => {
     // Searches the text read so far from the start, once per 8 characters,
-    // for a character it doesn't hold: n * n / 16 characters read. About 0.2 s
-    // at the full size.
+    // for a character it doesn't hold: n * n / 16 characters read.
     const quadratic = (n: number) => {
       const text = 'a'.repeat(n);
       let found = 0;
       for (let end = 8; end <= n; end += 8) found += text.slice(0, end).indexOf('b');
       return found;
     };
-    expect(() => expectLinear('quadratic', 512 * 1024, quadratic)).toThrow(/more than linear/);
+    // indexOf runs at memory speed, and how fast that is varies 4x across
+    // runners: at a fixed size, a fast one finishes the small input under
+    // MIN_TIMED_MS, and the floor hides the growth. Grow the size until the
+    // small input costs 2 * MIN_TIMED_MS, so the growth shows on any runner.
+    let size = 256 * 1024;
+    const smallCost = () =>
+      Math.min(
+        costOf(() => quadratic(size / STEP)),
+        costOf(() => quadratic(size / STEP)),
+      );
+    while (smallCost() < 2 * MIN_TIMED_MS && size < 8 << 20) size *= 2;
+    expect(() => expectLinear('quadratic', size, quadratic)).toThrow(/more than linear/);
   });
 });
 
