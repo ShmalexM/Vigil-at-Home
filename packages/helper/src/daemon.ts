@@ -245,7 +245,9 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
   const fastPath: FastPath = new FastPath({
     file: paths.helperRules,
     run: async (action): Promise<ActionOutcome> => {
-      const out = await executor.execute(action);
+      // What the rules do on their own belongs to the test run that synced them, if any.
+      const testRun = executor.rulesTestRun;
+      const out = await executor.execute(action, undefined, testRun ? { testRun } : {});
       if (out.kind !== 'done') throw new Error('needs the admin password');
       return out.result as ActionOutcome;
     },

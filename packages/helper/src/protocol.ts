@@ -210,6 +210,8 @@ export interface HelperRequest {
   command: HelperCommand;
   /** Nonce from a previous needs-approval reply, after the user approved it. */
   approval?: string;
+  /** Set by an opted-in test run (VIGIL_TEST_RUN_ID); recorded on what it does. */
+  testRun?: string;
 }
 
 /**
@@ -272,6 +274,9 @@ export function needsApproval(cmd: HelperCommand): boolean {
   return isRelease(CoreAction.parse(cmd));
 }
 
+/** A test run's id: letters, digits, dot, dash and underscore. */
+export const TestRunId = z.string().regex(/^[A-Za-z0-9._-]{1,64}$/);
+
 const RequestEnvelope = z.strictObject({
   id: z.string().min(1).max(100),
   command: z.record(z.string(), z.unknown()),
@@ -279,6 +284,7 @@ const RequestEnvelope = z.strictObject({
     .string()
     .regex(/^[a-f0-9]{32}$/)
     .optional(),
+  testRun: TestRunId.optional(),
 });
 
 /** Parse and strictly validate one request line. Unknown kinds and unknown fields are rejected. */
@@ -330,6 +336,7 @@ export function parseRequest(line: string): HelperRequest | { error: string; id?
   if (extra) return withId(id, `unknown field ${extra}`);
   const req: HelperRequest = { id: env.data.id, command: parsed.data };
   if (env.data.approval) req.approval = env.data.approval;
+  if (env.data.testRun) req.testRun = env.data.testRun;
   return req;
 }
 

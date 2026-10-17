@@ -129,7 +129,8 @@ jobs:
         run: sudo -E env "PATH=$PATH" VIGIL_MAC_INTEGRATION=1 pnpm --filter @vigil/sensors test:mac
       - name: helper checks
         if: always() && steps.present.outputs.yes == 'true'
-        run: sudo -E env "PATH=$PATH" VIGIL_MAC_INTEGRATION=1 pnpm --filter @vigil/helper test:mac
+        # A throwaway runner: these tests block with pf for real (docs/e2e-safety.md).
+        run: sudo -E env "PATH=$PATH" VIGIL_MAC_INTEGRATION=1 VIGIL_ALLOW_REAL_ENFORCEMENT=1 pnpm --filter @vigil/helper test:mac
 
   # Installs the helper exactly as the app does (the same script the password
   # dialog runs), checks launchd starts it as root and it answers, then removes it.

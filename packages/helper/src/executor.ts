@@ -7,6 +7,7 @@
 // So the helper can never be used to resume or restore something it did not
 // contain.
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   IdentityApprovalNeeded,
   type RuleStore,
@@ -48,6 +49,7 @@ import {
   type PersistenceRecord,
 } from './commands/persistence.js';
 import { disableLinuxPersistence, restoreLinuxPersistence } from './commands/linuxPersistence.js';
+import { isEnforcing, refuseRealEnforcement } from './testGuard.js';
 
 export interface ExecutorDeps {
   sys: System;
@@ -138,8 +140,21 @@ const POLICY: Record<string, Exclude<RulePolicy, 'REMOVE'>> = {
   allow: 'ALLOWLIST',
 };
 
+/** Who asked for a command, beyond the command itself. */
+export interface ExecContext {
+  /** The opted-in test run that sent it (testGuard.ts); recorded on its journal entries. */
+  testRun?: string;
+}
+
 export class Executor {
   readonly firewall: NetworkFirewall;
+  /** The test run of the command being executed, for record(). */
+  private readonly context = new AsyncLocalStorage<ExecContext>();
+  /**
+   * The test run whose sync put the blocking rules in force, if one did: what
+   * the fast path then does on its own is that run's too (daemon.ts).
+   */
+  rulesTestRun: string | undefined;
 
   constructor(private readonly d: ExecutorDeps) {
     this.firewall = d.sys.platform === 'linux' ? new NftFirewall(d.sys) : new Firewall(d.sys);
@@ -237,7 +252,11 @@ export class Executor {
     return b?.bound;
   }
 
-  async execute(cmd: HelperCommand, approval?: string): Promise<ExecOutcome> {
+  execute(cmd: HelperCommand, approval?: string, ctx: ExecContext = {}): Promise<ExecOutcome> {
+    return this.context.run(ctx, () => this.executeIn(cmd, approval));
+  }
+
+  private async executeIn(cmd: HelperCommand, approval?: string): Promise<ExecOutcome> {
     let bound: PinCandidate | undefined;
     // Refuse what Linux can't do before asking for a password for it.
     if (this.d.sys.platform === 'linux') checkLinuxBlock(cmd);
@@ -431,6 +450,8 @@ export class Executor {
       summary,
     };
     if (undo) entry.undo = undo;
+    const testRun = this.context.getStore()?.testRun;
+    if (testRun) entry.testRun = testRun;
     return this.outcome(this.d.journal.add(entry));
   }
 
@@ -441,6 +462,8 @@ export class Executor {
 
   private async run(cmd: HelperCommand): Promise<unknown> {
     const { sys, journal } = this.d;
+    // Tests never contain anything on the machine they run on unless they opt in.
+    if (sys.real && isEnforcing(cmd)) refuseRealEnforcement(cmd.kind);
     if (cmd.kind === 'santa.rule.set' && cmd.policy !== 'allow') {
       if (this.isOwnHash(cmd.identifier))
         throw new ActionError('refused', 'that program is part of Vigil');
@@ -606,6 +629,7 @@ export class Executor {
         } catch (err) {
           throw policyError(err);
         }
+        if (synced.applied) this.rulesTestRun = this.context.getStore()?.testRun;
         if (!this.d.preexec || !synced.applied) return { ...synced, preexec: null };
         // The rules and lists are in force and saved: answer now. Santa's
         // pre-launch rules follow in the background; detection.status says how.
@@ -617,6 +641,7 @@ export class Executor {
           ...(this.d.fastPath?.status() ?? {}),
           syncId: this.d.fastPath?.syncId() ?? null,
           preexec: this.preexecState,
+          testRun: this.rulesTestRun ?? null,
         };
       case 'self.grant': {
         if (!this.d.fastPath) throw new ActionError('failed', 'helper rules are not set up');

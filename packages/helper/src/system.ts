@@ -7,6 +7,7 @@ import { readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import { fileId } from '@vigil/core/self';
 import { hostPlatform, type Platform } from './platform.js';
 import { openRegularFile, type OpenedFile, type OpenOptions } from './openedFile.js';
+import { enforcingRun, refuseRealEnforcement } from './testGuard.js';
 
 export const BINARIES = {
   pfctl: '/sbin/pfctl',
@@ -69,6 +70,8 @@ export interface System {
   selfPid(): number;
   /** Which OS the commands target. Absent means macOS, which is what every fake assumed. */
   readonly platform?: Platform;
+  /** True for the real machine (realSystem), where a test may not enforce (testGuard.ts). */
+  readonly real?: boolean;
   /**
    * Linux only: the executable a pid runs, from /proc/<pid>/exe. The kernel
    * keeps that link, so argv tricks can't fake it.
@@ -110,11 +113,21 @@ export interface FileStat {
 export function realSystem(
   binaries: Partial<Record<BinaryName, string>> = binariesFor(hostPlatform()),
   platform: Platform = hostPlatform(),
+  env: Record<string, string | undefined> = process.env,
 ): System {
   return {
     platform,
+    real: true,
     selfPid: () => process.pid,
     run(bin, args, opts = {}) {
+      const enforcing = enforcingRun(bin, args);
+      if (enforcing) {
+        try {
+          refuseRealEnforcement(enforcing, env);
+        } catch (err) {
+          return Promise.reject(err);
+        }
+      }
       const file = binaries[bin];
       if (!file) {
         return Promise.resolve({
@@ -149,6 +162,7 @@ export function realSystem(
       });
     },
     signal(pid, sig) {
+      if (sig !== 'SIGCONT') refuseRealEnforcement(`${sig} to pid ${pid}`, env);
       process.kill(pid, sig);
     },
     consoleUid() {

@@ -21,6 +21,7 @@ import {
   unlessDemo,
 } from './helper-install.js';
 import { HelperLink } from './helper.js';
+import { helperSocketFor, userDataFor } from './test-isolation.js';
 import { HelperSyncer } from './helper-sync.js';
 import { registerIpc } from './ipc.js';
 import { systemProbe } from './onboarding/checks.js';
@@ -73,7 +74,9 @@ const distro = thisDistro();
 // The resource check (perf/measure.mjs) runs the app against a throwaway
 // profile and drives it from the main process.
 const perf = !app.isPackaged && !!process.env['VIGIL_PERF'];
-if (perf && process.env['VIGIL_USER_DATA']) app.setPath('userData', process.env['VIGIL_USER_DATA']);
+// A throwaway profile for tests (test-isolation.ts); development builds only.
+const testUserData = userDataFor(app.isPackaged, process.env);
+if (testUserData) app.setPath('userData', testUserData);
 
 if (wantsX11(process.platform, process.argv, process.env))
   app.commandLine.appendSwitch('ozone-platform', 'x11');
@@ -106,7 +109,7 @@ function start(): void {
 
   // Actions go to the privileged helper. Until it is installed and answering,
   // they are simulated and the UI says so.
-  const helper = new HelperLink();
+  const helper = new HelperLink(helperSocketFor(app.isPackaged, process.env));
   const core = new VigilCore(store, helper, true);
   const demo = !app.isPackaged && !!process.env['VIGIL_DEMO'];
   // The .app bundle or install folder when packaged; the Electron binary in development.

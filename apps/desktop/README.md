@@ -28,6 +28,9 @@ VIGIL_DEMO=1 pnpm --filter @vigil/desktop dev    # sample rules and one blocked 
 
 Development runs keep their data in `~/Library/Application Support/Vigil at Home Dev`,
 apart from the installed app's `Vigil at Home` folder, so demo data never reaches it.
+The checks in `e2e/` go further: each run gets a throwaway profile and its own
+isolated helper, and the one that must enforce for real (`flow.e2e.mjs`) runs only
+when opted in. See [docs/e2e-safety.md](../../docs/e2e-safety.md).
 
 Until the privileged helper is installed, every block runs through
 `DryRunExecutor`: it is logged, shown as "Simulated", and nothing on the Mac

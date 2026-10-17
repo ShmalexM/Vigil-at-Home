@@ -21,6 +21,8 @@ export interface JournalEntry {
   createdAt: number;
   undoneAt?: number;
   summary: string;
+  /** The test run that asked for it (testGuard.ts), so its teardown can undo it. */
+  testRun?: string;
 }
 
 interface JournalFile {
