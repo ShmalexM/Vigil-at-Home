@@ -70,6 +70,20 @@ const skipNode =
   args.includes('--skip-node') ||
   (dev && process.platform !== 'darwin' && process.platform !== 'linux');
 
+/** The app version (release.yml sets it before this runs) and commit the helper is built from. */
+function helperBuildStamp() {
+  const { version } = JSON.parse(readFileSync(join(app, 'package.json'), 'utf8'));
+  let commit = process.env['GITHUB_SHA']?.slice(0, 7) ?? '';
+  if (!commit) {
+    try {
+      commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim();
+    } catch {
+      commit = '';
+    }
+  }
+  return { version, commit };
+}
+
 async function bundle() {
   const common = join(out, 'common');
   rmSync(common, { recursive: true, force: true });
@@ -80,6 +94,8 @@ async function bundle() {
     metafile: true,
     entryPoints: [join(repo, 'packages/helper/src/cli.ts')],
     outfile: join(common, 'helper.mjs'),
+    // helper.status reports this, so the app can show which helper is running.
+    define: { __VIGIL_HELPER_BUILD__: JSON.stringify(helperBuildStamp()) },
   });
   // The pre-flight hook runs as the user, from the app bundle, on the same
   // signed node. install.sh doesn't copy it: nothing about it runs as root.
