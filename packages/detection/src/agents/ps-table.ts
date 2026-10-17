@@ -38,8 +38,24 @@ const MONTHS: Record<string, number> = {
 };
 
 // `lstart` in the C locale is always 24 characters: "Wed Oct  1 20:53:59 2026".
-const COMM_LINE =
-  /^\s*(\d+)\s+(\d+)\s+[A-Z][a-z]{2} ([A-Z][a-z]{2}) ([ \d]\d) (\d\d):(\d\d):(\d\d) (\d{4}) (.+)$/;
+const LSTART = String.raw`[A-Z][a-z]{2} ([A-Z][a-z]{2}) ([ \d]\d) (\d\d):(\d\d):(\d\d) (\d{4})`;
+const COMM_LINE = new RegExp(String.raw`^\s*(\d+)\s+(\d+)\s+${LSTART} (.+)$`);
+const START_LINE = new RegExp(String.raw`^\s*${LSTART}\s*$`);
+
+/** The time an `lstart` names, in ms (local time), from its captured parts. */
+function lstartMs(parts: string[]): number | undefined {
+  const [mon, day, hh, mm, ss, year] = parts;
+  const month = MONTHS[mon!];
+  if (month === undefined) return undefined;
+  return new Date(
+    Number(year),
+    month,
+    Number(day!.trim()),
+    Number(hh),
+    Number(mm),
+    Number(ss),
+  ).getTime();
+}
 
 /** Rows of `ps -axww -o pid=,ppid=,lstart=,comm=`. Lines that do not parse are skipped. */
 export function parsePsComm(text: string): PsRow[] {
@@ -48,21 +64,19 @@ export function parsePsComm(text: string): PsRow[] {
     const m = COMM_LINE.exec(line.replace(/\r$/, ''));
     if (!m) continue;
     const [, pid, ppid, mon, day, hh, mm, ss, year, comm] = m;
-    const month = MONTHS[mon!];
     // ps pads the column, so a bare name (`-zsh`, `claude`) can come with spaces before it.
     const path = comm!.trim();
-    if (month === undefined || path === '') continue;
-    const startedAt = new Date(
-      Number(year),
-      month,
-      Number(day!.trim()),
-      Number(hh),
-      Number(mm),
-      Number(ss),
-    ).getTime();
+    const startedAt = lstartMs([mon!, day!, hh!, mm!, ss!, year!]);
+    if (startedAt === undefined || path === '') continue;
     rows.push({ pid: Number(pid), ppid: Number(ppid), startedAt, path });
   }
   return rows;
+}
+
+/** The start time from `ps -o lstart= -p <pid>`, in ms as parsePsComm gives it. */
+export function parsePsStart(text: string): number | undefined {
+  const m = START_LINE.exec(text.replace(/\r?\n$/, ''));
+  return m ? lstartMs(m.slice(1)) : undefined;
 }
 
 /**
