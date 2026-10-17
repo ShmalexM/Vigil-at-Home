@@ -10,6 +10,7 @@ import {
   isIndicatorRule,
   STILL_CATCHES_THREAT,
   USER_TUNED_ONLY,
+  VIGIL_PROVIDER,
 } from '../proposals/pipeline.js';
 import { ruleLanguageGuide } from '../proposals/tools.js';
 import { replayRule } from '../proposals/replay.js';
@@ -423,6 +424,33 @@ describe('AI proposals about agent rules', () => {
       });
     }
     expect(pipeline.list()).toEqual([]);
+  });
+
+  it('takes an exception Vigil suggests from the user’s answers, even on an agent rule', () => {
+    const { pipeline, engine } = twoWeeks();
+    engine.upsertRule(watchRule);
+    const scoped = {
+      all: [
+        { field: 'process.path', op: 'eq', value: '/bin/sh' },
+        { field: 'process.commandLine', op: 'regex', value: '^cat \\.aws/credentials [0-9]+$' },
+      ],
+    };
+    const first = pipeline.suggestException(tune('agent-secret-command', scoped));
+    expect(first).toMatchObject({ ok: true });
+    expect(pipeline.get(first!.proposalId!)).toMatchObject({
+      provider: VIGIL_PROVIDER,
+      kind: 'tuning',
+      status: 'awaiting_review',
+    });
+    // One at a time per rule, and still never one that names an agent.
+    expect(pipeline.suggestException(tune('agent-secret-command', scoped))).toBeUndefined();
+    pipeline.reject(first!.proposalId!, userOrigin('rules-screen'));
+    // The user said no: not offered again for a month.
+    expect(pipeline.suggestException(tune('agent-secret-command', scoped))).toBeUndefined();
+    const byAgent = { field: 'process.agent.id', op: 'eq', value: 'claude-code' };
+    const wide = pipeline.suggestException(tune('agent-secret-command', byAgent));
+    expect(wide).toMatchObject({ ok: false });
+    expect(wide!.errors.join(' ')).toMatch(/agent or tool-request fields/);
   });
 
   it('refuses an AI exclusion on agent or tool fields', () => {

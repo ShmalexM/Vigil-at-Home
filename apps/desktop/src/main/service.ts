@@ -11,10 +11,12 @@ import {
   type UserDecision,
 } from '@vigil/core';
 import {
+  AgeOutDays,
   AlertView,
   Appearance,
   ThemePref,
   type AlertDetail,
+  type BulkClosable,
   type EventOutcome,
   type EventStats,
   type QuietRuleResult,
@@ -23,10 +25,10 @@ import {
   type RuleView,
   type StatusView,
 } from '../shared/ipc.js';
-import { isNoticed } from '../shared/attention.js';
+import { isNoticed, needsDecision } from '../shared/attention.js';
 import { untouched } from '../shared/piles.js';
 import { DEFAULT_APPEARANCE, type AppearanceSettings } from '../shared/themes.js';
-import { AlertService, type DecisionInput } from './alerts.js';
+import { AlertService, repeatKind, type DecisionInput } from './alerts.js';
 import { evidenceOf } from './evidence-export.js';
 import { redactEvidenceInSlices } from './evidence-redact.js';
 import { EventLog } from './events.js';
@@ -38,6 +40,18 @@ import type { ActionExecutor } from './executor.js';
 import { Scheduler } from './scheduler.js';
 import { reportFeedHealth } from './sensor-health.js';
 import { ruleMatcherHealth, SensorRegistry } from './sensors.js';
+import {
+  answerPattern,
+  commandExclusion,
+  DEFAULT_AGE_OUT_DAYS,
+  EXCEPTION_AFTER,
+  EXCEPTION_WINDOW_MS,
+  normalize,
+  OLD_AGENT_ALERT_MS,
+  pidAlive,
+  PROCESS_PROPOSAL_TTL_MS,
+  QUIET_SWEEP_MS,
+} from './quiet.js';
 import { computeStatus } from './status.js';
 import { TEST_RULE } from './test-alert.js';
 import { WORTH_A_LOOK_RULE } from './worth-a-look.js';
@@ -54,6 +68,7 @@ const JOB_NAMES: Record<string, string> = {
   'cap-disk': 'clean-up',
   'sensor-health': 'sensor checks',
   'agent-discovery': 'finding AI agents',
+  'quiet-sweep': 'alert clean-up',
 };
 
 /** How long staleAlerts' answer stands while no open alert changes. */
@@ -178,6 +193,16 @@ export class VigilCore {
     this.scheduler.every('cap-disk', HOUR, () => {
       this.capDisk();
     });
+    // Suggestions for processes long gone lapse, and old Noticed alerts move to History.
+    this.scheduler.every(
+      'quiet-sweep',
+      QUIET_SWEEP_MS,
+      async () => {
+        this.expireProposals();
+        await this.ageOut();
+      },
+      true,
+    );
   }
 
   stop(): void {
@@ -278,7 +303,202 @@ export class VigilCore {
       if (learned.suggested && learned.suggestDemotion)
         console.info(`[detection] suggested: ${learned.suggestDemotion.message}`);
     }
+    if (alert.decision?.verdict === 'expected' && !input.remember) this.offerException(alertId);
     return this.store.getAlert(alertId) ?? alert;
+  }
+
+  /**
+   * After the user said "That was me" {@link EXCEPTION_AFTER} times in
+   * {@link EXCEPTION_WINDOW_MS} to the same rule, agent or program and
+   * command (quiet.ts answerPattern), suggest a "Don't show this again"
+   * exception scoped to that program and command. It only waits on the
+   * Rules page: it loosens a rule, so the user approves it there (with the
+   * admin password where the helper needs it), like any suggested change.
+   * Answers given in bulk ("Those were me", closing a rule's alerts, age-out)
+   * carry a note and don't count.
+   */
+  private offerException(alertId: string): void {
+    const pipeline = this.detector?.pipeline;
+    const alert = this.store.getAlert(alertId);
+    const first = alert?.eventIds[0] ? this.store.getEvent(alert.eventIds[0]) : undefined;
+    if (!pipeline || !alert || !first) return;
+    const exclusion = commandExclusion(first);
+    if (!exclusion) return;
+    const pattern = answerPattern(alert.ruleId, first);
+    const since = this.now() - EXCEPTION_WINDOW_MS;
+    let answers = 0;
+    for (const a of this.store.listAlertsOfRule(alert.ruleId, 'resolved', since)) {
+      const d = a.decision;
+      if (d?.verdict !== 'expected' || d.note !== undefined || d.remember || d.at < since) continue;
+      const e = a.eventIds[0] ? this.store.getEvent(a.eventIds[0]) : undefined;
+      if (e && answerPattern(a.ruleId, e) === pattern) answers++;
+    }
+    if (answers < EXCEPTION_AFTER) return;
+    const proc = 'process' in first ? first.process : undefined;
+    const command = normalize(proc?.args?.join(' ') ?? '').slice(0, 300);
+    const name = this.detector?.rule(alert.ruleId)?.name ?? alert.ruleId;
+    const subject: { sha256?: string; teamId?: string; signingId?: string } = {};
+    if (proc?.sha256) subject.sha256 = proc.sha256;
+    if (proc?.teamId) subject.teamId = proc.teamId;
+    if (proc?.signingId) subject.signingId = proc.signingId;
+    try {
+      const res = pipeline.suggestException(
+        {
+          ruleId: alert.ruleId,
+          addExclusion: exclusion,
+          rationale: `Don't show this again? You said "That was me" ${answers} times in the last 30 days when "${name}" flagged ${proc?.path ?? 'this program'} running: ${command}. This stops the rule matching only that program running that command; the parts that change each run (numbers, temp files, ids) may differ.`,
+          evidence: [`${answers} alerts you marked as you`],
+        },
+        subject,
+      );
+      if (res && !res.ok) console.info(`[quiet] no exception suggested: ${res.errors.join(' ')}`);
+    } catch (err) {
+      console.warn('[quiet] could not suggest an exception:', err);
+    }
+  }
+
+  /** Whether a process still runs. Overridable for tests. */
+  pidAlive: (pid: number) => boolean = pidAlive;
+
+  /** Expire rule suggestions to stop processes that exited or are hours old. */
+  expireProposals(): number {
+    return this.alerts.expireProcessProposals(this.pidAlive, PROCESS_PROPOSAL_TTL_MS);
+  }
+
+  /**
+   * Whether a bulk close may take this alert: what clearNoticed asks
+   * (nothing held, no action taken, no suggestion waiting) except that it
+   * may need a decision, and last seen by `upTo`.
+   */
+  private bulkSafe(a: Alert, upTo: number): boolean {
+    return (
+      untouched(a) &&
+      !this.store.hasPendingProposal(a.id) &&
+      (a.repeats?.lastAt ?? a.createdAt) <= upTo
+    );
+  }
+
+  /** Whether an alert came from an AI agent's work. */
+  private fromAgent(a: Alert): boolean {
+    if (a.repeats && repeatKind(a.repeats.key) === 'agent') return true;
+    if (a.pile?.key.includes('"agent"')) return true;
+    const e = a.eventIds[0] ? this.store.getEvent(a.eventIds[0]) : undefined;
+    return !!(e && 'process' in e && e.process?.agent);
+  }
+
+  private ruleAlerts(ruleId: string, upTo: number): Alert[] {
+    return this.store.listAlertsOfRule(ruleId, 'open').filter((a) => this.bulkSafe(a, upTo));
+  }
+
+  private oldAgentAlerts(upTo: number): Alert[] {
+    const before = upTo - OLD_AGENT_ALERT_MS;
+    return this.store
+      .listAlerts({ status: 'open', limit: -1 })
+      .filter((a) => this.bulkSafe(a, before) && this.fromAgent(a));
+  }
+
+  /**
+   * How many alerts each bulk close would take now. Screens ask on every
+   * change, so like staleAlerts the answer stands while no open alert
+   * changed, for up to {@link STALE_TTL_MS}. Suggestions for exited
+   * processes are left to the sweep and the closes themselves.
+   */
+  bulkClosable(ruleId?: string): BulkClosable {
+    const now = this.now();
+    const mark = this.store.openAlertsMark();
+    const c = this.bulkCache;
+    if (!c || c.mark !== mark || now - c.at >= STALE_TTL_MS) {
+      this.bulkCache = {
+        mark,
+        at: now,
+        oldAgents: this.oldAgentAlerts(now).length,
+        rules: new Map(),
+      };
+    }
+    const cache = this.bulkCache!;
+    let rule = 0;
+    if (ruleId) {
+      rule = cache.rules.get(ruleId) ?? this.ruleAlerts(ruleId, now).length;
+      cache.rules.set(ruleId, rule);
+    }
+    return { rule, oldAgents: cache.oldAgents };
+  }
+
+  private bulkCache:
+    { mark: string; at: number; oldAgents: number; rules: Map<string, number> } | undefined;
+
+  /**
+   * "Close all from this rule". Mirrors clearNoticed: each closes as
+   * expected, nothing is released, the rules learn nothing, and anything
+   * with an action taken, something held or a suggestion waiting stays.
+   * Only alerts last seen by `upTo` (when the user opened the confirm) go.
+   */
+  async closeRuleAlerts(ruleId: string, upTo: number): Promise<number> {
+    this.expireProposals();
+    return this.closeQuietly(
+      this.ruleAlerts(ruleId, upTo).map((a) => a.id),
+      upTo,
+      'Closed with every alert from this rule',
+    );
+  }
+
+  /** "Close my agents' alerts older than 7 days", with closeRuleAlerts' guards. */
+  async closeOldAgentAlerts(upTo: number): Promise<number> {
+    this.expireProposals();
+    const before = upTo - OLD_AGENT_ALERT_MS;
+    return this.closeQuietly(
+      this.oldAgentAlerts(upTo).map((a) => a.id),
+      before,
+      'Closed with your agents’ older alerts',
+    );
+  }
+
+  /** Close each alert still safe to close in bulk when its turn comes. */
+  private async closeQuietly(ids: readonly string[], upTo: number, note: string): Promise<number> {
+    let closed = 0;
+    for (const id of ids) {
+      const a = this.store.getAlert(id);
+      if (!a || !this.bulkSafe(a, upTo)) continue;
+      await this.alerts.decide(id, { verdict: 'expected', release: false, note });
+      closed++;
+    }
+    return closed;
+  }
+
+  ageOutDays(): number {
+    return this.store.getSetting('ageOutDays', AgeOutDays, DEFAULT_AGE_OUT_DAYS);
+  }
+
+  setAgeOutDays(days: number): void {
+    this.store.setSetting('ageOutDays', AgeOutDays.parse(days));
+  }
+
+  /**
+   * Move Noticed alerts nobody touched for {@link ageOutDays} days to
+   * History: low or info severity, or ones that never told the user
+   * (silent). Never one that needs a decision, holds something, had an
+   * action or has a suggestion waiting; the rules learn nothing.
+   */
+  async ageOut(): Promise<number> {
+    const days = this.ageOutDays();
+    if (days === 0) return 0;
+    const before = this.now() - days * DAY;
+    const ids = this.store
+      .listAlerts({ status: 'open', limit: -1 })
+      .filter((a) => ageable(a) && this.bulkSafe(a, before))
+      .map((a) => a.id);
+    let moved = 0;
+    for (const id of ids) {
+      const a = this.store.getAlert(id);
+      if (!a || !ageable(a) || !this.bulkSafe(a, before)) continue;
+      await this.alerts.decide(id, {
+        verdict: 'expected',
+        release: false,
+        note: `Moved to History after ${days} ${days === 1 ? 'day' : 'days'} untouched`,
+      });
+      moved++;
+    }
+    return moved;
   }
 
   /**
@@ -631,6 +851,12 @@ export class VigilCore {
   setAppearance(appearance: AppearanceSettings): void {
     this.store.setSetting('appearance', Appearance.parse(appearance));
   }
+}
+
+/** Quiet enough to age out: Noticed, and low or info severity or silent. */
+function ageable(a: Alert): boolean {
+  if (!isNoticed(a) || needsDecision(a)) return false;
+  return a.severity === 'low' || a.severity === 'info' || a.notify === 'silent';
 }
 
 /** Local midnight before `ms`, so "today" matches the user's clock. */

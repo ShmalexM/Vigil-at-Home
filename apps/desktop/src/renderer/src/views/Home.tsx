@@ -10,6 +10,7 @@ import { useState } from 'react';
 import { useClock, useLive, vigil } from '../api';
 import { homeMood } from '../components/AskScout';
 import { NeedsYouLine, needsRows, NoticedList, pileLine, WatchLine } from '../components/Attention';
+import { CloseOldAgentAlerts } from '../components/BulkClose';
 import { Dog } from '../components/Dog';
 import { NotebookSheet } from '../components/Notebook';
 import { useToast } from '../components/Toasts';
@@ -213,6 +214,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               All {allNeeds.length}
             </button>
           )}
+          <CloseOldAgentAlerts />
         </Card>
       )}
 

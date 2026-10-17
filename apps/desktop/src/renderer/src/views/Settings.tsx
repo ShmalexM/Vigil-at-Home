@@ -46,6 +46,30 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
             <span>How much to show</span>
             <AlertViewSwitch value={status.alertView} />
           </div>
+          <div className="row spread">
+            <span className="col" style={{ gap: 2 }}>
+              <span>Move quiet alerts to History</span>
+              <span className="t-small">
+                Low and silent alerts nobody opened or answered. Anything that needs your decision
+                stays.
+              </span>
+            </span>
+            <select
+              aria-label="Move quiet alerts to History"
+              value={settings.ageOutDays}
+              onChange={async (e) => {
+                await vigil.setAgeOutDays(Number(e.target.value));
+                reload();
+              }}
+            >
+              {[1, 3, 7, 14, 30].map((d) => (
+                <option key={d} value={d}>
+                  After {d} {d === 1 ? 'day' : 'days'}
+                </option>
+              ))}
+              <option value={0}>Never</option>
+            </select>
+          </div>
         </Card>
       )}
       <SetupPanel />
