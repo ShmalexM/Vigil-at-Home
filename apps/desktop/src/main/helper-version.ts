@@ -66,7 +66,7 @@ export type HelperScriptOutcome = z.infer<typeof HelperScriptOutcome>;
 /** Why an install or update failed, said so the user knows what happened and what to do. */
 export function helperFailureWords(error: string | undefined): string {
   const e = (error ?? '').trim();
-  if (e === 'cancelled') return 'the password dialog was closed before the update ran';
+  if (e === 'cancelled') return 'the password dialog was closed before it ran';
   if (/\/bin\/sh\b|(^|\s)sh: |operation not permitted/i.test(e)) {
     return 'macOS could not run the shell (/bin/sh) the password dialog needs; something, such as a Santa block, is stopping it';
   }

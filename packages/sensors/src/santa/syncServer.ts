@@ -407,6 +407,8 @@ export class SantaSyncServer {
  * a sync that sent nothing the field is missing: that is 0, not unknown.
  */
 export function postflightCount(body: unknown, field: string): number | null {
+  // Only an object can leave a count out; null, a list or a string confirms nothing.
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return null;
   const v = pick(body, field);
   if (v === undefined || v === null) return 0;
   // uint32 arrives as a number; a protobuf JSON writer may also quote it.

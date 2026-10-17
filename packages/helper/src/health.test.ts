@@ -7,22 +7,69 @@ import {
   restartGapMs,
   SANTA_GONE_MS,
   SANTA_LIVE_MS,
-  santaReporting,
+  LaunchItemsMode,
+  MAX_KINDS,
+  MAX_TIMES,
+  SLOW_HOLD_MS,
 } from './health.js';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 
-describe('santaReporting', () => {
-  it('turns on with a recent event and stays on through quiet spells shorter than two hours', () => {
-    const now = 10 * HOUR;
-    expect(santaReporting(false, null, now)).toBe(false);
-    expect(santaReporting(false, now - SANTA_LIVE_MS + 1, now)).toBe(true);
-    // Quiet for 15 minutes: off if it wasn't on, kept on if it was. One
-    // threshold flipped osquery's config, and restarted it, on every crossing.
-    expect(santaReporting(false, now - 15 * MIN, now)).toBe(false);
-    expect(santaReporting(true, now - 15 * MIN, now)).toBe(true);
-    expect(santaReporting(true, now - SANTA_GONE_MS, now)).toBe(false);
+describe('LaunchItemsMode', () => {
+  it('slows only on a recent Santa event and holds the fast query for two hours after', () => {
+    let now = 10 * HOUR;
+    const m = new LaunchItemsMode();
+    expect(m.want(null, now)).toBe(false);
+    expect(m.want(now - SANTA_LIVE_MS + 1, now)).toBe(true);
+    // Quiet spells shorter than 15 minutes keep it.
+    now += 14 * MIN;
+    expect(m.want(now - 14 * MIN, now)).toBe(true);
+    now += MIN;
+    expect(m.want(now - SANTA_GONE_MS, now)).toBe(false);
+    // Santa is back at once, but the slow query waits out the hold.
+    expect(m.want(now, now)).toBe(false);
+    now += SLOW_HOLD_MS - MIN;
+    expect(m.want(now, now)).toBe(false);
+    now += MIN;
+    expect(m.want(now, now)).toBe(true);
+  });
+
+  it('brings the fast query back within 15 minutes when Santa is killed, past any backoff', () => {
+    let now = 100 * HOUR;
+    const mode = new LaunchItemsMode();
+    const restarts = new OsqueryRestarts(() => now);
+    // Santa reporting: osquery runs the slow query.
+    expect(mode.want(now, now)).toBe(true);
+    mode.applied('restarted', true, false);
+    expect(mode.urgent()).toBe(false);
+    // Plenty of restarts this hour: the backoff now holds the next one back.
+    for (let i = 0; i < 5; i++) restarts.after('restarted');
+    now += 5 * MIN;
+    expect(restarts.mayRestart()).toBe(false);
+
+    // An attacker kills Santa; its last event was just now.
+    const killedAt = now;
+    now += 10 * MIN;
+    expect(mode.want(killedAt, now)).toBe(true); // 10 minutes is a quiet spell
+    expect(restarts.mayRestart() || mode.urgent()).toBe(false);
+    now += 5 * MIN;
+    expect(mode.want(killedAt, now)).toBe(false);
+    // The restart that applies the fast query skips the backoff.
+    expect(restarts.mayRestart()).toBe(false);
+    expect(mode.urgent()).toBe(true);
+    mode.applied('restarted', false, false);
+    expect(mode.urgent()).toBe(false);
+  });
+
+  it('keeps a held-back slow-down from counting as applied', () => {
+    const mode = new LaunchItemsMode();
+    mode.applied('unchanged', false, false);
+    expect(mode.want(0, 1)).toBe(true);
+    mode.applied('deferred', true, true);
+    // Santa goes quiet before the slow query went in: no urgent restart needed.
+    expect(mode.want(0, SANTA_GONE_MS)).toBe(false);
+    expect(mode.urgent()).toBe(false);
   });
 });
 
@@ -115,15 +162,36 @@ describe('ErrorTally', () => {
     expect(t.repeated()).toEqual([]);
   });
 
-  it('keeps a bounded number of kinds', () => {
+  it('keeps at most MAX_KINDS kinds, dropping the rarest, and MAX_TIMES times per kind', () => {
     const t = new ErrorTally(() => 0);
-    for (let i = 0; i < 200; i++) {
-      const word =
-        String.fromCharCode(97 + (i % 26)) + String.fromCharCode(97 + Math.floor(i / 26));
-      t.note(`could not read ${word}`);
-      t.note(`could not read ${word}`);
-    }
-    expect(t.repeated().length).toBeLessThanOrEqual(5);
+    for (let i = 0; i < 3; i++) t.note('could not reach the frequent one');
+    const word = (i: number) => String.fromCharCode(97 + (i % 26), 97 + Math.floor(i / 26));
+    for (let i = 0; i < MAX_KINDS + 20; i++) t.note(`could not read ${word(i)}`);
+    expect(t.kindCount).toBe(MAX_KINDS);
+    expect(t.repeated(3).map((e) => e.message)).toEqual(['could not reach the frequent one']);
+
+    const busy = new ErrorTally(() => 0);
+    for (let i = 0; i < MAX_TIMES + 500; i++) busy.note('could not write the journal');
+    expect(busy.repeated()[0]?.lastDay).toBe(MAX_TIMES);
+  });
+
+  it('frees kinds with nothing in the last day before dropping recent ones', () => {
+    let now = 0;
+    const t = new ErrorTally(() => now);
+    const word = (i: number) => String.fromCharCode(97 + (i % 26), 97 + Math.floor(i / 26));
+    // Old ones, seen many times a day ago.
+    for (let i = 0; i < MAX_KINDS - 1; i++) for (let j = 0; j < 5; j++) t.note(`failed ${word(i)}`);
+    now = 25 * HOUR;
+    t.note('failed recent');
+    t.note('failed recent');
+    t.note('failed newer');
+    t.note('failed newer');
+    expect(
+      t
+        .repeated()
+        .map((e) => e.message)
+        .sort(),
+    ).toEqual(['failed newer', 'failed recent']);
   });
 });
 

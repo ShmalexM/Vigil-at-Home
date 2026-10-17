@@ -63,7 +63,7 @@ import {
   helperBuild,
   OsqueryRestarts,
   osqueryJob,
-  santaReporting,
+  LaunchItemsMode,
   type OsqueryRestartStatus,
   type RepeatedError,
 } from './health.js';
@@ -502,7 +502,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
 
   // Start osquery with Vigil's queries once it is installed, and keep it loaded.
   const osqueryPaths = opts.osquery ?? defaultOsqueryPaths();
-  let santaLive = false;
+  const launchItems = new LaunchItemsMode();
   const keepOsquery = () => {
     if (opts.osquery === false || process.getuid?.() !== 0) return;
     if (linux) {
@@ -516,17 +516,22 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     if (!osqueryPaths) return;
     // osquery's startup-item query slows to a 5 minute safety net only while
     // Santa is actually reporting (it can be installed but not yet approved).
-    // Kept on through short quiet spells, so the config doesn't flip.
-    santaLive = santaReporting(santaLive, hub.lastEventAt().santa, Date.now());
+    // Slowing down waits out short quiet spells; Santa going quiet speeds it
+    // back up within 15 minutes, without waiting on the restart backoff.
+    const slow = launchItems.want(hub.lastEventAt().santa, Date.now()) && santaReportsLaunchItems();
     void (async () => {
       osqueryRestarts.observe(await osqueryJob(sys, `system/${OSQUERY_LABEL}`));
       const state = await ensureOsquery(
         sys,
         osqueryPaths,
-        { santaReportsLaunchItems: santaLive && santaReportsLaunchItems() },
-        { mayRestart: osqueryRestarts.mayRestart(), restartPending: osqueryRestarts.pending },
+        { santaReportsLaunchItems: slow },
+        {
+          mayRestart: osqueryRestarts.mayRestart() || launchItems.urgent(),
+          restartPending: osqueryRestarts.pending,
+        },
       );
       osqueryRestarts.after(state);
+      launchItems.applied(state, slow, osqueryRestarts.pending);
       if (state === 'started' || state === 'restarted') log(`osquery ${state}`);
     })().catch((err: Error) => log(`could not start osquery: ${err.message}`));
   };

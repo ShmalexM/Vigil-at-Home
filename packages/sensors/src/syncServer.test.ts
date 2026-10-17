@@ -424,6 +424,22 @@ describe('unfinished syncs', () => {
     ]);
     expect(rules.syncedRev).not.toBe(rules.rev);
   });
+
+  it('never reads a postflight body that is not an object as confirming a clean sync', () => {
+    for (const body of [null, [], 'ok', 0]) {
+      const lines: string[] = [];
+      const rules = new RuleStore();
+      const s = new SantaSyncServer({ store: rules, log: (m) => lines.push(m) });
+      // An empty clean sync sends only the sentinel; the counts must match it.
+      s.dispatch('preflight', 'm', { request_clean_sync: true });
+      s.dispatch('postflight', 'm', body);
+      expect(rules.cleanSyncPending).toBe(true);
+      expect(s.lastRuleSyncAt).toBeNull();
+      expect(lines).toEqual([
+        'santa postflight mismatch: sent 1, received an unreadable count, processed an unreadable count',
+      ]);
+    }
+  });
 });
 
 describe('request logging', () => {

@@ -25,9 +25,7 @@ describe('helper version', () => {
   });
 
   it('says why an update failed in plain words', () => {
-    expect(helperFailureWords('cancelled')).toBe(
-      'the password dialog was closed before the update ran',
-    );
+    expect(helperFailureWords('cancelled')).toBe('the password dialog was closed before it ran');
     expect(helperFailureWords('sh: /bin/sh: Operation not permitted')).toMatch(
       /could not run the shell \(\/bin\/sh\)/,
     );
@@ -51,10 +49,10 @@ describe('helper version', () => {
       bundled: '0.1.0-alpha.6 (abc1234)',
       installedAt: null,
       updatePending: true,
-      lastFailure: { at: 7, reason: 'the password dialog was closed before the update ran' },
+      lastFailure: { at: 7, reason: 'the password dialog was closed before it ran' },
     });
     expect(outdatedNote(pending)).toBe(
-      'Out of date: running 0.1.0-alpha.5, this app ships 0.1.0-alpha.6 (abc1234); the last update failed: the password dialog was closed before the update ran',
+      'Out of date: running 0.1.0-alpha.5, this app ships 0.1.0-alpha.6 (abc1234); the last update failed: the password dialog was closed before it ran',
     );
     const done = helperVersionInfo({ ...base, updatePending: false });
     expect(done.lastFailure).toBeUndefined();

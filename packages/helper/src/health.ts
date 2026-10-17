@@ -18,17 +18,52 @@ const HOUR = 60 * 60_000;
 const DAY = 24 * HOUR;
 
 /**
- * Whether Santa is reporting, for osquery's config. It turns on with a Santa
- * event in the last 10 minutes and off only after 2 hours without one. With
- * one threshold, a Mac where Santa logs a launch every few minutes flipped
- * the config, and so restarted osquery, every few checks.
+ * Whether osquery's launchd query may slow to its 5 minute safety net because
+ * Santa reports launch items, and whether a restart to change that may skip
+ * the backoff. The two directions differ on purpose:
+ *
+ * - Slowing down needs a Santa event in the last 10 minutes, and once osquery
+ *   went back to the fast query it stays there for SLOW_HOLD_MS. With one
+ *   threshold both ways, a Mac where Santa logs every few minutes flipped
+ *   the config, and so restarted osquery, every few checks.
+ * - Speeding up is the safe direction (Santa stopped, maybe killed): it
+ *   happens once Santa has been quiet for SANTA_GONE_MS, and its restart never
+ *   waits on the backoff, so coverage is back within one more check.
  */
 export const SANTA_LIVE_MS = 10 * 60_000;
-export const SANTA_GONE_MS = 2 * HOUR;
+export const SANTA_GONE_MS = 15 * 60_000;
+export const SLOW_HOLD_MS = 2 * HOUR;
 
-export function santaReporting(was: boolean, lastEventAt: number | null, now: number): boolean {
-  if (lastEventAt === null) return false;
-  return now - lastEventAt < (was ? SANTA_GONE_MS : SANTA_LIVE_MS);
+export class LaunchItemsMode {
+  private live = false;
+  private fastSince = -Infinity;
+  /** What the running osquery has: true for the slow query, undefined until known. */
+  private running: boolean | undefined;
+
+  /** Whether the config should use the slow query now. */
+  want(lastEventAt: number | null, now: number): boolean {
+    const quiet = lastEventAt === null ? Infinity : now - lastEventAt;
+    if (this.live) {
+      if (quiet >= SANTA_GONE_MS) {
+        this.live = false;
+        this.fastSince = now;
+      }
+    } else if (quiet < SANTA_LIVE_MS && now - this.fastSince >= SLOW_HOLD_MS) {
+      this.live = true;
+    }
+    return this.live;
+  }
+
+  /** A restart that brings back the fast query (or might) skips the backoff. */
+  urgent(): boolean {
+    return !this.live && this.running !== false;
+  }
+
+  /** After ensureOsquery: what osquery now runs with. */
+  applied(state: string, wantSlow: boolean, stillPending: boolean): void {
+    if (state === 'restarted' || state === 'started' || (state === 'unchanged' && !stillPending))
+      this.running = wantSlow;
+  }
 }
 
 /** Restarts in the last hour before the helper waits between them: 0, 5, 10, 20, 40, then 60 minutes. */
@@ -165,9 +200,9 @@ export interface RepeatedError {
 }
 
 /** Lines kept apart; more than this and the rarest are dropped. */
-const MAX_KINDS = 50;
+export const MAX_KINDS = 50;
 /** Times kept per kind, enough to count a line logged every minute for a day. */
-const MAX_TIMES = 1500;
+export const MAX_TIMES = 1500;
 
 /**
  * Counts the problems the helper logs, grouped by their text with numbers
@@ -186,13 +221,18 @@ export class ErrorTally {
       .slice(0, 160);
   }
 
+  /** How many kinds of problem are kept. */
+  get kindCount(): number {
+    return this.kinds.size;
+  }
+
   /** Give it every log line; only problems are counted. */
   note(line: string): void {
     if (!PROBLEM.test(line)) return;
     const key = ErrorTally.key(line);
     let times = this.kinds.get(key);
     if (!times) {
-      if (this.kinds.size >= MAX_KINDS) this.dropRarest();
+      if (this.kinds.size >= MAX_KINDS) this.dropRarest(this.now() - DAY);
       times = [];
       this.kinds.set(key, times);
     }
@@ -200,12 +240,16 @@ export class ErrorTally {
     if (times.length > MAX_TIMES) times.shift();
   }
 
-  private dropRarest(): void {
+  /** Drop kinds with nothing in the last day; failing that, the one seen least. */
+  private dropRarest(cutoff: number): void {
+    for (const [k, t] of this.kinds) if (t.at(-1)! < cutoff) this.kinds.delete(k);
+    if (this.kinds.size < MAX_KINDS) return;
     let rarest: string | undefined;
     let fewest = Infinity;
     for (const [k, t] of this.kinds) {
-      if (t.length < fewest) {
-        fewest = t.length;
+      const recent = t.filter((at) => at >= cutoff).length;
+      if (recent < fewest) {
+        fewest = recent;
         rarest = k;
       }
     }

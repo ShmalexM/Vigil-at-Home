@@ -245,7 +245,7 @@ describe('checkHealth', () => {
             bundled: '0.1.0-alpha.6 (abc1234)',
             installedAt: Date.UTC(2026, 9, 6),
             updatePending: true,
-            lastFailure: { at: 5, reason: 'the password dialog was closed before the update ran' },
+            lastFailure: { at: 5, reason: 'the password dialog was closed before it ran' },
           };
         },
       }),
@@ -253,7 +253,7 @@ describe('checkHealth', () => {
     expect(reported).toEqual([null]);
     expect(h['helper']?.state).toBe('degraded');
     expect(h['helper']?.note).toMatch(
-      /^Out of date: running a build from .+, this app ships 0\.1\.0-alpha\.6 \(abc1234\); the last update failed: the password dialog was closed before the update ran$/,
+      /^Out of date: running a build from .+, this app ships 0\.1\.0-alpha\.6 \(abc1234\); the last update failed: the password dialog was closed before it ran$/,
     );
     expect(h['helper']?.helperVersion?.running).toBeNull();
 
