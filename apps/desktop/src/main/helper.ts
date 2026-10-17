@@ -318,7 +318,8 @@ export class HelperLink
    * included, so it stops blocking now. Always asks for the admin password
    * (a cancelled dialog throws a HelperCallError with code refused). With
    * `hold`, the password is asked for by the next dialog instead (a
-   * release's) or by approveHeld(); `onHeld` says when it is waiting.
+   * release's) or by approveHeld(); `onHeld` says when it is waiting, and
+   * the caller must then call approveHeld() or dropHeld().
    */
   async unblock(
     list: string,
@@ -329,11 +330,13 @@ export class HelperLink
     if (!client) throw new Error('The Vigil helper is not connected');
     const cmd = { kind: 'detection.list.unblock' as const, list, entry };
     try {
+      // A held unblock has no timer of its own: the caller settles it with
+      // approveHeld() or dropHeld(), and a closed connection refuses it. A
+      // timer started now would run while another dialog is open and could
+      // report a failure the held command later turns into a success.
+      if (opts.hold) return await client.hold<{ unblocked: boolean }>(cmd, opts.onHeld);
       return await withTimeout(
-        (signal) =>
-          opts.hold
-            ? client.hold<{ unblocked: boolean }>(cmd, opts.onHeld)
-            : client.call<{ unblocked: boolean }>(cmd, signal),
+        (signal) => client.call<{ unblocked: boolean }>(cmd, signal),
         RELEASE_TIMEOUT_MS,
       );
     } catch (err) {

@@ -286,19 +286,34 @@ class FakeExecutor implements ActionExecutor {
   }
 }
 
-/** The helper link: unblocks wait in `held` until approveHeld() or dropHeld(). */
+const refused = () => Object.assign(new Error('not approved'), { code: 'refused' });
+
+/**
+ * The helper link. A plain unblock runs `whileAsking` (the password dialog
+ * is open) and then says `answer`; a held one waits in `held` until
+ * approveHeld() (sent, then `answer`) or dropHeld(). `refuseAtOnce` fails
+ * a held unblock before it is held.
+ */
 class FakeHelper implements InForceHelper {
   state: HelperInForce = { journal: [], userBlocks: [] };
   readonly unblocks: { list: string; entry: string; hold: boolean }[] = [];
   private held: { yes: () => void; no: (e: Error) => void }[] = [];
+  answer: Error | 'yes' = 'yes';
+  refuseAtOnce: Error | undefined;
+  whileAsking: (() => Promise<void>) | undefined;
   approved = 0;
   dropped = 0;
   async inForce() {
     return this.state;
   }
-  unblock(list: string, entry: string, opts: { hold?: boolean; onHeld?: () => void } = {}) {
+  async unblock(list: string, entry: string, opts: { hold?: boolean; onHeld?: () => void } = {}) {
     this.unblocks.push({ list, entry, hold: !!opts.hold });
-    if (!opts.hold) return Promise.resolve({ unblocked: true });
+    if (!opts.hold) {
+      await this.whileAsking?.();
+      if (this.answer !== 'yes') throw this.answer;
+      return { unblocked: true };
+    }
+    if (this.refuseAtOnce) throw this.refuseAtOnce;
     return new Promise<{ unblocked: boolean }>((resolve, reject) => {
       this.held.push({ yes: () => resolve({ unblocked: true }), no: reject });
       opts.onHeld?.();
@@ -306,12 +321,14 @@ class FakeHelper implements InForceHelper {
   }
   async approveHeld() {
     this.approved++;
-    for (const h of this.held.splice(0)) h.yes();
+    for (const h of this.held.splice(0)) {
+      if (this.answer === 'yes') h.yes();
+      else h.no(this.answer);
+    }
   }
   dropHeld() {
     this.dropped++;
-    for (const h of this.held.splice(0))
-      h.no(Object.assign(new Error('not sent'), { code: 'refused' }));
+    for (const h of this.held.splice(0)) h.no(refused());
   }
 }
 
@@ -325,7 +342,6 @@ function setup() {
   core.detector = {
     userBlocks: () => [...list].map((entry) => ({ list: 'user_blocked_sha256', entry })),
     dropUserBlock: (_l: string, e: string) => list.delete(e),
-    restoreUserBlock: (_l: string, e: string) => void list.add(e),
     syncHelper: async () => {
       syncs++;
       return 'applied';
@@ -394,7 +410,7 @@ describe('releasing', () => {
     expect(syncs()).toBe(1);
   });
 
-  it('puts the block-list entry back when the user says no', async () => {
+  it('leaves the block list and Santa rule as they were when the user says no', async () => {
     const { executor, helper, inForce, list, syncs } = setup();
     executor.refuse.add('santa.rule.remove');
     const santa: Action = {
@@ -413,6 +429,71 @@ describe('releasing', () => {
     expect(helper.dropped).toBe(1);
     expect(list.has(PAYLOAD)).toBe(true);
     expect(syncs()).toBe(0);
+  });
+
+  it('puts the Santa rule back when the unblock fails after the password', async () => {
+    const { executor, helper, inForce, list, syncs } = setup();
+    helper.answer = Object.assign(new Error('not on your block list'), { code: 'not_found' });
+    const santa: Action = {
+      kind: 'santa.rule.set',
+      ruleType: 'binary',
+      identifier: PAYLOAD,
+      policy: 'block',
+    };
+    list.add(PAYLOAD);
+    helper.state = {
+      journal: [entry('j2', santa, NOW - DAY)],
+      userBlocks: [{ list: 'user_blocked_sha256', entry: PAYLOAD }],
+    };
+    const out = await inForce.release(`u:user_blocked_sha256:${PAYLOAD}`);
+    expect(out).toEqual({ ok: false, error: 'not on your block list' });
+    // Released, then blocked again: neither half stays.
+    expect(executor.ran).toEqual([
+      { kind: 'santa.rule.remove', ruleType: 'binary', identifier: PAYLOAD },
+      santa,
+    ]);
+    expect(list.has(PAYLOAD)).toBe(true);
+    expect(syncs()).toBe(0);
+  });
+
+  it('releases nothing when the unblock is refused before anything is asked', async () => {
+    const { executor, helper, inForce, list } = setup();
+    helper.refuseAtOnce = Object.assign(new Error('gone'), { code: 'not_found' });
+    const santa: Action = {
+      kind: 'santa.rule.set',
+      ruleType: 'binary',
+      identifier: PAYLOAD,
+      policy: 'block',
+    };
+    list.add(PAYLOAD);
+    helper.state = {
+      journal: [entry('j2', santa, NOW - DAY)],
+      userBlocks: [{ list: 'user_blocked_sha256', entry: PAYLOAD }],
+    };
+    expect((await inForce.release(`u:user_blocked_sha256:${PAYLOAD}`)).ok).toBe(false);
+    expect(executor.ran).toEqual([]);
+    expect(list.has(PAYLOAD)).toBe(true);
+  });
+
+  it('keeps the app’s list as it was while the dialog is open, and after a no', async () => {
+    const { helper, inForce, list, syncs, core } = setup();
+    list.add(PAYLOAD);
+    helper.state = {
+      journal: [],
+      userBlocks: [{ list: 'user_blocked_sha256', entry: PAYLOAD }],
+    };
+    helper.answer = refused();
+    // A sync while the dialog is open (a feed refresh) still sends the entry.
+    helper.whileAsking = async () => {
+      expect(core.detector!.userBlocks()).toEqual([
+        { list: 'user_blocked_sha256', entry: PAYLOAD },
+      ]);
+      await core.detector!.syncHelper?.();
+    };
+    const out = await inForce.release(`u:user_blocked_sha256:${PAYLOAD}`);
+    expect(out).toEqual({ ok: false, error: 'Not released: the password was not given.' });
+    expect(list.has(PAYLOAD)).toBe(true);
+    expect(syncs()).toBe(1);
   });
 
   it('takes a hash with no Santa rule off with the helper’s own password dialog', async () => {

@@ -511,10 +511,10 @@ export class Detector {
   }
 
   /**
-   * Take `entry` off one of the user's own block lists here. The helper is
-   * not told: In force takes it off there first, with the password, and only
-   * then syncs (`restoreUserBlock` puts it back if the user says no).
-   * False when it wasn't on the list.
+   * Take `entry` off one of the user's own block lists here. Only once the
+   * helper has taken it off (In force, with the password): dropped here
+   * first, the next sync would leave it to retire there for a week. False
+   * when it wasn't on the list.
    */
   dropUserBlock(list: string, entry: string): boolean {
     const lists = this.stores.lists;
@@ -526,11 +526,6 @@ export class Detector {
       { source: 'user', updatedAt: this.now() },
     );
     return true;
-  }
-
-  /** Put back an entry dropUserBlock took off. */
-  restoreUserBlock(list: string, entry: string): void {
-    this.stores.lists.add(list, entry.toLowerCase(), { source: 'user', updatedAt: this.now() });
   }
 
   /** The user's own block lists here, entry by entry. */

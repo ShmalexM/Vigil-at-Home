@@ -494,9 +494,11 @@ export class InForce {
   /**
    * Take a hash off the user's block list everywhere, with any Santa rule on
    * it, for one password: the helper's unblock is held while the Santa rule
-   * is released, and that release's dialog asks for both. The app's list
-   * changes first and is put back if the user says no, so the app never
-   * syncs the entry away (which would only retire it for a week) unasked.
+   * is released, and that release's dialog asks for both. Both happen or
+   * neither does: if the unblock fails after a Santa rule went, the rule is
+   * put back (a block needs no password). The app's own list follows only
+   * once the helper has taken the entry off, so no sync while the dialog is
+   * open (or after a crash) can drop it and leave it to retire unasked.
    */
   private async unblock(
     list: string,
@@ -510,10 +512,6 @@ export class InForce {
       };
     if (!helper.userBlocks.some((b) => b.list === list && b.entry.toLowerCase() === sha))
       return { ok: false, error: 'It is no longer on your block list.' };
-    const dropped = this.core.detector?.dropUserBlock(list, sha) ?? false;
-    const putBack = () => {
-      if (dropped) this.core.detector?.restoreUserBlock(list, sha);
-    };
     const santa = helper.journal.filter((e) => {
       const c = e.command as Action;
       return (
@@ -525,39 +523,65 @@ export class InForce {
       );
     });
     try {
-      if (!santa.length) {
-        await this.helper.unblock(list, sha);
-      } else {
-        let unblocking!: Promise<{ unblocked: boolean }>;
-        await new Promise<void>((held) => {
-          unblocking = this.helper.unblock(list, sha, { hold: true, onHeld: held });
-          unblocking.then(
-            () => held(),
-            () => held(),
-          );
-        });
-        let released: InForceReleaseResult = { ok: true };
-        for (const e of santa) {
-          released = await this.releaseEntry(e);
-          if (!released.ok) break;
-        }
-        if (released.ok) await this.helper.approveHeld();
-        else this.helper.dropHeld();
-        await unblocking.catch((err: unknown) => {
-          if (released.ok) throw err;
-        });
-        if (!released.ok) {
-          putBack();
-          return released;
-        }
+      if (!santa.length) await this.helper.unblock(list, sha);
+      else {
+        const failed = await this.unblockWithSanta(list, sha, santa);
+        if (failed) return failed;
       }
     } catch (err) {
-      putBack();
       return { ok: false, error: refusedWords(err) };
     }
-    // The helper no longer has it, so this sync drops nothing there.
-    if (dropped) void this.core.detector?.syncHelper?.();
+    if (this.core.detector?.dropUserBlock(list, sha)) void this.core.detector.syncHelper?.();
     return { ok: true };
+  }
+
+  /** The held unblock and the Santa releases: undefined when all went, else why not. Throws if the unblock failed. */
+  private async unblockWithSanta(
+    list: string,
+    sha: string,
+    santa: JournalEntry[],
+  ): Promise<InForceReleaseResult | undefined> {
+    const early: { err?: unknown } = {};
+    let unblocking!: Promise<{ unblocked: boolean }>;
+    await new Promise<void>((ready) => {
+      unblocking = this.helper.unblock(list, sha, { hold: true, onHeld: ready });
+      unblocking.then(
+        () => ready(),
+        (err: unknown) => {
+          early.err ??= err;
+          ready();
+        },
+      );
+    });
+    // Refused before anything was asked (it went meanwhile): release nothing.
+    if (early.err !== undefined) throw early.err;
+    const released: Action[] = [];
+    for (const e of santa) {
+      const out = await this.releaseEntry(e);
+      if (!out.ok) {
+        this.helper.dropHeld();
+        await unblocking.catch(() => undefined);
+        await this.reblock(released);
+        return out;
+      }
+      released.push(e.command as Action);
+    }
+    await this.helper.approveHeld();
+    try {
+      await unblocking;
+    } catch (err) {
+      await this.reblock(released);
+      throw err;
+    }
+    return undefined;
+  }
+
+  /** Put back Santa rules released for an unblock that didn't go through. */
+  private async reblock(actions: readonly Action[]): Promise<void> {
+    for (const action of actions)
+      await this.core.alerts.run('user', action, {
+        reason: 'Blocked again: taking it off your block list did not go through',
+      });
   }
 
   /**
