@@ -4,7 +4,7 @@ import { useToast } from './Toasts';
 import { Button } from './ui';
 
 const STAYS =
-  'They move to History as expected. Nothing is released, and rules stay as they are. Any with something blocked, an action taken or a suggestion waiting stay open.';
+  'They move to History as expected. Nothing is released, and rules stay as they are. High and critical alerts, and any with something blocked, an action taken or a suggestion waiting, stay open for you.';
 
 /**
  * A bulk close behind a confirm. Only alerts last seen before the confirm

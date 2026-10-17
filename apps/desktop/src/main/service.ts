@@ -48,8 +48,6 @@ import {
   EXCEPTION_WINDOW_MS,
   normalize,
   OLD_AGENT_ALERT_MS,
-  pidAlive,
-  PROCESS_PROPOSAL_TTL_MS,
   QUIET_SWEEP_MS,
 } from './quiet.js';
 import { computeStatus } from './status.js';
@@ -198,7 +196,7 @@ export class VigilCore {
       'quiet-sweep',
       QUIET_SWEEP_MS,
       async () => {
-        this.expireProposals();
+        await this.expireProposals();
         await this.ageOut();
       },
       true,
@@ -450,21 +448,19 @@ export class VigilCore {
     }
   }
 
-  /** Whether a process still runs. Overridable for tests. */
-  pidAlive: (pid: number) => boolean = pidAlive;
-
-  /** Expire rule suggestions to stop processes that exited or are hours old. */
-  expireProposals(): number {
-    return this.alerts.expireProcessProposals(this.pidAlive, PROCESS_PROPOSAL_TTL_MS);
+  /** Expire rule suggestions to stop processes that have exited (pid and start time). */
+  expireProposals(): Promise<number> {
+    return this.alerts.expireProcessProposals();
   }
 
   /**
    * Whether a bulk close may take this alert: what clearNoticed asks
-   * (nothing held, no action taken, no suggestion waiting) except that it
-   * may need a decision, and last seen by `upTo`.
+   * (nothing held, no action taken, no suggestion waiting, and nothing that
+   * needs a decision, so never a high or critical one), last seen by `upTo`.
    */
   private bulkSafe(a: Alert, upTo: number): boolean {
     return (
+      !needsDecision(a) &&
       untouched(a) &&
       !this.store.hasPendingProposal(a.id) &&
       (a.repeats?.lastAt ?? a.createdAt) <= upTo
@@ -527,7 +523,7 @@ export class VigilCore {
    * Only alerts last seen by `upTo` (when the user opened the confirm) go.
    */
   async closeRuleAlerts(ruleId: string, upTo: number): Promise<number> {
-    this.expireProposals();
+    await this.expireProposals();
     return this.closeQuietly(
       this.ruleAlerts(ruleId, upTo).map((a) => a.id),
       upTo,
@@ -537,7 +533,7 @@ export class VigilCore {
 
   /** "Close my agents' alerts older than 7 days", with closeRuleAlerts' guards. */
   async closeOldAgentAlerts(upTo: number): Promise<number> {
-    this.expireProposals();
+    await this.expireProposals();
     const before = upTo - OLD_AGENT_ALERT_MS;
     return this.closeQuietly(
       this.oldAgentAlerts(upTo).map((a) => a.id),

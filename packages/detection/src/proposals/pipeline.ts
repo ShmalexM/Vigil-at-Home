@@ -432,9 +432,9 @@ export class RulePipeline {
   /**
    * An exception Vigil suggests from the user's own answers (the same
    * "That was me" again and again), not from an AI. Like suggestDemotion it
-   * is off the AI tool surface and its budget, so it may name a rule an AI
-   * must leave alone (an agent rule); every other check submitTuning makes
-   * still holds, and only the user's approval applies it. Skipped while
+   * is off the AI tool surface and its budget. Every check submitTuning makes
+   * still holds, including what an AI may not change (agent, blocking and
+   * blocked-list rules), and only the user's approval applies it. Skipped while
    * another exception to the rule waits, or for 30 days after the user said
    * no to the same exclusion. A waiting suggestion to turn the whole rule
    * down doesn't stop it: this narrower one is offered beside it.
@@ -464,7 +464,7 @@ export class RulePipeline {
     provider: string,
     by: string | undefined,
     subject: ProposalSubject | undefined,
-    fromUser = false,
+    offBudget = false,
   ): SubmitResult {
     const parsedInput = ProposeTuningInput.safeParse(raw);
     if (!parsedInput.success)
@@ -472,7 +472,7 @@ export class RulePipeline {
     const input = parsedInput.data;
     const base = this.engine.getRule(input.ruleId);
     if (!base) return { ok: false, errors: [`No rule called ${input.ruleId}.`], warnings: [] };
-    const outOfScope = fromUser ? undefined : aiMayNotChange(base, this.engine.modeOf(base));
+    const outOfScope = aiMayNotChange(base, this.engine.modeOf(base));
     if (outOfScope) return { ok: false, errors: [outOfScope], warnings: [], final: true };
     if (exclusionHidesAgent(input.addExclusion))
       return { ok: false, errors: [AGENT_EXCLUSION], warnings: [] };
@@ -491,7 +491,7 @@ export class RulePipeline {
       subject,
     );
     if (same) return same;
-    const budget = fromUser ? undefined : this.budgetProblem(provider);
+    const budget = offBudget ? undefined : this.budgetProblem(provider);
     if (budget) return { ok: false, errors: [budget], warnings: [], final: true };
     const tuned: DetectionRule = {
       ...base,
