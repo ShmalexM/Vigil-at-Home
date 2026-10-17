@@ -73,7 +73,8 @@ const INSTRUCTIONS =
   'How should Vigil treat the event with key %KEY%?';
 
 export function createJevClient(options: JevOptions) {
-  const baseUrl = (options.baseUrl ?? JEV_DEFAULT_BASE_URL).replace(/\/+$/, '');
+  let baseUrl = options.baseUrl ?? JEV_DEFAULT_BASE_URL;
+  while (baseUrl.endsWith('/')) baseUrl = baseUrl.slice(0, -1);
   const model = options.model ?? JEV_DEFAULT_MODEL;
   const doFetch = options.fetch ?? fetch;
 

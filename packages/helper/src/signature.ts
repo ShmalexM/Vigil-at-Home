@@ -42,6 +42,46 @@ function once(output: string, line: RegExp): number {
   return output.match(line)?.length ?? 0;
 }
 
+/** Line breaks other than LF: `^…$/m` treats them as line ends, so they could plant lines. */
+const ODD_BREAKS = /[\r\u2028\u2029]/;
+/** Characters a signing identifier may have before it goes into a requirement. */
+const SAFE_IDENTIFIER = /^[A-Za-z0-9._-]{1,255}$/;
+const DEVELOPER_ID =
+  'certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists';
+const APP_STORE = 'certificate leaf[field.1.2.840.113635.100.6.1.9] exists';
+
+/**
+ * What a lookup gives when a class can't be confirmed: signed, but by nobody
+ * it can name. Never undefined, which rules read as least suspicious (`neq
+ * 'apple'` is false for a missing field), and never `invalid`, which would
+ * alert on every app that fails a check for harmless reasons (a
+ * self-updating bundle, a timeout).
+ */
+const unverified = (): SignatureInfo => ({ signing: 'unknown' });
+/** Output a real signature never produces (planted or repeated lines): a tampered name. */
+const tampered = (): SignatureInfo => ({ signing: 'invalid' });
+
+/**
+ * The requirement a signature class must pass with `codesign --verify`
+ * before it counts: what `codesign -dv` prints is display text, so it never
+ * grants a class by itself. Undefined when there is nothing to check
+ * (unsigned, ad hoc, no team) and null when it can't be written safely.
+ */
+function requirementFor(info: SignatureInfo, identifier: string): string | undefined | null {
+  if (info.signing === 'unsigned' || info.signing === 'adhoc') return undefined;
+  if (info.signing !== 'apple' && !info.teamId)
+    return info.signing === 'unknown' ? undefined : null;
+  if (!SAFE_IDENTIFIER.test(identifier)) return null;
+  const id = `identifier "${identifier}"`;
+  if (info.signing === 'apple') return `anchor apple and ${id}`;
+  const team = `certificate leaf[subject.OU] = "${info.teamId}"`;
+  if (info.signing === 'developer_id')
+    return `anchor apple generic and ${id} and ${DEVELOPER_ID} and ${team}`;
+  // Apple re-signs App Store apps with its own leaf: its OU is not the team.
+  if (info.signing === 'app_store') return `anchor apple generic and ${id} and ${APP_STORE}`;
+  return `anchor apple generic and ${id} and ${team}`;
+}
+
 export function signatureLookup(
   sys: System,
   now: () => number = Date.now,
@@ -52,13 +92,31 @@ export function signatureLookup(
     const run = chain.then(async () => {
       const t = now();
       while (recent.length > 0 && t - recent[0]! >= 60_000) recent.shift();
-      // A line break in the path could plant lines in codesign's output
-      // (Authority=, Platform identifier=) ahead of the real ones.
-      if (recent.length >= PER_MINUTE || !path.startsWith('/') || /[\r\n]/.test(path))
-        return undefined;
+      // codesign echoes the path in its output, so a path with a line break
+      // could plant lines (Platform identifier=, Authority=) ahead of the real ones.
+      if (recent.length >= PER_MINUTE || !path.startsWith('/')) return undefined;
+      // No real program path holds a line break: treat it as tampering.
+      if (/[\n\r\u2028\u2029]/.test(path)) return tampered();
       recent.push(t);
       const r = await sys.run('codesign', ['-dv', path], { timeoutMs: 10_000 });
-      return parseCodesign(`${r.stderr}\n${r.stdout}`);
+      const output = `${r.stderr}\n${r.stdout}`;
+      if (/code object is not signed at all/.test(output)) return { signing: 'unsigned' as const };
+      if (ODD_BREAKS.test(output)) return tampered();
+      // A failed codesign says nothing about a missing file; about a signature
+      // it could read (a malformed one), it is invalid.
+      if (r.code !== 0) return /^Identifier=/m.test(output) ? tampered() : undefined;
+      const info = parseCodesign(output);
+      if (!info) return /^Identifier=/m.test(output) ? tampered() : undefined;
+      const identifier = /^Identifier=(.+)$/m.exec(output)?.[1]?.trim() ?? '';
+      const req = requirementFor(info, identifier);
+      if (req === null) return unverified();
+      if (req !== undefined) {
+        const v = await sys
+          .run('codesign', ['--verify', `-R=${req}`, path], { timeoutMs: 10_000 })
+          .catch(() => undefined);
+        if (v?.code !== 0) return unverified();
+      }
+      return info;
     });
     chain = run.catch(() => undefined);
     return run;
@@ -70,9 +128,6 @@ export type RunTool = (
   bin: 'codesign' | 'ps',
   args: string[],
 ) => Promise<{ code: number | null; stdout: string; stderr: string }>;
-
-/** Characters a signing identifier may have before it goes into a requirement. */
-const IDENTIFIER = /^[A-Za-z0-9._-]{1,255}$/;
 
 /**
  * Reads the code signature of the program a running process runs, for an
@@ -118,10 +173,11 @@ export function processSignatureLookup(
         const shown = await run('codesign', ['-dvv', id]);
         if (shown.code !== 0) return undefined;
         const output = `${shown.stderr}\n${shown.stdout}`;
+        if (ODD_BREAKS.test(output)) return undefined;
         const info = parseCodesign(output);
         const team = info?.teamId;
         const identifier = info?.signingId?.slice(`${team}:`.length);
-        if (!info || !team || !identifier || !IDENTIFIER.test(identifier)) return undefined;
+        if (!info || !team || !identifier || !SAFE_IDENTIFIER.test(identifier)) return undefined;
         const req = `anchor apple generic and identifier "${identifier}" and certificate leaf[subject.OU] = "${team}"`;
         const verified = await run('codesign', ['--verify', `-R=${req}`, id]);
         if (verified.code !== 0) return undefined;

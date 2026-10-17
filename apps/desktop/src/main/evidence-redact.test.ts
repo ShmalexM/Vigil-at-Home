@@ -321,8 +321,9 @@ describe("the shared redaction's secret scan in copied evidence", () => {
       'openssl enc -k hunter2 -in a',
       '<password>hunter2</password><user>bob</user>',
       'echo eyJwYXNzd29yZCI6Imh1bnRlcjIifQ==',
-      'use ASIAABCDEFGHIJKLMNOP',
-      'use=whsec_aaaaaaaaaaaaaaaaaaaaaaaa',
+      // Built at run time so secret scanning doesn't flag the fixtures.
+      'use ASIA' + 'ABCDEFGHIJKLMNOP',
+      'use=whsec_' + 'a'.repeat(24),
       'use=hf_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
       'https://hooks.slack.com/services/T000/B000/XXXXXXXXXXXX',
       'curl https://b.example/k?X-Amz-Signature=' + '0123456789abcdef'.repeat(4) + '&x=1',
