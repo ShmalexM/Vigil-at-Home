@@ -292,6 +292,8 @@ export class VigilCore {
     // detector puts its side back. Otherwise ask for anything still held.
     if (alert.decision) await this.executor.approveHeld?.();
     else this.executor.dropHeld?.();
+    // A plain "That was me" may be the one that earns a "Don't show this again".
+    if (alert.decision?.verdict === 'expected' && !input.remember) this.offerException(alertId);
     if (learning) {
       const learned = await learning;
       if (learned.santa) {
@@ -303,8 +305,99 @@ export class VigilCore {
       if (learned.suggested && learned.suggestDemotion)
         console.info(`[detection] suggested: ${learned.suggestDemotion.message}`);
     }
-    if (alert.decision?.verdict === 'expected' && !input.remember) this.offerException(alertId);
     return this.store.getAlert(alertId) ?? alert;
+  }
+
+  /**
+   * Open alerts that a rule's exclusion, or the user's exception, now lets
+   * off: raised before that exclusion existed (an update made the rule
+   * quieter, or the user excluded the same thing from another alert). Only
+   * alerts that can be closed without asking count (untouched: nothing
+   * held back, no action taken or suggested, and no rule suggestion waiting
+   * in the proposals table), and only when the rule excuses
+   * every event the alert points to.
+   */
+  staleAlerts(): string[] {
+    const engine = this.detector?.engine;
+    if (!engine) return [];
+    // The page asks on every change; recount only when an open alert changed,
+    // or now and then for a rule or exclusion edited meanwhile.
+    const mark = this.store.openAlertsMark();
+    const now = this.now();
+    const c = this.staleCache;
+    if (c && c.mark === mark && now - c.at < STALE_TTL_MS) return c.ids;
+    const out: string[] = [];
+    for (const a of this.store.listAlerts({ status: 'open', limit: STALE_SCAN_LIMIT })) {
+      if (!untouched(a) || this.store.hasPendingProposal(a.id)) continue;
+      const events = this.store.getEvents(a.eventIds);
+      if (events.length === 0) continue;
+      if (events.every((e) => engine.excuses(a.ruleId, e))) out.push(a.id);
+    }
+    this.staleCache = { mark, at: now, ids: out };
+    return out;
+  }
+
+  private staleCache: { mark: string; at: number; ids: string[] } | undefined;
+
+  /**
+   * Close the given alerts that {@link staleAlerts} still names. Like
+   * clearNoticed it teaches the rules nothing: the exclusion already says it.
+   */
+  async clearStale(ids: readonly string[]): Promise<number> {
+    this.staleCache = undefined;
+    const stale = new Set(this.staleAlerts());
+    let cleared = 0;
+    for (const id of new Set(ids)) {
+      if (!stale.has(id)) continue;
+      await this.alerts.decide(id, {
+        verdict: 'expected',
+        release: false,
+        note: 'Its rule no longer flags this',
+      });
+      cleared++;
+    }
+    return cleared;
+  }
+
+  /**
+   * "Those were me" on the Noticed list. Only alerts that are still Noticed
+   * (shared/attention.ts) are cleared, so this can never release a block or
+   * dismiss something that asked for a decision. It doesn't teach the rules
+   * either: one tap on a pile shouldn't quietly turn a rule off. With
+   * `upTo`, an alert last seen after it is left too, checked again just
+   * before each one is cleared, so a repeat folded in mid-clear keeps it.
+   */
+  async clearNoticed(ids: readonly string[], upTo?: number): Promise<number> {
+    let cleared = 0;
+    for (const id of new Set(ids)) {
+      const alert = this.store.getAlert(id);
+      // One with an action taken or a suggestion waiting (the AI's or a rule's) stays
+      // for a look of its own, so a bulk tap never quietly expires a suggestion.
+      if (!alert || !isNoticed(alert) || !untouched(alert)) continue;
+      if (this.store.hasPendingProposal(id)) continue;
+      if (upTo !== undefined && (alert.repeats?.lastAt ?? alert.createdAt) > upTo) continue;
+      await this.alerts.decide(id, {
+        verdict: 'expected',
+        release: false,
+        note: 'Cleared from Noticed',
+      });
+      cleared++;
+    }
+    return cleared;
+  }
+
+  /**
+   * "Those were me" for every Noticed alert, not only the newest the lists
+   * loaded. Only alerts last seen by `at`, when the user opened the confirm,
+   * are cleared, so anything that turned up while they read it stays, a
+   * repeat folded into an older alert included.
+   */
+  async clearNoticedUpTo(at: number): Promise<number> {
+    const ids = this.store
+      .listAlerts({ status: 'open', limit: -1 })
+      .filter((a) => isNoticed(a) && untouched(a) && (a.repeats?.lastAt ?? a.createdAt) <= at)
+      .map((a) => a.id);
+    return this.clearNoticed(ids, at);
   }
 
   /**
@@ -499,98 +592,6 @@ export class VigilCore {
       moved++;
     }
     return moved;
-  }
-
-  /**
-   * Open alerts that a rule's exclusion, or the user's exception, now lets
-   * off: raised before that exclusion existed (an update made the rule
-   * quieter, or the user excluded the same thing from another alert). Only
-   * alerts that can be closed without asking count (untouched: nothing
-   * held back, no action taken or suggested, and no rule suggestion waiting
-   * in the proposals table), and only when the rule excuses
-   * every event the alert points to.
-   */
-  staleAlerts(): string[] {
-    const engine = this.detector?.engine;
-    if (!engine) return [];
-    // The page asks on every change; recount only when an open alert changed,
-    // or now and then for a rule or exclusion edited meanwhile.
-    const mark = this.store.openAlertsMark();
-    const now = this.now();
-    const c = this.staleCache;
-    if (c && c.mark === mark && now - c.at < STALE_TTL_MS) return c.ids;
-    const out: string[] = [];
-    for (const a of this.store.listAlerts({ status: 'open', limit: STALE_SCAN_LIMIT })) {
-      if (!untouched(a) || this.store.hasPendingProposal(a.id)) continue;
-      const events = this.store.getEvents(a.eventIds);
-      if (events.length === 0) continue;
-      if (events.every((e) => engine.excuses(a.ruleId, e))) out.push(a.id);
-    }
-    this.staleCache = { mark, at: now, ids: out };
-    return out;
-  }
-
-  private staleCache: { mark: string; at: number; ids: string[] } | undefined;
-
-  /**
-   * Close the given alerts that {@link staleAlerts} still names. Like
-   * clearNoticed it teaches the rules nothing: the exclusion already says it.
-   */
-  async clearStale(ids: readonly string[]): Promise<number> {
-    this.staleCache = undefined;
-    const stale = new Set(this.staleAlerts());
-    let cleared = 0;
-    for (const id of new Set(ids)) {
-      if (!stale.has(id)) continue;
-      await this.alerts.decide(id, {
-        verdict: 'expected',
-        release: false,
-        note: 'Its rule no longer flags this',
-      });
-      cleared++;
-    }
-    return cleared;
-  }
-
-  /**
-   * "Those were me" on the Noticed list. Only alerts that are still Noticed
-   * (shared/attention.ts) are cleared, so this can never release a block or
-   * dismiss something that asked for a decision. It doesn't teach the rules
-   * either: one tap on a pile shouldn't quietly turn a rule off. With
-   * `upTo`, an alert last seen after it is left too, checked again just
-   * before each one is cleared, so a repeat folded in mid-clear keeps it.
-   */
-  async clearNoticed(ids: readonly string[], upTo?: number): Promise<number> {
-    let cleared = 0;
-    for (const id of new Set(ids)) {
-      const alert = this.store.getAlert(id);
-      // One with an action taken or a suggestion waiting (the AI's or a rule's) stays
-      // for a look of its own, so a bulk tap never quietly expires a suggestion.
-      if (!alert || !isNoticed(alert) || !untouched(alert)) continue;
-      if (this.store.hasPendingProposal(id)) continue;
-      if (upTo !== undefined && (alert.repeats?.lastAt ?? alert.createdAt) > upTo) continue;
-      await this.alerts.decide(id, {
-        verdict: 'expected',
-        release: false,
-        note: 'Cleared from Noticed',
-      });
-      cleared++;
-    }
-    return cleared;
-  }
-
-  /**
-   * "Those were me" for every Noticed alert, not only the newest the lists
-   * loaded. Only alerts last seen by `at`, when the user opened the confirm,
-   * are cleared, so anything that turned up while they read it stays, a
-   * repeat folded into an older alert included.
-   */
-  async clearNoticedUpTo(at: number): Promise<number> {
-    const ids = this.store
-      .listAlerts({ status: 'open', limit: -1 })
-      .filter((a) => isNoticed(a) && untouched(a) && (a.repeats?.lastAt ?? a.createdAt) <= at)
-      .map((a) => a.id);
-    return this.clearNoticed(ids, at);
   }
 
   private statsCache: { at: number; stats: EventStats } | undefined;
