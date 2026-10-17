@@ -263,7 +263,7 @@ const GATEKEEPER_RE = String.raw`(spctl\s+--(master-disable|global-disable|disab
 // resetting All, or an app whose id names vigil/santa, is not.
 const TCC_RE = String.raw`tccutil\s+reset\b(?!\s+["']?\w+["']?\s+["']?(?![\w.-]*(vigil|santa))[\w-]+\.[\w.-]+["']?(\s|$|[;&|)]))`;
 // turning the firewall off, or unloading Santa's system extension.
-const FIREWALL_RE = String.raw`(socketfilterfw\b[^|;&]{0,64}--setglobalstate\s+off\b|--unload-system-extension\b|systemextensionsctl\s+uninstall\b[^|;&]{0,128}(santa|vigil))`;
+const FIREWALL_RE = String.raw`socketfilterfw\b[^|;&]{0,64}--setglobalstate\s+off\b|--unload-system-extension|systemextensionsctl\s+uninstall[^|;&]{0,128}(santa|vigil)`;
 // telling Vigil or Santa to quit over AppleScript.
 const QUIT_RE = String.raw`osascript\b[^|;&]{0,160}(\bquit\s+(app|application)\b[^|;&]{0,64}(vigil|santa)|(vigil|santa)[^|;&]{0,32}\bto\s+quit\b)`;
 
@@ -277,8 +277,10 @@ const QUIT_RE = String.raw`osascript\b[^|;&]{0,160}(\bquit\s+(app|application)\b
  */
 export const TAMPER_RES_NOCASE = [
   [KILL_RE, LAUNCHCTL_RE].join('|'),
-  [TCC_RE, FIREWALL_RE].join('|'),
-  [QUIT_RE, GATEKEEPER_RE, SANTACTL_RE].join('|'),
+  // tccutil first and with no repeat counts beside it: a copy in a rule of
+  // your own is refused for its lookahead (linear.test.ts).
+  [TCC_RE, GATEKEEPER_RE, SANTACTL_RE].join('|'),
+  [QUIT_RE, FIREWALL_RE].join('|'),
   // editing or deleting Vigil's, Santa's or osquery's own files: the verb or
   // redirect and a path to them on one line, at most 160 characters apart
   // (which also keeps the gap linear). Prose in a heredoc, a note or an

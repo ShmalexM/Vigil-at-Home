@@ -314,23 +314,33 @@ export function installedSelf(platform: Platform = 'darwin'): string[] {
 
 /**
  * The operating system's own programs that Vigil, its installer and its
- * password dialogs run, which no block by hash may name: on macOS all of
- * /bin and /sbin (the shells and core tools, about 90 files) and the tools
- * in /usr/bin and /usr/sbin that the helper, install.sh and the dialogs
- * start; on Linux the shells and the same kind of tools. Not all of /usr/bin:
- * that is over a thousand programs to hash at every start, and the app's
- * safety floor already keeps rules off every system folder by path
- * (PLATFORM_PATH_GLOBS in @vigil/detection). On 2026-10-10 a block by hash
- * on /bin/sh stopped every shell on the Mac, the password dialog Vigil
- * needed to undo it included.
+ * password dialogs run, which no block by hash may name: the shells and core
+ * tools in /bin and /sbin, and the tools in /usr/bin and /usr/sbin that the
+ * helper, install.sh and the dialogs start. Named one by one, never as a
+ * folder: on Linux /bin and /sbin are links to /usr/bin and /usr/sbin, which
+ * hold thousands of programs to hash at every start. The app's safety floor
+ * already keeps rules off every system folder by path (PLATFORM_PATH_GLOBS in
+ * @vigil/detection). On 2026-10-10 a block by hash on /bin/sh stopped every
+ * shell on the Mac, the password dialog Vigil needed to undo it included.
  */
+const MAC_BIN = [
+  ...['sh', 'bash', 'zsh', 'dash', 'ksh', 'csh', 'tcsh', 'cat', 'chmod', 'cp', 'date'],
+  ...['echo', 'expr', 'kill', 'launchctl', 'ln', 'ls', 'mkdir', 'mv', 'ps', 'pwd'],
+  ...['realpath', 'rm', 'rmdir', 'sleep', 'test', 'unlink'],
+].map((t) => `/bin/${t}`);
 const MAC_TOOLS = [
   ...['env', 'osascript', 'sudo', 'security', 'codesign', 'plutil', 'chflags', 'id'],
   ...['install', 'mktemp', 'xattr', 'find', 'readlink', 'touch', 'sort', 'tail'],
   ...['uname', 'dirname', 'shasum'],
 ].map((t) => `/usr/bin/${t}`);
 export const PLATFORM_PROGRAM_ROOTS: Record<Platform, readonly string[]> = {
-  darwin: ['/bin', '/sbin', ...MAC_TOOLS, '/usr/sbin/chown', '/usr/sbin/lsof'],
+  darwin: [
+    ...MAC_BIN,
+    ...['launchd', 'pfctl', 'mount', 'umount'].map((t) => `/sbin/${t}`),
+    ...MAC_TOOLS,
+    '/usr/sbin/chown',
+    '/usr/sbin/lsof',
+  ],
   linux: [
     ...['sh', 'bash', 'dash', 'zsh', 'ksh', 'mksh'].flatMap((s) => [`/bin/${s}`, `/usr/bin/${s}`]),
     ...['env', 'sudo', 'pkexec', 'systemctl', 'install', 'mktemp', 'find', 'nft'].map(
