@@ -230,7 +230,10 @@ describe('blocking rules in the helper', () => {
     sys.processes.set(6000, { path: '/bin/sh', started: 'T' });
     // Santa's log names no signer.
     const shell: SensorEvent = {
-      ...exec(6000, SH, '/bin/sh'),
+      id: 'e-sh',
+      ts: Date.now(),
+      source: 'santa',
+      kind: 'process.exec',
       process: { pid: 6000, ppid: 77, path: '/bin/sh', sha256: SH, signing: 'unknown' },
     };
     expect(await fast.check(shell)).toEqual([]);

@@ -25,11 +25,11 @@ VH_GROUP=wheel
 
 # Stop Vigil's osquery job and put back any osquery settings from before Vigil.
 # Older helpers don't have this command, so a failure here doesn't stop the removal.
-"$TOOLS/vigil-helper" osquery-remove 2>/dev/null || true
+vh_helper osquery-remove 2>/dev/null || true
 launchctl bootout "system/$LABEL" 2>/dev/null || true
 # Remove the pin and its key once the helper has stopped. Older helpers lack
 # the command; the lines below cover them.
-"$TOOLS/vigil-helper" pin-remove 2>/dev/null || true
+vh_helper pin-remove 2>/dev/null || true
 rm -f "/Library/LaunchDaemons/$LABEL.plist"
 rm -f "$TOOLS/vigil-helper"
 # Every version and DEST/current, and what older installs left beside them.

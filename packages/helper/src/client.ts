@@ -37,6 +37,49 @@ export type Approver = (
 ) => Promise<boolean>;
 
 /**
+ * What the user reads when macOS's password dialog can't run because Santa
+ * blocks /bin/sh (shellBlocked). Every such dialog runs its command through
+ * /bin/sh, so nothing that needs the password works until the block is gone.
+ */
+export const SHELL_BLOCKED =
+  'Santa is blocking /bin/sh, the macOS shell, so the macOS password dialog can’t run. ' +
+  'Install Vigil’s helper again from Terminal with the install command Vigil shows ' +
+  '(Terminal’s own shell still runs); the new helper lifts the block, and then this works again.';
+
+/** Thrown by an approver when the dialog can't run while /bin/sh is blocked. */
+export class ShellBlockedError extends Error {
+  constructor() {
+    super(SHELL_BLOCKED);
+  }
+}
+
+/**
+ * macOS: whether /bin/sh can't start, which happens when Santa blocks it by
+ * hash (on 2026-10-10 a "malicious" verdict did). AppleScript's `do shell
+ * script`, behind every password dialog Vigil shows, runs /bin/sh, so the
+ * dialog would fail with no useful word. Santa refuses the exec itself
+ * (EPERM); anything else, a timeout included, is not a block.
+ */
+export function shellBlocked(platform: Platform = hostPlatform()): Promise<boolean> {
+  if (platform !== 'darwin') return Promise.resolve(false);
+  return new Promise((resolve) => {
+    try {
+      execFile('/bin/sh', ['-c', ':'], { env: ADMIN_ENV, timeout: 5_000 }, (err) =>
+        resolve(isExecDenied(err)),
+      );
+    } catch (err) {
+      resolve(isExecDenied(err));
+    }
+  });
+}
+
+/** Whether an exec failed because something refused to let the program start. */
+export function isExecDenied(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === 'EPERM' || code === 'EACCES';
+}
+
+/**
  * How long a password dialog stays open: a little under the helper's own
  * wait for the answer (APPROVAL_TTL_MS), since a password typed after that
  * would be refused anyway, and well under the app's wait for a release.
@@ -88,15 +131,22 @@ function runDialog(
   });
 }
 
-export function osascriptApprover(helperExecutable = defaultPaths().helperExecutable): Approver {
-  return (nonce, prompt, also = [], signal) =>
-    runDialog(
+export function osascriptApprover(
+  helperExecutable = defaultPaths().helperExecutable,
+  blocked: () => Promise<boolean> = () => shellBlocked('darwin'),
+): Approver {
+  return async (nonce, prompt, also = [], signal) => {
+    const yes = await runDialog(
       '/usr/bin/osascript',
       ['-e', approvalAppleScript(helperExecutable, [nonce, ...also], prompt)],
       // The approve command runs as root; give it none of the session's environment.
       ADMIN_ENV,
       signal,
     );
+    // `do shell script` runs /bin/sh: with that blocked, a no means "couldn't", not "no".
+    if (!yes && !signal?.aborted && (await blocked())) throw new ShellBlockedError();
+    return yes;
+  };
 }
 
 /**
@@ -196,11 +246,12 @@ export class HelperClient {
         waiting.map((h) => h.nonce),
         signal,
       );
-      if (!approved) {
+      if (approved !== true) {
         // A "no" covers the held commands it asked about too: never ask twice.
+        const err = new HelperCallError(approved === false ? 'not approved' : approved, 'refused');
         this.held = this.held.filter((h) => !waiting.includes(h));
-        for (const h of waiting) h.settle(new HelperCallError('not approved', 'refused'));
-        throw new HelperCallError('not approved', 'refused');
+        for (const h of waiting) h.settle(err);
+        throw err;
       }
       for (const h of waiting) h.approved = true;
       resp = await this.send(command, resp.nonce);
@@ -243,7 +294,7 @@ export class HelperClient {
     const held = this.held;
     this.held = [];
     const waiting = held.filter((h) => !h.approved);
-    let approved = true;
+    let approved: boolean | string = true;
     if (waiting.length) {
       const [first, ...rest] = waiting;
       approved = await this.ask(
@@ -253,7 +304,8 @@ export class HelperClient {
       );
     }
     for (const h of held) {
-      if (!h.approved && !approved) h.settle(new HelperCallError('not approved', 'refused'));
+      if (!h.approved && approved !== true)
+        h.settle(new HelperCallError(approved === false ? 'not approved' : approved, 'refused'));
       else h.settle(await this.send(h.command, h.nonce));
     }
   }
@@ -261,16 +313,20 @@ export class HelperClient {
   /**
    * Shows the password dialog. When `signal` aborts (the caller stopped
    * waiting), the dialog closes and the answer is no, even a yes that
-   * arrives after.
+   * arrives after. A dialog that couldn't open for a reason the user can fix
+   * (ShellBlockedError) answers with that reason's words instead.
    */
   private async ask(
     nonce: string,
     prompt: string,
     also: string[],
     signal?: AbortSignal,
-  ): Promise<boolean> {
+  ): Promise<boolean | string> {
     if (signal?.aborted) return false;
-    const yes = await this.approver(nonce, prompt, also, signal).catch(() => false);
+    const yes = await this.approver(nonce, prompt, also, signal).catch((err: unknown) =>
+      err instanceof ShellBlockedError ? err.message : false,
+    );
+    if (typeof yes === 'string') return yes;
     return yes && !signal?.aborted;
   }
 

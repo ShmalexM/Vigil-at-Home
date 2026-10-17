@@ -19,6 +19,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { fileId, insideInstalledRoot, looksLikeAppImage } from '@vigil/core/self';
+import { SHELL_BLOCKED, shellBlocked } from '@vigil/helper/client';
 import type { HelperInstallResult } from '../shared/ipc.js';
 
 const hasHelper = (dir: string) =>
@@ -306,32 +307,37 @@ const REFUSED = 'Not running the helper script';
  * One line per statement, each ending in `;` or a keyword, so it is joined
  * into a single line that also pastes into Terminal.
  */
-export const ELEVATED_ENTRY = [
-  'set -eu;',
-  'PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; umask 077;',
-  'src=$1; script=$2; app=$3; shift 3;',
-  'vh_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; };',
-  `vh_refuse() { echo "${REFUSED}: $*" >&2; exit 1; };`,
-  'd=$(mktemp -d /tmp/vigil-helper.XXXXXX);',
-  `trap 'rm -rf "$d"' EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM;`,
-  'found=;',
-  'while [ "$#" -ge 2 ]; do',
-  'f=$1; want=$2; shift 2;',
-  'case $f in "" | /* | -* | *..* | *[!A-Za-z0-9._/-]*) vh_refuse "bad file name $f" ;; esac;',
-  'if [ -L "$src/$f" ] || [ ! -f "$src/$f" ]; then vh_refuse "$f is not a regular file"; fi;',
-  'case $f in */*) mkdir -p "$d/${f%/*}" ;; esac;',
-  // Accepted: the file can be swapped between the check above and this read
-  // (for a FIFO, or a link to an endless file). That only hangs the copy or
-  // fills /tmp until the hash check below refuses it; nothing unchecked runs.
-  'cat <"$src/$f" >"$d/$f";',
-  'if [ -L "$d/$f" ] || [ ! -f "$d/$f" ]; then vh_refuse "$f did not copy as a regular file"; fi;',
-  'got=$(vh_sha <"$d/$f"); got=${got%% *};',
-  '[ "$got" = "$want" ] || vh_refuse "$f changed after Vigil checked it";',
-  '[ "$f" != "$script" ] || found=1;',
-  'done;',
-  'if [ "$#" -ne 0 ] || [ -z "$found" ]; then vh_refuse "$script was not among the files checked"; fi;',
-  'status=0; /bin/sh "$d/$script" "$app" || status=$?; exit "$status"',
-].join(' ');
+export function elevatedEntry(shell: string): string {
+  return [
+    'set -eu;',
+    'PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH; umask 077;',
+    'src=$1; script=$2; app=$3; shift 3;',
+    'vh_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; };',
+    `vh_refuse() { echo "${REFUSED}: $*" >&2; exit 1; };`,
+    'd=$(mktemp -d /tmp/vigil-helper.XXXXXX);',
+    `trap 'rm -rf "$d"' EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM;`,
+    'found=;',
+    'while [ "$#" -ge 2 ]; do',
+    'f=$1; want=$2; shift 2;',
+    'case $f in "" | /* | -* | *..* | *[!A-Za-z0-9._/-]*) vh_refuse "bad file name $f" ;; esac;',
+    'if [ -L "$src/$f" ] || [ ! -f "$src/$f" ]; then vh_refuse "$f is not a regular file"; fi;',
+    'case $f in */*) mkdir -p "$d/${f%/*}" ;; esac;',
+    // Accepted: the file can be swapped between the check above and this read
+    // (for a FIFO, or a link to an endless file). That only hangs the copy or
+    // fills /tmp until the hash check below refuses it; nothing unchecked runs.
+    'cat <"$src/$f" >"$d/$f";',
+    'if [ -L "$d/$f" ] || [ ! -f "$d/$f" ]; then vh_refuse "$f did not copy as a regular file"; fi;',
+    'got=$(vh_sha <"$d/$f"); got=${got%% *};',
+    '[ "$got" = "$want" ] || vh_refuse "$f changed after Vigil checked it";',
+    '[ "$f" != "$script" ] || found=1;',
+    'done;',
+    'if [ "$#" -ne 0 ] || [ -z "$found" ]; then vh_refuse "$script was not among the files checked"; fi;',
+    `status=0; ${shell} "$d/$script" "$app" || status=$?; exit "$status"`,
+  ].join(' ');
+}
+
+/** {@link elevatedEntry} running the script with /bin/sh: the password dialogs' entry. */
+export const ELEVATED_ENTRY = elevatedEntry('/bin/sh');
 
 const ROOT_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
 
@@ -342,6 +348,16 @@ const ROOT_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
  * then `$0`, then {@link elevatedArgs}.
  */
 export const ROOT_SHELL = ['/usr/bin/env', '-i', `PATH=${ROOT_PATH}`, '/bin/sh', '-c'] as const;
+
+/**
+ * macOS: the shell the Terminal command runs everything in, instead of
+ * /bin/sh. It is the bash in POSIX mode that macOS's /bin/sh starts by
+ * default, but a separate program, so the command still works while Santa
+ * blocks /bin/sh by hash (2026-10-10), when no password dialog can run
+ * (shellBlocked). Installing the helper with it is the way out: the new
+ * helper lifts such a block.
+ */
+export const MAC_TERMINAL_SHELL = '/bin/bash --posix';
 
 /**
  * The files each script needs, the script first, relative to the helper
@@ -461,11 +477,14 @@ export function helperInstallCommand(
     .flat()
     .map((a) => shellQuote(a))
     .join(' ');
-  const entry = `sudo ${ROOT_SHELL.join(' ')} ${shellQuote(ELEVATED_ENTRY)} vigil-helper`;
   // Linux: root can't read an AppImage's mount, so copy the helper out first,
   // as runWithPkexec does. The entry checks the copy before root runs any of it.
-  if (platform === 'linux')
+  if (platform === 'linux') {
+    const entry = `sudo ${ROOT_SHELL.join(' ')} ${shellQuote(ELEVATED_ENTRY)} vigil-helper`;
     return `d=$(mktemp -d) && cp -R ${shellQuote(dir)}/. "$d" && ${entry} "$d" ${script} ${app} ${checks}; rm -rf "$d"`;
+  }
+  const shell = [...ROOT_SHELL.slice(0, -2), MAC_TERMINAL_SHELL, '-c'].join(' ');
+  const entry = `sudo ${shell} ${shellQuote(elevatedEntry(MAC_TERMINAL_SHELL))} vigil-helper`;
   return `${entry} ${shellQuote(dir)} ${script} ${app} ${checks}`;
 }
 
@@ -598,6 +617,7 @@ export function runHelperScript(
   dir = helperBundleDir(),
   run: RunFile = runFile,
   platform: NodeJS.Platform = process.platform,
+  blocked: () => Promise<boolean> = () => shellBlocked(platform === 'darwin' ? 'darwin' : 'linux'),
 ): Promise<HelperInstallResult> {
   if (running) {
     const same = (running.kind === 'uninstall') === (kind === 'uninstall');
@@ -611,7 +631,7 @@ export function runHelperScript(
               : 'The helper is being installed; try again once that finishes',
         });
   }
-  const done = runHelperScriptNow(kind, dir, run, platform).finally(() => {
+  const done = runHelperScriptNow(kind, dir, run, platform, blocked).finally(() => {
     running = undefined;
   });
   running = { kind, done };
@@ -623,6 +643,7 @@ async function runHelperScriptNow(
   dir: string | null | undefined,
   run: RunFile,
   platform: NodeJS.Platform,
+  blocked: () => Promise<boolean>,
 ): Promise<HelperInstallResult> {
   if (platform !== 'darwin' && platform !== 'linux') {
     return { ok: false, error: 'The helper only runs on macOS and Linux' };
@@ -634,7 +655,7 @@ async function runHelperScriptNow(
     r =
       platform === 'linux'
         ? await runWithPkexec(script, dir, run)
-        : await viaOsascript(kind, dir, run);
+        : await viaOsascript(kind, dir, run, blocked);
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
@@ -655,6 +676,7 @@ async function viaOsascript(
   kind: 'install' | 'update' | 'uninstall',
   dir: string,
   run: RunFile,
+  blocked: () => Promise<boolean>,
 ): Promise<HelperInstallResult> {
   const script = kind === 'uninstall' ? 'uninstall' : 'install';
   const manifest = checkedManifest(dir, script, 'darwin');
@@ -674,6 +696,10 @@ async function viaOsascript(
   // osascript reports a closed password dialog as "User canceled. (-128)" at
   // the end of its error; a path with -128 in it is not a cancel.
   if (/\(-128\)\s*$/.test(out.stderr)) return { ok: false, error: 'cancelled' };
+  // `do shell script` runs /bin/sh, so with Santa blocking it the dialog
+  // fails whatever the password. Say so; runHelperScriptNow adds the
+  // Terminal command, which runs bash instead.
+  if (await blocked()) return { ok: false, error: SHELL_BLOCKED };
   const msg = out.stderr
     .replace(/^\d+:\d+: execution error: /, '')
     .replace(/ \(-?\d+\)\s*$/, '')
