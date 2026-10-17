@@ -88,7 +88,9 @@ const baseName = (path: string): string => path.slice(path.lastIndexOf('/') + 1)
 export function shellCommand(p: Pick<ProcessRef, 'path' | 'args'>): string | undefined {
   if (!SHELL_NAMES.includes(baseName(p.path))) return undefined;
   const args = p.args ?? [];
-  const at = args.findIndex((a, i) => i > 0 && /^-[a-z]*c[a-z]*$/.test(a));
+  // A short-option cluster holding c (`-c`, `-lc`, `-ec`). Tested as letters
+  // plus an includes(), not `-[a-z]*c[a-z]*`, which backtracks on long runs.
+  const at = args.findIndex((a, i) => i > 0 && /^-[a-z]+$/.test(a) && a.includes('c'));
   if (at < 0) return undefined;
   const cmd = args
     .slice(at + 1)
