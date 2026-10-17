@@ -153,7 +153,8 @@ export async function osqueryJob(
 }
 
 /** Log lines that say something went wrong, as opposed to what the helper did. */
-const PROBLEM = /\b(could not|couldn't|can't|cannot|failed|failing|mismatch|error|refused|retrying|warning)\b/i;
+const PROBLEM =
+  /\b(could not|couldn't|can't|cannot|failed|failing|mismatch|error|refused|retrying|warning)\b/i;
 
 export interface RepeatedError {
   /** The line with its numbers and long ids replaced by #, so repeats group. */

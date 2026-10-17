@@ -118,7 +118,8 @@ describe('ErrorTally', () => {
   it('keeps a bounded number of kinds', () => {
     const t = new ErrorTally(() => 0);
     for (let i = 0; i < 200; i++) {
-      const word = String.fromCharCode(97 + (i % 26)) + String.fromCharCode(97 + Math.floor(i / 26));
+      const word =
+        String.fromCharCode(97 + (i % 26)) + String.fromCharCode(97 + Math.floor(i / 26));
       t.note(`could not read ${word}`);
       t.note(`could not read ${word}`);
     }
