@@ -50,6 +50,7 @@ export {
   PLATFORM_PATH_GLOBS,
   SHELL_NAMES,
   shellCommand,
+  matchesProgramHash,
   type SafetyConfig,
 } from './safety.js';
 export {

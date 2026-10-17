@@ -1,4 +1,4 @@
-import { authorizeAction, type Action, type ProcessRef } from '@vigil/core';
+import { authorizeAction, type Action, type Condition, type ProcessRef } from '@vigil/core';
 import { selfKey, selfRoots, underSelfRoot } from '@vigil/core/self';
 import { BlockList, isIP } from 'node:net';
 import { globMatcher } from './rules/compile.js';
@@ -97,6 +97,23 @@ export function shellCommand(p: Pick<ProcessRef, 'path' | 'args'>): string | und
     .join(' ')
     .trim();
   return cmd || undefined;
+}
+
+/** Event fields that name one exact program, wherever it is and whoever runs it. */
+const PROGRAM_HASH_FIELDS = new Set(['process.sha256', 'process.cdhash']);
+
+/**
+ * Whether the condition picks the program by its hash: an inList on its
+ * sha256 or CDHash (user-blocked-hash, the malware lists), or an `eq` or `in`
+ * test on one, anywhere outside a `not`. Such a rule fires on every run of
+ * that program, so its kill stops the program as surely as a block by hash.
+ */
+export function matchesProgramHash(c: Condition): boolean {
+  if ('inList' in c) return PROGRAM_HASH_FIELDS.has(c.inList.field);
+  if ('all' in c) return c.all.some(matchesProgramHash);
+  if ('any' in c) return c.any.some(matchesProgramHash);
+  if ('not' in c || 'firstSeen' in c) return false;
+  return PROGRAM_HASH_FIELDS.has(c.field) && (c.op === 'eq' || c.op === 'in');
 }
 
 export const DEFAULT_NEVER_BLOCK_NETWORKS = [

@@ -16,7 +16,7 @@ import {
 } from './rules/compile.js';
 import { compileField, keyOf, type FieldGetter } from './rules/fields.js';
 import { adoptLegacyUses, legacyKey, retainLegacyUses, type LegacyUse } from './rules/legacy.js';
-import { SafetyFloor, type SafetyConfig } from './safety.js';
+import { matchesProgramHash, SafetyFloor, type SafetyConfig } from './safety.js';
 import type { Stores } from './state/stores.js';
 import {
   DetectionRule,
@@ -528,6 +528,20 @@ export class DetectionEngine {
 
   /** Resolve the rule's response templates, dropping any the safety floor refuses. */
   private resolveResponse(rule: DetectionRule, e: DetectionEvent, downgrades: string[]): Action[] {
+    // A rule that picks the program by its hash acts on every run of it, so
+    // even a kill alone works like a block by hash: none for a program no
+    // block may name (part of the OS, an installed shell, Vigil). On
+    // 2026-10-10 user-blocked-hash on /bin/sh stopped every shell on the Mac.
+    const proc = 'process' in e ? e.process : undefined;
+    if (proc && rule.response.length && matchesProgramHash(rule.condition)) {
+      const why = this.safety.blockProtection(proc);
+      if (why) {
+        downgrades.push(
+          `Vigil will not act on ${proc.path}: this rule matches the program by its hash, so it would stop it everywhere, and ${why}.`,
+        );
+        return [];
+      }
+    }
     const actions: Action[] = [];
     for (const tpl of rule.response) {
       // Values the event lacks are left out; the Action schema decides whether they were required.

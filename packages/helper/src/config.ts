@@ -313,10 +313,33 @@ export function installedSelf(platform: Platform = 'darwin'): string[] {
 }
 
 /**
+ * The operating system's own programs that Vigil, its installer and every
+ * script on the computer run through: on macOS all of /bin, /sbin, /usr/bin
+ * and /usr/sbin (about 1,200 files, on the read-only system volume); on Linux,
+ * where those folders hold thousands of packaged programs, the shells and the
+ * tools the helper's install and password dialog start. On 2026-10-10 a block
+ * by hash on /bin/sh stopped every shell on the Mac, the password dialog
+ * Vigil needed to undo it included.
+ */
+export const PLATFORM_PROGRAM_ROOTS: Record<Platform, readonly string[]> = {
+  darwin: ['/bin', '/sbin', '/usr/bin', '/usr/sbin'],
+  linux: [
+    ...['sh', 'bash', 'dash', 'zsh', 'ksh', 'mksh'].flatMap((s) => [`/bin/${s}`, `/usr/bin/${s}`]),
+    '/usr/bin/env',
+    '/usr/bin/sudo',
+    '/usr/bin/pkexec',
+    '/usr/bin/systemctl',
+    '/bin/systemctl',
+  ],
+};
+
+/**
  * Where the programs live that no block by hash may name (ownHashes.ts): the
  * helper's launcher and the runtime it runs under, Santa's and osquery's
- * programs, and the installed app. Fixed paths plus the helper's own, never
- * anything a client sends.
+ * programs, the installed app, and the system's own programs
+ * (PLATFORM_PROGRAM_ROOTS), last, so a cap on how many files are hashed never
+ * leaves out Vigil's own. Fixed paths plus the helper's own, never anything a
+ * client sends.
  */
 export function ownProgramRoots(
   platform: Platform,
@@ -333,6 +356,7 @@ export function ownProgramRoots(
     `${helperExecutable}.d`,
     ...sensors,
     ...installedSelf(platform),
+    ...PLATFORM_PROGRAM_ROOTS[platform],
   ];
 }
 

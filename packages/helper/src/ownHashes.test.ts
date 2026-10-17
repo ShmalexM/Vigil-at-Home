@@ -4,6 +4,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -164,6 +165,23 @@ describe('OwnHashes', () => {
       ]),
     );
     expect(ownProgramRoots('darwin', '/x')).toContain(process.execPath);
+  });
+
+  it('covers the system’s own programs, after Vigil’s', () => {
+    const mac = ownProgramRoots('darwin', '/Library/PrivilegedHelperTools/vigil-helper', '/rt');
+    expect(mac.slice(-4)).toEqual(['/bin', '/sbin', '/usr/bin', '/usr/sbin']);
+    const linux = ownProgramRoots('linux', '/usr/libexec/vigil-helper', '/rt');
+    expect(linux).toEqual(expect.arrayContaining(['/bin/sh', '/usr/bin/bash', '/usr/bin/env']));
+    // Not all of /usr/bin on Linux: it holds thousands of packaged programs.
+    expect(linux).not.toContain('/usr/bin');
+    expect(linux.indexOf('/bin/sh')).toBeGreaterThan(linux.indexOf('/opt/Vigil at Home'));
+  });
+
+  it('knows the real /bin/sh as one of them', async () => {
+    const own = new OwnHashes({ roots: ['/bin/sh'], cdhashes: false, ownerUid: 0 });
+    await own.refresh();
+    const real = realpathSync.native('/bin/sh');
+    expect(own.owner(sha(readFileSync(real)))).toBe(real);
   });
 });
 
