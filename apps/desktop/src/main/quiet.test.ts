@@ -60,7 +60,7 @@ function agentRun(
 const sameCommand = (i: number) => [
   'sh',
   '-c',
-  `source /Users/a/.claude/shell-snapshots/snapshot-zsh-${1760000000000 + i}-r${i}x.sh && make test OUT=/var/folders/xy/abc/T/tmp.Q${i}w9ZpXk/out.log`,
+  `source /Users/a/.claude/shell-snapshots/snapshot-zsh-${1760000000000 + i}-r${i}x.sh && make test OUT=/var/folders/xy/abc/T/tmp.Q${i}w9ZpXk12/out.log`,
 ];
 
 function connect(remoteAddress: string, remotePort: number): EventOfKind<'network.connection'> {
@@ -128,15 +128,55 @@ describe('normalizing what an agent did', () => {
   it('makes only random per-run text alike', () => {
     expect(
       normalize(
-        'cat /private/var/folders/xy/abc123/T/tmp.Xyz9ab/out.json 8f14e45fceea167a5a36dedd4bea2543 1760000000',
+        'cat /private/var/folders/xy/abc123/T/tmp.Xyz9abQw12/out.json /Users/a/.cache/8f14e45fceea167a5a36dedd4bea2543/x',
       ),
-    ).toBe('cat /private/var/folders/xy/abc123/T/tmp.<random>/out.json <id> <time>');
+    ).toBe('cat /private/var/folders/xy/abc123/T/tmp.<random>/out.json /Users/a/.cache/<id>/x');
     expect(normalize('. snapshot-zsh-1697-abc.sh')).toBe('. snapshot-<id>.sh');
-    // Ports, pids, addresses and file names stay.
-    expect(normalize('curl http://45.33.2.1:4444/x && kill -0 4242')).toBe(
-      'curl http://45.33.2.1:4444/x && kill -0 4242',
+    expect(normalize('python /tmp/tmpk3j_x9ab/run.py')).toBe('python /tmp/tmp.<random>/run.py');
+    // Ports, pids, addresses, timestamps and file names stay.
+    expect(normalize('curl http://45.33.2.1:4444/x && kill -0 4242 --since 1760000000')).toBe(
+      'curl http://45.33.2.1:4444/x && kill -0 4242 --since 1760000000',
     );
     expect(patternOf(agentRun(sameCommand(1)))).toBe(patternOf(agentRun(sameCommand(2))));
+  });
+
+  it('never merges text an attacker chooses: hosts, digests, pinned URLs, temp-looking names', () => {
+    const p = (...args: string[]) => patternOf(agentRun(args));
+    // Decimal-IP hosts.
+    expect(p('curl', 'http://1123456789/x')).not.toBe(p('curl', 'http://1500000000/x'));
+    expect(p('curl', '1123456789')).not.toBe(p('curl', '1500000000'));
+    // Image digests and commit-pinned raw URLs.
+    const a = 'a'.repeat(32) + '1'.repeat(32);
+    const b = 'b'.repeat(32) + '2'.repeat(32);
+    expect(p('docker', 'run', `img@sha256:${a}`)).not.toBe(p('docker', 'run', `img@sha256:${b}`));
+    const raw = (sha: string) => `https://raw.example.com/o/r/${sha}/install.sh`;
+    expect(p('curl', raw(a.slice(0, 40)))).not.toBe(p('curl', raw(b.slice(0, 40))));
+    // Hex and UUID hostnames.
+    expect(p('ssh', `${a.slice(0, 20)}.example.com`)).not.toBe(
+      p('ssh', `${b.slice(0, 20)}.example.com`),
+    );
+    expect(p('ping', '0f8fad5b-d9cb-469f-a165-70867728950e')).not.toBe(
+      p('ping', '7c9e6679-7425-40de-944b-e07fc1f90ae7'),
+    );
+    // Names that only look like temp names.
+    expect(p('bash', '/tmp/tmp_build1/x.sh')).not.toBe(p('bash', '/tmp/tmp_evil99/x.sh'));
+    expect(p('bash', '/tmp/tmp.build/x.sh')).not.toBe(p('bash', '/tmp/tmp.evil1/x.sh'));
+    const regex = commandRegex('bash /tmp/tmp.Ab12Cd3456/x.sh')!;
+    expect(new RegExp(regex).test('bash /tmp/tmp.Zz99Yy0000/x.sh')).toBe(true);
+    expect(new RegExp(regex).test('bash /tmp/tmp_evil99/x.sh')).toBe(false);
+    expect(new RegExp(regex).test('bash /tmp/tmp.evil/x.sh')).toBe(false);
+  });
+
+  it('keeps the same command in another folder, or from another parent, apart', () => {
+    const at = (cwd: string, parentPath = '/bin/zsh') => {
+      const e = agentRun(['bash', './install.sh']);
+      e.process.cwd = cwd;
+      e.process.parentPath = parentPath;
+      return patternOf(e);
+    };
+    expect(at('/Users/a/proj')).toBe(at('/Users/a/proj'));
+    expect(at('/Users/a/proj')).not.toBe(at('/Users/a/Downloads/evil'));
+    expect(at('/Users/a/proj')).not.toBe(at('/Users/a/proj', '/tmp/dropper'));
   });
 
   it('keeps different scripts, addresses and ports apart', () => {
@@ -150,12 +190,12 @@ describe('normalizing what an agent did', () => {
 
   it('turns a command into an anchored regex where only random text may differ', () => {
     const base = 'node /Users/a/proj/vitest.mjs --out';
-    const regex = commandRegex(`${base} /tmp/tmp.Ab12Cd/x.json --since 1760000000 --port 6001`)!;
+    const regex = commandRegex(`${base} /tmp/tmp.Ab12Cd3456/x.json --port 6001`)!;
     const m = (s: string) => new RegExp(regex).test(`${base} ${s}`);
-    expect(m('/tmp/tmp.Zz99Yy/x.json --since 1760009999 --port 6001')).toBe(true);
-    expect(m('/tmp/evil.sh --since 1760000000 --port 6001')).toBe(false);
-    expect(m('/tmp/tmp.Ab12Cd/x.json --since 1760000000 --port 4444')).toBe(false);
-    expect(m('/tmp/tmp.Ab12Cd/x.json --since 1760000000 --port 6001 && curl x')).toBe(false);
+    expect(m('/tmp/tmp.Zz99Yy0000/x.json --port 6001')).toBe(true);
+    expect(m('/tmp/evil.sh --port 6001')).toBe(false);
+    expect(m('/tmp/tmp.Ab12Cd3456/x.json --port 4444')).toBe(false);
+    expect(m('/tmp/tmp.Ab12Cd3456/x.json --port 6001 && curl x')).toBe(false);
     // Too long for a rule's regex: no exception.
     expect(commandRegex(`sh -c ${'echo hello && '.repeat(30)}true`)).toBeUndefined();
   });
@@ -212,6 +252,20 @@ describe('folding an agent’s repeats', () => {
     await raise(['curl', 'http://45.33.2.1:4444/x'], 34);
     expect(store.listAlerts({ status: 'open' })).toHaveLength(4);
     expect(popups).toHaveLength(4);
+  });
+
+  it('keeps the same relative command run in another folder apart, and pops it up', async () => {
+    const { store, svc, popups } = alertsSetup();
+    const run = (cwd: string, pid: number) => {
+      const e = agentRun(['bash', './install.sh'], pid);
+      e.process.cwd = cwd;
+      return svc.raise({ rule: guard, events: [e], actions: [{ kind: 'process.suspend', pid }] });
+    };
+    const a = await run('/Users/a/proj', 41);
+    const b = await run('/Users/a/Downloads/evil', 42);
+    expect(b.id).not.toBe(a.id);
+    expect(store.listAlerts({ status: 'open' })).toHaveLength(2);
+    expect(popups).toHaveLength(2);
   });
 
   it('keeps other agents, other binaries, other rules and other network peers apart', async () => {
@@ -277,6 +331,27 @@ describe('folding an agent’s repeats', () => {
     await raise(303);
     expect(pending()).toEqual([202, 303]);
     expect(popups).toHaveLength(1);
+  });
+
+  it('still offers the newest suggestion when processes can’t be checked', async () => {
+    const { store, svc } = alertsSetup();
+    const raise = (pid: number) =>
+      svc.raise({
+        rule: guard,
+        events: [agentRun(['rm', '-rf', 'dist'], pid)],
+        actions: [{ kind: 'process.suspend', pid }],
+      });
+    const a = await raise(51);
+    svc.liveness = async () => {
+      throw new Error('spawn EPERM');
+    };
+    await expect(raise(52)).resolves.toMatchObject({ id: a.id });
+    const pending = store
+      .listProposals({ alertId: a.id, status: 'pending' })
+      .map((p) => (p.action as { pid: number }).pid)
+      .sort();
+    expect(pending).toEqual([51, 52]); // nothing expired, the newest added
+    expect(await svc.expireProcessProposals()).toBe(0);
   });
 
   it('never folds into a row the user acted on, or a block rule’s detections', async () => {
@@ -387,6 +462,16 @@ describe('expiring suggestions for processes that are gone', () => {
     const started = Date.now() - process.uptime() * 1000;
     expect(alive(process.pid, started)).toBe(true);
   });
+
+  it('falls back to signal 0 when ps can’t even start', async () => {
+    const throwing = (() => {
+      throw Object.assign(new Error('spawn EPERM'), { code: 'EPERM' });
+    }) as unknown as Parameters<typeof liveChecker>[1];
+    const alive = await liveChecker([process.pid, 999_999], throwing);
+    expect(alive(process.pid)).toBe(true);
+    expect(alive(process.pid, 1)).toBe(true); // can't read its start: keep the suggestion
+    expect(alive(999_999)).toBe(false);
+  });
 });
 
 function coreSetup(start = NOON) {
@@ -424,6 +509,27 @@ describe('closing in bulk', () => {
     expect(store.getAlert(critical.id)!.status).toBe('open');
     expect(store.getAlert(held.id)).toMatchObject({ status: 'open', containment: 'active' });
     expect(store.getAlert(other.id)).toMatchObject({ status: 'open' });
+  });
+
+  it('leaves a distinct payload the pile throttle turned into a badge', async () => {
+    const { store, core, at } = coreSetup();
+    // Medium and high-fidelity: it pops up, so each alert needs a decision.
+    const watched = makeRule({
+      id: 'agent-medium',
+      mode: 'alert',
+      severity: 'medium',
+      fidelity: 'high',
+    });
+    store.upsertRule(watched);
+    const raise = (args: string[]) =>
+      core.alerts.raise({ rule: watched, events: [agentRun(args)], actions: [] });
+    const first = await raise(['cat', '/Users/a/.aws/credentials']);
+    const second = await raise(['cat', '/Users/a/.ssh/id_ed25519']);
+    expect(first.notify).toBe('popup');
+    expect(second.notify).toBe('badge'); // the burst interrupted once
+    expect(core.bulkClosable('agent-medium')).toMatchObject({ rule: 0 });
+    expect(await core.closeRuleAlerts('agent-medium', at())).toBe(0);
+    expect(store.getAlert(second.id)!.status).toBe('open');
   });
 
   it('leaves alerts last seen after the confirm opened', async () => {
@@ -579,9 +685,7 @@ describe('"Don’t show this again" after repeated "That was me"', () => {
           'tool',
           'serve',
           '--root',
-          `/tmp/tmp.R${n}x7Qa/site`,
-          '--since',
-          String(1760000000 + n),
+          `/tmp/tmp.${String(n).padStart(4, '0')}x7QaZz/site`,
           '--port',
           String(o.port ?? 5000),
           ...(o.extra ?? []),

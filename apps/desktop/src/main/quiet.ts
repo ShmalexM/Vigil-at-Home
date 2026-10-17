@@ -27,37 +27,53 @@ export const EXCEPTION_WINDOW_MS = 30 * 24 * 60 * 60_000;
 /** Placeholders the normalizer writes (private-use characters), one per kind of volatile text. */
 const SNAP = '\uE000snap\uE001';
 const RAND = '\uE000rand\uE001';
-const ID = '\uE000id\uE001';
-const TIME = '\uE000time\uE001';
+const UUID = '\uE000uuid\uE001';
+const HEX = '\uE000hex\uE001';
 
-/** What each placeholder may match in an exception: only text of its own kind. */
+/** What each placeholder may match in an exception: only text of its own kind and shape. */
 const MATCHES: Record<string, string> = {
   [SNAP]: 'snapshot-[a-z]+-[0-9]+-[a-z0-9]+',
-  [RAND]: 'tmp[._]?[A-Za-z0-9_]{6,}',
-  [ID]: '[0-9a-fA-F-]{16,}',
-  [TIME]: '[0-9]{10,13}',
+  [RAND]: '(?:tmp\\.[A-Za-z0-9]{10}|tmp[a-z0-9_]{8})',
+  [UUID]: '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}',
+  [HEX]: '[0-9a-f]{16,}',
 };
+
+/** A whole path segment: after a slash, up to the next slash, quote or the end. */
+const SEGMENT_END = `(?=[/'"]|$)`;
+const VOLATILE_SEGMENTS: Array<[RegExp, string]> = [
+  // mktemp's tmp.XXXXXXXXXX and Python tempfile's tmpXXXXXXXX: their exact shapes only.
+  [new RegExp(`(?<=/)(?:tmp\\.[A-Za-z0-9]{10}|tmp[a-z0-9_]{8})${SEGMENT_END}`, 'g'), RAND],
+  [
+    new RegExp(
+      `(?<=/)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}${SEGMENT_END}`,
+      'gi',
+    ),
+    UUID,
+  ],
+  // Long lowercase hex mixing letters and digits: session and request ids.
+  [new RegExp(`(?<=/)(?=[0-9a-f]*\\d)(?=[0-9a-f]*[a-f])[0-9a-f]{16,}${SEGMENT_END}`, 'g'), HEX],
+];
 
 /**
  * The same text with only the parts that are random on every run made
- * alike: shell snapshot names, random temp names (tmp.XXXXXX, Python's
- * tmpXXXXXXXX), UUIDs, long hex ids and epoch timestamps. Everything that
- * says what was run stays as it is: script and file names, hosts, IP
- * addresses, ports and other numbers. Two different payloads never look alike.
+ * alike: Claude Code's shell snapshot names, and, as whole segments of a
+ * local file path, mktemp and tempfile names, UUIDs and long hex ids.
+ * Everything that says what was run stays as it is: script and file names,
+ * hosts, IP addresses (decimal ones too), ports, numbers and timestamps. A
+ * word holding a URL (`://`) or a reference (`@`, as in `image@sha256:`) is
+ * left whole, so an attacker-chosen host, path or digest never looks like
+ * another.
  */
 function placeholders(s: string): string {
-  return (
-    s
-      // Claude Code's shell snapshots: snapshot-zsh-1697123456789-abc123.
-      .replace(/snapshot-[a-z]+-\d+-[a-z0-9]+/g, SNAP)
-      // mktemp's tmp.XXXXXXXXXX and Python tempfile's tmpXXXXXXXX, as a path segment.
-      .replace(/(?<=\/)tmp[._]?(?=[A-Za-z0-9_]*\d)[A-Za-z0-9_]{6,}(?=\/|$|\s)/g, RAND)
-      .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, ID)
-      // Long hex mixing letters and digits: session and request ids.
-      .replace(/\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{16,}\b/gi, ID)
-      // Epoch seconds and milliseconds.
-      .replace(/\b1[0-9]{9}(?:[0-9]{3})?\b/g, TIME)
-  );
+  return s
+    .split(/(\s+)/)
+    .map((word) => {
+      if (word.includes('://') || word.includes('@')) return word;
+      let out = word.replace(/snapshot-[a-z]+-\d+-[a-z0-9]+/g, SNAP);
+      for (const [re, to] of VOLATILE_SEGMENTS) out = out.replace(re, to);
+      return out;
+    })
+    .join('');
 }
 
 /** Human-readable form of a normalized string, for keys and notes. */
@@ -65,8 +81,8 @@ export function normalize(s: string): string {
   return placeholders(s)
     .replaceAll(SNAP, 'snapshot-<id>')
     .replaceAll(RAND, 'tmp.<random>')
-    .replaceAll(ID, '<id>')
-    .replaceAll(TIME, '<time>');
+    .replaceAll(UUID, '<uuid>')
+    .replaceAll(HEX, '<id>');
 }
 
 /** Which program ran: its hash, or its path and signature when there is no hash. */
@@ -79,8 +95,8 @@ export function binaryOf(e: SensorEvent): string | undefined {
 
 /**
  * What an event did, with only random per-run text removed: its kind and
- * operation, the program, its command line, and the file, address or port it
- * touched. Two runs of the same command give the same pattern; a different
+ * operation, the program, its command line, working directory and parent
+ * program, and the file, address or port it touched. Two runs of the same command give the same pattern; a different
  * script, file, host, address or port gives a different one.
  */
 export function patternOf(e: SensorEvent): string {
@@ -89,6 +105,9 @@ export function patternOf(e: SensorEvent): string {
   if ('op' in e && typeof e.op === 'string') parts.op = e.op;
   if (proc?.path) parts.program = normalize(proc.path);
   if (proc?.args?.length) parts.command = normalize(proc.args.join(' '));
+  // Where it ran and what started it: `bash ./install.sh` in a project and in Downloads differ.
+  if (proc?.cwd) parts.cwd = normalize(proc.cwd);
+  if (proc?.parentPath) parts.parent = proc.parentPath;
   if ('path' in e && typeof e.path === 'string') parts.path = normalize(e.path);
   if (e.kind === 'network.connection') {
     parts.remoteAddress = e.remoteAddress;
@@ -116,8 +135,8 @@ export function answerPattern(ruleId: string, e: SensorEvent): string {
  * A rule exclusion for this exact program running this exact command, and
  * nothing else: the program's hash (or its path, team and signing ID when
  * there is no hash), and the whole command line as an anchored regex where
- * only random per-run text (snapshot names, random temp names, ids, epoch
- * times) may differ. Another script, host, address or port doesn't match,
+ * only random per-run text (snapshot names, mktemp and tempfile names, ids
+ * in file paths) may differ. Another script, host, address or port doesn't match,
  * and nothing can be added to the command. Undefined for anything an AI
  * agent ran (an exclusion can't name the agent, so it would hide every
  * agent's and every program's same command), with no command line or no
@@ -167,12 +186,21 @@ const START_SLACK_MS = 2000;
  * counts as alive: a suggestion is never dropped for a process that may
  * still run.
  */
-export async function liveChecker(pids: readonly number[]): Promise<Alive> {
+export async function liveChecker(
+  pids: readonly number[],
+  run: typeof execFileWithin = execFileWithin,
+): Promise<Alive> {
   const unique = [...new Set(pids)].filter((p) => Number.isInteger(p) && p > 0);
   if (unique.length === 0) return () => false;
-  const r = await execFileWithin('ps', ['-o', 'pid=,lstart=', '-p', unique.join(',')], 5000, {
-    env: { ...process.env, LC_ALL: 'C' },
-  });
+  let r: Awaited<ReturnType<typeof execFileWithin>>;
+  try {
+    r = await run('ps', ['-o', 'pid=,lstart=', '-p', unique.join(',')], 5000, {
+      env: { ...process.env, LC_ALL: 'C' },
+    });
+  } catch {
+    // Starting ps can throw outright (spawn EPERM): fall back, never reject.
+    return (pid) => pidAlive(pid);
+  }
   // ps exits 1 when some pid is gone, still listing the rest.
   if (r.timedOut || (r.code !== 0 && r.code !== 1)) return (pid) => pidAlive(pid);
   const out = r.stdout;

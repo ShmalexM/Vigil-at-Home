@@ -293,7 +293,14 @@ export class AlertService extends EventEmitter<AlertEvents> {
     );
     if (about.length === 0) return 0;
     const pidOf = (p: ActionProposal) => (p.action as { pid: number }).pid;
-    const alive = await this.liveness(about.map(pidOf));
+    let alive: Alive;
+    try {
+      alive = await this.liveness(about.map(pidOf));
+    } catch (err) {
+      // Can't tell: every process counts as running, so nothing expires.
+      console.warn('[alerts] could not check processes:', err);
+      return 0;
+    }
     const alerts = new Set<string>();
     let expired = 0;
     for (const p of about) {
@@ -502,10 +509,10 @@ export const REPEAT_WINDOW_MS = 15 * 60_000;
  *   path). One row a day, folding in even after the user answered it.
  * - Anything an AI agent did, from a rule in Alert mode: the rule and its
  *   version, the agent, the program (hash, or path and signature), and what
- *   was done with only random per-run text removed (quiet.ts patternOf:
- *   snapshot names, random temp names, ids, epoch times). A different
- *   script, file, host, address or port is a different payload and alerts
- *   on its own. The rule's suggestions are allowed and added to the row.
+ *   was done, where and from what parent, with only random per-run text
+ *   removed (quiet.ts patternOf: snapshot names, mktemp and tempfile names,
+ *   ids in file paths). A different script, file, folder, host, address or
+ *   port is a different payload and alerts on its own. The rule's suggestions are allowed and added to the row.
  * - Otherwise, exactly: the rule and its version, what the alert says, and
  *   every event with its process (executable identity and signature, pid and
  *   start time, command line, working directory, user, parent) and resource,

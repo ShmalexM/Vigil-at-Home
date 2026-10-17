@@ -28,7 +28,7 @@ import {
 import { isNoticed, needsDecision } from '../shared/attention.js';
 import { untouched } from '../shared/piles.js';
 import { DEFAULT_APPEARANCE, type AppearanceSettings } from '../shared/themes.js';
-import { AlertService, repeatKind, type DecisionInput } from './alerts.js';
+import { AlertService, notifyLevel, repeatKind, type DecisionInput } from './alerts.js';
 import { evidenceOf } from './evidence-export.js';
 import { redactEvidenceInSlices } from './evidence-redact.js';
 import { EventLog } from './events.js';
@@ -460,11 +460,23 @@ export class VigilCore {
    */
   private bulkSafe(a: Alert, upTo: number): boolean {
     return (
-      !needsDecision(a) &&
+      !this.needsYou(a) &&
       untouched(a) &&
       !this.store.hasPendingProposal(a.id) &&
       (a.repeats?.lastAt ?? a.createdAt) <= upTo
     );
+  }
+
+  /**
+   * Whether an alert asks for a decision, judged by the notify level its
+   * rule calls for: one the pile or interrupt throttle turned from a popup
+   * into a badge (a new payload in a burst) still needs the user.
+   */
+  private needsYou(a: Alert): boolean {
+    if (needsDecision(a)) return true;
+    if (a.notify !== 'badge') return false;
+    const rule = this.detector?.rule(a.ruleId) ?? this.store.getRule(a.ruleId);
+    return !!rule && notifyLevel(rule) === 'popup' && needsDecision({ ...a, notify: 'popup' });
   }
 
   /** Whether an alert came from an AI agent's work. */
