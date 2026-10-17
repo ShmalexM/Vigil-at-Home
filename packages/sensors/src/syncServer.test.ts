@@ -371,6 +371,59 @@ describe('unfinished syncs', () => {
     s.dispatch('postflight', 'm', {});
     expect(s.lastSyncAt).toBe(6_000);
   });
+
+  // Santa 2026.x writes protobuf JSON with default options: rules_received
+  // and rules_processed are left out when they are 0, and the other fields
+  // come as json_name or camelCase.
+  it('reads a Santa 2026.x postflight after a sync with nothing to send as confirmed', () => {
+    let clock = 10_000;
+    const lines: string[] = [];
+    const rules = new RuleStore(join(dir, 'santa2026-rules.json'));
+    rules.upsert({ ruleType: 'BINARY', identifier: SHA_A, policy: 'BLOCKLIST' });
+    const s = new SantaSyncServer({ store: rules, log: (m) => lines.push(m), now: () => clock });
+    // The first (clean) sync sends the one rule.
+    s.dispatch('preflight', 'm', { machine_id: 'm', request_clean_sync: true });
+    s.dispatch('ruledownload', 'm', {});
+    s.dispatch('postflight', 'm', {
+      rules_received: 1,
+      rules_processed: 1,
+      machine_id: 'm',
+      syncType: 'CLEAN',
+      rulesHash: 'f'.repeat(64),
+    });
+    expect(rules.syncedRev).toBe(rules.rev);
+
+    // A normal sync with no changes: Santa downloads nothing and its
+    // postflight carries no counts at all.
+    clock = 20_000;
+    s.dispatch('preflight', 'm', { machine_id: 'm', binaryRuleCount: 1 });
+    expect(s.dispatch('ruledownload', 'm', {})).toEqual({ rules: [] });
+    s.dispatch('postflight', 'm', {
+      machine_id: 'm',
+      syncType: 'NORMAL',
+      rulesHash: 'f'.repeat(64),
+    });
+    expect(lines.filter((l) => l.includes('mismatch'))).toEqual([]);
+    expect(s.lastRuleSyncAt).toBe(20_000);
+  });
+
+  it('still logs a postflight that confirms less than it was sent, or unreadable counts', () => {
+    const lines: string[] = [];
+    const rules = new RuleStore(join(dir, 'short-rules.json'));
+    rules.upsert({ ruleType: 'BINARY', identifier: SHA_A, policy: 'BLOCKLIST' });
+    rules.upsert({ ruleType: 'BINARY', identifier: SHA_B, policy: 'BLOCKLIST' });
+    const s = new SantaSyncServer({ store: rules, log: (m) => lines.push(m) });
+    s.dispatch('preflight', 'm', {});
+    // rules_processed left out: Santa imported none of the two.
+    s.dispatch('postflight', 'm', { rules_received: 2 });
+    s.dispatch('preflight', 'm', {});
+    s.dispatch('postflight', 'm', { rulesReceived: 'two', rulesProcessed: '2' });
+    expect(lines).toEqual([
+      'santa postflight mismatch: sent 2, received 2, processed 0',
+      'santa postflight mismatch: sent 2, received an unreadable count, processed 2',
+    ]);
+    expect(rules.syncedRev).not.toBe(rules.rev);
+  });
 });
 
 describe('request logging', () => {
