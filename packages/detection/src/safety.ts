@@ -175,7 +175,7 @@ export class SafetyFloor {
   processProtection(p: ProcessRef | undefined): string | undefined {
     if (!p) return 'there is no process to act on';
     if (p.pid <= 1) return 'it is a core macOS process';
-    if (p.signing === 'apple' || this.isPlatform(p.path)) {
+    if (this.isApple(p)) {
       const tool = this.appleTools.some((fits) => fits(p.path));
       if (!tool || p.ppid === 1 || p.ppid === undefined) {
         return 'it is part of macOS (signed by Apple)';
@@ -193,6 +193,19 @@ export class SafetyFloor {
   }
 
   /**
+   * Part of the OS, by something an attacker can't choose: a path the OS
+   * protects, or a `platform:` signing ID (Santa reports it from the kernel's
+   * platform-binary flag; the helper's codesign lookup only after verifying
+   * `anchor apple`). Not `signing: 'apple'` alone: from Santa's log and
+   * osquery that rests on the leaf certificate's name ("Software Signing"),
+   * which a self-signed certificate can carry, and it would make a program
+   * that can't be stopped or blocked.
+   */
+  private isApple(p: ProcessRef): boolean {
+    return this.isPlatform(p.path) || p.signingId?.startsWith('platform:') === true;
+  }
+
+  /**
    * Why this program must never be blocked by hash, or undefined if it may
    * be. Stricter than {@link processProtection}: a block stops the program
    * everywhere, not just this instance, so no part of the operating system
@@ -203,7 +216,7 @@ export class SafetyFloor {
    */
   blockProtection(p: ProcessRef | undefined): string | undefined {
     if (!p) return 'there is no process to act on';
-    if (this.isPlatform(p.path) || p.signing === 'apple') {
+    if (this.isApple(p)) {
       return SHELL_NAMES.includes(baseName(p.path))
         ? `${p.path} is the macOS shell; blocking it would stop every script on the Mac`
         : `${p.path} is part of macOS; blocking it would stop it for everything on the Mac`;

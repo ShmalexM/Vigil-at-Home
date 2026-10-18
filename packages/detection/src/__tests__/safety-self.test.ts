@@ -57,3 +57,28 @@ describe('safety floor: Vigil’s own programs by hash', () => {
     expect(floor.check(block(own), event(own))).toBe('it would block Vigil itself');
   });
 });
+
+// Review of #189: a self-signed certificate can be named "Software Signing",
+// and Santa's log and osquery report the leaf's name, so `signing: 'apple'`
+// alone must not make a program one that can't be stopped or blocked.
+describe('safety floor: what counts as part of macOS', () => {
+  const floor = new SafetyFloor();
+  const p = (path: string, extra: Record<string, string> = {}) => ({
+    pid: 4242,
+    ppid: 900,
+    path,
+    signing: 'apple' as const,
+    ...extra,
+  });
+
+  it('takes no certificate name on its own word', () => {
+    expect(floor.processProtection(p('/tmp/evil'))).toBeUndefined();
+    expect(floor.blockProtection(p('/tmp/evil'))).toBeUndefined();
+  });
+
+  it('takes a path the OS protects, or a platform signing ID', () => {
+    expect(floor.blockProtection(p('/usr/libexec/xpcproxy'))).toContain('part of macOS');
+    const platform = p('/tmp/copy', { signingId: 'platform:com.apple.curl' });
+    expect(floor.blockProtection(platform)).toContain('part of macOS');
+  });
+});
