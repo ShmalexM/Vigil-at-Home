@@ -3,7 +3,16 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { approvalOpen, HelperClient, pkexecApprover, type Approver } from './client.js';
+import {
+  approvalOpen,
+  HelperClient,
+  isExecDenied,
+  pkexecApprover,
+  SHELL_BLOCKED,
+  ShellBlockedError,
+  shellBlocked,
+  type Approver,
+} from './client.js';
 
 const NONCE = 'a'.repeat(32);
 
@@ -112,5 +121,39 @@ describe('HelperClient.call with a signal', () => {
     } finally {
       client.close();
     }
+  });
+
+  it('says why when the dialog could not run because Santa blocks /bin/sh', async () => {
+    const approver: Approver = () => Promise.reject(new ShellBlockedError());
+    const client = await HelperClient.connect(socket(), approver);
+    try {
+      const held = client.hold({ kind: 'process.resume', pid: 43 } as never);
+      await new Promise((r) => setTimeout(r, 50));
+      const call = client.call({ kind: 'process.resume', pid: 42 } as never);
+      // Not "not approved": the words that tell the user how to get out.
+      await expect(call).rejects.toMatchObject({ code: 'refused', message: SHELL_BLOCKED });
+      await expect(held).rejects.toMatchObject({ code: 'refused', message: SHELL_BLOCKED });
+      expect(approvedSends).toEqual([]);
+    } finally {
+      client.close();
+    }
+  });
+});
+
+describe('a blocked /bin/sh', () => {
+  it('is an exec refused with EPERM or EACCES, nothing else', () => {
+    const err = (code: string) => Object.assign(new Error(code), { code });
+    expect(isExecDenied(err('EPERM'))).toBe(true);
+    expect(isExecDenied(err('EACCES'))).toBe(true);
+    expect(isExecDenied(err('ENOENT'))).toBe(false);
+    // A non-zero exit has a numeric code: the shell ran.
+    expect(isExecDenied(Object.assign(new Error('exit'), { code: 1 }))).toBe(false);
+    expect(isExecDenied(null)).toBe(false);
+  });
+
+  it('is only looked for on macOS', async () => {
+    await expect(shellBlocked('linux')).resolves.toBe(false);
+    if (process.platform === 'darwin')
+      await expect(shellBlocked('darwin')).resolves.toBeTypeOf('boolean');
   });
 });

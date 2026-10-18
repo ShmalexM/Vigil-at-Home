@@ -41,6 +41,7 @@ import { AppPinStore } from './pinStore.js';
 import {
   defaultPaths,
   installedSelf,
+  OS_PROGRAM_ROOTS,
   ownProgramRoots,
   SANTA_SYNC_PORT,
   type HelperPaths,
@@ -48,7 +49,10 @@ import {
 import { Executor, OWN_HASHES_WAIT_MS, type ActionOutcome } from './executor.js';
 import { eventPipeline, FastPath } from './fastpath.js';
 import { Journal } from './journal.js';
-import { OwnHashes } from './ownHashes.js';
+import { OwnHashes, readyWithin } from './ownHashes.js';
+
+/** Most system programs hashed (OS_PROGRAM_ROOTS): about 2,200 on macOS. */
+const OS_MAX_FILES = 8192;
 import {
   ensureOsquery,
   defaultOsqueryPaths,
@@ -95,6 +99,8 @@ export interface DaemonOptions {
   trust?: (path: string) => SignatureInfo | undefined;
   /** Where the programs no block by hash may name live (ownProgramRoots); tests point it elsewhere. */
   ownProgramRoots?: string[];
+  /** The operating system's program folders (OS_PROGRAM_ROOTS); tests use none. */
+  osProgramRoots?: string[];
   /** How long to wait before trying the sync port again when it is taken. */
   syncRetryMs?: number;
   /** Tests: options for Santa's identity store (crash points, retry delay). */
@@ -272,7 +278,23 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     cdhashes: !linux,
     log,
   });
-  const rehash = (): Promise<void> => ownHashes.refresh().then(() => fastPath.dropOwnBlocks());
+  // The operating system's programs, a larger set (OS_PROGRAM_ROOTS) hashed after
+  // those, so nothing that starts waits on it; a block by hash waits for both.
+  const osHashes = new OwnHashes({
+    roots: opts.osProgramRoots ?? OS_PROGRAM_ROOTS[linux ? 'linux' : 'darwin'],
+    cdhashes: !linux,
+    maxFiles: OS_MAX_FILES,
+    log,
+  });
+  const noBlock = {
+    ready: () => Promise.all([ownHashes.ready(), osHashes.ready()]).then(() => undefined),
+    owner: (id: string) => ownHashes.owner(id) ?? osHashes.owner(id),
+  };
+  const rehash = (): Promise<void> =>
+    ownHashes
+      .refresh()
+      .then(() => osHashes.refresh())
+      .then(() => fastPath.dropOwnBlocks());
 
   // Blocking rules from the app, run on the sensor stream before events reach it.
   const fastPath: FastPath = new FastPath({
@@ -287,10 +309,14 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     log,
     ...(sys.fileId ? { fileId: (p: string) => sys.fileId?.(p) } : {}),
     installed: installedSelf(sys.platform),
-    ownProgram: (id) => ownHashes.owner(id),
+    ownProgram: (id) => noBlock.owner(id),
   });
   fastPath.load();
-  void rehash().then(() => log(`hashed ${ownHashes.size} of Vigil's and its sensors' programs`));
+  void rehash().then(() =>
+    log(
+      `hashed ${ownHashes.size} of Vigil's and its sensors' programs, ${osHashes.size} of the system's`,
+    ),
+  );
 
   // Linux: programs blocked by hash (fapolicyd, plus the check on each launch below).
   const fapolicyd = linux
@@ -365,7 +391,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
     ...(fapolicyd ? { fapolicyd } : {}),
     // The app pinned at install, never paused, stopped or blocked by hash.
     appPin: pinStore,
-    ownHashes,
+    ownHashes: noBlock,
     repin: {
       // Read before the password dialog; the approval re-pins only this code.
       candidate: (grant) => pinCandidate(sys, grant, { installed: installedSelf(sys.platform) }),
@@ -452,15 +478,12 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
       refuse: (rule) => {
         if (rule.policy === 'ALLOWLIST' || rule.policy === 'REMOVE') return undefined;
         if (rule.rule_type !== 'BINARY' && rule.rule_type !== 'CDHASH') return undefined;
-        const own = ownHashes.owner(rule.identifier);
+        const own = noBlock.owner(rule.identifier);
         return own ? `it would block ${own}` : undefined;
       },
-      // Never longer than a block by hash waits for them (OWN_HASHES_WAIT_MS).
-      ready: () =>
-        Promise.race([
-          ownHashes.ready(),
-          new Promise<void>((resolve) => setTimeout(resolve, OWN_HASHES_WAIT_MS).unref()),
-        ]),
+      // Both sets refuse (noBlock), so both are waited for, never longer than a
+      // block by hash waits for them (OWN_HASHES_WAIT_MS).
+      ready: () => readyWithin([ownHashes, osHashes], OWN_HASHES_WAIT_MS),
       eventDetailUrl: 'vigil://santa/event?sha256=%file_sha%',
       eventDetailText: 'Open Vigil',
     });

@@ -14,7 +14,8 @@
 # switch wins and `current` always names a complete version. Pruning leaves
 # alone anything another run could still be using: see vh_finish.
 #
-# Only POSIX sh here: macOS runs it with its /bin/sh, Linux with dash or bash.
+# Only POSIX sh here: macOS runs it with its /bin/sh (or, from the Terminal
+# command, /bin/bash --posix), Linux with dash or bash.
 # shellcheck shell=sh
 
 # Settings. Each real run uses these values; only the tests change them, after
@@ -29,6 +30,15 @@ VH_REPLACED= # the versions this run's switches moved `current` away from
 vh_die() {
   echo "$*" >&2
   exit 1
+}
+
+# Run one of the helper's own commands (osquery-config, pin-app...) as the
+# launcher would, but without it: Node from DEST/current, with an empty
+# environment. The launcher is a /bin/sh script, and these must still run
+# while Santa blocks /bin/sh (it did on 2026-10-10); this script then runs
+# under /bin/bash (see the Terminal command in helper-install.ts).
+vh_helper() {
+  /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "$DEST/current/node" "$DEST/current/helper.mjs" "$@"
 }
 
 # Rename $1 over $2 in one step. When $2 is a symlink to a folder, plain mv

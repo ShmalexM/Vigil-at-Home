@@ -4,6 +4,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -15,12 +16,12 @@ import { DetectionEngine, macosCoreRules, memoryStores } from '@vigil/detection'
 import { fastPathRules, listDigest } from '@vigil/detection/fastpath';
 import { RuleStore, SantaSyncServer } from '@vigil/sensors';
 import { Approvals } from './approval.js';
-import { ownProgramRoots } from './config.js';
+import { OS_PROGRAM_ROOTS, ownProgramRoots } from './config.js';
 import { Executor } from './executor.js';
 import { FastPath } from './fastpath.js';
 import type { ActionOutcome } from './executor.js';
 import { Journal } from './journal.js';
-import { OwnHashes } from './ownHashes.js';
+import { OwnHashes, readyWithin } from './ownHashes.js';
 import type { DetectionSync } from './protocol.js';
 import { FakeSystem } from './testing/fakeSystem.js';
 import { machO } from './testing/machO.js';
@@ -164,6 +165,63 @@ describe('OwnHashes', () => {
       ]),
     );
     expect(ownProgramRoots('darwin', '/x')).toContain(process.execPath);
+  });
+
+  it('covers the system’s own programs, after Vigil’s', () => {
+    const mac = ownProgramRoots('darwin', '/Library/PrivilegedHelperTools/vigil-helper', '/rt');
+    expect(mac).toEqual(
+      expect.arrayContaining(['/bin/sh', '/bin/zsh', '/usr/bin/env', '/usr/bin/osascript']),
+    );
+    expect(mac.indexOf('/bin/sh')).toBeGreaterThan(mac.indexOf('/Applications/Vigil at Home.app'));
+    // Programs one by one, never a folder: on Linux /bin links to /usr/bin, thousands of programs.
+    for (const folder of ['/bin', '/sbin', '/usr/bin', '/usr/sbin'])
+      expect(mac).not.toContain(folder);
+    const linux = ownProgramRoots('linux', '/usr/libexec/vigil-helper', '/rt');
+    expect(linux).toEqual(expect.arrayContaining(['/bin/sh', '/usr/bin/bash', '/usr/bin/env']));
+    // Not all of /usr/bin on Linux: it holds thousands of packaged programs.
+    expect(linux).not.toContain('/usr/bin');
+    expect(linux.indexOf('/bin/sh')).toBeGreaterThan(linux.indexOf('/opt/Vigil at Home'));
+  });
+
+  it('knows the real /bin/sh as one of them', async () => {
+    const own = new OwnHashes({ roots: ['/bin/sh'], cdhashes: false, ownerUid: 0 });
+    await own.refresh();
+    const real = realpathSync.native('/bin/sh');
+    expect(own.owner(sha(readFileSync(real)))).toBe(real);
+  });
+
+  // Review of #189: a copy of any OS tool (curl, ssh, python3) in /tmp has its hash.
+  it('covers every folder of the system’s programs in the background set', () => {
+    expect(OS_PROGRAM_ROOTS.darwin).toEqual(
+      expect.arrayContaining(['/bin', '/sbin', '/usr/bin', '/usr/sbin', '/usr/libexec']),
+    );
+    // /usr/bin/git and python3 are xcrun shims: the real ones are in the developer tools.
+    expect(OS_PROGRAM_ROOTS.darwin).toEqual(
+      expect.arrayContaining([
+        '/Library/Developer/CommandLineTools/usr/bin',
+        '/Applications/Xcode.app/Contents/Developer/usr/bin',
+      ]),
+    );
+    expect(OS_PROGRAM_ROOTS.linux).toEqual(expect.arrayContaining(['/usr/bin', '/usr/sbin']));
+  });
+
+  it('refuses a block naming an OS tool’s hash, wherever the copy ran', async () => {
+    const env = realpathSync.native('/usr/bin/env');
+    const os = new OwnHashes({ roots: [env], cdhashes: false, ownerUid: 0 });
+    await os.refresh();
+    const ex = new Executor({
+      sys: new FakeSystem(),
+      journal: new Journal(join(dir, 'journal.json')),
+      approvals: new Approvals({ dir: join(dir, 'approvals'), requiredOwnerUid: ownerUid }),
+      rules: new RuleStore(join(dir, 'rules.json')),
+      quarantine: { quarantineDir: join(dir, 'Quarantine') },
+      syncPort: 47821,
+      ownHashes: os,
+    });
+    const identifier = sha(readFileSync(env));
+    await expect(
+      ex.execute({ kind: 'santa.rule.set', ruleType: 'binary', identifier, policy: 'block' }),
+    ).rejects.toMatchObject({ code: 'refused', message: expect.stringContaining(env) });
   });
 });
 
@@ -403,6 +461,22 @@ describe('blocks naming those programs', () => {
       release();
       await p;
       expect(done).toBe(true);
+    });
+
+    // Review of #189: the sync refuses by both sets, so it must wait for the
+    // slower OS set too, or a stored block on /usr/bin/curl reaches Santa.
+    it('waits for every set it refuses by, within the limit', async () => {
+      let release!: () => void;
+      const late = { ready: () => new Promise<void>((r) => (release = r)) };
+      let done = false;
+      const both = readyWithin([own, late], 60_000).then(() => (done = true));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(done).toBe(false);
+      release();
+      await both;
+      // A set that never finishes holds nothing up past the limit.
+      const never = { ready: () => new Promise<void>(() => undefined) };
+      await expect(readyWithin([own, never], 10)).resolves.toBeUndefined();
     });
   });
 });

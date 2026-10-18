@@ -28,6 +28,7 @@ beforeAll(async () => {
   writeFileSync(paths.osqueryResults as string, '');
   sys.console = undefined;
   stop = await runDaemon({
+    osProgramRoots: [],
     paths,
     sys,
     log: () => {},

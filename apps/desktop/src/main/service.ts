@@ -34,7 +34,7 @@ import { redactEvidenceInSlices } from './evidence-redact.js';
 import { EventLog } from './events.js';
 import { BATTERY_SLOWDOWN, type PowerMode } from './power.js';
 import type { Store } from './db/store.js';
-import { FEED_CHECK_MS, type Detector } from './detection.js';
+import { FEED_CHECK_MS, notApplied, type Detector } from './detection.js';
 import type { InForce } from './in-force.js';
 import { RuleEditing } from './rule-editing.js';
 import type { ActionExecutor } from './executor.js';
@@ -56,6 +56,9 @@ import { TEST_RULE } from './test-alert.js';
 import { WORTH_A_LOOK_RULE } from './worth-a-look.js';
 import { SLOW_RULE } from './slow-rule.js';
 import { UsageService } from './usage.js';
+
+/** Why the Santa block a malicious verdict adds was run; Reopen finds it by this. */
+const CONFIRMED_MALICIOUS = 'You confirmed it as malicious';
 
 /** Scheduled jobs as people know them, for a stuck-work note in the status. */
 const JOB_NAMES: Record<string, string> = {
@@ -300,13 +303,73 @@ export class VigilCore {
       if (learned.santa) {
         await this.alerts.run('user', learned.santa, {
           alertId,
-          reason: 'You confirmed it as malicious',
+          reason: CONFIRMED_MALICIOUS,
         });
+      }
+      if (learned.blockRefused) {
+        console.warn(`[detection] ${learned.blockRefused.message}`);
+        this.alerts.refuse(
+          'user',
+          learned.blockRefused.santa,
+          { alertId, reason: CONFIRMED_MALICIOUS },
+          learned.blockRefused.message,
+        );
       }
       if (learned.suggested && learned.suggestDemotion)
         console.info(`[detection] suggested: ${learned.suggestDemotion.message}`);
     }
     return this.store.getAlert(alertId) ?? alert;
+  }
+
+  /**
+   * Put a resolved alert back in the list. Reopening one the user confirmed
+   * as malicious takes that verdict back: the program leaves the user-blocked
+   * list and the Santa rule the verdict added is removed, both through the
+   * helper, in one password dialog. If either is refused or fails, the alert
+   * stays resolved and the program stays blocked.
+   */
+  async reopen(alertId: string): Promise<Alert> {
+    const alert = this.store.getAlert(alertId);
+    if (alert?.decision?.verdict !== 'malicious' || !this.detector) {
+      return this.alerts.reopen(alertId);
+    }
+    // As in decide: the list change is held so the Santa removal's dialog includes it.
+    let held!: () => void;
+    const waiting = new Promise<void>((resolve) => (held = resolve));
+    let settled: Awaited<ReturnType<Detector['unlearn']>> | undefined;
+    const unlearning = this.detector
+      .unlearn(alertId, { hold: true, onHeld: held })
+      .then((r) => (settled = r));
+    await Promise.race([waiting, unlearning]);
+    // Refused before anything was held (the helper said no): leave the block alone.
+    if (settled && notApplied(settled.helper ?? 'applied')) {
+      return this.store.getAlert(alertId) ?? alert;
+    }
+    const blocks = this.store
+      .listActions({ alertId })
+      .filter(
+        (r) =>
+          r.actor === 'user' &&
+          r.status === 'done' &&
+          r.action.kind === 'santa.rule.set' &&
+          r.reason === CONFIRMED_MALICIOUS,
+      );
+    let failed = 0;
+    for (const r of blocks) {
+      try {
+        if ((await this.alerts.undo(r.id)).status !== 'done') failed++;
+      } catch (err) {
+        console.warn(`[alerts] could not unblock ${r.id}:`, err);
+        failed++;
+      }
+    }
+    if (failed) this.executor.dropHeld?.();
+    else await this.executor.approveHeld?.();
+    const undone = await unlearning;
+    if (failed || notApplied(undone.helper ?? 'applied')) {
+      return this.store.getAlert(alertId) ?? alert;
+    }
+    return this.alerts.reopen(alertId);
   }
 
   /**

@@ -221,6 +221,35 @@ describe('blocking rules in the helper', () => {
     expect(sys.signals).toEqual([]);
   });
 
+  it('never stops or blocks the macOS shell by its hash, even once the list drops it', async () => {
+    // 2026-10-10: a "malicious" verdict put /bin/sh's hash on the user's list,
+    // and every shell on the Mac was killed and blocked.
+    const SH = 'a5'.repeat(32);
+    const { sync, lists } = appSet({ known_bad_sha256: [BAD], user_blocked_sha256: [SH] });
+    await syncWith(sync, lists);
+    sys.processes.set(6000, { path: '/bin/sh', started: 'T' });
+    // Santa's log names no signer.
+    const shell: SensorEvent = {
+      id: 'e-sh',
+      ts: Date.now(),
+      source: 'santa',
+      kind: 'process.exec',
+      process: { pid: 6000, ppid: 77, path: '/bin/sh', sha256: SH, signing: 'unknown' },
+    };
+    expect(await fast.check(shell)).toEqual([]);
+    // Dropped from the list, the hash retires and still matches for a week.
+    const dropped = appSet({ known_bad_sha256: [BAD], user_blocked_sha256: [] });
+    await syncWith(dropped.sync, dropped.lists);
+    expect(fast.status().retired).toBeGreaterThan(0);
+    expect(await fast.check(shell)).toEqual([]);
+    expect(sys.signals).toEqual([]);
+    // A copy of that program anywhere else is still stopped.
+    sys.processes.set(6001, { path: '/tmp/payload', started: 'T' });
+    const ran = await fast.check(exec(6001, SH));
+    expect(sys.signals).toEqual([{ pid: 6001, signal: 'SIGKILL' }]);
+    expect(ran.map((r) => r.action.kind)).toContain('process.kill');
+  });
+
   it('refuses a list that arrives damaged and keeps the old one', async () => {
     const { sync } = appSet({ known_bad_sha256: [BAD, 'd'.repeat(64)] });
     await client.call(sync);

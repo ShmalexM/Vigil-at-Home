@@ -1,3 +1,4 @@
+import { SHELL_BLOCKED } from '@vigil/helper/client';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -22,6 +23,7 @@ import {
   appPinned,
   appPinTarget,
   ELEVATED_ENTRY,
+  elevatedEntry,
   elevatedArgs,
   helperBundleDir,
   helperInstallCommand,
@@ -125,10 +127,13 @@ describe('helper install', () => {
       .map((a) => shellQuote(a))
       .join(' ');
     const entry = `sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/sh -c ${shellQuote(ELEVATED_ENTRY)} vigil-helper`;
+    // macOS: bash, never /bin/sh, so the command works while Santa blocks /bin/sh.
+    const macEntry = `sudo /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --posix -c ${shellQuote(elevatedEntry('/bin/bash --posix'))} vigil-helper`;
+    expect(macEntry).not.toContain('/bin/sh');
     // install.sh gets the app to pin as its one argument.
     const app = (p: NodeJS.Platform) => shellQuote(appPinTarget(p));
     expect(helperInstallCommand(dir, 'darwin')).toBe(
-      `${entry} ${shellQuote(dir)} install.sh ${app('darwin')} ${checks}`,
+      `${macEntry} ${shellQuote(dir)} install.sh ${app('darwin')} ${checks}`,
     );
     expect(helperInstallCommand(dir, 'linux')).toBe(
       `d=$(mktemp -d) && cp -R ${shellQuote(dir)}/. "$d" && ${entry} "$d" linux/install.sh ${app('linux')} ${checks}; rm -rf "$d"`,
@@ -374,6 +379,26 @@ describe('helper install', () => {
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/Permission denied/);
     expect(r).toHaveProperty('command');
+  });
+
+  it('says Santa blocks /bin/sh when that is why the dialog failed, with a command that avoids it', async () => {
+    const { dir } = bundle();
+    const failed: RunFile = async () => ({
+      code: 1,
+      stdout: '',
+      stderr: '0:42: execution error: Operation not permitted (1)',
+    });
+    const r = await runHelperScript('update', dir, failed, 'darwin', async () => true);
+    expect(r).toMatchObject({ ok: false, error: SHELL_BLOCKED });
+    expect(r.command).toBe(helperInstallCommand(dir, 'darwin'));
+    expect(r.command).not.toMatch(/\/bin\/sh\b/);
+    // A closed dialog is still a cancel, and nothing is probed for it.
+    let probed = false;
+    const cancel: RunFile = async () => ({ code: 1, stdout: '', stderr: 'User canceled. (-128)' });
+    expect(
+      await runHelperScript('install', dir, cancel, 'darwin', async () => (probed = true)),
+    ).toEqual({ ok: false, error: 'cancelled' });
+    expect(probed).toBe(false);
   });
 
   it('runs one install at a time, whichever window asked', async () => {
@@ -758,19 +783,21 @@ describe('the uninstallers', () => {
   const script = (rel: string) =>
     readFileSync(join(import.meta.dirname, '..', '..', 'helper', rel), 'utf8');
   it.each([
-    ['uninstall.sh', 'launchctl bootout', '"$TOOLS/vigil-helper"'],
-    ['linux/uninstall.sh', 'systemctl disable --now', '"$LIBEXEC/vigil-helper"'],
+    // macOS runs Node itself (vh_helper): the launcher is a /bin/sh script.
+    ['uninstall.sh', 'launchctl bootout', 'vh_helper', '"$TOOLS/vigil-helper"'],
+    ['linux/uninstall.sh', 'systemctl disable --now', '"$LIBEXEC/vigil-helper"', undefined],
   ])(
     '%s stops the helper before pin-remove, and runs it before removing the helper',
-    (rel, stop, bin) => {
+    (rel, stop, run, launcher) => {
+      const bin = launcher ?? run;
       const text = script(rel);
       const at = (needle: string) => {
         const i = text.indexOf(needle);
         expect(i, needle).toBeGreaterThanOrEqual(0);
         return i;
       };
-      expect(at(stop)).toBeLessThan(at(`${bin} pin-remove`));
-      expect(at(`${bin} pin-remove`)).toBeLessThan(at(`rm -f ${bin}\n`));
+      expect(at(stop)).toBeLessThan(at(`${run} pin-remove`));
+      expect(at(`${run} pin-remove`)).toBeLessThan(at(`rm -f ${bin}\n`));
     },
   );
 });

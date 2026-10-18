@@ -69,6 +69,7 @@ export async function startIsolatedHelper(
     sensorBinaries: { santa: false, osquery: join(root, 'no-osqueryd') },
     osquery: false,
     ownProgramRoots: [],
+    osProgramRoots: [],
   });
   return {
     root,

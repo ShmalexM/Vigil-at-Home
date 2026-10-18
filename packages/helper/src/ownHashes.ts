@@ -176,3 +176,21 @@ export class OwnHashes {
     }
   }
 }
+
+/**
+ * Resolves once every set's first pass is done, or after `waitMs`, whichever
+ * comes first: what anything that refuses by these sets waits for.
+ */
+export function readyWithin(
+  sets: readonly Pick<OwnHashes, 'ready'>[],
+  waitMs: number,
+): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    Promise.all(sets.map((s) => s.ready())).then(() => undefined),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, waitMs);
+      timer.unref?.();
+    }),
+  ]).finally(() => clearTimeout(timer));
+}

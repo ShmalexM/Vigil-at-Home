@@ -11,6 +11,7 @@ export const AGENT_FIELD_PREFIXES: readonly string[] = [
   'agent',
   'tool',
   'command',
+  'commandPaths',
   'commandBytes',
   'commandClipped',
   'filePath',

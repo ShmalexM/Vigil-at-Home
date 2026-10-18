@@ -221,50 +221,136 @@ export const PERSIST_WRITE = String.raw`((^|[\s;&|(/])(cp|mv|tee|ln|ditto|rsync|
 export const PERSIST_RES = [PERSIST_LAUNCHCTL, PERSIST_CRONTAB, PERSIST_WRITE];
 
 // --------------------------------------------------------------------- tamper
-/** A path to Vigil's or Santa's own files. */
-const GUARDED_PATH = String.raw`(Vigil\\? at\\? Home(\.app\b|/)|vigil-helper|com\.vigilathome|/var/db/santa|Santa\.app)`;
+// These run on process.commandLinePaths / commandPaths: the command line with
+// quotes and escapes gone, `$HOME` and /Users/<name> as `~`, `//`, `/./` and
+// `..` resolved, /private/var as /var and `{a,b}` expanded
+// (rules/command-paths.ts). So `"$HOME"/Library/…`, `//Library/./…` and
+// `Vigil\ at\ Home` all read as one path.
+
+/** Starts a path: at the start, or after a space, `=`, `:`, `(` or `>`. */
+const AT = String.raw`(?<![^\s=:(>])`;
+/** The end of a folder's name: a `/`, a space or the end of the line. */
+const END = String.raw`(/|\s|$)`;
 
 /**
- * Stopping or editing Vigil or Santa, or switching off a macOS protection.
- * Matched case-insensitively; paths may escape their spaces (`Vigil\ at\ Home`).
- * The tempered gaps (`(?:(?!verb)[^|;&>])*`) stay linear: they stop at a
- * command separator and at the next verb, so one pipeline matches at most once.
+ * Paths to Vigil's, Santa's or osquery's own files where they are installed:
+ * the apps, the helper and its state, their launch jobs, data, logs and
+ * managed settings, and, after a `cd`, those names given relative to it.
+ * Each must start a path (AT), so the same folders inside a test sandbox
+ * (`/tmp/vigil-helper-test.X/Library/PrivilegedHelperTools/…`) do not count,
+ * and neither does a name inside another file's name: on a real Mac
+ * (2026-10-17), 940 of 977 alerts in two weeks were an agent's cp, chmod, mv
+ * or rm in such a sandbox, or a video moved into `~/Movies/Vigil at Home/`.
+ * The app bundle counts by its name wherever it is. Five patterns, each
+ * under the 256-character limit with the verb before it.
+ */
+const GUARDED_PATHS = [
+  // Relative to the folder it is in (`cd …; rm -rf vigil-helper.d`), and the app bundle anywhere.
+  String.raw`${AT}(\./)?(vigil-helper(\.d)?${END}|Santa\.app\b|Vigil at Home/)|Vigil at Home\.app\b`,
+  // The app's data and login item in a home folder.
+  String.raw`${AT}~/Library/(Application Support/Vigil at Home${END}|LaunchAgents/com\.vigilathome\.)`,
+  // The helper, its root-owned state, logs and launch job.
+  String.raw`${AT}/Library/(PrivilegedHelperTools/vigil-helper|Application Support/Vigil${END}|Logs/Vigil\b|Launch\w+/com\.vigilathome\.)`,
+  // Santa, the launch jobs and managed settings (configuration profiles), Santa's and osquery's data.
+  String.raw`${AT}(/Applications/Santa\.app\b|/Library/(LaunchDaemons|Managed Preferences(/\w+)?)/(com\.(vigilathome|northpolesec\.santa|google\.santa)|io\.osquery)|/var/(db/santa|osquery)\b)`,
+  // osquery itself, and Linux: the helper, its unit, socket, approvals and state, osquery's config, the app.
+  String.raw`${AT}(/opt/osquery\b|/usr/local/bin/osquery|/usr/libexec/vigil-helper|/etc/(systemd/system/vigil-helper|osquery\b)|/(var/)?run/vigil|/var/lib/vigil\b|/opt/Vigil at Home${END})`,
+];
+/** Databases an agent may read but not change: Vigil's own and Santa's rules. */
+const GUARDED_DBS = String.raw`${AT}(~/Library/Application Support/Vigil at Home/|/var/db/santa/)`;
+
+// kill/killall/pkill of Vigil or Santa, or a pipeline that xargs-kills it.
+const KILL_RE = String.raw`(^|[\s;&|(/])(kill|killall|pkill)\s(?:(?![\s(/](kill|killall|pkill)\s)[^|;&])*(vigil|santa)|(vigil|santa)[^;&]{0,200}\|\s*xargs\b[^|;&]{0,40}\bkill`;
+// launchctl unloading/booting out Vigil, Santa or osquery: launchctl itself
+// (bare or /bin/launchctl), not a stand-in a test put in a folder of its own.
+const LAUNCHCTL_RE = String.raw`(?<![^\s;&|(])(/bin/)?launchctl\s+(bootout|unload|remove|disable|kill)\b[^|;&]*(vigil|santa|osquery)`;
+// santactl adding an allow/remove rule.
+const SANTACTL_RE = String.raw`santactl\s+rule\b[^|;&]*--(allow|remove|whitelist)`;
+// spctl turning Gatekeeper off (or adding a blanket allowance), or csrutil
+// disabling System Integrity Protection.
+const GATEKEEPER_RE = String.raw`(spctl\s+--(master-disable|global-disable|disable|add)|csrutil\s+disable)\b`;
+// tccutil resetting privacy — but a per-app reset of some other app is fine;
+// resetting All, or an app whose id names vigil/santa, is not.
+const TCC_RE = String.raw`tccutil\s+reset\b(?!\s+\w+\s+(?![\w.-]*(vigil|santa))[\w-]+\.[\w.-]+(\s|$|[;&|)]))`;
+// turning the firewall off, or unloading Santa's system extension.
+const FIREWALL_RE = String.raw`socketfilterfw\b[^|;&]{0,64}--setglobalstate\s+off\b|--unload-system-extension|systemextensionsctl\s+uninstall[^|;&]{0,128}(santa|vigil)`;
+// telling Vigil or Santa to quit over AppleScript.
+const QUIT_RE = String.raw`osascript\b[^|;&]{0,160}(\bquit\s+(app|application)\b[^|;&]{0,64}(vigil|santa)|(vigil|santa)[^|;&]{0,32}\bto\s+quit\b)`;
+
+/**
+ * Stopping or editing Vigil, Santa or osquery, or switching off a macOS
+ * protection. Matched case-insensitively. The tempered gaps
+ * (`(?:(?!verb)[^|;&>])*`) stay linear: they stop at a command separator and
+ * at the next verb, so one pipeline matches at most once. A rule's condition
+ * holds at most ten patterns (lint.ts), so checks with nothing in common
+ * share one, joined by `|`, and the fixed phrases below are plain text.
  */
 export const TAMPER_RES_NOCASE = [
-  // kill/killall/pkill of Vigil or Santa, or a pipeline that xargs-kills it.
-  String.raw`((^|[\s;&|('"/])(kill|killall|pkill)\s(?:(?![\s('"/](kill|killall|pkill)\s)[^|;&])*(vigil|santa)|(vigil|santa)[^;&]{0,200}\|\s*xargs\b[^|;&]{0,40}\bkill)`,
-  // launchctl unloading/booting out Vigil or Santa.
-  String.raw`launchctl\s+(bootout|unload|remove|disable|kill)\b[^|;&]*(vigil|santa)`,
-  // santactl adding an allow/remove rule.
-  String.raw`santactl\s+rule\b[^|;&]*--(allow|remove|whitelist)`,
-  // spctl turning Gatekeeper off (or adding a blanket allowance), or csrutil
-  // disabling System Integrity Protection.
-  String.raw`(spctl\s+--(master-disable|global-disable|disable|add)|csrutil\s+disable)\b`,
-  // tccutil resetting privacy — but a per-app reset of some other app is fine;
-  // resetting All, or an app whose id names vigil/santa, is not.
-  String.raw`tccutil\s+reset\b(?!\s+["']?\w+["']?\s+["']?(?![\w.-]*(vigil|santa))[\w-]+\.[\w.-]+["']?(\s|$|[;&|)]))`,
-  // editing or deleting Vigil's or Santa's own files: the verb or redirect and
-  // a path to them on one line, at most 160 characters apart (which also keeps
-  // the gap linear). "Vigil at Home" counts only as a path (`…/Vigil at Home/`,
-  // `Vigil at Home.app`), so prose in a heredoc, a note or an agent's
-  // transcript that names Vigil does not. sqlite3 opening a database read-only
-  // (`-readonly`, `?mode=ro`) only reads it, like any other reader.
-  String.raw`(\b(rm|mv|cp|truncate|chmod|chown|tee)\b|\bsqlite3\b(?![^|;&>\n]{0,160}(\s-readonly\b|[?&]mode=ro\b))|>)[^|;&>\n]{0,160}?${GUARDED_PATH}`,
+  [KILL_RE, LAUNCHCTL_RE].join('|'),
+  // tccutil first and with no repeat counts beside it: a copy in a rule of
+  // your own is refused for its lookahead (linear.test.ts).
+  [TCC_RE, GATEKEEPER_RE, SANTACTL_RE].join('|'),
+  [QUIT_RE, FIREWALL_RE].join('|'),
+  // editing or deleting Vigil's, Santa's or osquery's own files: the verb or
+  // redirect and a path to them on one line, at most 160 characters apart
+  // (which also keeps the gap linear). Prose in a heredoc, a note or an
+  // agent's transcript that names Vigil does not count (see GUARDED_PATHS).
+  ...GUARDED_PATHS.map(
+    (path) => String.raw`(\b(rm|mv|cp|truncate|chmod|chown|tee)\b|>)[^|;&>\n]{0,160}?(${path})`,
+  ),
+  // sqlite3 changing Vigil's or Santa's database: opening it read-only
+  // (`-readonly`, `?mode=ro`) only reads it, like any other reader...
+  String.raw`\bsqlite3\b(?![^|;&>\n]{0,160}(\s-readonly\b|[?&]mode=ro\b))[^|;&>\n]{0,160}?${GUARDED_DBS}`,
   // ...unless it writes a copy or its output there.
-  String.raw`\bsqlite3\b[^|;&>\n]{0,160}?([\s"']\.(output|once|save|backup|clone|excel)|\bvacuum\s+into)\b[^|;&>\n]{0,160}?${GUARDED_PATH}`,
-  // turning the firewall off, or unloading Santa's system extension.
-  String.raw`(socketfilterfw\b[^|;&]{0,64}--setglobalstate\s+off\b|--unload-system-extension\b|systemextensionsctl\s+uninstall\b[^|;&]{0,128}(santa|vigil))`,
-  // telling Vigil or Santa to quit over AppleScript.
-  String.raw`osascript\b[^|;&]{0,160}(\bquit\s+(app|application)\b[^|;&]{0,64}(vigil|santa)|(vigil|santa)[^|;&]{0,32}\bto\s+quit\b)`,
+  String.raw`\bsqlite3\b[^|;&>\n]{0,160}?(\s\.(output|once|save|backup|clone|excel)|\bvacuum\s+into)\b[^|;&>\n]{0,160}?${GUARDED_DBS}`,
 ];
-/** Case-sensitive: `pfctl -d` turns the firewall off and `-F a`/`-F r`/`-F T` flush rules; `-f` loads rules and `-F states` only clears connections, both fine. */
-export const TAMPER_RE_CASED = String.raw`pfctl\s+-(d\b|F\s*["']?[arT])`;
+/**
+ * Case-sensitive: `pfctl -d` turns the firewall off and `-F a`/`-F r`/`-F T`
+ * flush rules; `-f` loads rules and `-F states` only clears connections,
+ * both fine. Plain text: the quotes around a flag are already gone.
+ */
+export const PFCTL_OFF = [
+  'pfctl -d',
+  'pfctl -F a',
+  'pfctl -Fa',
+  'pfctl -F r',
+  'pfctl -Fr',
+  'pfctl -F T',
+  'pfctl -FT',
+];
 
-/** `field` tampers with Vigil, Santa or a macOS protection. */
+/**
+ * `field` (process.commandLinePaths or commandPaths, see above) tampers with
+ * Vigil, Santa, osquery or a macOS protection.
+ */
 export const tamper = (field: string): Condition => ({
   any: [
     { field, op: 'regex', value: TAMPER_RES_NOCASE, nocase: true },
-    { field, op: 'regex', value: [TAMPER_RE_CASED] },
+    { field, op: 'contains', value: PFCTL_OFF },
+    // Stopping osquery by its process name, with any signal or option
+    // (`killall -KILL osqueryd`, `pkill -x osqueryd`).
+    {
+      all: [
+        { field, op: 'contains', value: ['killall', 'pkill'], nocase: true },
+        { field, op: 'contains', value: ['osqueryd'], nocase: true },
+      ],
+    },
+    // Changing Santa's rules database after changing into its folder
+    // (`cd /var/db/santa && sqlite3 rules.db "DELETE…"`); read-only is fine.
+    {
+      all: [
+        { field, op: 'contains', value: ['cd /var/db/santa'], nocase: true },
+        { field, op: 'contains', value: ['sqlite3'], nocase: true },
+        { not: { field, op: 'contains', value: ['-readonly', 'mode=ro'], nocase: true } },
+      ],
+    },
+    // Removing Vigil's or Santa's configuration profile.
+    {
+      all: [
+        { field, op: 'contains', value: ['profiles remove', 'profiles -r'], nocase: true },
+        { field, op: 'contains', value: ['vigilathome', 'santa'], nocase: true },
+      ],
+    },
   ],
 });
 
@@ -665,7 +751,7 @@ export const agentWatchRules: DetectionRuleInput[] = [
     severity: 'high',
     fidelity: 'medium',
     eventKinds: ['process.exec'],
-    condition: { all: [AGENT, CHILD, tamper('process.commandLine')] },
+    condition: { all: [AGENT, CHILD, tamper('process.commandLinePaths')] },
     response: [SUSPEND],
     reasons: [
       '{{process.agent.id}} ran: {{process.commandLine}}',

@@ -1,4 +1,4 @@
-import { authorizeAction, type Action, type ProcessRef } from '@vigil/core';
+import { authorizeAction, type Action, type Condition, type ProcessRef } from '@vigil/core';
 import { selfKey, selfRoots, underSelfRoot } from '@vigil/core/self';
 import { BlockList, isIP } from 'node:net';
 import { globMatcher } from './rules/compile.js';
@@ -45,6 +45,71 @@ export const PROTECTED_FILE_GLOBS = [...DEFAULT_PROTECTED_PATH_GLOBS, '/usr/**',
  */
 export const APPLE_TOOL_GLOBS = ['/bin/*', '/usr/bin/*'];
 
+/**
+ * Where the operating system's own programs live. A program here is part of
+ * macOS (or the Linux distribution) whatever the event's signing field says:
+ * events from Santa's log carry `signing: "unknown"`, and on 2026-10-10 a
+ * "malicious" verdict on such an event blocked /bin/sh for the whole Mac.
+ */
+export const PLATFORM_PATH_GLOBS = [
+  '/bin/**',
+  '/sbin/**',
+  '/usr/bin/**',
+  '/usr/sbin/**',
+  '/usr/libexec/**',
+  '/System/**',
+  '/Library/Apple/**',
+];
+
+/** Where Apple's developer tools live (Command Line Tools, Xcode). */
+export const APPLE_TOOLCHAIN_GLOBS = [
+  '/Library/Developer/CommandLineTools/**',
+  '/Applications/Xcode*.app/Contents/Developer/**',
+];
+/** The team ID Apple signs its own non-platform programs with (Xcode, its tools). */
+const APPLE_TEAM_ID = '59GAB85EFG';
+
+/** Shells: blocking one by hash stops every script that uses it, Vigil's included. */
+export const SHELL_NAMES = ['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'tcsh', 'csh', 'fish'];
+
+const baseName = (path: string): string => path.slice(path.lastIndexOf('/') + 1);
+
+/**
+ * The command a shell was asked to run with `-c`, or undefined when the
+ * process is not a shell running `-c <command>`. Santa's log splits the
+ * command on spaces, so everything after `-c` is joined back together.
+ */
+export function shellCommand(p: Pick<ProcessRef, 'path' | 'args'>): string | undefined {
+  if (!SHELL_NAMES.includes(baseName(p.path))) return undefined;
+  const args = p.args ?? [];
+  // A short-option cluster holding c (`-c`, `-lc`, `-ec`). Tested as letters
+  // plus an includes(), not `-[a-z]*c[a-z]*`, which backtracks on long runs.
+  const at = args.findIndex((a, i) => i > 0 && /^-[a-z]+$/.test(a) && a.includes('c'));
+  if (at < 0) return undefined;
+  const cmd = args
+    .slice(at + 1)
+    .join(' ')
+    .trim();
+  return cmd || undefined;
+}
+
+/** Event fields that name one exact program, wherever it is and whoever runs it. */
+const PROGRAM_HASH_FIELDS = new Set(['process.sha256', 'process.cdhash']);
+
+/**
+ * Whether the condition picks the program by its hash: an inList on its
+ * sha256 or CDHash (user-blocked-hash, the malware lists), or an `eq` or `in`
+ * test on one, anywhere outside a `not`. Such a rule fires on every run of
+ * that program, so its kill stops the program as surely as a block by hash.
+ */
+export function matchesProgramHash(c: Condition): boolean {
+  if ('inList' in c) return PROGRAM_HASH_FIELDS.has(c.inList.field);
+  if ('all' in c) return c.all.some(matchesProgramHash);
+  if ('any' in c) return c.any.some(matchesProgramHash);
+  if ('not' in c || 'firstSeen' in c) return false;
+  return PROGRAM_HASH_FIELDS.has(c.field) && (c.op === 'eq' || c.op === 'in');
+}
+
 export const DEFAULT_NEVER_BLOCK_NETWORKS = [
   '0.0.0.0/8',
   '127.0.0.0/8',
@@ -78,6 +143,8 @@ export class SafetyFloor {
   private readonly protectedPaths: ((path: string) => boolean)[];
   private readonly protectedFiles: ((path: string) => boolean)[];
   private readonly appleTools = APPLE_TOOL_GLOBS.map((g) => globMatcher(g));
+  private readonly platformPaths = PLATFORM_PATH_GLOBS.map((g) => globMatcher(g));
+  private readonly toolchain = APPLE_TOOLCHAIN_GLOBS.map((g) => globMatcher(g));
   private readonly systemPersistence = SYSTEM_PERSISTENCE_GLOBS.map((g) => globMatcher(g));
   private readonly selfPaths: string[];
   private selfHashes: Set<string>;
@@ -117,7 +184,7 @@ export class SafetyFloor {
   processProtection(p: ProcessRef | undefined): string | undefined {
     if (!p) return 'there is no process to act on';
     if (p.pid <= 1) return 'it is a core macOS process';
-    if (p.signing === 'apple') {
+    if (this.isApple(p)) {
       const tool = this.appleTools.some((fits) => fits(p.path));
       if (!tool || p.ppid === 1 || p.ppid === undefined) {
         return 'it is part of macOS (signed by Apple)';
@@ -128,6 +195,55 @@ export class SafetyFloor {
       return 'it lives in a protected system folder';
     }
     return undefined;
+  }
+
+  private isPlatform(path: string): boolean {
+    return this.platformPaths.some((fits) => fits(path));
+  }
+
+  /**
+   * Part of the OS, by something an attacker can't choose: a path the OS
+   * protects, or a `platform:` signing ID (Santa reports it from the kernel's
+   * platform-binary flag; the helper's codesign lookup only after verifying
+   * `anchor apple`). Not `signing: 'apple'` alone: from Santa's log and
+   * osquery that rests on the leaf certificate's name ("Software Signing"),
+   * which a self-signed certificate can carry, and it would make a program
+   * that can't be stopped or blocked.
+   */
+  /**
+   * Apple's developer tools, which /usr/bin/git, python3 and the like hand
+   * off to: in their install folders and signed with Apple's own team ID (a
+   * team ID comes only from an Apple-issued certificate). Root-owned, but
+   * not under SIP, so never exempt from being stopped (processProtection),
+   * only from a block by hash, which would stop git for the whole Mac.
+   */
+  private isAppleToolchain(p: ProcessRef): boolean {
+    return p.teamId === APPLE_TEAM_ID && this.toolchain.some((fits) => fits(p.path));
+  }
+
+  private isApple(p: ProcessRef): boolean {
+    return this.isPlatform(p.path) || p.signingId?.startsWith('platform:') === true;
+  }
+
+  /**
+   * Why this program must never be blocked by hash, or undefined if it may
+   * be. Stricter than {@link processProtection}: a block stops the program
+   * everywhere, not just this instance, so no part of the operating system
+   * may be blocked, whatever the signing field says. Only paths the OS
+   * itself protects count (PLATFORM_PATH_GLOBS, under SIP on macOS): a shell
+   * Homebrew, MacPorts or Nix installed sits in a folder the user's account
+   * can write, so a program there named `bash` may be anything.
+   */
+  blockProtection(p: ProcessRef | undefined): string | undefined {
+    if (!p) return 'there is no process to act on';
+    if (this.isAppleToolchain(p))
+      return `${p.path} is Apple's developer tool; blocking it would stop it for everything on the Mac`;
+    if (this.isApple(p)) {
+      return SHELL_NAMES.includes(baseName(p.path))
+        ? `${p.path} is the macOS shell; blocking it would stop every script on the Mac`
+        : `${p.path} is part of macOS; blocking it would stop it for everything on the Mac`;
+    }
+    return this.processProtection(p);
   }
 
   /** Why this action must not run or be offered, or undefined when it is safe. */
@@ -172,11 +288,8 @@ export class SafetyFloor {
         if (this.selfHashes.has(action.identifier.toLowerCase()))
           return 'it would block Vigil itself';
         const names = proc && [proc.sha256, proc.cdhash, proc.teamId, proc.signingId];
-        if (proc && names?.includes(action.identifier)) {
-          const why = this.processProtection(proc);
-          // Blocking an Apple CLI tool binary blocks it for everyone, not just this instance.
-          if (why || proc.signing === 'apple') return why ?? 'it would block part of macOS';
-        }
+        // A block names the program everywhere, not just this instance.
+        if (proc && names?.includes(action.identifier)) return this.blockProtection(proc);
         return undefined;
       }
       default:

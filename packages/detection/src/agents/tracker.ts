@@ -308,14 +308,28 @@ export function bareShellCommand(cmd: string): string[] | undefined {
   return words.length ? words : undefined;
 }
 
-/** The program and its arguments are exactly those words (the program by name). */
+/**
+ * Arguments as Santa's log gives them: it joins argv with spaces and the
+ * parser splits them again, so no argument holds a space and a word that
+ * had one (`Claude Code-credentials`) arrives as two.
+ */
+function splitOnSpaces(args: readonly string[]): boolean {
+  return !args.some((a) => /\s/.test(a));
+}
+
+/**
+ * The program and its arguments are exactly those words (the program by
+ * name). From Santa's log, where word boundaries are lost, the same words
+ * joined by spaces: the shell's first child is the command it was given, so
+ * this tells the command from any other child just as well.
+ */
 function runsWords(words: readonly string[], p: AgentProc): boolean {
   const args = p.args;
-  if (!args || args.length !== words.length) return false;
+  if (!args?.length) return false;
   const prog = basename(words[0]!);
   if (basename(p.path) !== prog || basename(args[0]!) !== prog) return false;
-  for (let i = 1; i < args.length; i++) if (args[i] !== words[i]) return false;
-  return true;
+  if (args.length === words.length && args.every((a, i) => i === 0 || a === words[i])) return true;
+  return splitOnSpaces(args) && args.slice(1).join(' ') === words.slice(1).join(' ');
 }
 
 /** The tag `parent` hands `child`: a bare shell's one command keeps the signature, else passOn. */
@@ -705,8 +719,13 @@ export class AgentTracker {
     const t = n.tag;
     if (n.bareUsed || n.viaBareShell || !t || (t.teamId === undefined && t.signingId === undefined))
       return;
-    if (!COMMAND_SHELLS.has(n.name) || args?.length !== 3 || args[1] !== '-c') return;
-    const words = bareShellCommand(args[2]!);
+    if (!COMMAND_SHELLS.has(n.name) || !args || args.length < 3 || args[1] !== '-c') return;
+    // From Santa's log the command arrives split on spaces (see splitOnSpaces):
+    // join it back. With exact arguments, anything after the command is $0 and
+    // up, and the shell runs only the command, so that is not a bare command.
+    const cmd =
+      args.length === 3 ? args[2]! : splitOnSpaces(args) ? args.slice(2).join(' ') : undefined;
+    const words = cmd === undefined ? undefined : bareShellCommand(cmd);
     if (words) n.bareCmd = words.map(ownString);
   }
 

@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { installedRoots } from '@vigil/core/self';
 import { hostPlatform, type Platform } from './platform.js';
@@ -313,10 +314,102 @@ export function installedSelf(platform: Platform = 'darwin'): string[] {
 }
 
 /**
+ * The operating system's own programs that Vigil, its installer and its
+ * password dialogs run, which no block by hash may name: the shells and core
+ * tools in /bin and /sbin, and the tools in /usr/bin and /usr/sbin that the
+ * helper, install.sh and the dialogs start. Named one by one, never as a
+ * folder: on Linux /bin and /sbin are links to /usr/bin and /usr/sbin, which
+ * hold thousands of programs to hash at every start. The app's safety floor
+ * already keeps rules off every system folder by path (PLATFORM_PATH_GLOBS in
+ * @vigil/detection). On 2026-10-10 a block by hash on /bin/sh stopped every
+ * shell on the Mac, the password dialog Vigil needed to undo it included.
+ */
+const MAC_BIN = [
+  ...['sh', 'bash', 'zsh', 'dash', 'ksh', 'csh', 'tcsh', 'cat', 'chmod', 'cp', 'date'],
+  ...['echo', 'expr', 'kill', 'launchctl', 'ln', 'ls', 'mkdir', 'mv', 'ps', 'pwd'],
+  ...['realpath', 'rm', 'rmdir', 'sleep', 'test', 'unlink'],
+].map((t) => `/bin/${t}`);
+const MAC_TOOLS = [
+  ...['env', 'osascript', 'sudo', 'security', 'codesign', 'plutil', 'chflags', 'id'],
+  ...['install', 'mktemp', 'xattr', 'find', 'readlink', 'touch', 'sort', 'tail'],
+  ...['uname', 'dirname', 'shasum'],
+].map((t) => `/usr/bin/${t}`);
+export const PLATFORM_PROGRAM_ROOTS: Record<Platform, readonly string[]> = {
+  darwin: [
+    ...MAC_BIN,
+    ...['launchd', 'pfctl', 'mount', 'umount'].map((t) => `/sbin/${t}`),
+    ...MAC_TOOLS,
+    '/usr/sbin/chown',
+    '/usr/sbin/lsof',
+  ],
+  linux: [
+    ...['sh', 'bash', 'dash', 'zsh', 'ksh', 'mksh'].flatMap((s) => [`/bin/${s}`, `/usr/bin/${s}`]),
+    ...['env', 'sudo', 'pkexec', 'systemctl', 'install', 'mktemp', 'find', 'nft'].map(
+      (t) => `/usr/bin/${t}`,
+    ),
+    '/bin/systemctl',
+    '/usr/sbin/nft',
+  ],
+};
+
+/**
+ * Why this helper should not run: launchd starts it as
+ * `vigil-helper.d/current/node vigil-helper.d/current/helper.mjs`, reading
+ * `current` twice, and an install that switches it in between would pair one
+ * version's Node with another's helper.mjs. Node reports its own real path,
+ * so the real helper.mjs must sit beside it. Undefined when they match, or
+ * when this Node isn't an installed version (development, tests).
+ */
+export function versionMismatch(
+  execPath: string,
+  script: string | undefined,
+  realpath: (p: string) => string = realpathSync,
+): string | undefined {
+  if (!/\/vigil-helper\.d\/versions\/[^/]+\/node$/.test(execPath) || !script) return undefined;
+  let real: string;
+  try {
+    real = realpath(script);
+  } catch {
+    return `${script} is gone`;
+  }
+  const dir = execPath.slice(0, execPath.lastIndexOf('/'));
+  return real === `${dir}/helper.mjs` ? undefined : `${real} is not the helper beside ${execPath}`;
+}
+
+/**
+ * Every folder of the operating system's own programs, hashed in the
+ * background (daemon.ts osHashes) so that no block by hash names one of them,
+ * wherever a copy of it runs: on 2026-10-10 Santa's log reported /bin/sh with
+ * no signature, and a copy of curl or python3 in /tmp would look the same.
+ * macOS: the folders SIP protects (about 2,200 programs) and Apple's
+ * developer tools. Linux: the
+ * distribution's folders; /bin and /sbin are often links to these.
+ */
+export const OS_PROGRAM_ROOTS: Record<Platform, readonly string[]> = {
+  darwin: [
+    '/bin',
+    '/sbin',
+    '/usr/bin',
+    '/usr/sbin',
+    '/usr/libexec',
+    '/System/Library/CoreServices',
+    // The developer tools that /usr/bin/git, python3 and the like hand off to
+    // (those are xcrun shims): Apple's, root-owned, but not under SIP.
+    '/Library/Developer/CommandLineTools/usr/bin',
+    '/Library/Developer/CommandLineTools/usr/libexec',
+    '/Applications/Xcode.app/Contents/Developer/usr/bin',
+    '/Applications/Xcode-beta.app/Contents/Developer/usr/bin',
+  ],
+  linux: ['/usr/bin', '/usr/sbin', '/usr/libexec', '/usr/lib/systemd', '/bin', '/sbin'],
+};
+
+/**
  * Where the programs live that no block by hash may name (ownHashes.ts): the
  * helper's launcher and the runtime it runs under, Santa's and osquery's
- * programs, and the installed app. Fixed paths plus the helper's own, never
- * anything a client sends.
+ * programs, the installed app, and the system's own programs
+ * (PLATFORM_PROGRAM_ROOTS), last, so a cap on how many files are hashed never
+ * leaves out Vigil's own. Fixed paths plus the helper's own, never anything a
+ * client sends.
  */
 export function ownProgramRoots(
   platform: Platform,
@@ -333,6 +426,7 @@ export function ownProgramRoots(
     `${helperExecutable}.d`,
     ...sensors,
     ...installedSelf(platform),
+    ...PLATFORM_PROGRAM_ROOTS[platform],
   ];
 }
 

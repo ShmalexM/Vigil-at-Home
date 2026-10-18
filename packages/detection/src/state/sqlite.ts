@@ -120,6 +120,12 @@ class SqliteListStore extends MemoryListStore {
       .run(list, entry.trim().toLowerCase(), meta.source, meta.updatedAt);
     super.add(list, entry);
   }
+  override remove(list: string, entry: string): boolean {
+    this.db
+      .prepare('DELETE FROM det_list_entries WHERE list = ? AND entry = ?')
+      .run(list, entry.trim().toLowerCase());
+    return super.remove(list, entry);
+  }
 }
 
 class SqliteExceptionStore extends MemoryExceptionStore {

@@ -26,7 +26,6 @@ import {
   SCRIPT_WRITE_RE,
   SECRET_PATH_RES,
   SECRET_READ_RE,
-  TAMPER_RE_CASED,
   TAMPER_RES_NOCASE,
   UPLOAD_RES,
 } from '../packs/agent-watch.js';
@@ -389,6 +388,11 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
       [bash('sudo launchctl bootout system/com.vigilathome.helper'), DENY],
       [bash('sudo pfctl -F all'), DENY],
       [bash('killall Santa'), DENY],
+      // A path written another way reads the same (rules/command-paths.ts).
+      [bash('sudo rm -rf //Library/./PrivilegedHelperTools/vigil-helper.d'), DENY],
+      [bash('rm "$HOME"/Library/Application\\ Support/Vigil\\ at\\ Home/vigil.db'), DENY],
+      [bash('sudo rm -r /Library/{PrivilegedHelperTools,x}/vigil-{helper,y}.d'), DENY],
+      [bash('sudo killall -KILL osqueryd'), DENY],
       [write(`${home}/Library/Application Support/Vigil at Home/vigil.db`), DENY],
       [write('/var/db/santa/rules.db', 'Edit'), DENY],
       // The same files by the firmlink, the /private links and in another case.
@@ -534,7 +538,6 @@ describe('agent rule packs', () => {
       ENV_DUMP_RE,
       ...PERSIST_RES,
       ...TAMPER_RES_NOCASE,
-      TAMPER_RE_CASED,
       KEYCHAIN_SECRET_RE,
       AGENT_CONFIG_RE,
       CONFIG_WRITE_RE,
@@ -808,6 +811,73 @@ describe('agent rule packs', () => {
         expect(fired(child())).not.toContain('agent-keychain-secret');
       });
 
+      // As Santa's log stored it on a real Mac (2026-10-15): argv joined with
+      // spaces and split again, so the service arrives as two words; no
+      // signature on the child, no parent path.
+      it('is still Claude Code’s own read when Santa’s log splits the arguments on spaces', () => {
+        const split = READ.split(' ');
+        const t = agentTree(NATIVE, { basePid: (pid += 100), args: ['2.1.283'], root: ANTHROPIC });
+        const copy = t.exec(NATIVE, ['2.1.283'], t.root.process, {
+          signing: 'developer_id',
+          ...ANTHROPIC,
+        });
+        const shell = t.exec('/bin/sh', ['/bin/sh', '-c', ...split], copy.process, {
+          signing: 'unknown',
+        });
+        const child = t.exec(
+          '/usr/bin/security',
+          CHILD_ARGS.flatMap((a) => a.split(' ')),
+          shell.process,
+          {
+            ancestors,
+            signing: 'unknown',
+          },
+        );
+        expect(procOf(child)?.args?.slice(-2)).toEqual(['Claude', 'Code-credentials']);
+        expect(fired(shell)).not.toContain('agent-keychain-secret');
+        expect(fired(child)).not.toContain('agent-keychain-secret');
+      });
+
+      it('still alerts on a Santa-split read that is not exactly the command', () => {
+        const split = READ.split(' ');
+        const santa = (command: string[], childArgs: string[]) => {
+          const t = agentTree(NATIVE, {
+            basePid: (pid += 100),
+            args: ['2.1.283'],
+            root: ANTHROPIC,
+          });
+          const copy = t.exec(NATIVE, ['2.1.283'], t.root.process, {
+            signing: 'developer_id',
+            ...ANTHROPIC,
+          });
+          const shell = t.exec('/bin/sh', ['/bin/sh', '-c', ...command], copy.process, {
+            signing: 'unknown',
+          });
+          return t.exec('/usr/bin/security', childArgs, shell.process, {
+            ancestors,
+            signing: 'unknown',
+          });
+        };
+        const childSplit = CHILD_ARGS.flatMap((a) => a.split(' '));
+        const bad = [
+          // Another service than the command named, or one more option.
+          santa(split, [...childSplit.slice(0, -2), 'Chrome', 'Safe', 'Storage']),
+          santa(split, [...childSplit, '-g']),
+          // A command that chains: not a bare command, split or not.
+          santa([...split, ';', 'true'], childSplit),
+          // Exact arguments (no split): what follows the command is $0, not part of it.
+          santa(
+            ['security find-generic-password -a alexmargaris -w -s', '"Claude Code-credentials"'],
+            ['security', 'find-generic-password', '-a', 'alexmargaris', '-w', '-s'],
+          ),
+        ];
+        for (const e of bad)
+          expect(fired(e), JSON.stringify(procOf(e)?.args)).toContain('agent-keychain-secret');
+        // A root only found by `ps` (Claude Code started before Vigil) has no
+        // signature to hand down, so the same read still alerts.
+        expect(fired(pair({}).child())).toContain('agent-keychain-secret');
+      });
+
       it('still alerts on another child, chaining, a second child or an unsigned root', () => {
         const bad = [
           pair(ANTHROPIC, 'echo hi').child(),
@@ -1051,6 +1121,91 @@ describe('agent rule packs', () => {
       ]) {
         expect(fired(sh(c)), c).toContain('agent-guard-tamper');
       }
+    });
+
+    // Real Mac, 2026-10-17: 940 of 977 alerts in two weeks were these shapes.
+    // Review of #189: the narrowing must still catch these.
+    it('reads a path however it is written, relative or not', () => {
+      const loud = [
+        // Relative to a folder the agent changed into.
+        'cd /Library/PrivilegedHelperTools && sudo rm -rf vigil-helper.d',
+        'cd /Applications && sudo mv Santa.app /tmp/',
+        'cd ~/Library/Application\\ Support && rm -rf Vigil\\ at\\ Home/',
+        'rm -rf ./vigil-helper.d',
+        // The same path written another way.
+        'sudo rm -rf //Library/PrivilegedHelperTools/vigil-helper.d',
+        'sudo rm -rf /Library/./PrivilegedHelperTools/vigil-helper.d',
+        'sudo rm -rf /Library/Logs/../PrivilegedHelperTools/vigil-helper',
+        'sudo rm -rf /Library/PrivilegedHelperTools/{x,vigil-helper.d}',
+        'rm "$HOME"/Library/Application\\ Support/Vigil\\ at\\ Home/vigil.db',
+        'rm -r ${HOME}/Library/Application\\ Support/Vigil\\ at\\ Home',
+        'sudo rm /private/var/db/santa/rules.db',
+        // Santa's rules database, changed with sqlite3.
+        'sudo sqlite3 /var/db/santa/rules.db "DELETE FROM rules"',
+        // Linux: the socket and approvals.
+        'sudo rm /run/vigil-helper.sock',
+        'sudo rm -r /run/vigil-approvals',
+        // No trailing slash.
+        'sudo rm -r "/Library/Application Support/Vigil"',
+        'sudo rm -r /opt/osquery',
+        // A profile, the older Santa's launch job, osquery.
+        'sudo profiles remove -identifier com.vigilathome.santa',
+        'sudo rm /Library/LaunchDaemons/com.google.santa.daemon.plist',
+        'sudo launchctl bootout system/io.osquery.agent',
+        'sudo killall osqueryd',
+        // Second review of #189.
+        'sudo rm -r /Library/{PrivilegedHelperTools,x}/vigil-{helper,y}.d',
+        'sudo rm -r /System/Volumes/Data/Library/PrivilegedHelperTools/vigil-helper.d',
+        'rm ~alex/Library/Application\\ Support/Vigil\\ at\\ Home/vigil.db',
+        'cd /var/db/santa && sudo sqlite3 rules.db "DELETE FROM rules"',
+        'sudo killall -KILL osqueryd',
+        'sudo pkill -x osqueryd',
+      ];
+      for (const c of loud) expect(fired(sh(c)), c).toContain('agent-guard-tamper');
+      const quiet = [
+        'sqlite3 -readonly /var/db/santa/rules.db "select count(*) from rules"',
+        'rm -r ~/src/vigil-helper-notes/',
+        'cp ~/Movies/Vigil\\ at\\ Home/tour.mp4 /tmp/',
+        'sudo profiles list',
+        'ls /Library/PrivilegedHelperTools/vigil-helper.d',
+        'cd /var/db/santa && sqlite3 -readonly rules.db "select count(*) from rules"',
+        'pgrep osqueryd',
+      ];
+      for (const c of quiet) expect(fired(sh(c)), c).not.toContain('agent-guard-tamper');
+    });
+
+    it('takes only where Vigil, Santa and osquery are installed, not a folder named like them', () => {
+      const sandbox = '/private/tmp/vigil-helper-test.wpocnG';
+      const quiet = [
+        `cp /tmp/vigil-helper-test.wpocnG/bundle/node ${sandbox}/Library/PrivilegedHelperTools/.vigil-helper-upgrade.J9uXjZ/new/node`,
+        `chmod 755 ${sandbox}/Library/PrivilegedHelperTools/.vigil-helper-upgrade.J9uXjZ/launcher.new`,
+        `mv ${sandbox}/Library/PrivilegedHelperTools/vigil-helper.d ${sandbox}/old`,
+        `rm -f ${sandbox}/Library/PrivilegedHelperTools/.vigil-helper-install.lock/pid`,
+        `cp x ${sandbox}/Library/LaunchDaemons/com.vigilathome.helper.plist`,
+        'rm /tmp/vigil-helper-test.d9i64U/fail-bootstrap',
+        `/bin/sh ${sandbox}/bin/launchctl bootout system/com.vigilathome.helper`,
+        `/bin/mv -n ${home}/Downloads/vigil-at-home-tour.mp4 "${home}/Movies/Vigil at Home/2026-10-downloads/vigil-at-home-tour.mp4"`,
+        `/bin/mv -n "${home}/Downloads/Vigil at Home Codebase Tour.html" "${home}/Documents/Projects/Vigil at Home/Downloaded References/"`,
+        'cp ~/src/vigil-helper-notes.md /tmp/',
+      ];
+      for (const c of quiet) expect(fired(sh(c)), c).not.toContain('agent-guard-tamper');
+      const loud = [
+        'sudo rm -rf /Library/PrivilegedHelperTools/vigil-helper.d',
+        'sudo mv /Library/LaunchDaemons/com.vigilathome.helper.plist /tmp/',
+        'sudo rm "/Library/Application Support/Vigil/helper-rules.json"',
+        'rm ~/Library/LaunchAgents/com.vigilathome.app.plist',
+        `cp /tmp/x "${home}/Library/Application Support/Vigil at Home/vigil.db"`,
+        'sudo rm -rf /var/db/santa/rules.db',
+        'sudo rm /Library/LaunchDaemons/com.northpolesec.santa.plist',
+        'sudo mv /Applications/Santa.app /tmp/',
+        'sudo cp /tmp/x.conf /var/osquery/osquery.conf',
+        'sudo rm -rf /opt/osquery/lib',
+        'sudo tee /Library/Managed\\ Preferences/com.northpolesec.santa.plist < /tmp/p',
+        'sudo rm /etc/systemd/system/vigil-helper.service',
+        'sudo rm -rf /var/lib/vigil/rules.json',
+        'sudo /bin/launchctl bootout system/com.vigilathome.helper',
+      ];
+      for (const c of loud) expect(fired(sh(c)), c).toContain('agent-guard-tamper');
     });
 
     it('lets an agent read Vigil’s database, but not change it or write a copy there', () => {

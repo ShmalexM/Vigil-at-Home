@@ -1,4 +1,5 @@
 import type { DetectionEvent } from '../types.js';
+import { commandPaths } from './command-paths.js';
 import { shellDownloadsAndRuns } from './download-run.js';
 import { runsQuietLine } from './quiet-lines.js';
 
@@ -25,6 +26,14 @@ const COMPUTED: Record<string, FieldGetter> = {
   'process.parentName': (e) =>
     'process' in e ? (basename(e.process?.parentPath) ?? e.process?.ancestors?.[0]) : undefined,
   'process.commandLine': (e) => ('process' in e ? e.process?.args?.join(' ') : undefined),
+  /** The command line with its paths written one way (see rules/command-paths.ts). */
+  'process.commandLinePaths': (e) =>
+    'process' in e ? commandPaths(e.process?.args?.join(' ')) : undefined,
+  /** An agent's Bash request with its paths written one way (see rules/command-paths.ts). */
+  commandPaths: (e) => {
+    const c = read(e, 'command');
+    return typeof c === 'string' ? commandPaths(c) : undefined;
+  },
   /**
    * A shell running exactly one of Claude Code's real local-service reads
    * (see rules/quiet-lines.ts). The download-run rule stays quiet on these.

@@ -349,6 +349,28 @@ export class AlertService extends EventEmitter<AlertEvents> {
     }
   }
 
+  /**
+   * Log an action Vigil refused to run, with why, on the alert's action list,
+   * so the user sees what was not done instead of nothing.
+   */
+  refuse(
+    actor: Actor,
+    action: Action,
+    ctx: { alertId?: string; reason: string },
+    why: string,
+  ): ActionRecord {
+    return this.logAction({
+      id: newId(this.now()),
+      action,
+      actor,
+      reason: ctx.reason,
+      requestedAt: this.now(),
+      status: 'denied',
+      result: { at: this.now(), error: why },
+      ...(ctx.alertId ? { alertId: ctx.alertId } : {}),
+    });
+  }
+
   /** The user undoes one action. */
   async undo(actionId: string): Promise<ActionRecord> {
     const record = this.store.getAction(actionId);

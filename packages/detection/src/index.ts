@@ -47,6 +47,10 @@ export {
   underSelfRoot,
   DEFAULT_PROTECTED_PATH_GLOBS,
   DEFAULT_NEVER_BLOCK_NETWORKS,
+  PLATFORM_PATH_GLOBS,
+  SHELL_NAMES,
+  shellCommand,
+  matchesProgramHash,
   type SafetyConfig,
 } from './safety.js';
 export {
@@ -56,6 +60,7 @@ export {
   assertExceptionScope,
   type DemotionPolicy,
   type DecisionResult,
+  type UndoBlockResult,
 } from './feedback.js';
 export type { UserOrigin } from './origin.js';
 export * from './state/stores.js';
@@ -81,7 +86,7 @@ export {
   ENV_DUMP_RE,
   PERSIST_RES,
   TAMPER_RES_NOCASE,
-  TAMPER_RE_CASED,
+  PFCTL_OFF,
   KEYCHAIN_SECRET_RE,
   AGENT_CONFIG_RE,
   CONFIG_WRITE_RE,
