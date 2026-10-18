@@ -128,8 +128,9 @@ export function DecisionControls({
       </div>
       {!contained && !full && (
         <span className="t-small">
-          Either answer closes it, and Vigil remembers which. When a rule keeps getting these
-          answers, Vigil suggests turning it down on the Rules page.
+          Either answer closes it, and Vigil remembers which. Say “That was me” to the same thing a
+          few times and Vigil offers “Don’t show this again” on the Rules page; when a whole rule
+          keeps getting these answers, it suggests turning the rule down.
         </span>
       )}
       {contained && active.length > 0 && (

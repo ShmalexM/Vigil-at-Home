@@ -15,6 +15,7 @@ import { useLive, vigil } from '../api';
 import { DecisionControls, type Decided } from '../components/Decision';
 import { NotebookSheet } from '../components/Notebook';
 import { PileBox } from '../components/Pile';
+import { CloseOldAgentAlerts, CloseRuleAlerts } from '../components/BulkClose';
 import { pileUp } from '../../../shared/piles';
 import { useToast } from '../components/Toasts';
 import { toolRequestFields } from '../components/ToolRequestFields';
@@ -85,6 +86,7 @@ export function AlertsView({
         </button>
       </div>
       {tab === 'open' && <StaleBanner />}
+      {tab === 'open' && <CloseOldAgentAlerts />}
       <div className="split">
         <div className="list split-list scroll">
           {list.length === 0 && (
@@ -259,6 +261,9 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
             alert={alert}
             onDone={(n) => toast({ text: `Closed ${n} ${n === 1 ? 'alert' : 'alerts'}` })}
           />
+        )}
+        {alert.status === 'open' && (
+          <CloseRuleAlerts ruleId={alert.ruleId} ruleName={rule?.name ?? alert.title} />
         )}
       </Card>
 

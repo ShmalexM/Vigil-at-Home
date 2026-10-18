@@ -186,6 +186,9 @@ export const ExclusionInput = z.object({
 });
 export type ExclusionInput = z.infer<typeof ExclusionInput>;
 
+/** Days an untouched Noticed alert stays open before it moves to History; 0 means never. */
+export const AgeOutDays = z.number().int().min(0).max(365);
+
 /** What an exclusion made from an alert covers. */
 export const ExcludeScope = z.enum(['this_binary', 'this_signer', 'this_path', 'this_host']);
 export type ExcludeScope = z.infer<typeof ExcludeScope>;
@@ -203,6 +206,12 @@ export const calls = {
   clearStale: z.tuple([z.array(Id).min(1).max(2000)]),
   /** Every Noticed alert raised up to this time (when the user opened the confirm). */
   clearNoticedUpTo: z.tuple([z.number().int().nonnegative()]),
+  /** What closeRuleAlerts and closeOldAgentAlerts would close now (this rule's, with a rule). */
+  bulkClosable: z.tuple([RuleId.optional()]),
+  /** Every open alert of this rule last seen up to this time that is safe to close in bulk. */
+  closeRuleAlerts: z.tuple([RuleId, z.number().int().nonnegative()]),
+  /** Every open alert from an AI agent last seen a week before this time, safe to close in bulk. */
+  closeOldAgentAlerts: z.tuple([z.number().int().nonnegative()]),
   undoAction: z.tuple([Id]),
   /** Everything Vigil enforces now, and what the startup check makes of it. */
   getInForce: z.tuple([]),
@@ -234,6 +243,7 @@ export const calls = {
   setTheme: z.tuple([ThemePref]),
   setAlertView: z.tuple([AlertView]),
   setShowAdvanced: z.tuple([z.boolean()]),
+  setAgeOutDays: z.tuple([AgeOutDays]),
   setAppearance: z.tuple([Appearance]),
   sendTestAlert: z.tuple([]),
   openMain: z.tuple([Route.optional()]),
@@ -641,6 +651,14 @@ export interface EventStats {
   retentionDays: number;
 }
 
+/** How many open alerts each bulk close would close now. */
+export interface BulkClosable {
+  /** This rule's (0 without a rule). */
+  rule: number;
+  /** AI agents' alerts last seen more than a week ago. */
+  oldAgents: number;
+}
+
 export interface SettingsView {
   theme: ThemePref;
   appearance: AppearanceSettings;
@@ -650,6 +668,8 @@ export interface SettingsView {
   commit: string;
   /** The sidebar's Advanced group was left open. */
   showAdvanced: boolean;
+  /** Days before an untouched Noticed alert moves to History; 0 means never. */
+  ageOutDays: number;
   /** process.platform and process.arch, for About and bug reports. */
   platform: string;
   arch: string;
@@ -673,6 +693,10 @@ export interface CallResults {
   /** How many of them were closed. */
   clearStale: number;
   clearNoticedUpTo: number;
+  bulkClosable: BulkClosable;
+  /** How many were closed. */
+  closeRuleAlerts: number;
+  closeOldAgentAlerts: number;
   undoAction: ActionRecord;
   getInForce: InForceView;
   releaseInForce: InForceReleaseResult;
@@ -702,6 +726,7 @@ export interface CallResults {
   setTheme: void;
   setAlertView: void;
   setShowAdvanced: void;
+  setAgeOutDays: void;
   setAppearance: void;
   sendTestAlert: Alert;
   openMain: void;

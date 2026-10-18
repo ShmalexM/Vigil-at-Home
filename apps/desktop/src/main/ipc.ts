@@ -83,6 +83,9 @@ export function registerIpc(
     }),
     clearStale: (ids) => core.clearStale(ids),
     clearNoticedUpTo: (at) => core.clearNoticedUpTo(at),
+    bulkClosable: (ruleId) => core.bulkClosable(ruleId),
+    closeRuleAlerts: (ruleId, upTo) => core.closeRuleAlerts(ruleId, upTo),
+    closeOldAgentAlerts: (upTo) => core.closeOldAgentAlerts(upTo),
     undoAction: (id) => core.alerts.undo(id),
     getInForce: () =>
       core.inForce?.view() ?? Promise.resolve({ helper: 'unavailable', items: [], check: null }),
@@ -139,6 +142,7 @@ export function registerIpc(
       version: app.getVersion(),
       commit: typeof __VIGIL_COMMIT__ === 'string' ? __VIGIL_COMMIT__ : '',
       showAdvanced: core.showAdvanced(),
+      ageOutDays: core.ageOutDays(),
       platform: process.platform,
       arch: process.arch,
     }),
@@ -153,6 +157,10 @@ export function registerIpc(
     },
     setShowAdvanced: (show) => {
       core.setShowAdvanced(show);
+      windows.broadcast('changed');
+    },
+    setAgeOutDays: (days) => {
+      core.setAgeOutDays(days);
       windows.broadcast('changed');
     },
     setAppearance: (appearance) => {

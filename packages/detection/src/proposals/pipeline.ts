@@ -426,6 +426,46 @@ export class RulePipeline {
     by?: string,
     subject?: ProposalSubject,
   ): SubmitResult {
+    return this.tuning(raw, provider, by, subject);
+  }
+
+  /**
+   * An exception Vigil suggests from the user's own answers (the same
+   * "That was me" again and again), not from an AI. Like suggestDemotion it
+   * is off the AI tool surface and its budget. Every check submitTuning makes
+   * still holds, including what an AI may not change (agent, blocking and
+   * blocked-list rules), and only the user's approval applies it. Skipped while
+   * another exception to the rule waits, or for 30 days after the user said
+   * no to the same exclusion. A waiting suggestion to turn the whole rule
+   * down doesn't stop it: this narrower one is offered beside it.
+   */
+  suggestException(raw: ProposeTuningInput, subject?: ProposalSubject): SubmitResult | undefined {
+    const parsed = ProposeTuningInput.safeParse(raw);
+    if (!parsed.success) return { ok: false, errors: formatZod(parsed.error), warnings: [] };
+    const now = this.opts.now();
+    const added = canonical(parsed.data.addExclusion);
+    const blocked = this.store
+      .list()
+      .some(
+        (p) =>
+          p.rule.id === parsed.data.ruleId &&
+          p.kind === 'tuning' &&
+          (p.status === 'awaiting_review' ||
+            (p.status === 'rejected' &&
+              now - (p.decidedAt ?? 0) < 30 * DAY &&
+              canonical(p.rule.exclusions.at(-1)) === added)),
+      );
+    if (blocked) return undefined;
+    return this.tuning(parsed.data, VIGIL_PROVIDER, undefined, subject, true);
+  }
+
+  private tuning(
+    raw: unknown,
+    provider: string,
+    by: string | undefined,
+    subject: ProposalSubject | undefined,
+    offBudget = false,
+  ): SubmitResult {
     const parsedInput = ProposeTuningInput.safeParse(raw);
     if (!parsedInput.success)
       return { ok: false, errors: formatZod(parsedInput.error), warnings: [] };
@@ -451,7 +491,7 @@ export class RulePipeline {
       subject,
     );
     if (same) return same;
-    const budget = this.budgetProblem(provider);
+    const budget = offBudget ? undefined : this.budgetProblem(provider);
     if (budget) return { ok: false, errors: [budget], warnings: [], final: true };
     const tuned: DetectionRule = {
       ...base,

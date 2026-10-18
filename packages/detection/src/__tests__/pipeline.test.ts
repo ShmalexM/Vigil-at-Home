@@ -10,6 +10,7 @@ import {
   isIndicatorRule,
   STILL_CATCHES_THREAT,
   USER_TUNED_ONLY,
+  VIGIL_PROVIDER,
 } from '../proposals/pipeline.js';
 import { ruleLanguageGuide } from '../proposals/tools.js';
 import { replayRule } from '../proposals/replay.js';
@@ -423,6 +424,46 @@ describe('AI proposals about agent rules', () => {
       });
     }
     expect(pipeline.list()).toEqual([]);
+  });
+
+  it('takes an exception Vigil suggests from the user’s answers, but never on an agent rule', () => {
+    const { pipeline, engine } = twoWeeks();
+    engine.upsertRule(watchRule);
+    engine.upsertRule(
+      testRule({
+        id: 'unsigned-net-alert',
+        eventKinds: ['network.connection'],
+        condition: { field: 'process.signing', op: 'in', value: ['unsigned', 'adhoc'] },
+      }),
+    );
+    const scoped = {
+      all: [
+        { field: 'process.sha256', op: 'eq', value: '2'.repeat(64) },
+        { field: 'process.commandLine', op: 'regex', value: '^tool serve --port 8000$' },
+      ],
+    };
+    // What an AI may not change, Vigil's own suggestion may not either.
+    expect(pipeline.suggestException(tune('agent-secret-command', scoped))).toMatchObject({
+      ok: false,
+      errors: [USER_TUNED_ONLY],
+      final: true,
+    });
+    const first = pipeline.suggestException(tune('unsigned-net-alert', scoped));
+    expect(first).toMatchObject({ ok: true });
+    expect(pipeline.get(first!.proposalId!)).toMatchObject({
+      provider: VIGIL_PROVIDER,
+      kind: 'tuning',
+      status: 'awaiting_review',
+    });
+    // One at a time per rule.
+    expect(pipeline.suggestException(tune('unsigned-net-alert', scoped))).toBeUndefined();
+    pipeline.reject(first!.proposalId!, userOrigin('rules-screen'));
+    // The user said no: not offered again for a month.
+    expect(pipeline.suggestException(tune('unsigned-net-alert', scoped))).toBeUndefined();
+    const byAgent = { field: 'process.agent.id', op: 'eq', value: 'claude-code' };
+    const wide = pipeline.suggestException(tune('unsigned-net-alert', byAgent));
+    expect(wide).toMatchObject({ ok: false });
+    expect(wide!.errors.join(' ')).toMatch(/agent or tool-request fields/);
   });
 
   it('refuses an AI exclusion on agent or tool fields', () => {

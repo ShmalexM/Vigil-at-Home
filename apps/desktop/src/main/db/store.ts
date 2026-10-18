@@ -844,6 +844,41 @@ export class Store {
     return `${row.n}:${row.at ?? 0}`;
   }
 
+  /**
+   * The newest alert of this rule whose repeats key is `key`, created at or
+   * after `since`, in any status unless `status` is given.
+   */
+  findRepeat(
+    ruleId: string,
+    key: string,
+    opts: { since?: number; status?: Alert['status'] } = {},
+  ): Alert | undefined {
+    return this.one(
+      Alert,
+      `SELECT body FROM alerts
+         WHERE rule_id = ? AND created_at >= ? AND (? IS NULL OR status = ?)
+           AND json_extract(body, '$.repeats.key') = ?
+         ORDER BY created_at DESC LIMIT 1`,
+      ruleId,
+      opts.since ?? 0,
+      opts.status ?? null,
+      opts.status ?? null,
+      key,
+    );
+  }
+
+  /** Every alert of one rule with this status, newest first. */
+  listAlertsOfRule(ruleId: string, status: Alert['status'], since = 0): Alert[] {
+    return this.all(
+      Alert,
+      `SELECT body FROM alerts WHERE rule_id = ? AND status = ? AND created_at >= ?
+         ORDER BY created_at DESC`,
+      ruleId,
+      status,
+      since,
+    );
+  }
+
   /** How many alerts have this status, however many listAlerts returns. */
   countAlerts(status: Alert['status']): number {
     const row = this.stmt('SELECT COUNT(*) AS n FROM alerts WHERE status = ?').get(status) as {

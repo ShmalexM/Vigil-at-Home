@@ -117,6 +117,7 @@ export {
   INDICATOR_RULE,
   INDICATOR_EXCLUSION,
   BLOCKING_RULE,
+  VIGIL_PROVIDER,
   aiMayNotChange,
   isIndicatorRule,
   type ProposalSubject,

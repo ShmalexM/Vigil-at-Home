@@ -47,7 +47,11 @@ describe('piles', () => {
   it('piles one agent run’s alerts into one Needs-you row that interrupts once', async () => {
     const { store, svc, popups, tick } = setup();
     for (let i = 0; i < 5; i++) {
-      await svc.raise({ rule, events: [opened(`/Users/a/Library/x/${i}.log`)], actions: [] });
+      await svc.raise({
+        rule,
+        events: [opened(`/Users/a/Library/x/${'abcde'[i]}.log`)],
+        actions: [],
+      });
       tick(1_000);
     }
     const open = store.listAlerts({ status: 'open' });

@@ -19,6 +19,14 @@ import {
 import { AGENT_CATALOG } from '@vigil/detection';
 import type { Store } from './db/store.js';
 import type { ActionExecutor } from './executor.js';
+import {
+  AGENT_REPEAT_WINDOW_MS,
+  binaryOf,
+  liveChecker,
+  patternOf,
+  startOfDay,
+  type Alive,
+} from './quiet.js';
 
 /** What the detection engine hands over when a rule in alert or block mode matches. */
 export interface Detection {
@@ -68,6 +76,12 @@ export class AlertService extends EventEmitter<AlertEvents> {
     super();
   }
 
+  /**
+   * Which of these pids still run as the same process (pid and start time).
+   * Overridable for tests.
+   */
+  liveness: (pids: readonly number[]) => Promise<Alive> = liveChecker;
+
   /** A shadow-mode rule matched: record it for review, tell nobody. */
   recordShadowMatch(rule: Rule, events: SensorEvent[]): void {
     this.store.tx(() => {
@@ -90,8 +104,8 @@ export class AlertService extends EventEmitter<AlertEvents> {
     if (d.events.length === 0) throw new Error('A detection needs at least one event');
     const at = this.now();
     const key = repeatKey(d);
-    const same = key ? this.openRepeatOf(key, at) : undefined;
-    if (same) return this.foldRepeat(same, d, at);
+    const same = key ? this.repeatOf(key, d.rule.id, at) : undefined;
+    if (same) return await this.foldRepeat(same, d, at);
     let alert: Alert = {
       id: newId(at),
       createdAt: at,
@@ -121,6 +135,11 @@ export class AlertService extends EventEmitter<AlertEvents> {
     if (alert.notify === 'popup' && !d.standalone && d.rule.severity !== 'critical') {
       const key = interruptKey(d.rule.id, d.events[0]!);
       if (key && this.openInterruptOf(key, at)) alert.notify = 'badge';
+    }
+    // Santa blocking the same program again on a later day: it was already
+    // shown once, and Santa keeps blocking it without anyone's help.
+    if (alert.notify === 'popup' && key && repeatKind(key) === 'santa') {
+      if (this.store.findRepeat(d.rule.id, key)) alert.notify = 'badge';
     }
     this.store.tx(() => {
       for (const e of d.events) this.store.insertEvent(e);
@@ -176,6 +195,28 @@ export class AlertService extends EventEmitter<AlertEvents> {
     });
   }
 
+  /** The alert this detection folds into, by the kind of its repeats key. */
+  private repeatOf(key: string, ruleId: string, at: number): Alert | undefined {
+    const kind = repeatKind(key);
+    if (kind === 'exact') return this.openRepeatOf(key, at);
+    if (kind === 'santa') {
+      // One alert per program per day, whatever the user did with it.
+      return this.store.findRepeat(ruleId, key, { since: startOfDay(at) });
+    }
+    const a = this.store.findRepeat(ruleId, key, { status: 'open' });
+    if (!a || a.decision || a.containment !== 'none' || a.actionIds.length > 0) return undefined;
+    // Counted from the first detection, so an old row can't keep absorbing new activity.
+    if (at - a.createdAt > AGENT_REPEAT_WINDOW_MS) return undefined;
+    if (a.ai?.proposalIds.length) return undefined;
+    if (this.store.listActions({ alertId: a.id }).length > 0) return undefined;
+    // Only the rule's own suggestions, untouched: a repeat adds its own beside them.
+    const proposals = this.store.listProposals({ alertId: a.id });
+    const untouched = proposals.every(
+      (p) => p.proposedBy === 'rule' && (p.status === 'pending' || p.status === 'expired'),
+    );
+    return untouched ? a : undefined;
+  }
+
   /**
    * An open alert this detection repeats exactly, if one started within the
    * last {@link REPEAT_WINDOW_MS}. Anything the user or a rule has acted on, or
@@ -198,11 +239,13 @@ export class AlertService extends EventEmitter<AlertEvents> {
   }
 
   /**
-   * Fold an identical repeat into its open alert: its events and rule match
-   * are kept, the row's count goes up, and nobody is interrupted again (no
-   * popup, and the AI isn't asked twice).
+   * Fold a repeat into its alert: its events and rule match are kept, the
+   * row's count goes up, and nobody is interrupted again (no popup, and the
+   * AI isn't asked twice). An agent's repeat may carry the rule's suggestion
+   * (stop that process): it is offered too, and an earlier one expires only
+   * once its own process has exited.
    */
-  private foldRepeat(alert: Alert, d: Detection, at: number): Alert {
+  private async foldRepeat(alert: Alert, d: Detection, at: number): Promise<Alert> {
     const next: Alert = {
       ...alert,
       updatedAt: at,
@@ -222,8 +265,53 @@ export class AlertService extends EventEmitter<AlertEvents> {
         alertId: alert.id,
       });
     });
-    this.emit('changed', next);
-    return next;
+    if (d.actions.length === 0) {
+      this.emit('changed', next);
+      return next;
+    }
+    await this.expireGone(this.store.listProposals({ alertId: alert.id, status: 'pending' }), at);
+    for (const action of d.actions) {
+      this.propose('rule', action, alert.id, `Suggested by rule: ${d.rule.name}`);
+    }
+    return this.refresh(alert.id);
+  }
+
+  /**
+   * Expire pending suggestions to stop, resume or kill a process once that
+   * process (its pid, and its start time when the suggestion has one) has
+   * exited, as a decision does. A suggestion for a process that still runs
+   * stays however old it is. Nothing runs; the alert stays as it is.
+   * Returns how many expired.
+   */
+  expireProcessProposals(): Promise<number> {
+    return this.expireGone(this.store.listProposals({ status: 'pending' }), this.now());
+  }
+
+  private async expireGone(proposals: ActionProposal[], at: number): Promise<number> {
+    const about = proposals.filter(
+      (p) => p.status === 'pending' && p.action.kind.startsWith('process.') && 'pid' in p.action,
+    );
+    if (about.length === 0) return 0;
+    const pidOf = (p: ActionProposal) => (p.action as { pid: number }).pid;
+    let alive: Alive;
+    try {
+      alive = await this.liveness(about.map(pidOf));
+    } catch (err) {
+      // Can't tell: every process counts as running, so nothing expires.
+      console.warn('[alerts] could not check processes:', err);
+      return 0;
+    }
+    const alerts = new Set<string>();
+    let expired = 0;
+    for (const p of about) {
+      const startTime = (p.action as { startTime?: number }).startTime;
+      if (alive(pidOf(p), startTime)) continue;
+      this.store.saveProposal({ ...p, status: 'expired', decidedAt: at });
+      expired++;
+      if (p.alertId) alerts.add(p.alertId);
+    }
+    for (const id of alerts) if (this.store.getAlert(id)) this.refresh(id);
+    return expired;
   }
 
   /** Authorize, log and execute one action. Never throws for a denied or failed action. */
@@ -415,15 +503,50 @@ export class AlertService extends EventEmitter<AlertEvents> {
 export const REPEAT_WINDOW_MS = 15 * 60_000;
 
 /**
- * The evidence a repeat must match exactly to share a row: the rule and its
- * version, what the alert says, and every event with its process (executable
- * identity and signature, pid and start time, command line, working
- * directory, user, parent) and resource, with only the event's id, time and
- * raw sensor record left out. Detections that run or suggest an action,
- * critical ones, and ones marked standalone never share a row.
+ * The evidence a repeat must match to share a row. Three kinds:
+ *
+ * - Santa blocking a launch: the rule and the program (its hash, else its
+ *   path). One row a day, folding in even after the user answered it.
+ * - Anything an AI agent did, from a rule in Alert mode: the rule and its
+ *   version, the agent, the program (hash, or path and signature), and what
+ *   was done, where and from what parent, with only random per-run text
+ *   removed (quiet.ts patternOf: snapshot names, mktemp and tempfile names,
+ *   ids in file paths). A different script, file, folder, host, address or
+ *   port is a different payload and alerts on its own. The rule's suggestions are allowed and added to the row.
+ * - Otherwise, exactly: the rule and its version, what the alert says, and
+ *   every event with its process (executable identity and signature, pid and
+ *   start time, command line, working directory, user, parent) and resource,
+ *   with only the event's id, time and raw sensor record left out.
+ *
+ * Detections that run an action, critical ones, and ones marked standalone
+ * never share a row; outside an agent, neither do ones that suggest one.
  */
 export function repeatKey(d: Detection): string | undefined {
-  if (d.standalone || d.actions.length > 0 || d.rule.severity === 'critical') return undefined;
+  if (d.standalone || d.rule.severity === 'critical') return undefined;
+  const e = d.events[0]!;
+  const proc = 'process' in e ? e.process : undefined;
+  const one = d.events.length === 1;
+  if (
+    one &&
+    proc &&
+    d.actions.length === 0 &&
+    e.kind === 'santa.decision' &&
+    e.target === 'execution' &&
+    e.decision === 'block'
+  ) {
+    return JSON.stringify(['~santa', d.rule.id, proc.sha256 ?? proc.path]);
+  }
+  if (one && proc?.agent && d.rule.mode === 'alert') {
+    return JSON.stringify([
+      '~agent',
+      d.rule.id,
+      d.rule.version,
+      proc.agent.id,
+      binaryOf(e),
+      patternOf(e),
+    ]);
+  }
+  if (d.actions.length > 0) return undefined;
   return JSON.stringify([
     d.rule.id,
     d.rule.version,
@@ -432,6 +555,13 @@ export function repeatKey(d: Detection): string | undefined {
     d.subject ?? null,
     d.events.map(({ id: _id, ts: _ts, raw: _raw, ...rest }) => sorted(rest)),
   ]);
+}
+
+/** Which of repeatKey's kinds a key is. */
+export function repeatKind(key: string): 'exact' | 'agent' | 'santa' {
+  if (key.startsWith('["~agent"')) return 'agent';
+  if (key.startsWith('["~santa"')) return 'santa';
+  return 'exact';
 }
 
 /** How long an unanswered popup keeps later ones for the same rule and program quiet. */
