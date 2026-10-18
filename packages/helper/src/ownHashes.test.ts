@@ -195,6 +195,13 @@ describe('OwnHashes', () => {
     expect(OS_PROGRAM_ROOTS.darwin).toEqual(
       expect.arrayContaining(['/bin', '/sbin', '/usr/bin', '/usr/sbin', '/usr/libexec']),
     );
+    // /usr/bin/git and python3 are xcrun shims: the real ones are in the developer tools.
+    expect(OS_PROGRAM_ROOTS.darwin).toEqual(
+      expect.arrayContaining([
+        '/Library/Developer/CommandLineTools/usr/bin',
+        '/Applications/Xcode.app/Contents/Developer/usr/bin',
+      ]),
+    );
     expect(OS_PROGRAM_ROOTS.linux).toEqual(expect.arrayContaining(['/usr/bin', '/usr/sbin']));
   });
 

@@ -79,3 +79,37 @@ describe('rules that pick a program by its hash', () => {
     }
   });
 });
+
+// Review of #189: /usr/bin/git and python3 hand off to the developer tools,
+// which are Apple's but not under SIP.
+describe('Apple’s developer tools', () => {
+  const GIT = '/Library/Developer/CommandLineTools/usr/bin/git';
+  const tool = (path: string, teamId?: string) =>
+    ({
+      ...exec(path),
+      process: {
+        pid: 4242,
+        ppid: 900,
+        path,
+        sha256: SH,
+        signing: 'developer_id',
+        ...(teamId ? { teamId } : {}),
+      },
+    }) as DetectionEvent;
+
+  it('are never stopped or blocked by a rule that picks them by hash', () => {
+    for (const path of [GIT, '/Applications/Xcode.app/Contents/Developer/usr/bin/python3']) {
+      for (const d of engine().evaluate(tool(path, '59GAB85EFG')))
+        expect(d.execute, path).toEqual([]);
+    }
+  });
+
+  it('count only with Apple’s team ID, and only in their install folders', () => {
+    for (const e of [tool(GIT), tool(GIT, 'ABCDE12345'), tool('/tmp/git', '59GAB85EFG')]) {
+      const d = engine()
+        .evaluate(e)
+        .find((x) => x.match.ruleId === 'known-bad-hash')!;
+      expect(d.execute.map((a) => a.kind)).toEqual(['process.kill', 'santa.rule.set']);
+    }
+  });
+});

@@ -61,6 +61,14 @@ export const PLATFORM_PATH_GLOBS = [
   '/Library/Apple/**',
 ];
 
+/** Where Apple's developer tools live (Command Line Tools, Xcode). */
+export const APPLE_TOOLCHAIN_GLOBS = [
+  '/Library/Developer/CommandLineTools/**',
+  '/Applications/Xcode*.app/Contents/Developer/**',
+];
+/** The team ID Apple signs its own non-platform programs with (Xcode, its tools). */
+const APPLE_TEAM_ID = '59GAB85EFG';
+
 /** Shells: blocking one by hash stops every script that uses it, Vigil's included. */
 export const SHELL_NAMES = ['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'tcsh', 'csh', 'fish'];
 
@@ -136,6 +144,7 @@ export class SafetyFloor {
   private readonly protectedFiles: ((path: string) => boolean)[];
   private readonly appleTools = APPLE_TOOL_GLOBS.map((g) => globMatcher(g));
   private readonly platformPaths = PLATFORM_PATH_GLOBS.map((g) => globMatcher(g));
+  private readonly toolchain = APPLE_TOOLCHAIN_GLOBS.map((g) => globMatcher(g));
   private readonly systemPersistence = SYSTEM_PERSISTENCE_GLOBS.map((g) => globMatcher(g));
   private readonly selfPaths: string[];
   private selfHashes: Set<string>;
@@ -201,6 +210,17 @@ export class SafetyFloor {
    * which a self-signed certificate can carry, and it would make a program
    * that can't be stopped or blocked.
    */
+  /**
+   * Apple's developer tools, which /usr/bin/git, python3 and the like hand
+   * off to: in their install folders and signed with Apple's own team ID (a
+   * team ID comes only from an Apple-issued certificate). Root-owned, but
+   * not under SIP, so never exempt from being stopped (processProtection),
+   * only from a block by hash, which would stop git for the whole Mac.
+   */
+  private isAppleToolchain(p: ProcessRef): boolean {
+    return p.teamId === APPLE_TEAM_ID && this.toolchain.some((fits) => fits(p.path));
+  }
+
   private isApple(p: ProcessRef): boolean {
     return this.isPlatform(p.path) || p.signingId?.startsWith('platform:') === true;
   }
@@ -216,6 +236,8 @@ export class SafetyFloor {
    */
   blockProtection(p: ProcessRef | undefined): string | undefined {
     if (!p) return 'there is no process to act on';
+    if (this.isAppleToolchain(p))
+      return `${p.path} is Apple's developer tool; blocking it would stop it for everything on the Mac`;
     if (this.isApple(p)) {
       return SHELL_NAMES.includes(baseName(p.path))
         ? `${p.path} is the macOS shell; blocking it would stop every script on the Mac`

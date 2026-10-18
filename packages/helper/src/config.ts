@@ -381,7 +381,8 @@ export function versionMismatch(
  * background (daemon.ts osHashes) so that no block by hash names one of them,
  * wherever a copy of it runs: on 2026-10-10 Santa's log reported /bin/sh with
  * no signature, and a copy of curl or python3 in /tmp would look the same.
- * macOS: the folders SIP protects (about 2,200 programs). Linux: the
+ * macOS: the folders SIP protects (about 2,200 programs) and Apple's
+ * developer tools. Linux: the
  * distribution's folders; /bin and /sbin are often links to these.
  */
 export const OS_PROGRAM_ROOTS: Record<Platform, readonly string[]> = {
@@ -392,6 +393,12 @@ export const OS_PROGRAM_ROOTS: Record<Platform, readonly string[]> = {
     '/usr/sbin',
     '/usr/libexec',
     '/System/Library/CoreServices',
+    // The developer tools that /usr/bin/git, python3 and the like hand off to
+    // (those are xcrun shims): Apple's, root-owned, but not under SIP.
+    '/Library/Developer/CommandLineTools/usr/bin',
+    '/Library/Developer/CommandLineTools/usr/libexec',
+    '/Applications/Xcode.app/Contents/Developer/usr/bin',
+    '/Applications/Xcode-beta.app/Contents/Developer/usr/bin',
   ],
   linux: ['/usr/bin', '/usr/sbin', '/usr/libexec', '/usr/lib/systemd', '/bin', '/sbin'],
 };

@@ -158,6 +158,21 @@ describe('user decisions', () => {
     expect(eng.stores.lists.has(USER_BLOCKED_HASHES, 'b'.repeat(64))).toBe(true);
   });
 
+  // Review of #189: blocking the developer tools' git would stop git for the whole Mac.
+  it('refuses to block Apple’s developer tools by hash on a malicious verdict', () => {
+    const eng = new DetectionEngine([anyExec], memoryStores());
+    const p = proc({
+      path: '/Library/Developer/CommandLineTools/usr/bin/git',
+      sha256: 'c'.repeat(64),
+      signing: 'developer_id',
+      teamId: '59GAB85EFG',
+    });
+    const d = eng.evaluate(exec(p))[0]!;
+    const res = new Feedback(eng, undefined, () => T0).recordDecision(d, malicious, me);
+    expect(res.blockRefused?.message).toContain('developer tool');
+    expect(eng.stores.lists.has(USER_BLOCKED_HASHES, 'c'.repeat(64))).toBe(false);
+  });
+
   it.each([
     ['/usr/bin/python3', 'part of macOS'],
     ['/usr/libexec/xpcproxy', 'part of macOS'],
