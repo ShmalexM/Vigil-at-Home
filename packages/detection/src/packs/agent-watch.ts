@@ -318,14 +318,6 @@ export const PFCTL_OFF = [
   'pfctl -F T',
   'pfctl -FT',
 ];
-/** Stopping osquery by name. */
-const OSQUERY_KILL = [
-  'killall osqueryd',
-  'killall -9 osqueryd',
-  'pkill osqueryd',
-  'pkill -9 osqueryd',
-  'pkill -f osquery',
-];
 
 /**
  * `field` (process.commandLinePaths or commandPaths, see above) tampers with
@@ -335,7 +327,23 @@ export const tamper = (field: string): Condition => ({
   any: [
     { field, op: 'regex', value: TAMPER_RES_NOCASE, nocase: true },
     { field, op: 'contains', value: PFCTL_OFF },
-    { field, op: 'contains', value: OSQUERY_KILL, nocase: true },
+    // Stopping osquery by its process name, with any signal or option
+    // (`killall -KILL osqueryd`, `pkill -x osqueryd`).
+    {
+      all: [
+        { field, op: 'contains', value: ['killall', 'pkill'], nocase: true },
+        { field, op: 'contains', value: ['osqueryd'], nocase: true },
+      ],
+    },
+    // Changing Santa's rules database after changing into its folder
+    // (`cd /var/db/santa && sqlite3 rules.db "DELETE…"`); read-only is fine.
+    {
+      all: [
+        { field, op: 'contains', value: ['cd /var/db/santa'], nocase: true },
+        { field, op: 'contains', value: ['sqlite3'], nocase: true },
+        { not: { field, op: 'contains', value: ['-readonly', 'mode=ro'], nocase: true } },
+      ],
+    },
     // Removing Vigil's or Santa's configuration profile.
     {
       all: [

@@ -26,6 +26,12 @@ describe('commandPaths', () => {
       ['cp a >/Users/alex//x', 'cp a >~/x'],
       ["sqlite3 'file:/Users/alex/a.db?mode=ro'", 'sqlite3 file:~/a.db?mode=ro'],
       ['echo $HOMEDIR', 'echo $HOMEDIR'],
+      ['rm /a/{b,c}/d{e,f}', 'rm /a/b/de /a/b/df /a/c/de /a/c/df'],
+      ['rm /System/Volumes/Data/Library/x', 'rm /Library/x'],
+      ['rm /System/Volumes/Data/private/var/db/x', 'rm /var/db/x'],
+      ['rm /System/Volumes/Data/Users/alex/x', 'rm ~/x'],
+      ['rm ~alex/Library/x', 'rm ~/Library/x'],
+      ['echo ~', 'echo ~'],
       ['a\nb  c', 'a\nb  c'],
     ];
     for (const [cmd, want] of cases) expect(commandPaths(cmd), cmd).toBe(want);

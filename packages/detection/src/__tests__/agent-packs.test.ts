@@ -391,6 +391,8 @@ const cases: Record<string, { bad: Array<[DetectionEvent, Want]>; good: Detectio
       // A path written another way reads the same (rules/command-paths.ts).
       [bash('sudo rm -rf //Library/./PrivilegedHelperTools/vigil-helper.d'), DENY],
       [bash('rm "$HOME"/Library/Application\\ Support/Vigil\\ at\\ Home/vigil.db'), DENY],
+      [bash('sudo rm -r /Library/{PrivilegedHelperTools,x}/vigil-{helper,y}.d'), DENY],
+      [bash('sudo killall -KILL osqueryd'), DENY],
       [write(`${home}/Library/Application Support/Vigil at Home/vigil.db`), DENY],
       [write('/var/db/santa/rules.db', 'Edit'), DENY],
       // The same files by the firmlink, the /private links and in another case.
@@ -1151,6 +1153,13 @@ describe('agent rule packs', () => {
         'sudo rm /Library/LaunchDaemons/com.google.santa.daemon.plist',
         'sudo launchctl bootout system/io.osquery.agent',
         'sudo killall osqueryd',
+        // Second review of #189.
+        'sudo rm -r /Library/{PrivilegedHelperTools,x}/vigil-{helper,y}.d',
+        'sudo rm -r /System/Volumes/Data/Library/PrivilegedHelperTools/vigil-helper.d',
+        'rm ~alex/Library/Application\\ Support/Vigil\\ at\\ Home/vigil.db',
+        'cd /var/db/santa && sudo sqlite3 rules.db "DELETE FROM rules"',
+        'sudo killall -KILL osqueryd',
+        'sudo pkill -x osqueryd',
       ];
       for (const c of loud) expect(fired(sh(c)), c).toContain('agent-guard-tamper');
       const quiet = [
@@ -1159,6 +1168,8 @@ describe('agent rule packs', () => {
         'cp ~/Movies/Vigil\\ at\\ Home/tour.mp4 /tmp/',
         'sudo profiles list',
         'ls /Library/PrivilegedHelperTools/vigil-helper.d',
+        'cd /var/db/santa && sqlite3 -readonly rules.db "select count(*) from rules"',
+        'pgrep osqueryd',
       ];
       for (const c of quiet) expect(fired(sh(c)), c).not.toContain('agent-guard-tamper');
     });
