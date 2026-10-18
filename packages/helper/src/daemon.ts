@@ -49,7 +49,7 @@ import {
 import { Executor, OWN_HASHES_WAIT_MS, type ActionOutcome } from './executor.js';
 import { eventPipeline, FastPath } from './fastpath.js';
 import { Journal } from './journal.js';
-import { OwnHashes } from './ownHashes.js';
+import { OwnHashes, readyWithin } from './ownHashes.js';
 
 /** Most system programs hashed (OS_PROGRAM_ROOTS): about 2,200 on macOS. */
 const OS_MAX_FILES = 8192;
@@ -481,12 +481,9 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<() => Promise
         const own = noBlock.owner(rule.identifier);
         return own ? `it would block ${own}` : undefined;
       },
-      // Never longer than a block by hash waits for them (OWN_HASHES_WAIT_MS).
-      ready: () =>
-        Promise.race([
-          ownHashes.ready(),
-          new Promise<void>((resolve) => setTimeout(resolve, OWN_HASHES_WAIT_MS).unref()),
-        ]),
+      // Both sets refuse (noBlock), so both are waited for, never longer than a
+      // block by hash waits for them (OWN_HASHES_WAIT_MS).
+      ready: () => readyWithin([ownHashes, osHashes], OWN_HASHES_WAIT_MS),
       eventDetailUrl: 'vigil://santa/event?sha256=%file_sha%',
       eventDetailText: 'Open Vigil',
     });

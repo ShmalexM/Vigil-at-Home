@@ -21,7 +21,7 @@ import { Executor } from './executor.js';
 import { FastPath } from './fastpath.js';
 import type { ActionOutcome } from './executor.js';
 import { Journal } from './journal.js';
-import { OwnHashes } from './ownHashes.js';
+import { OwnHashes, readyWithin } from './ownHashes.js';
 import type { DetectionSync } from './protocol.js';
 import { FakeSystem } from './testing/fakeSystem.js';
 import { machO } from './testing/machO.js';
@@ -454,6 +454,22 @@ describe('blocks naming those programs', () => {
       release();
       await p;
       expect(done).toBe(true);
+    });
+
+    // Review of #189: the sync refuses by both sets, so it must wait for the
+    // slower OS set too, or a stored block on /usr/bin/curl reaches Santa.
+    it('waits for every set it refuses by, within the limit', async () => {
+      let release!: () => void;
+      const late = { ready: () => new Promise<void>((r) => (release = r)) };
+      let done = false;
+      const both = readyWithin([own, late], 60_000).then(() => (done = true));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(done).toBe(false);
+      release();
+      await both;
+      // A set that never finishes holds nothing up past the limit.
+      const never = { ready: () => new Promise<void>(() => undefined) };
+      await expect(readyWithin([own, never], 10)).resolves.toBeUndefined();
     });
   });
 });
