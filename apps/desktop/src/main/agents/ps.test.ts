@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { processTableReader, readLinuxProcessTable } from './ps.js';
+import { processTableReader, readLinuxProcessTable, rootSignatureReader } from './ps.js';
 
 function fakeProc(): string {
   const proc = mkdtempSync(join(tmpdir(), 'proc-'));
@@ -59,5 +59,19 @@ describe('process table on Linux', () => {
 
   it('reads nothing on systems Vigil can’t list', async () => {
     expect(await processTableReader('win32')()).toEqual([]);
+  });
+});
+
+describe('rootSignatureReader', () => {
+  it('reads a seeded root’s signature on macOS only, through codesign and ps', async () => {
+    expect(rootSignatureReader('linux')).toBeUndefined();
+    expect(rootSignatureReader('win32')).toBeUndefined();
+    const bins: string[] = [];
+    const read = rootSignatureReader('darwin', async (bin) => {
+      bins.push(bin);
+      return { code: 1, stdout: '', stderr: '4242: code object is not signed at all' };
+    })!;
+    expect(await read(4242, 0)).toBeUndefined();
+    expect(bins).toEqual(['codesign']);
   });
 });
