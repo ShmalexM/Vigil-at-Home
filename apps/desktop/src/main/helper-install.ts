@@ -213,6 +213,25 @@ export function appPinned(
   }
 }
 
+/**
+ * What the helper says is wrong with its pin files, from the readable copy:
+ * it ignores files it can't verify (signed with another key, say) and never
+ * re-signs them itself. A helper update does (pin-app), so the app asks for one.
+ */
+export function appPinProblem(
+  platform: NodeJS.Platform = process.platform,
+  root = '',
+): string | undefined {
+  try {
+    const pin = JSON.parse(readFileSync(appPinFile(platform, root), 'utf8')) as {
+      problem?: unknown;
+    };
+    return typeof pin.problem === 'string' && pin.problem ? pin.problem : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface HelperMatch {
   /** current: the installed helper is the one this app ships; outdated: it isn't. */
   installed: 'none' | 'current' | 'outdated';
@@ -231,6 +250,10 @@ export interface HelperMatch {
  * didn't change. An app inside the installer's folder is never pinned and
  * changes neither. The self grant's password re-pins as well, so the app
  * checks again before asking (see index.ts).
+ *
+ * A helper that reports a problem with its pin files (appPinProblem) is
+ * outdated too, wherever the app is, and the bundle names the problem, so
+ * the app asks once for the update that signs them again.
  */
 export function helperMatch(
   dir: string,
@@ -250,11 +273,14 @@ export function helperMatch(
   } catch {
     identity = undefined; // the app's own file is unreadable: nothing to compare
   }
+  const problem = appPinProblem(platform, root);
   const bundle = createHash('sha256')
     .update(
-      [...shipped.map((f) => fingerprint(f.bundled, f.by)), ...(identity ? [identity] : [])].join(
-        '\n',
-      ),
+      [
+        ...shipped.map((f) => fingerprint(f.bundled, f.by)),
+        ...(identity ? [identity] : []),
+        ...(problem ? [`pin: ${problem}`] : []),
+      ].join('\n'),
     )
     .digest('hex')
     .slice(0, 16);
@@ -272,7 +298,7 @@ export function helperMatch(
     }
   });
   const pinned = !identity || !app || appPinned(platform, app, root);
-  return { installed: same && pinned ? 'current' : 'outdated', bundle };
+  return { installed: same && pinned && !problem ? 'current' : 'outdated', bundle };
 }
 
 /** How ELEVATED_ENTRY starts its message when it refuses to run anything. */
