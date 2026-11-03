@@ -31,11 +31,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Small enough for a CPU runner, supports tool calls, and doesn't spend time thinking.
-          - model: qwen2.5:1.5b
+          # What setup suggests: small enough for a CPU runner and supports tool calls.
+          - model: llama3.2:1b
             tests: packages/ai/src/live
-          # What Macs under 16 GB label events with; it only labels, so only that test runs.
-          - model: qwen2.5:0.5b
+          # Next on the labeller's list; it has no tools, so only the labelling test runs.
+          - model: gemma3:1b
             tests: packages/ai/src/live/classifier.test.ts
     name: ollama (${{ matrix.model }})
     env:

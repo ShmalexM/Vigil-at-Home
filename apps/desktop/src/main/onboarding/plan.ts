@@ -7,18 +7,11 @@ import type {
 } from '../../shared/setup.js';
 
 /**
- * The small model offered for "run it on this Mac": qwen2.5:1.5b (about 1 GB)
- * with 16 GB of memory or more, qwen2.5:0.5b (about 400 MB) below that. Same
- * rule as `recommendedClassifierModel` in @vigil/ai, which replaces this once
- * that package is in the app.
+ * What setup suggests for "run it on this Mac" to someone with no model yet:
+ * small, and able to call tools, so Scout and the rule reviewer work on it too.
+ * Any other model in Ollama works as well.
  */
-export const LOCAL_MODEL = 'qwen2.5:1.5b';
-export const LOCAL_MODEL_SMALL = 'qwen2.5:0.5b';
-const GB = 1024 ** 3;
-
-export function localModelFor(totalMemBytes: number): string {
-  return totalMemBytes < 16 * GB ? LOCAL_MODEL_SMALL : LOCAL_MODEL;
-}
+export const LOCAL_MODEL = 'llama3.2:1b';
 
 export interface StepCommand {
   /** What this line does, shown above it. */
@@ -78,8 +71,6 @@ export interface PlanInputs {
   platform?: NodeJS.Platform;
   /** On Linux, which package manager the install commands use. */
   distro?: LinuxDistro;
-  /** Model to pull; defaults to the one for this Mac's memory. */
-  localModel?: string;
   /** Command that installs Vigil's root helper; unset until the helper ships in the app. */
   helperInstallCommand?: string;
   /** Where the Santa configuration profile was written; unset until blocking ships. */
@@ -214,8 +205,6 @@ function macProtection(inputs: PlanInputs): StepDef[] {
 }
 
 function aiSteps(inputs: PlanInputs, linux: boolean): StepDef[] {
-  const model = inputs.localModel ?? LOCAL_MODEL;
-  const size = model === LOCAL_MODEL_SMALL ? 'about 400 MB' : 'about 1 GB';
   const computer = linux ? 'computer' : 'Mac';
   const brew = linux ? {} : { after: ['homebrew'] };
   return [
@@ -247,9 +236,9 @@ function aiSteps(inputs: PlanInputs, linux: boolean): StepDef[] {
       id: 'ollama-model',
       group: 'ai',
       title: 'Local model',
-      why: `A small model that labels unusual events. ${model} is ${size}, picked for this ${computer}’s memory, and only uses memory while it works. A small model you already have counts too; a bigger one explains alerts but isn’t used for labelling.`,
+      why: `A model that explains alerts and labels unusual events on this ${computer}. Any model you already have in Ollama works. If you have none, ${LOCAL_MODEL} is about 1.3 GB and only uses memory while it works.`,
       modes: LOCAL_AI,
-      commands: [{ label: 'Download the model', cmd: `ollama pull ${model}` }],
+      commands: [{ label: 'Download a model', cmd: `ollama pull ${LOCAL_MODEL}` }],
       check: 'ollama.model',
       checks: 'Ollama lists a model',
       after: ['ollama'],

@@ -288,13 +288,24 @@ const exec = (id: string, path: string): SensorEvent => ({
 
 describe('event labelling with a small local model', () => {
   it('picks a model that fits the memory, from what is installed', () => {
-    expect(recommendedClassifierModel(8 * GB)).toBe('qwen2.5:0.5b');
-    expect(recommendedClassifierModel(15 * GB)).toBe('qwen2.5:0.5b');
-    expect(recommendedClassifierModel(16 * GB)).toBe('qwen2.5:1.5b');
+    expect(recommendedClassifierModel(8 * GB)).toBe('llama3.2:1b');
+    expect(recommendedClassifierModel(16 * GB)).toBe('llama3.2:1b');
     const installed = [{ name: 'gpt-oss:20b' }, { name: 'llama3.2:1b' }, { name: 'qwen2.5:1.5b' }];
-    expect(pickClassifierModel(installed, 16 * GB)).toBe('qwen2.5:1.5b');
+    expect(pickClassifierModel(installed, 16 * GB)).toBe('llama3.2:1b');
     expect(pickClassifierModel(installed, 8 * GB)).toBe('llama3.2:1b');
-    expect(pickClassifierModel([{ name: 'gpt-oss:20b' }], 8 * GB)).toBeUndefined();
+    // Any other local model works: the lightest one that can write text.
+    expect(pickClassifierModel([{ name: 'gpt-oss:20b' }], 8 * GB)).toBe('gpt-oss:20b');
+    expect(
+      pickClassifierModel(
+        [
+          { name: 'big:70b', size: 40e9 },
+          { name: 'nomic-embed-text', size: 3e8 },
+          { name: 'mid:8b', size: 5e9 },
+        ],
+        16 * GB,
+      ),
+    ).toBe('mid:8b');
+    expect(pickClassifierModel([{ name: 'nomic-embed-text' }], 16 * GB)).toBeUndefined();
     // A model set in settings wins, but only when it's installed.
     expect(classifierModelChoice(installed, 'gpt-oss:20b', 8 * GB)).toBe('gpt-oss:20b');
     expect(classifierModelChoice(installed, 'mistral:7b', 8 * GB)).toBeUndefined();

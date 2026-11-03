@@ -630,6 +630,38 @@ describe('Ollama adapter', () => {
     expect(shown).toEqual(['big-no-tools:70b', 'mid-tools:8b']);
   });
 
+  it('falls back to the largest model that can write, and offers it no tools', async () => {
+    const chats: Array<{ model: string; tools?: unknown }> = [];
+    const adapter = createOllamaAdapter({
+      baseUrl: 'http://127.0.0.1:11434',
+      fetch: (async (url: string, init?: RequestInit) => {
+        if (url.endsWith('/api/tags'))
+          return Response.json({
+            models: [
+              { name: 'small:1b', size: 1 },
+              { name: 'large-embed-text', size: 90 },
+              { name: 'mid:8b', size: 8 },
+            ],
+          });
+        if (url.endsWith('/api/show')) return Response.json({ capabilities: ['completion'] });
+        chats.push(JSON.parse(String(init?.body)));
+        return Response.json({ message: { role: 'assistant', content: '{"summary":"done"}' } });
+      }) as typeof fetch,
+    });
+    expect(await adapter.probe()).toMatchObject({ state: 'ready', version: 'mid:8b' });
+    const out = await adapter.run({
+      systemPrompt: 's',
+      userPrompt: 'u',
+      jsonSchema: schema,
+      tools: [getFinding],
+      signal: new AbortController().signal,
+      onUsage: () => {},
+    });
+    expect(out).toMatchObject({ kind: 'ok', json: { summary: 'done' } });
+    expect(chats[0]).toMatchObject({ model: 'mid:8b' });
+    expect(chats[0]!.tools).toBeUndefined();
+  });
+
   it('reports a set model that is not installed', async () => {
     const adapter = createOllamaAdapter({
       baseUrl: 'http://127.0.0.1:11434',

@@ -14,15 +14,7 @@ import {
 import { FeedKeyStore, KeyStore, type Cipher } from './keys.js';
 import { calls } from '../../shared/ipc.js';
 import { feedKeyNote, keyedFeeds } from '../../shared/setup.js';
-import {
-  FAPOLICYD_ALLOW_RULES,
-  LOCAL_MODEL,
-  LOCAL_MODEL_SMALL,
-  linuxDistro,
-  localModelFor,
-  setupPlan,
-  stepsFor,
-} from './plan.js';
+import { FAPOLICYD_ALLOW_RULES, LOCAL_MODEL, linuxDistro, setupPlan, stepsFor } from './plan.js';
 import { OnboardingService, type CodexSetup } from './service.js';
 import { linuxTerminal } from './terminal.js';
 
@@ -111,20 +103,10 @@ describe('setup plan', () => {
     });
   });
 
-  it('pulls the small local model', () => {
+  it('suggests a small local model, and says any other works', () => {
     const model = stepsFor('local').find((s) => s.id === 'ollama-model')!;
     expect(model.commands[0]!.cmd).toBe(`ollama pull ${LOCAL_MODEL}`);
-  });
-
-  it('picks a smaller model for Macs with less than 16 GB', () => {
-    expect(localModelFor(4 * 1024 ** 3)).toBe(LOCAL_MODEL_SMALL);
-    expect(localModelFor(8 * 1024 ** 3)).toBe(LOCAL_MODEL_SMALL);
-    expect(localModelFor(16 * 1024 ** 3)).toBe(LOCAL_MODEL);
-    const step = stepsFor('local', { localModel: LOCAL_MODEL_SMALL }).find(
-      (s) => s.id === 'ollama-model',
-    )!;
-    expect(step.commands[0]!.cmd).toBe(`ollama pull ${LOCAL_MODEL_SMALL}`);
-    expect(step.why).toContain('400 MB');
+    expect(model.why).toContain('Any model you already have');
   });
 
   it('offers Claude Code pre-flight only when Claude Code is around, with no commands to run', () => {
@@ -269,7 +251,7 @@ describe('checks', () => {
     expect((await CHECKS.helper(fakeMac({ files: [HELPER_SOCKET] }))).ok).toBe(false);
   });
 
-  it('prefers the small model but accepts one already installed', async () => {
+  it('accepts any local model that can write', async () => {
     const lots = 32 * 1024 ** 3;
     expect(
       await CHECKS['ollama.model']({ ...fakeMac({ ollama: [LOCAL_MODEL] }), memoryBytes: lots }),
@@ -277,22 +259,18 @@ describe('checks', () => {
       ok: true,
       detail: expect.stringContaining(LOCAL_MODEL),
     });
-    expect((await CHECKS['ollama.model'](fakeMac({ ollama: ['gemma3:1b'] }))).detail).toContain(
-      'gemma3:1b',
+    expect(await CHECKS['ollama.model'](fakeMac({ ollama: ['hermes-local:quality'] }))).toEqual({
+      ok: true,
+      detail: 'hermes-local:quality labels events',
+    });
+    // An embedding model can't label anything, so the step isn't done.
+    expect((await CHECKS['ollama.model'](fakeMac({ ollama: ['nomic-embed-text'] }))).ok).toBe(
+      false,
     );
-    // A big model explains alerts but the labeller never picks it, so the step isn't done.
-    const big = await CHECKS['ollama.model'](fakeMac({ ollama: ['hermes-local:quality'] }));
-    expect(big.ok).toBe(false);
-    expect(big.detail).toMatch(/hermes-local:quality.*labelling events needs a small model/);
   });
 
-  it('agrees with the labeller on memory and on a model set in AI settings', async () => {
+  it('agrees with the labeller on a model set in AI settings', async () => {
     const GB = 1024 ** 3;
-    // Below 16 GB the labeller only looks at the small list, which leaves out 1.5b.
-    const small = { ...fakeMac({ ollama: [LOCAL_MODEL] }), memoryBytes: 8 * GB };
-    expect((await CHECKS['ollama.model'](small)).ok).toBe(false);
-    const smallOk = { ...fakeMac({ ollama: [LOCAL_MODEL_SMALL] }), memoryBytes: 8 * GB };
-    expect((await CHECKS['ollama.model'](smallOk)).ok).toBe(true);
     // A model set in settings is the only one the labeller uses.
     const set = (installed: string[]) => ({
       ...fakeMac({ ollama: installed }),

@@ -43,7 +43,7 @@ const MODES: { id: SetupMode; icon: ReactNode; title: string; body: string; cost
     icon: <Laptop size={20} />,
     title: `On this ${computer} only`,
     body: `A small model on your ${computer} explains alerts and suggests rules. Nothing leaves your ${computer}, and it works offline.`,
-    cost: 'About 1 GB of disk. Uses memory only while it thinks.',
+    cost: 'About 1.3 GB of disk, or none if you have a model. Uses memory only while it thinks.',
   },
   {
     id: 'cloud',
@@ -57,7 +57,7 @@ const MODES: { id: SetupMode; icon: ReactNode; title: string; body: string; cost
     icon: <Layers size={20} />,
     title: 'Both',
     body: 'Routine work runs on the local model; harder questions go to your cloud AI, and it falls back to local when the cloud is out of reach.',
-    cost: 'About 1 GB of disk plus a small share of your plan.',
+    cost: 'About 1.3 GB of disk, or none if you have a model, plus a small share of your plan.',
   },
 ];
 

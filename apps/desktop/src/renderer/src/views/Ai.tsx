@@ -239,6 +239,35 @@ export function AiSection() {
               onChange={(v) => void setPref({ labelling: v === 'on' })}
             />
           </div>
+          {view.mode !== 'cloud' && (
+            <div className="ai-option">
+              <div className="ai-main">
+                <div className="ai-name">Local model for labelling</div>
+                <div className="ai-sub">
+                  {view.localModels.length > 0
+                    ? 'Any model in Ollama works. Automatic picks a light one, because labelling runs in the background.'
+                    : 'Nothing found in Ollama yet. Any model you pull will show up here.'}
+                </div>
+              </div>
+              <select
+                aria-label="Local model for labelling"
+                value={view.prefs.localModel ?? ''}
+                onChange={(e) => void setPref({ localModel: e.target.value || null })}
+              >
+                <option value="">Automatic</option>
+                {view.prefs.localModel && !view.localModels.includes(view.prefs.localModel) && (
+                  <option value={view.prefs.localModel}>
+                    {view.prefs.localModel} (not installed)
+                  </option>
+                )}
+                {view.localModels.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <ul className="ai-list ai-list-bordered">
             {view.providers.filter((p) => p.provider === 'jev').map((p) => row(p, view))}
           </ul>

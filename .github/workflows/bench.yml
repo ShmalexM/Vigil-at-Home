@@ -62,8 +62,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # What Macs under 16 GB and over 16 GB label with (packages/ai classifier.ts).
-        model: ['qwen2.5:0.5b', 'qwen2.5:1.5b']
+        # The first two models the labeller looks for (packages/ai classifier.ts).
+        model: ['llama3.2:1b', 'gemma3:1b']
     name: labels (${{ matrix.model }})
     env:
       VIGIL_BENCH_LABELLER: ollama

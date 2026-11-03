@@ -85,6 +85,7 @@ export {
   JEV_OPENROUTER_URL,
 } from './providers/jev.js';
 export {
+  canGenerate,
   CLASSIFIER_MODELS,
   classifierModelChoice,
   classifierRuntime,

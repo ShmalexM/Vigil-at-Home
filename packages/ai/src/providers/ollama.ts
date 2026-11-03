@@ -1,3 +1,4 @@
+import { canGenerate } from '../classifier.js';
 import { callTool, toolJsonSchema } from '../tools.js';
 import type {
   AdapterRunInput,
@@ -10,11 +11,11 @@ import type {
 
 export interface OllamaAdapterOptions {
   readonly baseUrl: string;
-  /** A model to use. Without one, Vigil picks the largest installed model that supports tools. */
+  /** A model to use. Without one, Vigil picks among the installed ones. */
   readonly model?: string;
   /**
    * Picks among installed models when `model` is unset. Default: the largest
-   * one that supports tools.
+   * one that supports tools, otherwise the largest that can write text.
    */
   readonly pickModel?: (
     installed: ReadonlyArray<{ name: string; size?: number }>,
@@ -59,6 +60,8 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
   const http = options.fetch ?? fetch;
   const base = options.baseUrl.replace(/\/$/, '');
   let chosen: string | undefined;
+  /** The chosen model can't call tools, and Ollama refuses a request that offers them. */
+  let toolless = false;
   const rt = options.runtime;
   const runtimeOptions = {
     num_predict: rt?.numPredict ?? DEFAULT_MAX_OUTPUT_TOKENS,
@@ -84,8 +87,13 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
     return (body.capabilities ?? []).includes('tools');
   }
 
-  /** The configured model if it's installed, otherwise the largest installed one with tool support. */
+  /**
+   * The configured model if it's installed, otherwise the largest installed one
+   * with tool support, otherwise the largest that can write text: it can still
+   * answer from what Vigil hands it, just without calling tools.
+   */
   async function pickModel(models: ReadonlyArray<{ name: string; size?: number }>) {
+    toolless = false;
     if (options.model) {
       const wanted = options.model;
       return models.some((m) => m.name === wanted || m.name === `${wanted}:latest`)
@@ -95,7 +103,8 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
     if (options.pickModel) return options.pickModel(models);
     const bySize = [...models].sort((a, b) => (b.size ?? 0) - (a.size ?? 0));
     for (const m of bySize) if (await supportsTools(m.name)) return m.name;
-    return undefined;
+    toolless = true;
+    return bySize.find((m) => canGenerate(m.name))?.name;
   }
 
   return {
@@ -131,7 +140,7 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
     async run(input: AdapterRunInput): Promise<AdapterRunOutput> {
       const audit: ToolAudit = { called: [], denied: [] };
       const model = options.model ?? chosen;
-      if (!model) return { kind: 'error', message: 'No Ollama model with tool support.', audit };
+      if (!model) return { kind: 'error', message: 'No Ollama model installed.', audit };
       const tools = new Map(input.tools.map((t) => [t.name, t]));
       let inputTokens = 0;
       let outputTokens = 0;
@@ -160,7 +169,7 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
               options: runtimeOptions,
               ...(options.runtime?.keepAlive ? { keep_alive: options.runtime.keepAlive } : {}),
               format: input.jsonSchema,
-              ...(tools.size > 0 && round < MAX_TOOL_ROUNDS
+              ...(tools.size > 0 && round < MAX_TOOL_ROUNDS && !toolless
                 ? {
                     tools: input.tools.map((t) => ({
                       type: 'function',

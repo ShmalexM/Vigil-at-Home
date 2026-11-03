@@ -155,7 +155,7 @@ export function DecisionControls({
           </div>
         </div>
       )}
-      {!contained && !full && (
+      {!contained && !full && !askingNotMe && (
         <span className="t-small">
           “That was me” and “Looks fine” both close it, and Vigil remembers which. Say “That was me”
           to the same thing a few times and Vigil offers “Don’t show this again” on the Rules page;

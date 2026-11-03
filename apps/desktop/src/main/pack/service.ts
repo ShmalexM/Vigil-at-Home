@@ -594,7 +594,7 @@ export class PackService {
   }
 
   voice(): PackVoice {
-    return this.o.load(KEY_VOICE, PackVoice, 'pack');
+    return this.o.load(KEY_VOICE, PackVoice, 'plain');
   }
 
   /** Plain wording turns off the dog talk in moods and the Lead dog's replies. */

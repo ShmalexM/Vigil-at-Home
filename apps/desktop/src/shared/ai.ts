@@ -9,6 +9,8 @@ export const AiProvider = z.enum(['claude', 'codex', 'api', 'ollama', 'jev']);
 export type AiProvider = z.infer<typeof AiProvider>;
 
 /** What the user can switch in Settings. Everything else comes from setup and saved keys. */
+const LocalModelName = z.string().regex(/^[\w./:-]{1,200}$/);
+
 export const AiPrefs = z.object({
   claude: z.boolean(),
   codex: z.boolean(),
@@ -26,6 +28,8 @@ export const AiPrefs = z.object({
   claudePlan: z.boolean(),
   /** Codex through the user's ChatGPT plan sign-in, or a saved OpenAI API key. */
   codexUses: z.enum(['subscription', 'apiKey']),
+  /** The model in Ollama that labels events. Unset: Vigil picks a light one by itself. */
+  localModel: LocalModelName.optional(),
   /**
    * One limit on everything Vigil charges to the user's keys this month, all
    * together (Cloud API, Jev, Claude on an Anthropic key, Codex on an OpenAI key).
@@ -45,10 +49,13 @@ export const DEFAULT_AI_PREFS: AiPrefs = {
   codexUses: 'subscription',
 };
 
-/** A change to some prefs. A null cap removes it. */
-export const AiPrefsPatch = AiPrefs.omit({ monthlyCapUsd: true })
+/** A change to some prefs. A null cap or model removes it. */
+export const AiPrefsPatch = AiPrefs.omit({ monthlyCapUsd: true, localModel: true })
   .partial()
-  .extend({ monthlyCapUsd: z.number().min(0).max(10_000).nullable().optional() });
+  .extend({
+    monthlyCapUsd: z.number().min(0).max(10_000).nullable().optional(),
+    localModel: LocalModelName.nullable().optional(),
+  });
 export type AiPrefsPatch = z.input<typeof AiPrefsPatch>;
 
 export type AiProviderState =
@@ -90,6 +97,8 @@ export interface AiView {
   api?: { name: string; last4: string };
   /** An Anthropic API key is saved, so Claude can work on its own (and label with Haiku). */
   anthropicKey: boolean;
+  /** Models in Ollama that can write text, for choosing which one labels events. */
+  localModels: string[];
   /** How Jev is reached: the OpenRouter key, its own TypeSafe key, or not at all. */
   jevVia: 'openrouter' | 'typesafe' | null;
   /** Set when the switches leave the AI unable to work (AiBridge.offNotice). */

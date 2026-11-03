@@ -29,6 +29,7 @@ import { protectionLeft } from '../../../shared/setup';
 import type { SensorView } from '../../../shared/ipc';
 import {
   diaryLines,
+  dogLabel,
   foundLines,
   pileWords,
   SCOUT_PILE_MIN,
@@ -81,6 +82,11 @@ export function HomeView({ go }: { go: (r: string) => void }) {
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
   const approvals = pack?.approvals ?? [];
+  // By role, never by name: the Lead dog can name a dog, so a name is model text.
+  const helperLabel = (id: string) => {
+    const dog = pack?.dogs.find((d) => d.id === id);
+    return dog ? dogLabel(dog, pack?.voice) : 'A helper';
+  };
   const needsYou = (status?.needsYou ?? 0) + approvals.length;
   const scout = homeMood(pack, !!status && (needsYou > 0 || status.level === 'poor'));
 
@@ -189,7 +195,6 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               </span>
             </div>
           )}
-          {pack && <PackDiary pack={pack} />}
         </Card>
       )}
 
@@ -229,8 +234,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
             {approvals.map((a) => (
               <button key={a.id} type="button" className="list-row" onClick={() => go('pack')}>
                 <span className="grow clamp-2 t-h3">
-                  {pack?.dogs.find((d) => d.id === a.dogId)?.name ?? 'A helper'} wants to use{' '}
-                  {a.toolTitle}
+                  {helperLabel(a.dogId)} wants to use {a.toolTitle}
                 </span>
                 <span className="t-small nowrap">{timeAgo(a.at)}</span>
               </button>
@@ -262,6 +266,8 @@ export function HomeView({ go }: { go: (r: string) => void }) {
           <CloseOldAgentAlerts />
         </Card>
       )}
+
+      {pack && <PackDiary pack={pack} />}
 
       <Card>
         <SectionHead title="Protection" sub="The layers that watch and block" />
@@ -506,8 +512,8 @@ function PackDiary({ pack }: { pack: PackView }) {
   const dog = (id: string) => pack.dogs.find((d) => d.id === id);
   const shown = open ? dog(open) : undefined;
   return (
-    <div className="pack-diary">
-      <span className="t-label">Today the pack</span>
+    <Card className="pack-diary">
+      <span className="t-label">{pack.voice === 'plain' ? 'Today' : 'Today the pack'}</span>
       <ul>
         {lines.map((l) => {
           const d = dog(l.dog)!;
@@ -552,7 +558,7 @@ function PackDiary({ pack }: { pack: PackView }) {
           onClose={() => setOpen(undefined)}
         />
       )}
-    </div>
+    </Card>
   );
 }
 
