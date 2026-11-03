@@ -1,7 +1,7 @@
 import { execFileWithin } from '@vigil/ai';
 import { accessSync, constants, existsSync } from 'node:fs';
 import { homedir, totalmem } from 'node:os';
-import { classifierModelChoice } from '@vigil/ai';
+import { classifierModelChoice, isLocalWriter, type LocalModel } from '@vigil/ai';
 import { join } from 'node:path';
 import type { CheckId } from '../../shared/setup.js';
 import { FAPOLICYD_ALLOW_RULES } from './plan.js';
@@ -187,7 +187,14 @@ export const CHECKS: Record<CheckId, (p: Probe) => Promise<CheckResult>> = {
       p.classifierModel?.(),
       p.memoryBytes ?? totalmem(),
     );
-    return picked ? { ok: true, detail: `${picked} labels events` } : { ok: false };
+    if (picked) return { ok: true, detail: `${picked} labels events` };
+    const writers = models.filter(isLocalWriter);
+    return writers.length
+      ? {
+          ok: false,
+          detail: `${writers.length === 1 ? writers[0]!.name : `${writers.length} models`} would be heavy for background work. Choose one under Settings › AI to use it anyway, or download a smaller one.`,
+        }
+      : { ok: false };
   },
 
   claude: async (p) => {
@@ -220,16 +227,10 @@ export const CHECKS: Record<CheckId, (p: Probe) => Promise<CheckResult>> = {
       : { ok: false },
 };
 
-async function ollamaModels(p: Probe): Promise<{ name: string; size?: number }[] | undefined> {
+async function ollamaModels(p: Probe): Promise<LocalModel[] | undefined> {
   try {
-    const body = (await p.getJson('http://127.0.0.1:11434/api/tags')) as {
-      models?: { name?: unknown; size?: unknown }[];
-    };
-    return (body.models ?? []).flatMap((m) =>
-      typeof m.name === 'string'
-        ? [{ name: m.name, ...(typeof m.size === 'number' ? { size: m.size } : {}) }]
-        : [],
-    );
+    const body = (await p.getJson('http://127.0.0.1:11434/api/tags')) as { models?: LocalModel[] };
+    return (body.models ?? []).filter((m) => typeof m.name === 'string');
   } catch {
     return undefined;
   }

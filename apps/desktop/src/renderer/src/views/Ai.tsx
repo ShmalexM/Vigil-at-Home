@@ -245,7 +245,7 @@ export function AiSection() {
                 <div className="ai-name">Local model for labelling</div>
                 <div className="ai-sub">
                   {view.localModels.length > 0
-                    ? 'Any model in Ollama works. Automatic picks a light one, because labelling runs in the background.'
+                    ? 'Any model in Ollama works. Automatic picks a light one, because labelling runs in the background. Models that run on Ollama’s servers aren’t listed.'
                     : 'Nothing found in Ollama yet. Any model you pull will show up here.'}
                 </div>
               </div>
@@ -303,8 +303,8 @@ function usedFor(p: AiProviderView, view: AiView): string {
       view.mode === 'local' ? 'explaining alerts' : 'explaining alerts when nothing above is ready';
     if (!labels) return `Used for: ${explain}.`;
     return view.mode !== 'local' && (view.jevVia || haiku)
-      ? `Used for: ${explain}, and labelling events with a small model when ${before} can’t.`
-      : `Used for: ${explain}, and labelling events with a small model.`;
+      ? `Used for: ${explain}, and labelling events when ${before} can’t.`
+      : `Used for: ${explain}, and labelling events.`;
   }
   if (view.mode === 'local') return `Not used while Vigil runs AI on this ${computer} only.`;
   if (p.provider === 'claude') {
@@ -325,7 +325,7 @@ function usedFor(p: AiProviderView, view: AiView): string {
 
 function labellingText(view: AiView): string {
   if (view.mode === 'local')
-    return `A small model on this ${computer} labels unusual programs and connections in Activity.`;
+    return `A model on this ${computer} labels unusual programs and connections in Activity.`;
   const fallback =
     view.mode === 'cloud'
       ? view.jevVia
@@ -348,7 +348,7 @@ function labellingText(view: AiView): string {
     } when it can’t.${addHaiku}`;
   return view.mode === 'cloud'
     ? `The apps above label unusual programs and connections in Activity, within their background share. An OpenRouter or TypeSafe key adds Jev.${addHaiku}`
-    : `A small model on this ${computer} labels unusual programs and connections in Activity. An OpenRouter or TypeSafe key adds Jev.${addHaiku}`;
+    : `A model on this ${computer} labels unusual programs and connections in Activity. An OpenRouter or TypeSafe key adds Jev.${addHaiku}`;
 }
 
 function describe(p: AiProviderView, view: AiView): string {

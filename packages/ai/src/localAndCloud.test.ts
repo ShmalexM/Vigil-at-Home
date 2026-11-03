@@ -288,24 +288,28 @@ const exec = (id: string, path: string): SensorEvent => ({
 
 describe('event labelling with a small local model', () => {
   it('picks a model that fits the memory, from what is installed', () => {
-    expect(recommendedClassifierModel(8 * GB)).toBe('llama3.2:1b');
+    expect(recommendedClassifierModel(8 * GB)).toBe('gemma3:270m');
+    expect(recommendedClassifierModel(15 * GB)).toBe('gemma3:270m');
     expect(recommendedClassifierModel(16 * GB)).toBe('llama3.2:1b');
     const installed = [{ name: 'gpt-oss:20b' }, { name: 'llama3.2:1b' }, { name: 'qwen2.5:1.5b' }];
     expect(pickClassifierModel(installed, 16 * GB)).toBe('llama3.2:1b');
     expect(pickClassifierModel(installed, 8 * GB)).toBe('llama3.2:1b');
-    // Any other local model works: the lightest one that can write text.
-    expect(pickClassifierModel([{ name: 'gpt-oss:20b' }], 8 * GB)).toBe('gpt-oss:20b');
-    expect(
-      pickClassifierModel(
-        [
-          { name: 'big:70b', size: 40e9 },
-          { name: 'nomic-embed-text', size: 3e8 },
-          { name: 'mid:8b', size: 5e9 },
-        ],
-        16 * GB,
-      ),
-    ).toBe('mid:8b');
-    expect(pickClassifierModel([{ name: 'nomic-embed-text' }], 16 * GB)).toBeUndefined();
+    // Any other local model works: the lightest one that can write text and fits the memory.
+    const others = [
+      { name: 'big:70b', size: 40e9 },
+      { name: 'nomic-embed-text', size: 3e8 },
+      { name: 'all-minilm', size: 4e7 },
+      { name: 'odd-name', size: 5e7, details: { family: 'nomic-bert' } },
+      { name: 'gpt-oss:120b-cloud', size: 300 },
+      { name: 'mid:8b', size: 5e9 },
+    ];
+    expect(pickClassifierModel(others, 32 * GB)).toBe('mid:8b');
+    // Unasked, a small Mac doesn't take a model that would crowd its memory.
+    expect(pickClassifierModel(others, 8 * GB)).toBeUndefined();
+    // Asked, it does, even one the automatic pick passed over.
+    expect(classifierModelChoice(others, 'big:70b', 8 * GB)).toBe('big:70b');
+    expect(pickClassifierModel([{ name: 'nomic-embed-text' }], 32 * GB)).toBeUndefined();
+    expect(pickClassifierModel([{ name: 'gpt-oss:120b-cloud' }], 32 * GB)).toBeUndefined();
     // A model set in settings wins, but only when it's installed.
     expect(classifierModelChoice(installed, 'gpt-oss:20b', 8 * GB)).toBe('gpt-oss:20b');
     expect(classifierModelChoice(installed, 'mistral:7b', 8 * GB)).toBeUndefined();
@@ -316,6 +320,7 @@ describe('event labelling with a small local model', () => {
       numPredict: 256,
       numThread: 4,
       keepAlive: '1m',
+      think: false,
     });
     expect(classifierRuntime(1).numThread).toBe(1);
   });

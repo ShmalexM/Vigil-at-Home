@@ -34,8 +34,8 @@ jobs:
           # What setup suggests: small enough for a CPU runner and supports tool calls.
           - model: llama3.2:1b
             tests: packages/ai/src/live
-          # Next on the labeller's list; it has no tools, so only the labelling test runs.
-          - model: gemma3:1b
+          # What setup suggests below 16 GB; it has no tools, so only the labelling test runs.
+          - model: gemma3:270m
             tests: packages/ai/src/live/classifier.test.ts
     name: ollama (${{ matrix.model }})
     env:

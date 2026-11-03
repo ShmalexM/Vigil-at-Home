@@ -630,36 +630,41 @@ describe('Ollama adapter', () => {
     expect(shown).toEqual(['big-no-tools:70b', 'mid-tools:8b']);
   });
 
-  it('falls back to the largest model that can write, and offers it no tools', async () => {
-    const chats: Array<{ model: string; tools?: unknown }> = [];
+  it('never picks a cloud model by itself, however it answers', async () => {
     const adapter = createOllamaAdapter({
       baseUrl: 'http://127.0.0.1:11434',
-      fetch: (async (url: string, init?: RequestInit) => {
-        if (url.endsWith('/api/tags'))
-          return Response.json({
-            models: [
-              { name: 'small:1b', size: 1 },
-              { name: 'large-embed-text', size: 90 },
-              { name: 'mid:8b', size: 8 },
-            ],
-          });
-        if (url.endsWith('/api/show')) return Response.json({ capabilities: ['completion'] });
-        chats.push(JSON.parse(String(init?.body)));
-        return Response.json({ message: { role: 'assistant', content: '{"summary":"done"}' } });
-      }) as typeof fetch,
+      fetch: (async (url: string) =>
+        url.endsWith('/api/tags')
+          ? Response.json({ models: [{ name: 'gpt-oss:120b-cloud', size: 300 }] })
+          : Response.json({ capabilities: ['completion', 'tools'] })) as typeof fetch,
     });
-    expect(await adapter.probe()).toMatchObject({ state: 'ready', version: 'mid:8b' });
-    const out = await adapter.run({
+    expect(await adapter.probe()).toMatchObject({ state: 'not_installed' });
+  });
+
+  it('turns thinking off only when asked to', async () => {
+    const chats: Array<{ think?: boolean }> = [];
+    const adapter = (runtime?: { think: boolean }) =>
+      createOllamaAdapter({
+        baseUrl: 'http://127.0.0.1:11434',
+        model: 'm',
+        ...(runtime ? { runtime } : {}),
+        fetch: (async (_url: string, init?: RequestInit) => {
+          chats.push(JSON.parse(String(init?.body)));
+          return Response.json({ message: { role: 'assistant', content: '{"summary":"done"}' } });
+        }) as typeof fetch,
+      });
+    const input = {
       systemPrompt: 's',
       userPrompt: 'u',
       jsonSchema: schema,
-      tools: [getFinding],
+      tools: [],
       signal: new AbortController().signal,
       onUsage: () => {},
-    });
-    expect(out).toMatchObject({ kind: 'ok', json: { summary: 'done' } });
-    expect(chats[0]).toMatchObject({ model: 'mid:8b' });
-    expect(chats[0]!.tools).toBeUndefined();
+    };
+    await adapter({ think: false }).run(input);
+    await adapter().run(input);
+    expect(chats[0]!.think).toBe(false);
+    expect(chats[1]!.think).toBeUndefined();
   });
 
   it('reports a set model that is not installed', async () => {

@@ -411,6 +411,7 @@ function start(): void {
     // Moods change often while dogs work; one push per 150 ms is plenty.
     packPush ??= setTimeout(() => {
       packPush = undefined;
+      windows.setNeedsYou(core.status().badge + pack.approvalCount());
       windows.broadcast('pack');
     }, 150);
   };
@@ -484,7 +485,7 @@ function start(): void {
   setTimeout(() => windows.prewarmPopover(), 2000);
 
   const refresh = () => {
-    windows.setNeedsYou(core.status().badge);
+    windows.setNeedsYou(core.status().badge + pack.approvalCount());
     windows.broadcast('changed');
   };
   core.alerts.on('changed', refresh);

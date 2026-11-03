@@ -315,6 +315,8 @@ export class VigilCore {
           learned.blockRefused.message,
         );
       }
+      // A block just ran or was refused: the alert and any open page show it now.
+      if (learned.santa || learned.blockRefused) this.alerts.refresh(alertId);
       if (learned.suggested && learned.suggestDemotion)
         console.info(`[detection] suggested: ${learned.suggestDemotion.message}`);
     }

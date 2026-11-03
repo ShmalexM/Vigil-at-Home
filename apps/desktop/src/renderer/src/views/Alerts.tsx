@@ -228,10 +228,14 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
         kept: 'Kept as it is',
         released: 'Done, and marked safe',
         contained: 'Done',
+        threat: 'Marked as a threat',
         fine: 'Marked as fine',
         expected: 'Marked as you',
       }[d],
-      undo: d === 'released' || d === 'contained' ? undefined : () => void vigil.reopen(alert.id),
+      undo:
+        d === 'released' || d === 'contained' || d === 'threat'
+          ? undefined
+          : () => void vigil.reopen(alert.id),
     });
 
   return (

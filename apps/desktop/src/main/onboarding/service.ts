@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { totalmem } from 'node:os';
 import { z } from 'zod';
 import {
   SetupMode,
@@ -12,7 +13,7 @@ import {
 import type { Store } from '../db/store.js';
 import { CHECKS, type CheckResult, type Probe } from './checks.js';
 import type { KeyStore } from './keys.js';
-import { API_KEYS, stepsFor, type PlanInputs } from './plan.js';
+import { API_KEYS, localModelFor, stepsFor, type PlanInputs } from './plan.js';
 
 const KEY_MODE = 'onboarding.mode';
 const KEY_FINISHED = 'onboarding.finishedAt';
@@ -165,6 +166,7 @@ export class OnboardingService extends EventEmitter<{ changed: [] }> {
     const inputs = {
       // The probe says which computer it checks, so steps and checks agree.
       ...(this.o.probe.platform ? { platform: this.o.probe.platform } : {}),
+      localModel: localModelFor(totalmem()),
       ...this.o.plan?.(),
     };
     // Before a mode is chosen, show everything so the choice screen can count steps.

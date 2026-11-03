@@ -13,6 +13,7 @@ import { BlockedChip, Button, IconButton, LevelPill, SeverityMark } from '../com
 import { timeAgo } from '../format';
 import { isNoticed, needsDecision } from '../../../shared/attention';
 import { updateNeedsUser } from '../../../shared/updates';
+import { usePack } from './Pack';
 
 /** Rows the popover lists before handing over to the app. */
 export const POPOVER_ROWS = 5;
@@ -24,6 +25,9 @@ export function Popover() {
   const [status] = useLive(() => vigil.getStatus());
   const [alerts] = useLive(() => vigil.listAlerts('open'));
   const [updates] = useLive(() => vigil.getUpdates());
+  const [pack] = usePack({ settings: false });
+  const approvals = pack?.approvals.length ?? 0;
+  const needsYou = (status?.needsYou ?? 0) + approvals;
   const needs = needsRows((alerts ?? []).filter(needsDecision));
   const noticed = (alerts ?? []).filter(isNoticed);
   const open = (id: string) => void vigil.openMain(`alerts/${id}`);
@@ -47,8 +51,8 @@ export function Popover() {
             </span>
           )}
         </div>
-        {status && status.reasons.length === 0 && <WorkingHeadline needsYou={status.needsYou} />}
-        {status && status.needsYou > 0 && <NeedsYouLine count={status.needsYou} />}
+        {status && status.reasons.length === 0 && <WorkingHeadline needsYou={needsYou} />}
+        {needsYou > 0 && <NeedsYouLine count={needsYou} />}
         {status && status.reasons.length > 0 && (
           <span className="t-small">{status.reasons.slice(0, 2).join(' · ')}</span>
         )}
@@ -61,13 +65,26 @@ export function Popover() {
       </header>
 
       <div className="col scroll grow" style={{ gap: 14 }}>
-        {needs.length > 0 && (
+        {(needs.length > 0 || approvals > 0) && (
           <section className="col" style={{ gap: 6 }}>
             <div className="row spread">
               <span className="t-label">Needs you</span>
-              <span className="count hot">{status?.needsYou ?? needs.length}</span>
+              <span className="count hot">{needsYou}</span>
             </div>
             <div className="list">
+              {approvals > 0 && (
+                <button
+                  type="button"
+                  className="list-row"
+                  onClick={() => void vigil.openMain('pack')}
+                >
+                  <span className="t-h3 ellipsis">
+                    {approvals === 1
+                      ? 'A helper is waiting for your OK'
+                      : `${approvals} helpers are waiting for your OK`}
+                  </span>
+                </button>
+              )}
               {needs.slice(0, POPOVER_ROWS).map((r) => (
                 <button key={r.id} type="button" className="list-row" onClick={() => open(r.id)}>
                   <div className="col grow" style={{ gap: 2 }}>
@@ -94,7 +111,7 @@ export function Popover() {
           </section>
         )}
 
-        {needs.length === 0 && noticed.length === 0 && (
+        {needs.length === 0 && approvals === 0 && noticed.length === 0 && (
           <div className="empty" style={{ border: 0 }}>
             <span className="empty-icon">
               <CircleCheck size={20} />

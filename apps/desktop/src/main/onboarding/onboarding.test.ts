@@ -14,7 +14,15 @@ import {
 import { FeedKeyStore, KeyStore, type Cipher } from './keys.js';
 import { calls } from '../../shared/ipc.js';
 import { feedKeyNote, keyedFeeds } from '../../shared/setup.js';
-import { FAPOLICYD_ALLOW_RULES, LOCAL_MODEL, linuxDistro, setupPlan, stepsFor } from './plan.js';
+import {
+  FAPOLICYD_ALLOW_RULES,
+  LOCAL_MODEL,
+  LOCAL_MODEL_SMALL,
+  linuxDistro,
+  localModelFor,
+  setupPlan,
+  stepsFor,
+} from './plan.js';
 import { OnboardingService, type CodexSetup } from './service.js';
 import { linuxTerminal } from './terminal.js';
 
@@ -107,6 +115,16 @@ describe('setup plan', () => {
     const model = stepsFor('local').find((s) => s.id === 'ollama-model')!;
     expect(model.commands[0]!.cmd).toBe(`ollama pull ${LOCAL_MODEL}`);
     expect(model.why).toContain('Any model you already have');
+  });
+
+  it('suggests a lighter model for Macs with less than 16 GB', () => {
+    expect(localModelFor(8 * 1024 ** 3)).toBe(LOCAL_MODEL_SMALL);
+    expect(localModelFor(16 * 1024 ** 3)).toBe(LOCAL_MODEL);
+    const step = stepsFor('local', { localModel: LOCAL_MODEL_SMALL }).find(
+      (s) => s.id === 'ollama-model',
+    )!;
+    expect(step.commands[0]!.cmd).toBe(`ollama pull ${LOCAL_MODEL_SMALL}`);
+    expect(step.why).toContain('300 MB');
   });
 
   it('offers Claude Code pre-flight only when Claude Code is around, with no commands to run', () => {
@@ -267,6 +285,14 @@ describe('checks', () => {
     expect((await CHECKS['ollama.model'](fakeMac({ ollama: ['nomic-embed-text'] }))).ok).toBe(
       false,
     );
+    // Too heavy to take unasked: the step says how to use it anyway.
+    const heavy = await CHECKS['ollama.model']({
+      ...fakeMac({ ollama: [] }),
+      memoryBytes: 8 * 1024 ** 3,
+      getJson: async () => ({ models: [{ name: 'big:20b', size: 13e9 }] }),
+    });
+    expect(heavy.ok).toBe(false);
+    expect(heavy.detail).toMatch(/big:20b.*Settings › AI/);
   });
 
   it('agrees with the labeller on a model set in AI settings', async () => {

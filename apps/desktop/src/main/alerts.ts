@@ -499,7 +499,7 @@ export class AlertService extends EventEmitter<AlertEvents> {
   }
 
   /** Recompute containment from the action log, save, and announce. */
-  private refresh(alertId: string): Alert {
+  refresh(alertId: string): Alert {
     const alert = this.store.getAlert(alertId);
     if (!alert) throw new Error(`No alert ${alertId}`);
     const actions = this.store.listActions({ alertId });

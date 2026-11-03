@@ -16,8 +16,8 @@ import type { AiRunner } from './runner.js';
  * these before any other model the user installed, and never downloads one.
  */
 export const CLASSIFIER_MODELS = {
-  /** For Macs with less than 16 GB of memory. */
-  small: ['llama3.2:1b', 'gemma3:1b', 'qwen2.5:0.5b', 'qwen3:0.6b'],
+  /** For Macs with less than 16 GB of memory, whose budget is 0.6 GB (docs/performance.md). */
+  small: ['gemma3:270m', 'gemma3:1b', 'llama3.2:1b', 'qwen2.5:0.5b', 'qwen3:0.6b'],
   /** For everything else. */
   regular: [
     'llama3.2:1b',
@@ -34,10 +34,28 @@ const GB = 1024 ** 3;
 /** Below this, the list leaves out models that keep much memory resident. */
 const SMALL_BELOW = 16 * GB;
 
-/** Whether a model can write text at all: an embedding or reranking model can't. */
-export function canGenerate(name: string): boolean {
-  return !/embed|rerank|(^|[/:-])bge/i.test(name);
+/** A model as Ollama lists it. */
+export interface LocalModel {
+  readonly name: string;
+  readonly size?: number;
+  readonly details?: { readonly family?: string };
 }
+
+/**
+ * Whether a model can write text on this computer. An embedding or reranking
+ * model can't write (bert is their family), and a `-cloud` model runs on
+ * Ollama's servers, so it can't be used where nothing may leave this computer.
+ */
+export function isLocalWriter(m: LocalModel): boolean {
+  return (
+    !/embed|rerank|minilm|paraphrase|(^|[/:-])(bge|e5)\b/i.test(m.name) &&
+    !/(^|[-:])cloud\b/i.test(m.name) &&
+    !/bert/i.test(m.details?.family ?? '')
+  );
+}
+
+/** The largest model labelling takes unasked: it runs in the background, so it has to stay light. */
+const largestAutomatic = (memoryBytes: number) => memoryBytes / 4;
 
 /** The model setup suggests pulling on this Mac. */
 export function recommendedClassifierModel(memoryBytes: number = totalmem()): string {
@@ -45,20 +63,21 @@ export function recommendedClassifierModel(memoryBytes: number = totalmem()): st
 }
 
 /**
- * A known small model the user has installed, otherwise the smallest installed
- * model that can write text, or nothing. Any local model works; labelling runs
- * in the background, so it takes the lightest one on offer.
+ * A known small model the user has installed, otherwise the smallest local
+ * model that fits this computer's memory, or nothing. A bigger one still works
+ * when the user chooses it in settings ({@link classifierModelChoice}).
  */
 export function pickClassifierModel(
-  installed: ReadonlyArray<{ name: string; size?: number }>,
+  installed: readonly LocalModel[],
   memoryBytes: number = totalmem(),
 ): string | undefined {
   const names = new Set(installed.flatMap((m) => [m.name, m.name.replace(/:latest$/, '')]));
   const list = memoryBytes < SMALL_BELOW ? CLASSIFIER_MODELS.small : CLASSIFIER_MODELS.regular;
   const known = list.find((m) => names.has(m));
   if (known) return known;
-  return [...installed]
-    .filter((m) => canGenerate(m.name))
+  return installed
+    .filter(isLocalWriter)
+    .filter((m) => (m.size ?? 0) <= largestAutomatic(memoryBytes))
     .sort((a, b) => (a.size ?? Infinity) - (b.size ?? Infinity))[0]?.name;
 }
 
@@ -69,7 +88,7 @@ export function pickClassifierModel(
  * setup's check calls this so the two can't disagree.
  */
 export function classifierModelChoice(
-  installed: ReadonlyArray<{ name: string; size?: number }>,
+  installed: readonly LocalModel[],
   override?: string,
   memoryBytes: number = totalmem(),
 ): string | undefined {
@@ -89,6 +108,8 @@ export function classifierRuntime(cores: number = cpus().length) {
     numPredict: 256,
     numThread: Math.max(1, Math.floor(cores / 2)),
     keepAlive: '1m',
+    // A thinking model would spend all 256 tokens on thoughts and never finish its JSON.
+    think: false,
   } as const;
 }
 

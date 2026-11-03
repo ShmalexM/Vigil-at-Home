@@ -15,7 +15,7 @@ import { releaseFailed } from '../format';
 import { HoldButton } from './HoldButton';
 import { Button } from './ui';
 
-export type Decided = 'kept' | 'released' | 'contained' | 'fine' | 'expected';
+export type Decided = 'kept' | 'released' | 'contained' | 'threat' | 'fine' | 'expected';
 
 /**
  * The one set of decision buttons, used by the alert page and the popup. Each
@@ -140,13 +140,25 @@ export function DecisionControls({
       </div>
       {!contained && askingNotMe && (
         <div className="col release-scope" style={{ gap: 6 }}>
-          <span className="t-small">
-            Vigil will treat this as a threat. If a program is behind it, Vigil blocks that exact
-            program from running again, which may ask for your password. It never blocks your
-            system’s own programs, and Reopen on the alert takes this back.
-          </span>
+          {alert.subject?.path ? (
+            <>
+              <span className="t-small">
+                If Vigil has this program’s fingerprint, it blocks it from running again, so
+                anything else that uses it stops working too:
+              </span>
+              <div className="subject mono">{alert.subject.path}</div>
+              <span className="t-small">
+                That may ask for your password. Your system’s own programs are never blocked, and
+                Reopen on the alert takes this back.
+              </span>
+            </>
+          ) : (
+            <span className="t-small">
+              There’s no program here to block, so this records your answer and closes the alert.
+            </span>
+          )}
           <div className="row">
-            <Button kind="primary" onClick={() => void decide('malicious', false, 'contained')}>
+            <Button kind="primary" onClick={() => void decide('malicious', false, 'threat')}>
               Treat as a threat
             </Button>
             <Button kind="ghost" onClick={() => setNotMeFor(undefined)}>

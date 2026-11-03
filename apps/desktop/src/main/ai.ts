@@ -11,10 +11,11 @@ import {
   stopSharingCodexSignIn,
   canRun,
   candidatesFor,
-  canGenerate,
+  isLocalWriter,
   jevRoute,
   whoRuns,
   type AiKeysSaved,
+  type LocalModel,
   type AiNotRunning,
   type AiPurpose,
   type AiSettings,
@@ -126,17 +127,15 @@ function readPrefs(read: () => unknown): AiPrefs {
   return AiPrefs.parse(out);
 }
 
-/** What Ollama has that can write text, or nothing when it isn't running. */
+/** What Ollama has that can write text on this computer, or nothing when it isn't running. */
 async function localModels(baseUrl: string): Promise<string[]> {
   try {
     const res = await fetch(`${baseUrl.replace(/\/$/, '')}/api/tags`, {
       signal: AbortSignal.timeout(1_500),
     });
     if (!res.ok) return [];
-    const { models = [] } = (await res.json()) as { models?: { name?: unknown }[] };
-    return models.flatMap((m) =>
-      typeof m.name === 'string' && canGenerate(m.name) ? [m.name] : [],
-    );
+    const { models = [] } = (await res.json()) as { models?: LocalModel[] };
+    return models.filter(isLocalWriter).map((m) => m.name);
   } catch {
     return [];
   }

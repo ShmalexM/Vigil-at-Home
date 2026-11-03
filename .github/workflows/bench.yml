@@ -62,8 +62,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The first two models the labeller looks for (packages/ai classifier.ts).
-        model: ['llama3.2:1b', 'gemma3:1b']
+        # What setup suggests below and from 16 GB (packages/ai classifier.ts).
+        model: ['gemma3:270m', 'llama3.2:1b']
     name: labels (${{ matrix.model }})
     env:
       VIGIL_BENCH_LABELLER: ollama
