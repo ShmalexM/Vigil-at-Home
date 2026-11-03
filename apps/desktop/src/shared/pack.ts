@@ -33,7 +33,9 @@ export type DogMood =
  * waits for the user. "auto": the user's AI judges each such tool call and
  * low-risk ones go ahead (never on a Claude plan for background work).
  * "full": dogs go ahead, except where a rule or the user's own tool setting
- * says ask.
+ * says ask. In every mode, once a run has used a tool (a recall of only clean
+ * facts aside) or started from tainted text, a tool that can change things
+ * asks (gate.ts).
  */
 export const PermissionMode = z.enum(['ask', 'auto', 'full']);
 export type PermissionMode = z.infer<typeof PermissionMode>;

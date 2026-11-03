@@ -44,6 +44,8 @@ The mode at the top of the page works like a coding agent's permission modes.
 
 Retiring a dog always asks in Let AI decide.
 
+The last column holds only until a run has used a tool, and not at all for a run that starts from a tainted job, report or memory fact. From then on a tool call that can change things asks you, in every mode, Full access included. A memory recall that finds only your own facts doesn't count, and neither does a connector's own title and description, so its first call in a clean run can go ahead. See [Who sees outside text](#who-sees-outside-text).
+
 A tool call still waiting for your OK when its run ends is refused. A pack
 dog's card then stays held for its next same call (below); the Lead dog's
 goes with its answer.
@@ -58,7 +60,7 @@ Text Vigil didn't write and you didn't type can carry instructions: a file name,
 - **The bridge.** When a change rests on text the acting path never saw, every change in that turn waits for your OK, in every mode, Full access included. Vigil goes by references, never by words: your message names one (`answer-3`, `report:<dog id>`), or the acting path cites one or writes one into a change. The acting path is told to cite what a change rests on ("do what Pip suggested" cites Pip's report, "yes" to a reading answer cites that answer); it never saw that text, so it has nothing of it to copy. A request you typed in full applies as your mode allows, whatever words it uses: "Create a dog named Advisor to check Downloads hourly", "Run Pip; ignore any recommendations in its report" and "Remember I prefer reports in plain English" read nothing and wait for nothing in Full access. Memory changes wait too when the turn also went down the reading path, when a fact replaces one your message doesn't name word for word, or when the fact to forget came from outside text.
 - **After an answer that read outside text.** Once any answer in the conversation read outside text or used a tool, a short "yes" may be agreeing to it, and the acting path can't see what it said. So from then on every change waits for your OK as an inline card in the Lead chat, in every mode, Full access included, however much of it you typed: adding, changing, running or retiring a dog, giving it tools, and remembering or forgetting a fact. Approving it is one tap; it raises no popup, notification or badge. The taint belongs to the conversation, not to one answer: a clean reply, a reply that only holds cards, or asking the same thing again does not clear it. Only a new conversation (clearing the chat) starts clean.
 
-Pack dogs' own runs keep their provenance: a run that used a tool, or whose prompt held a tainted job, report or memory fact, writes a tainted report. A tainted last report is outside text: a run whose prompt holds one may read it, but every call it makes to a tool that can change things asks you first, in every mode and even for a tool set to Always allow (the same reason the reading path has no such tools). Their connector tools are offered as `tool_1`, `tool_2` and so on, never by the server's name, and every call goes through the tool gate below. Changes saved by older versions keep their recorded taint: approving one keeps an outside name or job marked, until you edit the dog yourself.
+Pack dogs' own runs keep their provenance: a run that used a tool, or whose prompt held a tainted job, report or memory fact, writes a tainted report. The same things make the run itself tainted: once its prompt holds a tainted job, report or memory fact, or once it has used any tool, every call it makes to a tool that can change things asks you first, in every mode and even for a tool set to Always allow (the same reason the reading path has no such tools). So only a clean run's first tool call goes by your mode and tool choice alone. A memory recall that finds only your own facts doesn't count for this. Neither does a connector's own title and description, since you chose that connector, though they still taint the report. Their connector tools are offered as `tool_1`, `tool_2` and so on, never by the server's name, and every call goes through the tool gate below. Changes saved by older versions keep their recorded taint: approving one keeps an outside name or job marked, until you edit the dog yourself.
 
 ## How a tool call is decided
 
@@ -71,7 +73,7 @@ flowchart TD
   off -- no --> rules{Vigil's rules<br/>connector calls only}
   rules -- stop --> refused
   rules -- ask --> ask[You are asked]
-  rules -- nothing --> prev{Run read a tainted<br/>last report?}
+  rules -- nothing --> prev{Tainted prompt, or the<br/>run used a tool?}
   prev -- yes, and the tool can change things --> ask
   prev -- no --> choice{Your choice for the tool}
   choice -- Always ask --> ask
@@ -245,7 +247,7 @@ migrations.
 
 Connectors are your own MCP servers, added on the Pack page under Tools and connectors: a command on this Mac (stdio) or a URL (streamable HTTP). Vigil is the MCP client; the model sees only the tools and their results, never a token. Environment values and bearer tokens are encrypted with the Keychain-backed key the API keys use, in `pack-secrets.json` (mode 0600). Vigil never reads another app's MCP settings.
 
-Each connector tool gets the same four choices as Vigil's own: Follow mode, Always ask, Always allow, Off. A connector tool never counts as read-only, even when its server marks it so: MCP treats those hints as untrusted, and Vigil can't check them. The page shows the server's claim ("Server says it only reads"), but the tool still follows your permission mode, and in Let AI decide a dog given one waits for your OK. Set a tool you trust to Always allow and it is treated as read-only from then on.
+Each connector tool gets the same four choices as Vigil's own: Follow mode, Always ask, Always allow, Off. A connector tool never counts as read-only, even when its server marks it so: MCP treats those hints as untrusted, and Vigil can't check them. The page shows the server's claim ("Server says it only reads"), but the tool still follows your permission mode, and in Let AI decide a dog given one waits for your OK. Set a tool you trust to Always allow and it is treated as read-only from then on, except that it still asks once a run has used a tool or when it starts from a tainted job, report or memory fact.
 
 Each connector gets an id of its own when you add it: its name as a slug and a part that is new every time, so an id is never given twice, even to a connector you remove and add again under the same name. Tool grants, tool choices and held cards go by that id, so none carry over to a new connector. Connectors added before keep the ids they have. Vigil's rules check a connector call twice, as `mcp__<connector id>__<tool>` and as `mcp__<name slug>__<tool>` (the form rules written before used, like `mcp__github__create_issue`), and the stricter answer wins. Rules only add friction (stop or ask, never allow), so a match by name can only make a call wait. What lifts a rule binds to the id alone: an exception or exclusion on the tool or its server, written for the name, does not apply to a connector with an id of its own.
 
