@@ -150,13 +150,12 @@ export function DecisionControls({
               </span>
               <div className="subject mono">{blockTarget}</div>
               <span className="t-small">
-                That may ask for your password. Your system’s own programs are never blocked, and
-                Reopen on the alert takes this back.
+                That may ask for your password. Reopen on the alert takes this back.
               </span>
             </>
           ) : (
             <span className="t-small">
-              There’s no program here to block, so this records your answer and closes the alert.
+              Vigil can’t block anything here, so this records your answer and closes the alert.
             </span>
           )}
           <div className="row">

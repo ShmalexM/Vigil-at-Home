@@ -232,6 +232,8 @@ describe('Detector', () => {
       },
     });
     const alertId = popups[0]!;
+    // The panel must not promise a block the floor refuses.
+    expect(core.alertDetail(alertId)?.blockTarget).toBeUndefined();
     await core.decide(alertId, { verdict: 'malicious', release: false });
     expect(core.detector!.stores.lists.has('user_blocked_sha256', 'c'.repeat(64))).toBe(false);
     expect(executor.log.filter((a) => a.kind === 'santa.rule.set')).toEqual([]);
