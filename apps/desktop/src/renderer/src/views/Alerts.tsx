@@ -354,31 +354,26 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
       <Card>
         <SectionHead
           title="Evidence"
-          sub={evidenceSub(events)}
+          sub={`${evidenceSub(events)}. Review before sharing: command lines can contain secrets.`}
           right={
-            <div className="row" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-              <span className="t-small">
-                Review before sharing: command lines can contain secrets.
-              </span>
-              <Button
-                size="sm"
-                kind="ghost"
-                icon={<Copy size={13} />}
-                title="Copy the alert, its events and what was done, as JSON. Your user and computer names are hidden, and so is any command line that looks like it holds a secret. It can still miss one."
-                onClick={async () => {
-                  try {
-                    const json = await vigil.alertEvidence(alert.id);
-                    if (!json) throw new Error('gone');
-                    await navigator.clipboard.writeText(json);
-                    toast({ text: 'Copied the evidence as JSON. Review it before sharing.' });
-                  } catch {
-                    toast({ text: 'Couldn’t copy to the clipboard' });
-                  }
-                }}
-              >
-                Copy
-              </Button>
-            </div>
+            <Button
+              size="sm"
+              kind="ghost"
+              icon={<Copy size={13} />}
+              title="Copy the alert, its events and what was done, as JSON. Your user and computer names are hidden, and so is any command line that looks like it holds a secret. It can still miss one."
+              onClick={async () => {
+                try {
+                  const json = await vigil.alertEvidence(alert.id);
+                  if (!json) throw new Error('gone');
+                  await navigator.clipboard.writeText(json);
+                  toast({ text: 'Copied the evidence as JSON. Review it before sharing.' });
+                } catch {
+                  toast({ text: 'Couldn’t copy to the clipboard' });
+                }
+              }}
+            >
+              Copy
+            </Button>
           }
         />
         {events.map((e) => (

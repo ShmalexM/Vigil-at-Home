@@ -68,9 +68,12 @@ export function AiSection() {
   useEffect(() => void load(), [load]);
   // Home’s "Open AI settings" opens Settings at this card.
   const card = useRef<HTMLDivElement>(null);
+  const loaded = view !== undefined;
   useEffect(() => {
-    if (location.hash === '#settings/ai') card.current?.scrollIntoView({ block: 'start' });
-  }, []);
+    if (loaded && location.hash === '#settings/ai') {
+      card.current?.scrollIntoView({ block: 'start' });
+    }
+  }, [loaded]);
 
   const setPref = async (patch: AiPrefsPatch) => {
     await vigil.setAiPrefs(patch);

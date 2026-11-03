@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { BellRing, ClipboardCopy } from 'lucide-react';
 import { useLive, vigil } from '../api';
 import { AlertViewSwitch } from '../components/Attention';
@@ -19,6 +19,8 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
   const [settings, reload] = useLive(() => vigil.getSettings());
   const [status] = useLive(() => vigil.getStatus());
   const toast = useToast();
+  // Home's "Open AI settings" lands inside Advanced, so it has to start open.
+  const [advancedOpen, setAdvancedOpen] = useState(location.hash === '#settings/ai');
   // The theme can change from another window too.
   useEffect(() => vigil.on('theme', reload), [reload]);
   if (!settings) return null;
@@ -108,7 +110,11 @@ export function SettingsView({ go }: { go: (r: string) => void }) {
           <dd>Apache-2.0, open source</dd>
         </dl>
       </Card>
-      <details className="settings-advanced">
+      <details
+        className="settings-advanced"
+        open={advancedOpen}
+        onToggle={(e) => setAdvancedOpen(e.currentTarget.open)}
+      >
         <summary className="t-h2">Advanced</summary>
         <span className="t-small">
           The detail behind what Vigil does: every alert, the rules, raw activity, AI providers,

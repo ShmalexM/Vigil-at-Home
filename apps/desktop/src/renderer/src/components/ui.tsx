@@ -119,11 +119,15 @@ export function SectionHead({
 }) {
   return (
     <div className="row spread" style={{ alignItems: 'flex-start' }}>
-      <div className="col" style={{ gap: 3 }}>
+      <div className="col" style={{ gap: 3, minWidth: 0 }}>
         <h2 className="t-h2">{title}</h2>
         {sub && <span className="t-small">{sub}</span>}
       </div>
-      {right && <div className="row">{right}</div>}
+      {right && (
+        <div className="row" style={{ flexShrink: 0 }}>
+          {right}
+        </div>
+      )}
     </div>
   );
 }

@@ -198,9 +198,9 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
           </>
         )}
 
-        {stage === 'review' && <Review view={view} onDone={onDone} />}
+        {stage === 'review' && <Review view={view} onBack={() => setStage('ai')} onDone={onDone} />}
 
-        {!(stage === 'ai' && (!view.mode || choosing)) && (
+        {stage !== 'review' && !(stage === 'ai' && (!view.mode || choosing)) && (
           <div className="row spread">
             {idx > 0 ? (
               <Button
@@ -213,12 +213,10 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
             ) : (
               <span />
             )}
-            {stage !== 'review' && (
-              <Button kind="primary" onClick={() => setStage(STAGES[idx + 1]!.id)}>
-                Next
-                <ArrowRight size={15} />
-              </Button>
-            )}
+            <Button kind="primary" onClick={() => setStage(STAGES[idx + 1]!.id)}>
+              Next
+              <ArrowRight size={15} />
+            </Button>
           </div>
         )}
       </div>
@@ -512,7 +510,15 @@ function Command({ label, cmd }: { label: string; cmd: string }) {
   );
 }
 
-function Review({ view, onDone }: { view: SetupView; onDone: () => void }) {
+function Review({
+  view,
+  onBack,
+  onDone,
+}: {
+  view: SetupView;
+  onBack: () => void;
+  onDone: () => void;
+}) {
   // With no AI chosen, the AI steps aren't part of this setup.
   const shown = view.mode ? view.steps : view.steps.filter((s) => s.group !== 'ai');
   const left = shown.filter(
@@ -533,7 +539,7 @@ function Review({ view, onDone }: { view: SetupView; onDone: () => void }) {
         <h1 className="t-title">{left.length ? 'Almost there' : 'You’re set up'}</h1>
         <span>
           {left.length
-            ? 'You can finish now and come back to the rest from Settings › Run setup again. Vigil shows Fair until protection is complete.'
+            ? 'You can finish now and come back to the rest from Settings › Walk through setup again. Vigil shows Fair until protection is complete.'
             : onLinux
               ? 'Vigil is watching. It lives in the system tray and will pop up only when it blocks something or needs you. If your desktop shows no tray icons (GNOME needs the AppIndicator extension), open Vigil at Home from your apps instead; it keeps running when you close this window.'
               : 'Vigil is watching. It lives in the menu bar and will pop up only when it blocks something or needs you.'}
@@ -576,7 +582,10 @@ function Review({ view, onDone }: { view: SetupView; onDone: () => void }) {
           set up yet. Until then blocks are simulated and labelled that way.
         </div>
       )}
-      <div className="row" style={{ justifyContent: 'flex-end' }}>
+      <div className="row spread">
+        <Button kind="ghost" icon={<ArrowLeft size={15} />} onClick={onBack}>
+          Back
+        </Button>
         <Button
           kind="primary"
           size="lg"
