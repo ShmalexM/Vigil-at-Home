@@ -10,7 +10,12 @@ import {
   SquareTerminal,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import type { SetupMode, SetupStepView, SetupView } from '../../../../shared/setup';
+import {
+  protectionLeft,
+  type SetupMode,
+  type SetupStepView,
+  type SetupView,
+} from '../../../../shared/setup';
 import { useLive, vigil } from '../../api';
 import { computer, onLinux } from '../../platform';
 import { PreflightSetup } from '../../components/PreflightSetup';
@@ -164,6 +169,7 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
         {stage === 'ai' && (!view.mode || choosing) && (
           <ChooseMode
             mode={view.mode}
+            protectionDone={protectionLeft(view.steps).length === 0}
             onPick={async (m) => {
               setView(await vigil.setSetupMode(m));
               setChoosing(false);
@@ -226,10 +232,12 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
 
 function ChooseMode({
   mode,
+  protectionDone,
   onPick,
   onSkip,
 }: {
   mode: SetupMode | undefined;
+  protectionDone: boolean;
   onPick: (m: SetupMode) => void;
   onSkip: () => void;
 }) {
@@ -239,9 +247,12 @@ function ChooseMode({
       <div className="col" style={{ gap: 6 }}>
         <h1 className="t-title">Add AI? (optional)</h1>
         <span>
-          Protection is already set: detection and blocking run on your {computer} with fixed rules
-          and never wait for AI. AI only explains alerts and suggests new rules for you to approve.
-          You can skip it and add it later in Settings.
+          {protectionDone
+            ? 'Protection is already set: detection'
+            : 'Protection has steps left, and AI won’t change that: detection'}{' '}
+          and blocking run on your {computer} with fixed rules and never wait for AI. AI only
+          explains alerts and suggests new rules for you to approve. You can skip it and add it
+          later in Settings.
         </span>
       </div>
       <div
@@ -539,7 +550,7 @@ function Review({
         <h1 className="t-title">{left.length ? 'Almost there' : 'You’re set up'}</h1>
         <span>
           {left.length
-            ? 'You can finish now and come back to the rest from Settings › Walk through setup again. Vigil shows Fair until protection is complete.'
+            ? 'You can finish now and come back to the rest from Settings › Walk through setup again. Until then, Home lists what’s left.'
             : onLinux
               ? 'Vigil is watching. It lives in the system tray and will pop up only when it blocks something or needs you. If your desktop shows no tray icons (GNOME needs the AppIndicator extension), open Vigil at Home from your apps instead; it keeps running when you close this window.'
               : 'Vigil is watching. It lives in the menu bar and will pop up only when it blocks something or needs you.'}

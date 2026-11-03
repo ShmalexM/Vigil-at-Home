@@ -290,12 +290,18 @@ describe('VigilCore', () => {
       checkedToday: 1,
       lastEventAt: at - 60_000,
       blockedToday: 0,
+      simulatedToday: 0,
     });
     await core.alerts.raise({
       rule: makeRule(),
       events: [{ ...makeExec(), ts: at }],
       actions: [suspend],
     });
-    expect(core.status().watch).toMatchObject({ checkedToday: 2, blockedToday: 1 });
+    // With no helper the block only ran as a simulation, so it isn't counted as a real one.
+    expect(core.status().watch).toMatchObject({
+      checkedToday: 2,
+      blockedToday: 0,
+      simulatedToday: 1,
+    });
   });
 });

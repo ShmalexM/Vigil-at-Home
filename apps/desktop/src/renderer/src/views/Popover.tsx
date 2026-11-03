@@ -9,7 +9,7 @@ import {
   WorkingHeadline,
 } from '../components/Attention';
 import { Shield } from '../components/Shield';
-import { Button, Chip, IconButton, LevelPill, SeverityMark } from '../components/ui';
+import { BlockedChip, Button, IconButton, LevelPill, SeverityMark } from '../components/ui';
 import { timeAgo } from '../format';
 import { isNoticed, needsDecision } from '../../../shared/attention';
 import { updateNeedsUser } from '../../../shared/updates';
@@ -76,7 +76,7 @@ export function Popover() {
                       <SeverityMark severity={r.severity} />
                       {pileLine(r) && <span>· {pileLine(r)}</span>}
                       <span>· {timeAgo(r.at)}</span>
-                      {r.blocked && <Chip tone="good">Blocked</Chip>}
+                      {r.blocked && <BlockedChip simulated={r.simulated} />}
                     </span>
                   </div>
                 </button>

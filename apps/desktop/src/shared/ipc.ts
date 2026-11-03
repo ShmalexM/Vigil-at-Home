@@ -387,8 +387,10 @@ export interface WatchSummary {
   checkedToday: number;
   /** When the newest event arrived, or null before the first. */
   lastEventAt: number | null;
-  /** Things a rule blocked or paused today. */
+  /** Things a rule really blocked or paused today. */
   blockedToday: number;
+  /** Rule blocks today that only ran as a simulation, because the helper wasn't connected. */
+  simulatedToday: number;
 }
 
 export interface StatusView {

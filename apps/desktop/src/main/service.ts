@@ -719,6 +719,7 @@ export class VigilCore {
         checkedToday: this.store.countEventsSince(today),
         lastEventAt: this.store.newestEventAt(),
         blockedToday: this.store.countRuleBlocksSince(today),
+        simulatedToday: this.store.countRuleBlocksSince(today, true),
       },
       sensors: this.sensors.list(),
       dryRun: this.executor.simulated ?? this.dryRun,

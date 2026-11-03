@@ -29,7 +29,7 @@ import { HistoryView } from './History';
 import { HomeView } from './Home';
 import { InForceView } from './InForce';
 import { isTyping, navKey, navKeys, navShortcut } from './nav-keys';
-import { PackPage } from './Pack';
+import { PackPage, usePack } from './Pack';
 import { SetupWizard } from './onboarding/SetupWizard';
 import { RulesView } from './Rules';
 import { SettingsView } from './Settings';
@@ -102,6 +102,9 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
   // Names and statuses only: the badge needs no stats, and this runs on every page.
   const [agents] = useLive(() => vigil.listAgentNames());
   const suggestions = agents?.filter((a) => a.status === 'suggested').length ?? 0;
+  const [pack] = usePack({ settings: false });
+  const approvals = pack?.approvals.length ?? 0;
+  const needsYou = (status?.needsYou ?? 0) + approvals;
   const [section = 'home', param] = route.split('/');
   const onAdvanced = ADVANCED_NAV.some((n) => n.id === section);
   // The Advanced group starts closed and remembers how it was left. Landing on one
@@ -161,7 +164,7 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
               key={n.id}
               item={n}
               current={section === n.id}
-              badge={n.id === 'home' ? status?.badge : undefined}
+              badge={n.id === 'home' ? (status?.badge ?? 0) + approvals : undefined}
               onClick={() => go(n.id)}
             />
           ))}
@@ -174,9 +177,9 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
           >
             <SlidersHorizontal size={16} />
             <span className="grow">Advanced</span>
-            {!showAdvanced && suggestions > 0 && (
-              <span className="count" title="Suggested agents waiting on you">
-                {suggestions}
+            {!showAdvanced && suggestions + approvals > 0 && (
+              <span className="count" title="Waiting on you in these pages">
+                {suggestions + approvals}
               </span>
             )}
             <ChevronRight size={14} className="nav-chevron" />
@@ -194,7 +197,9 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
                         calm: true,
                         badgeTitle: 'Suggested agents waiting on you',
                       }
-                    : {})}
+                    : n.id === 'pack'
+                      ? { badge: approvals, badgeTitle: 'Tools waiting for your OK' }
+                      : {})}
                   onClick={() => go(n.id)}
                 />
               ))}
@@ -213,7 +218,7 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
               <span className="t-small muted">Protection</span>
               <LevelPill level={status.level} small />
             </span>
-            {(status.reasons.length > 0 || status.needsYou === 0) && (
+            {(status.reasons.length > 0 || needsYou === 0) && (
               <span className="t-small sidebar-status-why">
                 {status.reasons[0] ?? 'Nothing needs you'}
               </span>
@@ -221,9 +226,9 @@ export function AppShell({ initialRoute }: { initialRoute: string }) {
             {status.reasons.length > 1 && (
               <span className="t-small muted">and {status.reasons.length - 1} more · see Home</span>
             )}
-            {status.needsYou > 0 && (
+            {needsYou > 0 && (
               <span className="t-small sidebar-status-why">
-                {status.needsYou} {status.needsYou === 1 ? 'thing needs' : 'things need'} you
+                {needsYou} {needsYou === 1 ? 'thing needs' : 'things need'} you
               </span>
             )}
           </button>

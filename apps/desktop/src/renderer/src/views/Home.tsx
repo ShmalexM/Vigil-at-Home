@@ -14,10 +14,18 @@ import { CloseOldAgentAlerts } from '../components/BulkClose';
 import { Dog } from '../components/Dog';
 import { NotebookSheet } from '../components/Notebook';
 import { useToast } from '../components/Toasts';
-import { Card, Chip, LevelPill, SectionHead, SeverityMark, StatusMark } from '../components/ui';
+import {
+  BlockedChip,
+  Card,
+  LevelPill,
+  SectionHead,
+  SeverityMark,
+  StatusMark,
+} from '../components/ui';
 import { timeAgo } from '../format';
 import { isNoticed, needsDecision } from '../../../shared/attention';
 import { LEVEL_RULES } from '../../../shared/levels';
+import { protectionLeft } from '../../../shared/setup';
 import type { SensorView } from '../../../shared/ipc';
 import {
   diaryLines,
@@ -49,6 +57,9 @@ export function HomeView({ go }: { go: (r: string) => void }) {
   const [alerts] = useLive(() => vigil.listAlerts('open'));
   // The startup check: blocks that are dangerous or forgotten (main/in-force.ts).
   const [inForce] = useLive(() => vigil.getInForce());
+  const [setup] = useLive(() => vigil.getSetup());
+  // The shell's banner covers setup that was never finished; this covers finishing early.
+  const setupLeft = setup?.finished ? protectionLeft(setup.steps) : [];
   const allNeeds = needsRows((alerts ?? []).filter(needsDecision));
   // The biggest pile gets Scout's card instead of a row.
   const bigPile = allNeeds.reduce<(typeof allNeeds)[number] | undefined>(
@@ -69,7 +80,9 @@ export function HomeView({ go }: { go: (r: string) => void }) {
     el.open = true;
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
-  const scout = homeMood(pack, !!status && (status.needsYou > 0 || status.level === 'poor'));
+  const approvals = pack?.approvals ?? [];
+  const needsYou = (status?.needsYou ?? 0) + approvals.length;
+  const scout = homeMood(pack, !!status && (needsYou > 0 || status.level === 'poor'));
 
   return (
     <div className="page">
@@ -84,7 +97,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
             <LevelPill level={status.level} />
             <span className="t-h2">
               {levelSentence[status.level]}
-              {status.needsYou === 0 && ' Nothing needs you.'}
+              {needsYou === 0 && ' Nothing needs you.'}
             </span>
             {lead && (
               <button
@@ -98,7 +111,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               </button>
             )}
           </div>
-          {status.needsYou > 0 && <NeedsYouLine count={status.needsYou} />}
+          {needsYou > 0 && <NeedsYouLine count={needsYou} />}
           <div className="row spread" style={{ flexWrap: 'wrap' }}>
             <WatchLine watch={status.watch} />
             <button
@@ -139,6 +152,17 @@ export function HomeView({ go }: { go: (r: string) => void }) {
               broken.
             </p>
           </details>
+          {setupLeft.length > 0 && (
+            <div className="row wrap home-why" style={{ gap: 8 }} role="status">
+              <span>
+                Setup has {setupLeft.length === 1 ? 'a step' : `${setupLeft.length} steps`} left:{' '}
+                {setupLeft.map((s) => s.title).join(', ')}.
+              </span>
+              <button type="button" className="btn sm ghost" onClick={() => go('setup')}>
+                Continue setup
+              </button>
+            </div>
+          )}
           {status.aiOff && (
             <div className="row" style={{ flexWrap: 'wrap', gap: 8 }} role="status">
               <span className="t-small grow">{status.aiOff}.</span>
@@ -169,7 +193,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
         </Card>
       )}
 
-      {(needs.length > 0 || bigPile) && (
+      {(needs.length > 0 || bigPile || approvals.length > 0) && (
         <Card>
           <SectionHead title="Needs you" sub="Waiting on your decision, newest first" />
           {bigPile && lead && pack && (
@@ -202,6 +226,15 @@ export function HomeView({ go }: { go: (r: string) => void }) {
             </div>
           )}
           <div className="list">
+            {approvals.map((a) => (
+              <button key={a.id} type="button" className="list-row" onClick={() => go('pack')}>
+                <span className="grow clamp-2 t-h3">
+                  {pack?.dogs.find((d) => d.id === a.dogId)?.name ?? 'A helper'} wants to use{' '}
+                  {a.toolTitle}
+                </span>
+                <span className="t-small nowrap">{timeAgo(a.at)}</span>
+              </button>
+            ))}
             {needs.slice(0, 6).map((r) => (
               <button
                 key={r.id}
@@ -216,7 +249,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
                   </span>
                   {pileLine(r) && <span className="t-small">{pileLine(r)}</span>}
                 </span>
-                {r.blocked && <Chip tone="good">Blocked</Chip>}
+                {r.blocked && <BlockedChip simulated={r.simulated} />}
                 <span className="t-small nowrap">{timeAgo(r.at)}</span>
               </button>
             ))}
@@ -333,7 +366,7 @@ export function HomeView({ go }: { go: (r: string) => void }) {
         <button type="button" className="row t-small noticed-hint" onClick={() => go('history')}>
           <Eye size={14} />
           Vigil also noticed {status.noticed === 1 ? 'one thing' : `${status.noticed} things`},
-          probably you. Nothing was blocked. See History.
+          usually you or an AI agent you’re running. Nothing was blocked. See History.
         </button>
       )}
     </div>

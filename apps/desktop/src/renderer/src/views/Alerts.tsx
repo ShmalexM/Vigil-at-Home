@@ -19,11 +19,25 @@ import { CloseOldAgentAlerts, CloseRuleAlerts } from '../components/BulkClose';
 import { pileUp } from '../../../shared/piles';
 import { useToast } from '../components/Toasts';
 import { toolRequestFields } from '../components/ToolRequestFields';
-import { Button, Card, Chip, SectionHead, SeverityMark, StatusMark } from '../components/ui';
+import {
+  BlockedChip,
+  Button,
+  Card,
+  Chip,
+  SectionHead,
+  SeverityMark,
+  StatusMark,
+} from '../components/ui';
 import { evidenceSub, isHookRequest, realProcess, STOPPED_ANSWER } from '../evidence';
 import { actorLabel, clock, describeAction, describeEvent, seenTimes, timeAgo } from '../format';
-import { actionErrorText } from '../decision';
-import { helperNote, notChangedText } from '../format';
+import {
+  actionErrorText,
+  isSimulated,
+  provenance,
+  provenanceLabel,
+  responseProvenance,
+} from '../decision';
+import { helperNote, notChangedText, simulatedNote } from '../format';
 import { modeLabel, quieterMode } from '../rule-modes';
 import { ExcludeFromAlert } from '../components/ExcludeFromAlert';
 import { useAgentLinks, type AgentLinks } from './Activity';
@@ -187,7 +201,7 @@ function AlertRow({
           {pile && <span>· {pile}</span>}
           <span>· {timeAgo(alert.createdAt)}</span>
           {seenTimes(alert) && <Chip>{seenTimes(alert)}</Chip>}
-          {alert.containment === 'active' && <Chip tone="good">Blocked</Chip>}
+          {alert.containment === 'active' && <BlockedChip simulated={alert.simulated} />}
           {alert.ai && <Chip tone="ai">AI read</Chip>}
         </span>
       </div>
@@ -203,6 +217,10 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
   const { alert, events, actions, proposals, rule } = detail;
   const pending = proposals.filter((p) => p.status === 'pending');
   const contained = alert.containment === 'active';
+  // Worded from what every action really did, as in the popup.
+  const response = contained ? responseProvenance(actions) : undefined;
+  const note = simulatedNote(response);
+  const allSimulated = response === 'simulated';
 
   const decided = (d: Decided) =>
     toast({
@@ -222,7 +240,16 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
         <div className="row">
           <SeverityMark severity={alert.severity} />
           {seenTimes(alert) && <Chip>{seenTimes(alert)}</Chip>}
-          {contained && <Chip tone="good">Blocked</Chip>}
+          {note ? (
+            <Chip
+              tone="fair"
+              title="The Vigil helper wasn’t connected when some or all of this ran, so that part changed nothing"
+            >
+              {note[0]!.toUpperCase() + note.slice(1)}
+            </Chip>
+          ) : (
+            contained && <BlockedChip />
+          )}
           {alert.containment === 'released' && <Chip tone="fair">Released</Chip>}
           {alert.status === 'resolved' && <Chip>Resolved</Chip>}
           <span className="grow" />
@@ -292,23 +319,33 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
       )}
       {(actions.length > 0 || proposals.length > 0) && (
         <Card>
-          <SectionHead title="Response" sub="What was done, and what was suggested" />
+          <SectionHead
+            title={allSimulated ? 'What Vigil would have done' : 'Response'}
+            sub={
+              allSimulated
+                ? 'Simulated: the Vigil helper wasn’t connected, so nothing really changed'
+                : 'What was done, and what was suggested'
+            }
+          />
           {actions.map((r) => (
             <div key={r.id} className="row">
               <StatusMark
                 state={
                   r.status === 'done'
-                    ? 'done'
+                    ? provenance(r) === 'real'
+                      ? 'done'
+                      : 'warn'
                     : r.status === 'pending'
                       ? 'running'
                       : r.status === 'undone'
                         ? 'warn'
                         : 'failed'
                 }
-                label={r.status}
+                label={(r.status === 'done' && provenanceLabel(r)) || r.status}
               />
               <span className="grow ellipsis">
                 {describeAction(r.action)}
+                {isSimulated(r) && !allSimulated && <span className="muted"> (simulated)</span>}
                 {actionErrorText(r, actions) ? (
                   <span className="t-small"> · {actionErrorText(r, actions)}</span>
                 ) : null}

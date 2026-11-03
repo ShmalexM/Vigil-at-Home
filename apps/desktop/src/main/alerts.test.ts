@@ -27,6 +27,24 @@ describe('AlertService', () => {
     expect(store.ruleMatchCounts(0).get('test.rule')).toBe(1);
   });
 
+  it('marks an alert simulated only while every block in force was simulated', async () => {
+    const { svc } = setup();
+    const dry = await svc.raise({ rule: makeRule(), events: [makeExec()], actions: [suspend] });
+    expect(dry.simulated).toBe(true);
+
+    const real: ActionExecutor = {
+      execute: async () => ({ at: 1, simulated: false }),
+    };
+    const { svc: enforcing } = setup(real);
+    const enforced = await enforcing.raise({
+      rule: makeRule(),
+      events: [makeExec()],
+      actions: [suspend],
+    });
+    expect(enforced.containment).toBe('active');
+    expect(enforced.simulated).toBeUndefined();
+  });
+
   it('pops up once for a block that repeats while its popup is unanswered', async () => {
     let now = 1_000_000;
     const store = memoryStore();

@@ -511,8 +511,11 @@ export class AlertService extends EventEmitter<AlertEvents> {
       : containing.some((r) => r.status === 'undone')
         ? 'released'
         : 'none';
-    const next = { ...alert, containment };
-    if (next.containment !== alert.containment) {
+    const inForce = containing.filter((r) => r.status === 'done');
+    const simulated = inForce.length > 0 && inForce.every((r) => r.result?.simulated === true);
+    const { simulated: wasSimulated = false, ...rest } = alert;
+    const next: Alert = { ...rest, containment, ...(simulated ? { simulated } : {}) };
+    if (next.containment !== alert.containment || simulated !== wasSimulated) {
       next.updatedAt = this.now();
       this.store.saveAlert(next);
     }

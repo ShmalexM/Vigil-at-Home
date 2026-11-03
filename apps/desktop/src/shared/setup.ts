@@ -150,3 +150,10 @@ export interface SetupView {
   canSaveKeys: boolean;
   checkedAt: number;
 }
+
+/** Protection steps still open: required, not done, and not skipped by the user. */
+export function protectionLeft(steps: readonly SetupStepView[]): SetupStepView[] {
+  return steps.filter(
+    (s) => s.group === 'protection' && !s.optional && !s.skipped && s.state !== 'done',
+  );
+}
