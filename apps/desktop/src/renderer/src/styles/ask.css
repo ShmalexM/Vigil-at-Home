@@ -5,6 +5,8 @@
 .ask-dock {
   position: sticky;
   bottom: 0;
+  /* On a page shorter than the window, stay at the bottom instead of under the content. */
+  margin-top: auto;
   z-index: 6;
   display: flex;
   justify-content: center;

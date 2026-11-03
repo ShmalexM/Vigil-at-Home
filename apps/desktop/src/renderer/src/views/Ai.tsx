@@ -68,9 +68,12 @@ export function AiSection() {
   useEffect(() => void load(), [load]);
   // Home’s "Open AI settings" opens Settings at this card.
   const card = useRef<HTMLDivElement>(null);
+  const loaded = view !== undefined;
   useEffect(() => {
-    if (location.hash === '#settings/ai') card.current?.scrollIntoView({ block: 'start' });
-  }, []);
+    if (loaded && location.hash === '#settings/ai') {
+      card.current?.scrollIntoView({ block: 'start' });
+    }
+  }, [loaded]);
 
   const setPref = async (patch: AiPrefsPatch) => {
     await vigil.setAiPrefs(patch);
@@ -236,6 +239,35 @@ export function AiSection() {
               onChange={(v) => void setPref({ labelling: v === 'on' })}
             />
           </div>
+          {view.mode !== 'cloud' && (
+            <div className="ai-option">
+              <div className="ai-main">
+                <div className="ai-name">Local model for labelling</div>
+                <div className="ai-sub">
+                  {view.localModels.length > 0
+                    ? 'Any model in Ollama works. Automatic picks a light one, because labelling runs in the background. Models that run on Ollama’s servers aren’t listed.'
+                    : 'Nothing found in Ollama yet. Any model you pull will show up here.'}
+                </div>
+              </div>
+              <select
+                aria-label="Local model for labelling"
+                value={view.prefs.localModel ?? ''}
+                onChange={(e) => void setPref({ localModel: e.target.value || null })}
+              >
+                <option value="">Automatic</option>
+                {view.prefs.localModel && !view.localModels.includes(view.prefs.localModel) && (
+                  <option value={view.prefs.localModel}>
+                    {view.prefs.localModel} (not installed)
+                  </option>
+                )}
+                {view.localModels.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <ul className="ai-list ai-list-bordered">
             {view.providers.filter((p) => p.provider === 'jev').map((p) => row(p, view))}
           </ul>
@@ -271,8 +303,8 @@ function usedFor(p: AiProviderView, view: AiView): string {
       view.mode === 'local' ? 'explaining alerts' : 'explaining alerts when nothing above is ready';
     if (!labels) return `Used for: ${explain}.`;
     return view.mode !== 'local' && (view.jevVia || haiku)
-      ? `Used for: ${explain}, and labelling events with a small model when ${before} can’t.`
-      : `Used for: ${explain}, and labelling events with a small model.`;
+      ? `Used for: ${explain}, and labelling events when ${before} can’t.`
+      : `Used for: ${explain}, and labelling events.`;
   }
   if (view.mode === 'local') return `Not used while Vigil runs AI on this ${computer} only.`;
   if (p.provider === 'claude') {
@@ -293,7 +325,7 @@ function usedFor(p: AiProviderView, view: AiView): string {
 
 function labellingText(view: AiView): string {
   if (view.mode === 'local')
-    return `A small model on this ${computer} labels unusual programs and connections in Activity.`;
+    return `A model on this ${computer} labels unusual programs and connections in Activity.`;
   const fallback =
     view.mode === 'cloud'
       ? view.jevVia
@@ -316,7 +348,7 @@ function labellingText(view: AiView): string {
     } when it can’t.${addHaiku}`;
   return view.mode === 'cloud'
     ? `The apps above label unusual programs and connections in Activity, within their background share. An OpenRouter or TypeSafe key adds Jev.${addHaiku}`
-    : `A small model on this ${computer} labels unusual programs and connections in Activity. An OpenRouter or TypeSafe key adds Jev.${addHaiku}`;
+    : `A model on this ${computer} labels unusual programs and connections in Activity. An OpenRouter or TypeSafe key adds Jev.${addHaiku}`;
 }
 
 function describe(p: AiProviderView, view: AiView): string {

@@ -593,8 +593,13 @@ export class PackService {
     this.changed();
   }
 
+  /** Tool calls waiting for the person's OK, for the number on the menu-bar icon. */
+  approvalCount(): number {
+    return this.liveApprovals().length;
+  }
+
   voice(): PackVoice {
-    return this.o.load(KEY_VOICE, PackVoice, 'pack');
+    return this.o.load(KEY_VOICE, PackVoice, 'plain');
   }
 
   /** Plain wording turns off the dog talk in moods and the Lead dog's replies. */

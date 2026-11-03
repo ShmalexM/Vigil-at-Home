@@ -927,12 +927,13 @@ export class Store {
   }
 
   /** Containment a rule carried out since `since`, counting ones the user later released. */
-  countRuleBlocksSince(since: number): number {
+  countRuleBlocksSince(since: number, simulated = false): number {
     const row = this.stmt(
       `SELECT COUNT(*) AS n FROM actions
          WHERE requested_at >= ? AND status IN ('done', 'undone')
            AND json_extract(body, '$.actor') = 'rule'
-           AND json_extract(body, '$.undoes') IS NULL`,
+           AND json_extract(body, '$.undoes') IS NULL
+           AND json_extract(body, '$.result.simulated') IS ${simulated ? '1' : 'NOT 1'}`,
     ).get(since) as { n: number };
     return row.n;
   }

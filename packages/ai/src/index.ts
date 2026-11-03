@@ -87,6 +87,8 @@ export {
 export {
   CLASSIFIER_MODELS,
   classifierModelChoice,
+  isLocalWriter,
+  type LocalModel,
   classifierRuntime,
   createEventClassifier,
   eventLine,

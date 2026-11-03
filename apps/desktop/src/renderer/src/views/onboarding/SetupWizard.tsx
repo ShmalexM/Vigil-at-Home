@@ -10,7 +10,12 @@ import {
   SquareTerminal,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import type { SetupMode, SetupStepView, SetupView } from '../../../../shared/setup';
+import {
+  protectionLeft,
+  type SetupMode,
+  type SetupStepView,
+  type SetupView,
+} from '../../../../shared/setup';
 import { useLive, vigil } from '../../api';
 import { computer, onLinux } from '../../platform';
 import { PreflightSetup } from '../../components/PreflightSetup';
@@ -38,7 +43,7 @@ const MODES: { id: SetupMode; icon: ReactNode; title: string; body: string; cost
     icon: <Laptop size={20} />,
     title: `On this ${computer} only`,
     body: `A small model on your ${computer} explains alerts and suggests rules. Nothing leaves your ${computer}, and it works offline.`,
-    cost: 'About 1 GB of disk. Uses memory only while it thinks.',
+    cost: 'Up to 1.3 GB of disk, or none if you have a model. Uses memory only while it thinks.',
   },
   {
     id: 'cloud',
@@ -52,7 +57,7 @@ const MODES: { id: SetupMode; icon: ReactNode; title: string; body: string; cost
     icon: <Layers size={20} />,
     title: 'Both',
     body: 'Routine work runs on the local model; harder questions go to your cloud AI, and it falls back to local when the cloud is out of reach.',
-    cost: 'About 1 GB of disk plus a small share of your plan.',
+    cost: 'Up to 1.3 GB of disk, or none if you have a model, plus a small share of your plan.',
   },
 ];
 
@@ -164,6 +169,7 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
         {stage === 'ai' && (!view.mode || choosing) && (
           <ChooseMode
             mode={view.mode}
+            protectionDone={protectionLeft(view.steps).length === 0}
             onPick={async (m) => {
               setView(await vigil.setSetupMode(m));
               setChoosing(false);
@@ -198,9 +204,9 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
           </>
         )}
 
-        {stage === 'review' && <Review view={view} onDone={onDone} />}
+        {stage === 'review' && <Review view={view} onBack={() => setStage('ai')} onDone={onDone} />}
 
-        {!(stage === 'ai' && (!view.mode || choosing)) && (
+        {stage !== 'review' && !(stage === 'ai' && (!view.mode || choosing)) && (
           <div className="row spread">
             {idx > 0 ? (
               <Button
@@ -213,12 +219,10 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
             ) : (
               <span />
             )}
-            {stage !== 'review' && (
-              <Button kind="primary" onClick={() => setStage(STAGES[idx + 1]!.id)}>
-                Next
-                <ArrowRight size={15} />
-              </Button>
-            )}
+            <Button kind="primary" onClick={() => setStage(STAGES[idx + 1]!.id)}>
+              Next
+              <ArrowRight size={15} />
+            </Button>
           </div>
         )}
       </div>
@@ -228,10 +232,12 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
 
 function ChooseMode({
   mode,
+  protectionDone,
   onPick,
   onSkip,
 }: {
   mode: SetupMode | undefined;
+  protectionDone: boolean;
   onPick: (m: SetupMode) => void;
   onSkip: () => void;
 }) {
@@ -241,9 +247,12 @@ function ChooseMode({
       <div className="col" style={{ gap: 6 }}>
         <h1 className="t-title">Add AI? (optional)</h1>
         <span>
-          Protection is already set: detection and blocking run on your {computer} with fixed rules
-          and never wait for AI. AI only explains alerts and suggests new rules for you to approve.
-          You can skip it and add it later in Settings.
+          {protectionDone
+            ? 'Protection is already set: detection'
+            : 'Protection has steps left, and AI won’t change that: detection'}{' '}
+          and blocking run on your {computer} with fixed rules and never wait for AI. AI only
+          explains alerts and suggests new rules for you to approve. You can skip it and add it
+          later in Settings.
         </span>
       </div>
       <div
@@ -512,7 +521,15 @@ function Command({ label, cmd }: { label: string; cmd: string }) {
   );
 }
 
-function Review({ view, onDone }: { view: SetupView; onDone: () => void }) {
+function Review({
+  view,
+  onBack,
+  onDone,
+}: {
+  view: SetupView;
+  onBack: () => void;
+  onDone: () => void;
+}) {
   // With no AI chosen, the AI steps aren't part of this setup.
   const shown = view.mode ? view.steps : view.steps.filter((s) => s.group !== 'ai');
   const left = shown.filter(
@@ -533,7 +550,7 @@ function Review({ view, onDone }: { view: SetupView; onDone: () => void }) {
         <h1 className="t-title">{left.length ? 'Almost there' : 'You’re set up'}</h1>
         <span>
           {left.length
-            ? 'You can finish now and come back to the rest from Settings › Run setup again. Vigil shows Fair until protection is complete.'
+            ? 'You can finish now and come back to the rest from Settings › Walk through setup again. Until then, Home lists what’s left.'
             : onLinux
               ? 'Vigil is watching. It lives in the system tray and will pop up only when it blocks something or needs you. If your desktop shows no tray icons (GNOME needs the AppIndicator extension), open Vigil at Home from your apps instead; it keeps running when you close this window.'
               : 'Vigil is watching. It lives in the menu bar and will pop up only when it blocks something or needs you.'}
@@ -576,7 +593,10 @@ function Review({ view, onDone }: { view: SetupView; onDone: () => void }) {
           set up yet. Until then blocks are simulated and labelled that way.
         </div>
       )}
-      <div className="row" style={{ justifyContent: 'flex-end' }}>
+      <div className="row spread">
+        <Button kind="ghost" icon={<ArrowLeft size={15} />} onClick={onBack}>
+          Back
+        </Button>
         <Button
           kind="primary"
           size="lg"

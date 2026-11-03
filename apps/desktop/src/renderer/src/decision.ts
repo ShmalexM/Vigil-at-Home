@@ -13,6 +13,21 @@ const base = (p: string) => p.split('/').filter(Boolean).pop() ?? p;
 const proc = (a: { pid: number; path?: string | undefined }) =>
   a.path ? base(a.path) : `process ${a.pid}`;
 
+/**
+ * The answers for an alert with nothing in force. A serious one leads with the
+ * answer that doesn't close it as harmless, so one click on the main button
+ * can never wave off a credential upload. A suggested action already is the
+ * "this is bad" answer, so "This wasn't me" only shows without one.
+ */
+export function uncontainedAnswers(
+  severity: Alert['severity'],
+  pendingCount: number,
+): { lead: 'contain' | 'not-me' | 'that-was-me'; notMe: boolean } {
+  const serious = severity === 'high' || severity === 'critical';
+  if (pendingCount > 0) return { lead: serious ? 'contain' : 'that-was-me', notMe: false };
+  return { lead: serious ? 'not-me' : 'that-was-me', notMe: true };
+}
+
 /** Containment from this alert that is still in force and can be undone. */
 export function activeContainment(actions: readonly ActionRecord[]): ActionRecord[] {
   return actions.filter((r) => r.status === 'done' && !r.undoes && releaseStep(r) !== undefined);

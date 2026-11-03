@@ -179,6 +179,41 @@ describe('Detector', () => {
     expect(executor.log.filter((a) => a.kind === 'santa.rule.set').length).toBeGreaterThan(0);
   });
 
+  // Sol review: a network alert has no path on its subject, but the verdict blocks its program.
+  it.each([
+    { sha256: BAD, target: '/private/tmp/stealer', blocks: 1 },
+    { sha256: undefined, target: undefined, blocks: 0 },
+  ])('names what a malicious verdict blocks, and blocks that ($target)', async (c) => {
+    const { core, popups, executor } = setup();
+    core.detector!.engine.upsertRule({
+      ...ownRule('out', '^/private/tmp/', 'alert'),
+      eventKinds: ['network.connection'],
+    });
+    await core.handleEvent({
+      id: `ev-net-${c.blocks}`,
+      ts: Date.now(),
+      source: 'test',
+      kind: 'network.connection',
+      direction: 'outbound',
+      protocol: 'tcp',
+      remoteAddress: '203.0.113.9',
+      remotePort: 443,
+      process: {
+        pid: 777,
+        path: '/private/tmp/stealer',
+        ...(c.sha256 ? { sha256: c.sha256 } : {}),
+        signing: 'unsigned',
+      },
+    });
+    const alertId = popups[0]!;
+    const detail = core.alertDetail(alertId)!;
+    expect(detail.alert.subject?.path).toBeUndefined();
+    expect(detail.blockTarget).toBe(c.target);
+
+    await core.decide(alertId, { verdict: 'malicious', release: false });
+    expect(executor.log.filter((a) => a.kind === 'santa.rule.set')).toHaveLength(c.blocks);
+  });
+
   it('never blocks /bin/sh on a malicious verdict, and logs why on the alert', async () => {
     const { core, store, popups, executor } = setup();
     core.detector!.engine.upsertRule(ownRule('any-sh', '^/bin/sh$', 'alert'));
@@ -197,6 +232,8 @@ describe('Detector', () => {
       },
     });
     const alertId = popups[0]!;
+    // The panel must not promise a block the floor refuses.
+    expect(core.alertDetail(alertId)?.blockTarget).toBeUndefined();
     await core.decide(alertId, { verdict: 'malicious', release: false });
     expect(core.detector!.stores.lists.has('user_blocked_sha256', 'c'.repeat(64))).toBe(false);
     expect(executor.log.filter((a) => a.kind === 'santa.rule.set')).toEqual([]);

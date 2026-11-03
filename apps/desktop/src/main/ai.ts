@@ -11,9 +11,11 @@ import {
   stopSharingCodexSignIn,
   canRun,
   candidatesFor,
+  isLocalWriter,
   jevRoute,
   whoRuns,
   type AiKeysSaved,
+  type LocalModel,
   type AiNotRunning,
   type AiPurpose,
   type AiSettings,
@@ -123,6 +125,20 @@ function readPrefs(read: () => unknown): AiPrefs {
     else if (field in DEFAULT_AI_PREFS) out[field] = DEFAULT_AI_PREFS[field as keyof AiPrefs];
   }
   return AiPrefs.parse(out);
+}
+
+/** What Ollama has that can write text on this computer, or nothing when it isn't running. */
+async function localModels(baseUrl: string): Promise<string[]> {
+  try {
+    const res = await fetch(`${baseUrl.replace(/\/$/, '')}/api/tags`, {
+      signal: AbortSignal.timeout(1_500),
+    });
+    if (!res.ok) return [];
+    const { models = [] } = (await res.json()) as { models?: LocalModel[] };
+    return models.filter(isLocalWriter).map((m) => m.name);
+  } catch {
+    return [];
+  }
 }
 
 function offView(fix: { notice: string; label?: string } | undefined): Partial<AiView> {
@@ -279,7 +295,7 @@ export class AiBridge extends EventEmitter<{
 
   setPrefs(raw: AiPrefsPatch): AiView['prefs'] {
     const patch = AiPrefsPatch.parse(raw);
-    const { monthlyCapUsd, ...rest } = patch;
+    const { monthlyCapUsd, localModel, ...rest } = patch;
     const current = this.prefs();
     const defined = Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined));
     let next: AiPrefs = { ...current, ...defined };
@@ -287,6 +303,10 @@ export class AiBridge extends EventEmitter<{
       const { monthlyCapUsd: _dropped, ...withoutCap } = next;
       next = withoutCap;
     } else if (monthlyCapUsd !== undefined) next = { ...next, monthlyCapUsd };
+    if (localModel === null) {
+      const { localModel: _dropped, ...withoutModel } = next;
+      next = withoutModel;
+    } else if (localModel !== undefined) next = { ...next, localModel };
     this.o.store.setSetting(KEY_PREFS, AiPrefs.parse(next));
     this.cachedPrefs = undefined;
     this.emit('changed');
@@ -468,7 +488,11 @@ export class AiBridge extends EventEmitter<{
           }
         : { ...base.api, enabled: false },
       jev: { ...base.jev, enabled: prefs.jev },
-      classifier: { ...base.classifier, enabled: prefs.labelling },
+      classifier: {
+        ...base.classifier,
+        enabled: prefs.labelling,
+        ...(prefs.localModel ? { model: prefs.localModel } : {}),
+      },
       quota: { ...base.quota, ...(cap !== undefined ? { apiKeyMonthlyCapUsd: cap } : {}) },
       // The account and Mac names are replaced before anything reaches a model.
       redaction: { ...base.redaction, ...localNames() },
@@ -661,6 +685,7 @@ export class AiBridge extends EventEmitter<{
       providers,
       ...(api ? { api: { name: api.name, last4: api.last4 } } : {}),
       anthropicKey: !!saved.anthropic,
+      localModels: settings.mode === 'cloud' ? [] : await localModels(settings.ollama.baseUrl),
       jevVia,
       ...offView(this.offFix()),
       checkedAt: this.now(),

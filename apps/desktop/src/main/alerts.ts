@@ -498,8 +498,18 @@ export class AlertService extends EventEmitter<AlertEvents> {
     return this.refresh(alertId);
   }
 
+  /**
+   * Alerts saved before `simulated` existed read as really blocked. Work it out
+   * for those at startup, from the same action log refresh uses.
+   */
+  markOldSimulated(): void {
+    for (const a of this.store.listAlerts({ limit: -1 })) {
+      if (a.containment === 'active' && !a.simulated) this.refresh(a.id);
+    }
+  }
+
   /** Recompute containment from the action log, save, and announce. */
-  private refresh(alertId: string): Alert {
+  refresh(alertId: string): Alert {
     const alert = this.store.getAlert(alertId);
     if (!alert) throw new Error(`No alert ${alertId}`);
     const actions = this.store.listActions({ alertId });
@@ -511,8 +521,11 @@ export class AlertService extends EventEmitter<AlertEvents> {
       : containing.some((r) => r.status === 'undone')
         ? 'released'
         : 'none';
-    const next = { ...alert, containment };
-    if (next.containment !== alert.containment) {
+    const inForce = containing.filter((r) => r.status === 'done');
+    const simulated = inForce.length > 0 && inForce.every((r) => r.result?.simulated === true);
+    const { simulated: wasSimulated = false, ...rest } = alert;
+    const next: Alert = { ...rest, containment, ...(simulated ? { simulated } : {}) };
+    if (next.containment !== alert.containment || simulated !== wasSimulated) {
       next.updatedAt = this.now();
       this.store.saveAlert(next);
     }

@@ -7,12 +7,17 @@ import type { AlertView, WatchSummary } from '../../../shared/ipc';
 import { Segmented } from './ui';
 import { pileUp, untouched } from '../../../shared/piles';
 
+function blockedWords(blocked: number, simulated: number): string {
+  const real = blocked === 0 ? 'nothing blocked' : `${blocked} blocked`;
+  return simulated === 0 ? real : `${real} (${simulated} simulated)`;
+}
+
 /** Proof Vigil is running, in one line. */
 export function WatchLine({ watch }: { watch: WatchSummary }) {
   const parts = [
     `Checked ${watch.checkedToday.toLocaleString()} ${watch.checkedToday === 1 ? 'thing' : 'things'} today`,
     watch.lastEventAt ? `latest ${timeAgo(watch.lastEventAt)}` : 'waiting for the first event',
-    watch.blockedToday === 0 ? 'nothing blocked' : `${watch.blockedToday} blocked`,
+    blockedWords(watch.blockedToday, watch.simulatedToday),
   ];
   return <span className="t-small watch-line">{parts.join(' · ')}</span>;
 }
@@ -181,8 +186,8 @@ export function NoticedList({
       )}
       <span className="t-small">
         {more
-          ? 'Usually this is you installing or setting something up. None of these were blocked. Open one if it wasn’t you.'
-          : `${count === 1 ? 'One thing' : `${count} things`} Vigil noticed, probably you installing or setting something up. Nothing was blocked.`}
+          ? 'Usually this is you, or an AI agent you’re running, installing or setting something up. None of these were blocked. Open one if it wasn’t you.'
+          : `${count === 1 ? 'One thing' : `${count} things`} Vigil noticed, usually you or an AI agent you’re running. Nothing was blocked.`}
       </span>
       {more && (
         <div className="list">
@@ -218,6 +223,7 @@ export interface NeedsRowView {
   severity: Alert['severity'];
   at: number;
   blocked: boolean;
+  simulated?: boolean;
   /** For a pile: how many alerts, and the agent or program behind them. */
   count?: number;
   who?: string;
@@ -233,6 +239,7 @@ export function needsRows(alerts: readonly Alert[]): NeedsRowView[] {
         severity: a.severity,
         at: a.createdAt,
         blocked: a.containment === 'active',
+        ...(a.simulated ? { simulated: true } : {}),
       };
     }
     const newest = r.alerts.reduce((x, y) => (y.createdAt > x.createdAt ? y : x));

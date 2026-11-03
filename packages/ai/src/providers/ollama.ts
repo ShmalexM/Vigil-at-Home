@@ -1,3 +1,4 @@
+import { isLocalWriter, type LocalModel } from '../classifier.js';
 import { callTool, toolJsonSchema } from '../tools.js';
 import type {
   AdapterRunInput,
@@ -8,17 +9,17 @@ import type {
   ToolAudit,
 } from '../types.js';
 
+type OllamaModel = LocalModel;
+
 export interface OllamaAdapterOptions {
   readonly baseUrl: string;
   /** A model to use. Without one, Vigil picks the largest installed model that supports tools. */
   readonly model?: string;
   /**
    * Picks among installed models when `model` is unset. Default: the largest
-   * one that supports tools.
+   * one that runs on this computer and supports tools.
    */
-  readonly pickModel?: (
-    installed: ReadonlyArray<{ name: string; size?: number }>,
-  ) => string | undefined;
+  readonly pickModel?: (installed: readonly OllamaModel[]) => string | undefined;
   /** Keeps a small model light on a slow laptop. Passed to Ollama as is. */
   readonly runtime?: {
     /** Context window in tokens. */
@@ -29,6 +30,8 @@ export interface OllamaAdapterOptions {
     readonly numPredict?: number;
     /** How long Ollama keeps the model in memory after a request, e.g. "1m". */
     readonly keepAlive?: string;
+    /** False stops a thinking model spending its whole answer budget on thoughts. */
+    readonly think?: boolean;
   };
   /** What to suggest pulling when nothing suitable is installed. */
   readonly suggestedModel?: string;
@@ -84,8 +87,12 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
     return (body.capabilities ?? []).includes('tools');
   }
 
-  /** The configured model if it's installed, otherwise the largest installed one with tool support. */
-  async function pickModel(models: ReadonlyArray<{ name: string; size?: number }>) {
+  /**
+   * The configured model if it's installed, otherwise the largest installed one
+   * with tool support. Never a cloud model unless it's the configured one: they
+   * run on Ollama's servers, and local means nothing leaves this computer.
+   */
+  async function pickModel(models: readonly OllamaModel[]) {
     if (options.model) {
       const wanted = options.model;
       return models.some((m) => m.name === wanted || m.name === `${wanted}:latest`)
@@ -93,7 +100,7 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
         : undefined;
     }
     if (options.pickModel) return options.pickModel(models);
-    const bySize = [...models].sort((a, b) => (b.size ?? 0) - (a.size ?? 0));
+    const bySize = models.filter(isLocalWriter).sort((a, b) => (b.size ?? 0) - (a.size ?? 0));
     for (const m of bySize) if (await supportsTools(m.name)) return m.name;
     return undefined;
   }
@@ -124,7 +131,7 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
         : {
             provider: 'ollama',
             state: 'not_installed',
-            detail: `Run: ollama pull ${options.model ?? options.suggestedModel ?? 'gpt-oss:20b'}`,
+            detail: `Run: ollama pull ${options.model ?? options.suggestedModel ?? 'llama3.2:1b'}`,
           };
     },
 
@@ -159,6 +166,7 @@ export function createOllamaAdapter(options: OllamaAdapterOptions): ProviderAdap
               stream: false,
               options: runtimeOptions,
               ...(options.runtime?.keepAlive ? { keep_alive: options.runtime.keepAlive } : {}),
+              ...(options.runtime?.think !== undefined ? { think: options.runtime.think } : {}),
               format: input.jsonSchema,
               ...(tools.size > 0 && round < MAX_TOOL_ROUNDS
                 ? {

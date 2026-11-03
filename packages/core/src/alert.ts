@@ -50,6 +50,8 @@ export const Alert = z.object({
   status: z.enum(['open', 'resolved']),
   /** `active` while any containment action from this alert is in force. */
   containment: z.enum(['none', 'active', 'released']),
+  /** True when every containment action in force only ran as a simulation. */
+  simulated: z.boolean().optional(),
   eventIds: z.array(Id).min(1),
   actionIds: z.array(Id).default([]),
   /** Primary subject, for grouping and the popup header. */

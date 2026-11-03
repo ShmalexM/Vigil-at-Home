@@ -255,8 +255,8 @@ label, score and reason written for every event:
 Almost all the time went into writing the answer, so one batch was more than
 the whole 72 CPU-seconds an hour. The classifier now answers with just the
 keys of events that look unusual or suspicious, stops at 256 tokens, is
-limited by CPU seconds per hour, waits while `power.isBusy()`, and uses the
-0.5b model below 16 GB. The same 20-event batch on 1.5b then took 17 s wall
+limited by CPU seconds per hour, waits while `power.isBusy()`, and uses a
+smaller model below 16 GB. The same 20-event batch on 1.5b then took 17 s wall
 time including the model load, about 34 CPU-seconds and 49 output tokens on
 GitHub's Linux runner: about two batches an hour inside the budget on a
 machine that slow. The M1 runner is a VM without the GPU, so a real

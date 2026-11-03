@@ -108,6 +108,11 @@ export function Card({
   return <section className={`card ${tight ? 'tight' : ''} ${className}`}>{children}</section>;
 }
 
+/** What an alert's containment really did: "Simulated" never reads as a real block. */
+export function BlockedChip({ simulated }: { simulated?: boolean | undefined }) {
+  return simulated ? <Chip tone="fair">Simulated</Chip> : <Chip tone="good">Blocked</Chip>;
+}
+
 export function SectionHead({
   title,
   sub,
@@ -119,11 +124,15 @@ export function SectionHead({
 }) {
   return (
     <div className="row spread" style={{ alignItems: 'flex-start' }}>
-      <div className="col" style={{ gap: 3 }}>
+      <div className="col" style={{ gap: 3, minWidth: 0 }}>
         <h2 className="t-h2">{title}</h2>
         {sub && <span className="t-small">{sub}</span>}
       </div>
-      {right && <div className="row">{right}</div>}
+      {right && (
+        <div className="row" style={{ flexShrink: 0 }}>
+          {right}
+        </div>
+      )}
     </div>
   );
 }

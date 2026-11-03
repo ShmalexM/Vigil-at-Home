@@ -61,7 +61,7 @@ const KINDS: {
   {
     provider: 'ollama',
     purpose: 'classify',
-    model: 'qwen2.5:1.5b',
+    model: 'llama3.2:1b',
     perDay: 18,
     input: 2_200,
     output: 90,

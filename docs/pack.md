@@ -126,12 +126,12 @@ A half-written message stays in the box when you change pages or close the drawe
 
 If only a Claude plan is set up, pack jobs can't run and Let AI decide asks about every risky call in them.
 
-## Plain wording
+## Dog voice
 
-The pack talks with a little dog in it ("Biscuit sniffed through new events",
-"Back with a report"). **Plain wording** on the Pack page turns that off: the
-diary, the helpers' status lines and the Lead dog's replies use plain
-sentences. The dogs, their names and everything they do stay the same.
+The pack talks in plain sentences by default. **Dog voice** on the Pack page
+adds a little dog to the diary, the helpers' status lines and the Lead dog's
+replies ("Biscuit sniffed through new events", "Back with a report"). The dogs,
+their names and everything they do stay the same either way.
 
 ## Notebooks
 

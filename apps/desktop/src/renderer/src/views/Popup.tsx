@@ -166,6 +166,7 @@ export function Popup({ initialId }: { initialId: string }) {
           alert={alert}
           actions={actions}
           proposals={proposals}
+          blockTarget={detail?.blockTarget}
           full
           onDecided={() => void vigil.closePopup()}
         />

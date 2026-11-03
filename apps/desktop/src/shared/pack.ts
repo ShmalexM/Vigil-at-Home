@@ -416,10 +416,10 @@ const HELPER_LABEL: Record<HelperId, string> = {
  * the Lead dog can name or rename a dog, so a name is model text, and a fixed
  * sentence must not read out whatever a model chose to put in it.
  */
-export function dogLabel(d: Pick<Dog, 'role' | 'helper'>): string {
+export function dogLabel(d: Pick<Dog, 'role' | 'helper'>, voice: PackVoice = 'pack'): string {
   if (d.role === 'lead') return 'The Lead dog';
   if (d.role === 'helper' && d.helper) return HELPER_LABEL[d.helper];
-  if (d.role === 'helper') return 'A helper';
+  if (d.role === 'helper' || voice === 'plain') return 'A helper';
   return 'A pack dog';
 }
 
@@ -443,7 +443,7 @@ export function diaryLines(
       const t = mine.find((x) => x.kind === k);
       return t && t.n > t.failed ? [words[k](t.n - t.failed)] : [];
     });
-    const who = dogLabel(d);
+    const who = dogLabel(d, voice);
     const text =
       did.length === 0
         ? `${who} tried ${times(failed)} but couldn’t finish`
@@ -471,7 +471,7 @@ export function foundLines(
     const things = found === 1 ? 'thing' : 'things';
     const text =
       voice === 'plain'
-        ? `${dogLabel(d)} found ${found} ${things} worth a look`
+        ? `${dogLabel(d, voice)} found ${found} ${things} worth a look`
         : `${dogLabel(d)} sniffed out ${found} ${things} worth a look`;
     return [{ dog: d.id, text, found }];
   });

@@ -165,6 +165,7 @@ export class VigilCore {
   }
 
   start(): void {
+    this.alerts.markOldSimulated();
     if (this.detector) {
       const detector = this.detector;
       // Threat lists refresh in the background; the engine sees them on its next lookup.
@@ -315,6 +316,8 @@ export class VigilCore {
           learned.blockRefused.message,
         );
       }
+      // A block just ran or was refused: the alert and any open page show it now.
+      if (learned.santa || learned.blockRefused) this.alerts.refresh(alertId);
       if (learned.suggested && learned.suggestDemotion)
         console.info(`[detection] suggested: ${learned.suggestDemotion.message}`);
     }
@@ -719,6 +722,7 @@ export class VigilCore {
         checkedToday: this.store.countEventsSince(today),
         lastEventAt: this.store.newestEventAt(),
         blockedToday: this.store.countRuleBlocksSince(today),
+        simulatedToday: this.store.countRuleBlocksSince(today, true),
       },
       sensors: this.sensors.list(),
       dryRun: this.executor.simulated ?? this.dryRun,
@@ -733,12 +737,14 @@ export class VigilCore {
     if (!alert) return null;
     // Pack rules live in the engine, not the rules table; its mode is the one in force.
     const rule = this.detector?.rule(alert.ruleId) ?? this.store.getRule(alert.ruleId);
+    const blockTarget = this.detector?.verdictBlockTarget(id);
     return {
       alert,
       events: this.store.getEvents(alert.eventIds),
       actions: this.store.listActions({ alertId: id }),
       proposals: this.store.listProposals({ alertId: id }),
       ...(rule ? { rule } : {}),
+      ...(blockTarget ? { blockTarget } : {}),
     };
   }
 

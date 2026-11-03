@@ -189,16 +189,16 @@ export function PackPage() {
         </div>
         <label
           className="pack-voice t-small"
-          title="Turns off the dog talk in the pack’s status lines and the Lead dog’s replies. The dogs stay."
+          title="Adds dog talk to the pack’s status lines and the Lead dog’s replies. The dogs stay either way."
         >
           <input
             type="checkbox"
-            checked={pack.voice === 'plain'}
+            checked={pack.voice === 'pack'}
             onChange={(e) =>
-              void vigil.setPackVoice(e.target.checked ? 'plain' : 'pack').then(reload)
+              void vigil.setPackVoice(e.target.checked ? 'pack' : 'plain').then(reload)
             }
           />
-          Plain wording
+          Dog voice
         </label>
       </div>
       {tab === 'pack' ? (

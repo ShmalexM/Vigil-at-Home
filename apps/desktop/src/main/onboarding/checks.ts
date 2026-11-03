@@ -1,10 +1,10 @@
 import { execFileWithin } from '@vigil/ai';
 import { accessSync, constants, existsSync } from 'node:fs';
 import { homedir, totalmem } from 'node:os';
-import { classifierModelChoice } from '@vigil/ai';
+import { classifierModelChoice, isLocalWriter, type LocalModel } from '@vigil/ai';
 import { join } from 'node:path';
 import type { CheckId } from '../../shared/setup.js';
-import { FAPOLICYD_ALLOW_RULES, LOCAL_MODEL, LOCAL_MODEL_SMALL } from './plan.js';
+import { FAPOLICYD_ALLOW_RULES } from './plan.js';
 
 export interface CheckResult {
   ok: boolean;
@@ -179,30 +179,22 @@ export const CHECKS: Record<CheckId, (p: Probe) => Promise<CheckResult>> = {
     return tags ? { ok: true } : { ok: false, detail: 'Nothing answers on 127.0.0.1:11434' };
   },
 
-  /**
-   * Labelling only ever uses one of @vigil/ai's small models, so this says
-   * which one, the same way the labeller picks it. A big model the user
-   * already has explains alerts, but doesn't stand in for the small one.
-   */
+  /** Which model labels events, picked the labeller's way, so the two can't disagree. */
   'ollama.model': async (p) => {
-    const names = (await ollamaModels(p)) ?? [];
-    // The labeller's own choice, so this step is done exactly when labelling has a model.
+    const models = (await ollamaModels(p)) ?? [];
     const picked = classifierModelChoice(
-      names.map((name) => ({ name })),
+      models,
       p.classifierModel?.(),
       p.memoryBytes ?? totalmem(),
     );
-    if (picked) {
-      const ours = picked === LOCAL_MODEL || picked === LOCAL_MODEL_SMALL;
-      return { ok: true, detail: `${picked}${ours ? '' : ', already installed,'} labels events` };
-    }
-    if (names.length) {
-      return {
-        ok: false,
-        detail: `${names.length === 1 ? names[0] : `${names.length} models`} already installed can explain alerts, but labelling events needs a small model`,
-      };
-    }
-    return { ok: false };
+    if (picked) return { ok: true, detail: `${picked} labels events` };
+    const writers = models.filter(isLocalWriter);
+    return writers.length
+      ? {
+          ok: false,
+          detail: `${writers.length === 1 ? writers[0]!.name : `${writers.length} models`} would be heavy for background work. Choose one under Settings › AI to use it anyway, or download a smaller one.`,
+        }
+      : { ok: false };
   },
 
   claude: async (p) => {
@@ -235,12 +227,10 @@ export const CHECKS: Record<CheckId, (p: Probe) => Promise<CheckResult>> = {
       : { ok: false },
 };
 
-async function ollamaModels(p: Probe): Promise<string[] | undefined> {
+async function ollamaModels(p: Probe): Promise<LocalModel[] | undefined> {
   try {
-    const body = (await p.getJson('http://127.0.0.1:11434/api/tags')) as {
-      models?: { name?: unknown }[];
-    };
-    return (body.models ?? []).map((m) => m.name).filter((n): n is string => typeof n === 'string');
+    const body = (await p.getJson('http://127.0.0.1:11434/api/tags')) as { models?: LocalModel[] };
+    return (body.models ?? []).filter((m) => typeof m.name === 'string');
   } catch {
     return undefined;
   }

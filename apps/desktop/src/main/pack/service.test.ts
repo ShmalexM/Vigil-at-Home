@@ -886,17 +886,18 @@ describe('the pack', () => {
     expect(pack.dogs().find((d) => d.id === dog.id)?.lastReport?.ok).toBe(true);
   });
 
-  it('talks plainly when the person turns on Plain wording', async () => {
+  it('talks plainly until the person turns on Dog voice', async () => {
     const { pack, handlers, runs } = setup();
-    expect((await pack.view()).voice).toBe('pack');
-    handlers.push(() => ({ reply: 'Woof', actions: [] }));
-    await pack.say('hi');
-    expect(runs[0]!.instructions).toContain('dog humour is fine');
-    pack.setVoice('plain');
+    expect((await pack.view()).voice).toBe('plain');
     handlers.push(() => ({ reply: 'Hello', actions: [] }));
     await pack.say('hi');
-    expect(runs[1]!.instructions).toContain('plain wording');
-    expect(runs[1]!.instructions).not.toContain('dog humour');
+    expect(runs[0]!.instructions).toContain('plain wording');
+    expect(runs[0]!.instructions).not.toContain('dog humour');
+    pack.setVoice('pack');
+    handlers.push(() => ({ reply: 'Woof', actions: [] }));
+    await pack.say('hi');
+    expect(runs[1]!.instructions).toContain('dog humour is fine');
+    pack.setVoice('plain');
     pack.helperBusy('labeller', true);
     const biscuit = (await pack.view()).dogs.find((d) => d.helper === 'labeller');
     expect(biscuit).toMatchObject({ mood: 'sniffing', activity: 'Labelling new events' });

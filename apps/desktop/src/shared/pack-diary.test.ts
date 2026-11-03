@@ -79,7 +79,7 @@ describe('findings in the diary', () => {
       { dog: 'pip', text: 'A pack dog sniffed out 2 things worth a look', found: 2 },
     ]);
     expect(foundLines([pip(report(2_000, ['medium']))], SINCE, 'plain')).toEqual([
-      { dog: 'pip', text: 'A pack dog found 1 thing worth a look', found: 1 },
+      { dog: 'pip', text: 'A helper found 1 thing worth a look', found: 1 },
     ]);
   });
 
@@ -89,7 +89,7 @@ describe('findings in the diary', () => {
     for (const voice of ['pack', 'plain'] as const) {
       const [line] = foundLines([dog], SINCE, voice);
       expect(line!.text).not.toContain(named);
-      expect(line!.text).toMatch(/^A pack dog /);
+      expect(line!.text).toMatch(/^(A pack dog|A helper) /);
     }
   });
 

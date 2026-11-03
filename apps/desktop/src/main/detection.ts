@@ -447,6 +447,12 @@ export class Detector {
     return { ...value, helper };
   }
 
+  /** What a "malicious" verdict on this alert would block; learn() blocks the same thing. */
+  verdictBlockTarget(alertId: string): string | undefined {
+    const d = this.store.getAlertDetection(alertId) as Detection | undefined;
+    return d && this.feedback.blockTarget(d);
+  }
+
   /**
    * Take back the user's "malicious" verdict on an alert: the program leaves
    * the user-blocked list, and the Santa rule the verdict added is returned

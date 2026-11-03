@@ -13,6 +13,7 @@ import {
   refusalNote,
   responseProvenance,
   sameAlert,
+  uncontainedAnswers,
 } from './decision';
 
 let n = 0;
@@ -252,5 +253,19 @@ describe('simulated containment', () => {
     expect(
       othersNeedingYou(alert({ severity: 'low', notify: 'badge', containment: 'none' }), 2, []),
     ).toBe(2);
+  });
+});
+
+describe('uncontainedAnswers', () => {
+  it('never leads a serious alert with an answer that closes it as harmless', () => {
+    expect(uncontainedAnswers('critical', 0)).toEqual({ lead: 'not-me', notMe: true });
+    expect(uncontainedAnswers('high', 0)).toEqual({ lead: 'not-me', notMe: true });
+  });
+  it('leads a quiet alert with That was me, and still offers This wasn’t me', () => {
+    expect(uncontainedAnswers('medium', 0)).toEqual({ lead: 'that-was-me', notMe: true });
+  });
+  it('lets a suggested action stand in for This wasn’t me', () => {
+    expect(uncontainedAnswers('critical', 1)).toEqual({ lead: 'contain', notMe: false });
+    expect(uncontainedAnswers('low', 2)).toEqual({ lead: 'that-was-me', notMe: false });
   });
 });

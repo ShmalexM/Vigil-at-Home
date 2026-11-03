@@ -1,6 +1,6 @@
 import { ExternalLink, X } from 'lucide-react';
 import { useEffect, useRef } from 'react';
-import { ChatContext, type DogMood, type PackView } from '../../../shared/pack';
+import { ChatContext, dogLabel, type DogMood, type PackView } from '../../../shared/pack';
 import { leadChat, useLeadChat } from '../lead-chat';
 import '../styles/ask.css';
 import { LeadConversation, usePack } from '../views/Pack';
@@ -140,12 +140,13 @@ function AskDrawer({
  * The words stay in the status line; the dog only shows it.
  */
 export function homeMood(
-  pack: Pick<PackView, 'dogs'> | undefined,
+  pack: Pick<PackView, 'dogs' | 'voice'> | undefined,
   needsYou: boolean,
 ): { mood: DogMood; says: string } {
   const busy = pack?.dogs.find((d) => WORKING.includes(d.mood));
   if (needsYou) return { mood: 'waiting', says: 'Something needs you' };
-  if (busy) return { mood: busy.mood, says: `${busy.name} is on a job` };
+  // By role, never by name: a name is model text (see dogLabel).
+  if (busy) return { mood: busy.mood, says: `${dogLabel(busy, pack?.voice)} is on a job` };
   return { mood: 'idle', says: 'All quiet' };
 }
 

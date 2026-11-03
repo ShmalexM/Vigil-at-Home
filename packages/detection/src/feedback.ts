@@ -140,6 +140,41 @@ export class Feedback {
   ) {}
 
   /**
+   * What a "malicious" verdict on this detection would block, for the person
+   * deciding: the program's path, or the rule's identifier if the event has
+   * none. Undefined when the verdict would block nothing.
+   */
+  blockTarget(d: Detection): string | undefined {
+    const santa = verdictBlock(d);
+    if (!santa || this.refusedBlock(d)) return undefined;
+    const e = d.event;
+    return ('process' in e ? e.process?.path : undefined) ?? santa.identifier;
+  }
+
+  /**
+   * The floor every rule's block passes through, for the rule returned and for
+   * the hash listed: the user-blocked rule turns a listed hash into a Santa
+   * block of its own.
+   */
+  private refusedBlock(d: Detection): DecisionResult['blockRefused'] {
+    const e = d.event;
+    const sha = 'process' in e ? e.process?.sha256 : undefined;
+    const byHash = sha
+      ? {
+          kind: 'santa.rule.set' as const,
+          ruleType: 'binary' as const,
+          identifier: sha,
+          policy: 'block' as const,
+        }
+      : undefined;
+    for (const a of [verdictBlock(d), byHash]) {
+      const why = a && this.engine.refusal(a, e);
+      if (a && why) return { santa: a, message: refusedMessage(d, why) };
+    }
+    return undefined;
+  }
+
+  /**
    * The user's call on a detection (core's UserDecision).
    * - malicious: adds the hash to the user-blocked list and returns the Santa rule to add.
    * - benign or expected with `remember`: adds an exception for this binary or signer, or
@@ -159,23 +194,10 @@ export class Feedback {
       const e = d.event;
       const sha = 'process' in e ? e.process?.sha256 : undefined;
       const santa = verdictBlock(d);
-      // The floor every rule's block passes through, for the rule returned
-      // and for the hash listed: the user-blocked rule turns a listed hash
-      // into a Santa block of its own.
-      const byHash = sha
-        ? {
-            kind: 'santa.rule.set' as const,
-            ruleType: 'binary' as const,
-            identifier: sha,
-            policy: 'block' as const,
-          }
-        : undefined;
-      for (const a of [santa, byHash]) {
-        const why = a && this.engine.refusal(a, e);
-        if (a && why) {
-          result.blockRefused = { santa: a, message: refusedMessage(d, why) };
-          return result;
-        }
+      const refused = this.refusedBlock(d);
+      if (refused) {
+        result.blockRefused = refused;
+        return result;
       }
       if (sha) lists.add(USER_BLOCKED_HASHES, sha, { source: 'user', updatedAt: ts });
       if (santa) result.santa = santa;

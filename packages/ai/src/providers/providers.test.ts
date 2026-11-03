@@ -630,6 +630,43 @@ describe('Ollama adapter', () => {
     expect(shown).toEqual(['big-no-tools:70b', 'mid-tools:8b']);
   });
 
+  it('never picks a cloud model by itself, however it answers', async () => {
+    const adapter = createOllamaAdapter({
+      baseUrl: 'http://127.0.0.1:11434',
+      fetch: (async (url: string) =>
+        url.endsWith('/api/tags')
+          ? Response.json({ models: [{ name: 'gpt-oss:120b-cloud', size: 300 }] })
+          : Response.json({ capabilities: ['completion', 'tools'] })) as typeof fetch,
+    });
+    expect(await adapter.probe()).toMatchObject({ state: 'not_installed' });
+  });
+
+  it('turns thinking off only when asked to', async () => {
+    const chats: Array<{ think?: boolean }> = [];
+    const adapter = (runtime?: { think: boolean }) =>
+      createOllamaAdapter({
+        baseUrl: 'http://127.0.0.1:11434',
+        model: 'm',
+        ...(runtime ? { runtime } : {}),
+        fetch: (async (_url: string, init?: RequestInit) => {
+          chats.push(JSON.parse(String(init?.body)));
+          return Response.json({ message: { role: 'assistant', content: '{"summary":"done"}' } });
+        }) as typeof fetch,
+      });
+    const input = {
+      systemPrompt: 's',
+      userPrompt: 'u',
+      jsonSchema: schema,
+      tools: [],
+      signal: new AbortController().signal,
+      onUsage: () => {},
+    };
+    await adapter({ think: false }).run(input);
+    await adapter().run(input);
+    expect(chats[0]!.think).toBe(false);
+    expect(chats[1]!.think).toBeUndefined();
+  });
+
   it('reports a set model that is not installed', async () => {
     const adapter = createOllamaAdapter({
       baseUrl: 'http://127.0.0.1:11434',
