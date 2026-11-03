@@ -58,6 +58,7 @@ export {
   DEFAULT_DEMOTION,
   USER_BLOCKED_HASHES,
   assertExceptionScope,
+  verdictBlockTarget,
   type DemotionPolicy,
   type DecisionResult,
   type UndoBlockResult,

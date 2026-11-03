@@ -434,6 +434,8 @@ export interface AlertDetail {
   actions: ActionRecord[];
   proposals: ActionProposal[];
   rule?: Rule;
+  /** What marking this alert a threat would block. Absent when it would block nothing. */
+  blockTarget?: string;
 }
 
 /**

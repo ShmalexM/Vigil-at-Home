@@ -269,6 +269,7 @@ function AlertDetailView({ id, go }: { id: string; go: (r: string) => void }) {
             alert={alert}
             actions={actions}
             proposals={proposals}
+            blockTarget={detail?.blockTarget}
             onDecided={decided}
           />
         ) : (

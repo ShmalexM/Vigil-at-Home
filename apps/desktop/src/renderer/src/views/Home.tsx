@@ -522,7 +522,7 @@ function PackDiary({ pack }: { pack: PackView }) {
               <button
                 type="button"
                 className="pack-diary-line"
-                title={`Open ${d.name}’s notebook`}
+                title="Open this notebook"
                 onClick={() => setOpen(l.dog)}
               >
                 <Dog breed={d.breed} mood="idle" size={28} className="still" />
@@ -541,7 +541,7 @@ function PackDiary({ pack }: { pack: PackView }) {
               <button
                 type="button"
                 className="pack-diary-line"
-                title={`Open ${d.name}’s notebook`}
+                title="Open this notebook"
                 onClick={() => setOpen(l.dog)}
               >
                 <Dog breed={d.breed} mood="idle" size={28} className="still" />

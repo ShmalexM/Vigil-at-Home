@@ -64,6 +64,18 @@ function verdictBlock(d: Detection): NonNullable<Detection['santa']> | undefined
 }
 
 /**
+ * What a "malicious" verdict on this detection would block, for the person
+ * deciding: the program's path, or the rule's identifier if the event has none.
+ * Undefined when the verdict blocks nothing.
+ */
+export function verdictBlockTarget(d: Detection): string | undefined {
+  const santa = verdictBlock(d);
+  if (!santa) return undefined;
+  const e = d.event;
+  return ('process' in e ? e.process?.path : undefined) ?? santa.identifier;
+}
+
+/**
  * Why a confirmed threat was not blocked, in words for the user. A shell
  * running `-c <command>` names the program it ran: that is what to block.
  */

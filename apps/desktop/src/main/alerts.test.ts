@@ -45,6 +45,16 @@ describe('AlertService', () => {
     expect(enforced.simulated).toBeUndefined();
   });
 
+  it('marks an alert saved before the flag existed, from its action log', async () => {
+    const { svc, store } = setup();
+    const raised = await svc.raise({ rule: makeRule(), events: [makeExec()], actions: [suspend] });
+    const { simulated: _, ...old } = raised;
+    store.saveAlert(old);
+
+    svc.markOldSimulated();
+    expect(store.getAlert(raised.id)?.simulated).toBe(true);
+  });
+
   it('pops up once for a block that repeats while its popup is unanswered', async () => {
     let now = 1_000_000;
     const store = memoryStore();

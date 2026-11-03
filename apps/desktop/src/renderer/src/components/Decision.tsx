@@ -29,12 +29,14 @@ export function DecisionControls({
   proposals,
   onDecided,
   full,
+  blockTarget,
 }: {
   alert: Alert;
   actions: readonly ActionRecord[];
   proposals: readonly ActionProposal[];
   onDecided: (d: Decided) => void;
   full?: boolean;
+  blockTarget: string | undefined;
 }) {
   const [failure, setFailure] = useState<{ id: string; text: string }>();
   const [notMeFor, setNotMeFor] = useState<string>();
@@ -140,13 +142,13 @@ export function DecisionControls({
       </div>
       {!contained && askingNotMe && (
         <div className="col release-scope" style={{ gap: 6 }}>
-          {alert.subject?.path ? (
+          {blockTarget ? (
             <>
               <span className="t-small">
-                If Vigil has this program’s fingerprint, it blocks it from running again, so
-                anything else that uses it stops working too:
+                Vigil blocks this program from running again, so anything else that uses it stops
+                working too:
               </span>
-              <div className="subject mono">{alert.subject.path}</div>
+              <div className="subject mono">{blockTarget}</div>
               <span className="t-small">
                 That may ask for your password. Your system’s own programs are never blocked, and
                 Reopen on the alert takes this back.

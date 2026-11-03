@@ -21,6 +21,7 @@ import {
   FeedImporter,
   Feedback,
   USER_BLOCKED_HASHES,
+  verdictBlockTarget,
   RuleEditor,
   RulePipeline,
   RuleReviewer,
@@ -445,6 +446,12 @@ export class Detector {
       return { ...result, suggested: suggested?.ok === true };
     }, opts);
     return { ...value, helper };
+  }
+
+  /** What a "malicious" verdict on this alert would block; learn() blocks the same thing. */
+  verdictBlockTarget(alertId: string): string | undefined {
+    const d = this.store.getAlertDetection(alertId) as Detection | undefined;
+    return d && verdictBlockTarget(d);
   }
 
   /**
