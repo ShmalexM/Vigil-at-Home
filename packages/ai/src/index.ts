@@ -254,6 +254,7 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
               getApiKey: (jevVia.typesafe && options.getJevApiKey) || (async () => undefined),
               ...(openRouterKey ? { getOpenRouterApiKey: openRouterKey } : {}),
               log: options.log,
+              redaction: settings.redaction,
             }),
             ...(cap !== undefined && spent
               ? { jevAllowed: async () => (await spent()) < cap }
