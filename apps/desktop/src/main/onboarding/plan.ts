@@ -311,6 +311,10 @@ function linuxProtection(inputs: PlanInputs): StepDef[] {
   const distro = inputs.distro ?? 'other';
   const install = (pkg: string) =>
     distro === 'debian' ? `sudo apt-get install -y ${pkg}` : `sudo dnf install -y ${pkg}`;
+  // osquery 5.24.0 shipped without its eBPF tables, so Vigil would never see a
+  // program start (osquery/osquery#9225). Its signed repositories still offer it
+  // as the newest version. Refusing only that version lets 5.24.1 in once they
+  // publish it. An apt preferences file with any extension but .pref is ignored.
   const osquery: StepCommand[] =
     distro === 'debian'
       ? [
@@ -321,6 +325,10 @@ function linuxProtection(inputs: PlanInputs): StepDef[] {
           {
             label: 'Add osquery’s package repository',
             cmd: 'echo "deb [signed-by=/etc/apt/keyrings/osquery.gpg] https://pkg.osquery.io/deb deb main" | sudo tee /etc/apt/sources.list.d/osquery.list',
+          },
+          {
+            label: 'Skip osquery 5.24.0, which can’t see programs start',
+            cmd: "printf 'Package: osquery\\nPin: version 5.24.0*\\nPin-Priority: -1\\n' | sudo tee /etc/apt/preferences.d/osquery.pref >/dev/null",
           },
           {
             label: 'Install osquery',
@@ -335,6 +343,10 @@ function linuxProtection(inputs: PlanInputs): StepDef[] {
           {
             label: 'Add osquery’s package repository',
             cmd: 'curl -fsSL https://pkg.osquery.io/rpm/osquery-s3-rpm.repo | sudo tee /etc/yum.repos.d/osquery.repo >/dev/null',
+          },
+          {
+            label: 'Skip osquery 5.24.0, which can’t see programs start',
+            cmd: "sudo sed -i '/^\\[osquery-s3-rpm-repo\\]$/a excludepkgs=osquery-5.24.0*' /etc/yum.repos.d/osquery.repo",
           },
           {
             label: 'Install osquery',
