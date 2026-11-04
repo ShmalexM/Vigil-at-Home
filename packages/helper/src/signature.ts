@@ -6,6 +6,7 @@
 // Lookups run one at a time and at most 60 a minute, so a burst of unknown
 // programs right after the helper starts can't load the Mac.
 
+import { parsePsStart } from '@vigil/detection';
 import type { SignatureInfo } from '@vigil/sensors';
 import type { System } from './system.js';
 
@@ -114,5 +115,65 @@ export function signatureLookup(
     });
     chain = run.catch(() => undefined);
     return run;
+  };
+}
+
+/** Runs one of the two programs a process signature lookup needs; never a shell. */
+export type RunTool = (
+  bin: 'codesign' | 'ps',
+  args: string[],
+) => Promise<{ code: number | null; stdout: string; stderr: string }>;
+
+/**
+ * Reads the code signature of the program a running process runs, for an
+ * agent root found by `ps` (see AgentTracker.onSeededRoot). The answer
+ * belongs to that process, not to a path:
+ *
+ *   1. `codesign -dvv <pid>` names the team and identifier of the program the
+ *      kernel says the pid runs (not argv[0], which any program can choose).
+ *   2. `codesign --verify -R=<that class, team and identifier> <pid>` (see
+ *      requirementFor) checks the running code itself is valid and is exactly
+ *      that team's program, so a file swapped on disk between the two steps
+ *      cannot lend its signature.
+ *   3. `ps -o lstart= -p <pid>` must still give the start time the tracker
+ *      had, so a pid that exited and was reused meanwhile gets nothing.
+ *
+ * A program with no team ID (unsigned, ad hoc, Apple's own) gets undefined,
+ * and so does an App Store app: Apple's leaf signs it, so its requirement
+ * cannot check the team, and a team is all the tracker uses.
+ * Lookups run one at a time and at most 60 a minute, like signatureLookup.
+ * Accepted limit: ps reports whole seconds, so a pid reused within the same
+ * second as the first process started would pass step 3; macOS hands out
+ * pids in order, so that needs the whole pid range to wrap within a second.
+ */
+export function processSignatureLookup(
+  run: RunTool,
+  now: () => number = Date.now,
+): (pid: number, startedAt: number) => Promise<SignatureInfo | undefined> {
+  const recent: number[] = [];
+  let chain: Promise<unknown> = Promise.resolve();
+  return (pid, startedAt) => {
+    const go = chain.then(async (): Promise<SignatureInfo | undefined> => {
+      const t = now();
+      while (recent.length > 0 && t - recent[0]! >= 60_000) recent.shift();
+      if (recent.length >= PER_MINUTE || !Number.isSafeInteger(pid) || pid <= 1) return undefined;
+      recent.push(t);
+      const id = String(pid);
+      const shown = await run('codesign', ['-dvv', id]);
+      const output = `${shown.stderr}\n${shown.stdout}`;
+      if (shown.code !== 0 || ODD_BREAKS.test(output)) return undefined;
+      const info = parseCodesign(output);
+      if (!info?.teamId || info.signing === 'app_store') return undefined;
+      const identifier = /^Identifier=(.+)$/m.exec(output)?.[1]?.trim() ?? '';
+      const req = requirementFor(info, identifier);
+      if (!req) return undefined;
+      const verified = await run('codesign', ['--verify', `-R=${req}`, id]);
+      if (verified.code !== 0) return undefined;
+      const start = await run('ps', ['-o', 'lstart=', '-p', id]);
+      if (start.code !== 0 || parsePsStart(start.stdout) !== startedAt) return undefined;
+      return info;
+    });
+    chain = go.catch(() => undefined);
+    return go;
   };
 }

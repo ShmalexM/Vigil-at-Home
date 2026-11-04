@@ -6,10 +6,15 @@
 
 import { readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { execOutputWithin } from '@vigil/ai';
+import { execFileWithin, execOutputWithin } from '@vigil/ai';
 import { MAX_PS_ARGS, mergePsArgs, parsePsComm, type PsRow } from '@vigil/detection';
+import { processSignatureLookup, type RunTool } from '@vigil/helper';
+import type { SignatureInfo } from '@vigil/sensors';
 
 const PS = '/bin/ps';
+const CODESIGN = '/usr/bin/codesign';
+/** codesign reads a large program's signature from disk; give it longer than ps. */
+const CODESIGN_TIMEOUT_MS = 10_000;
 const TIMEOUT_MS = 3000;
 const MAX_BUFFER = 8 * 1024 * 1024;
 
@@ -93,4 +98,21 @@ export function processTableReader(
   if (platform === 'darwin') return () => readProcessTable();
   if (platform === 'linux') return async () => readLinuxProcessTable();
   return async () => [];
+}
+
+const runTool: RunTool = (bin, args) =>
+  bin === 'ps'
+    ? execFileWithin(PS, args, TIMEOUT_MS, { env: { LC_ALL: 'C' } })
+    : execFileWithin(CODESIGN, args, CODESIGN_TIMEOUT_MS);
+
+/**
+ * macOS: reads the signature of the program a seeded agent root runs, bound
+ * to that process (see processSignatureLookup). Elsewhere there are no team
+ * IDs to read, so none.
+ */
+export function rootSignatureReader(
+  platform: NodeJS.Platform = process.platform,
+  run: RunTool = runTool,
+): ((pid: number, startedAt: number) => Promise<SignatureInfo | undefined>) | undefined {
+  return platform === 'darwin' ? processSignatureLookup(run) : undefined;
 }
