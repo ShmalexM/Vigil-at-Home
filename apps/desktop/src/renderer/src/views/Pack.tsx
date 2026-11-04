@@ -110,13 +110,13 @@ const MODES: { id: PermissionMode; label: string; icon: ReactNode; says: string 
     id: 'auto',
     label: 'Let AI decide',
     icon: <Sparkles size={14} />,
-    says: 'Your AI rates each tool call. Low-risk calls go ahead; anything riskier waits for you.',
+    says: 'Your AI rates each tool call. Low-risk calls go ahead; anything riskier waits for you. Once a run has used a tool, other than looking up your own memory, connector tools wait for you too.',
   },
   {
     id: 'full',
     label: 'Full access',
     icon: <Zap size={14} />,
-    says: 'The pack goes ahead without asking, except where a Vigil rule or your own tool setting says ask.',
+    says: 'The pack goes ahead without asking, except where a Vigil rule or your own tool setting says ask. Once a run has used a tool, other than looking up your own memory, connector tools ask too.',
   },
 ];
 
@@ -1154,6 +1154,13 @@ function ToolsTab({ pack, reload }: { pack: PackView; reload: () => void }) {
           <li>
             <b>Vigil’s rules</b> check every connector call first. A rule that stops it stops it in
             every mode, Full access included; a rule that asks always asks.
+          </li>
+          <li>
+            <b>What the run has read</b> comes next. Once a run has used any tool, or started from a
+            job, report or memory that could hold someone else’s text, every connector tool asks, in
+            every mode and even set to Always allow. A memory lookup that finds only your own facts
+            doesn’t count, and neither does a connector’s own description, so its first call in a
+            clean run can go ahead: add only connectors you trust.
           </li>
           <li>
             <b>Your choice</b> for the tool comes next: Always ask, or Always allow.

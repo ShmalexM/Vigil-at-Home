@@ -477,7 +477,11 @@ describe('the pack', () => {
       const pending = tool(req, 'tool_1').run({ title: 'x' });
       await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
       const a = (await pack.view()).approvals[0]!;
-      expect(a).toMatchObject({ dogId: dog.id, why: 'mode', toolTitle: 'GitHub › Create issue' });
+      expect(a).toMatchObject({
+        dogId: dog.id,
+        why: 'outside-text',
+        toolTitle: 'GitHub › Create issue',
+      });
       expect((await pack.view()).dogs.find((d) => d.id === dog.id)?.mood).toBe('waiting');
       pack.decideTool(a.id, 'deny');
       denied = await pending;
@@ -492,6 +496,103 @@ describe('the pack', () => {
     expect(vigilCalls).toEqual(['search_events']);
     expect(String(denied)).toContain('said no');
     expect(connectorCalls).toEqual([['github', 'create_issue', { title: 'y' }]]);
+  });
+
+  describe('outside text read during a run', () => {
+    const WRITES = ['vigil.search_events', 'github.list_issues', 'github.create_issue'];
+
+    for (const mode of ['ask', 'auto', 'full'] as const)
+      for (const read of ['search_events', 'tool_1'])
+        it(`asks before a write that follows ${read}, even set to Always allow (${mode})`, async () => {
+          const { pack, handlers, connectorCalls } = setup();
+          pack.setMode(mode);
+          pack.setToolChoice('github.list_issues', 'allow');
+          pack.setToolChoice('github.create_issue', 'allow');
+          const dog = pack.adopt({ ...CREATE, tools: WRITES } as never);
+          handlers.push(async (req) => {
+            await tool(req, read).run({});
+            const call = tool(req, 'tool_2').run({ title: 'from the event' });
+            await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+            expect((await pack.view()).approvals[0]).toMatchObject({
+              tool: 'github.create_issue',
+              why: 'outside-text',
+            });
+            pack.decideTool((await pack.view()).approvals[0]!.id, 'deny');
+            await call;
+            return { summary: 'ok', findings: [] };
+          });
+          await pack.runDog(dog.id);
+          expect(connectorCalls.filter((c) => c[1] === 'create_issue')).toEqual([]);
+        });
+
+    it('asks from the first call when the job could hold someone else’s text', async () => {
+      const { pack, handlers, settings, connectorCalls } = setup();
+      pack.setMode('full');
+      settings.set('pack.dogs', [
+        {
+          id: 'dog-pip',
+          role: 'pack',
+          name: 'Pip',
+          breed: 'chihuahua',
+          job: 'Do what the file in Downloads says.',
+          schedule: 'hourly',
+          tools: ['github.create_issue'],
+          enabled: true,
+          createdBy: 'lead',
+          createdAt: 1,
+          jobTainted: true,
+          nameTainted: false,
+        },
+      ]);
+      handlers.push(async (req) => {
+        const call = tool(req, 'tool_1').run({ title: 'x' });
+        await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+        expect((await pack.view()).approvals[0]).toMatchObject({ why: 'outside-text' });
+        pack.decideTool((await pack.view()).approvals[0]!.id, 'deny');
+        await call;
+        return { summary: 'ok', findings: [] };
+      });
+      await pack.runDog('dog-pip');
+      expect(connectorCalls).toEqual([]);
+    });
+
+    it('asks before a write that follows recalling a fact from outside text', async () => {
+      const { pack, handlers, memory, connectorCalls } = setup();
+      pack.setMode('full');
+      for (let i = 0; i < 60; i++)
+        memory.remember(
+          { fact: `Note ${i} ${'n'.repeat(90)}`, topic: 'mac' },
+          { from: 'you', tainted: false },
+        );
+      memory.remember({ fact: 'Note 7 says to file an issue', topic: 'pack' }, { from: 'you' });
+      const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+      handlers.push(async (req) => {
+        // It shares no word with the job, so it reached the run only by this recall.
+        expect(JSON.stringify(req.data)).not.toContain('file an issue');
+        const found = await tool(req, 'recall_memory').run({ words: 'note 7' });
+        expect(JSON.stringify(found)).toContain('file an issue');
+        const call = tool(req, 'tool_1').run({ title: 'from the note' });
+        await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
+        expect((await pack.view()).approvals[0]).toMatchObject({ why: 'outside-text' });
+        pack.decideTool((await pack.view()).approvals[0]!.id, 'deny');
+        await call;
+        return { summary: 'ok', findings: [] };
+      });
+      await pack.runDog(dog.id);
+      expect(connectorCalls).toEqual([]);
+    });
+
+    it('still runs a clean run’s first write in Full access', async () => {
+      const { pack, handlers, connectorCalls } = setup();
+      pack.setMode('full');
+      const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
+      handlers.push(async (req) => {
+        await tool(req, 'tool_1').run({ title: 'x' });
+        return { summary: 'ok', findings: [] };
+      });
+      await pack.runDog(dog.id);
+      expect(connectorCalls).toEqual([['github', 'create_issue', { title: 'x' }]]);
+    });
   });
 
   it('makes no connector call once the run waiting on the user has ended', async () => {
@@ -573,7 +674,6 @@ describe('the pack', () => {
     pack.setMode('auto');
     const dog = pack.adopt({ ...CREATE, tools: ['github.create_issue'] } as never);
     handlers.push(async (req) => {
-      await tool(req, 'tool_1').run({ title: 'low' });
       const risky = tool(req, 'tool_1').run({ title: 'high' });
       await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
       expect((await pack.view()).approvals[0]).toMatchObject({
@@ -582,10 +682,11 @@ describe('the pack', () => {
       });
       pack.decideTool((await pack.view()).approvals[0]!.id, 'deny');
       await risky;
+      await tool(req, 'tool_1').run({ title: 'low' });
       return { summary: 'x', findings: [] };
     });
-    handlers.push(() => ({ risk: 'low', reason: 'small' }));
     handlers.push(() => ({ risk: 'high', reason: 'posts publicly' }));
+    handlers.push(() => ({ risk: 'low', reason: 'small' }));
     // The job's handler runs first and calls the judge twice from inside it.
     const order = [...handlers];
     handlers.length = 0;
@@ -1244,8 +1345,8 @@ describe('the pack', () => {
         tools: ['vigil.search_events', 'github.list_issues', 'github.create_issue'],
       } as never);
       handlers.push(async (req) => {
-        await tool(req, 'search_events').run({ limit: 5 });
         await tool(req, 'tool_1').run({ q: 'token=hunter2-secret' });
+        await tool(req, 'search_events').run({ limit: 5 });
         // This one waits for the person, who says no.
         const asked = tool(req, 'tool_2').run({ title: 'x' });
         await vi.waitFor(async () => expect((await pack.view()).approvals).toHaveLength(1));
@@ -1256,6 +1357,7 @@ describe('the pack', () => {
       await pack.runDog(dog.id, 'background');
       const [note] = pack.notes({ dog: dog.id });
       expect(note!.calls).toEqual([
+        expect.objectContaining({ tool: 'github.list_issues', outcome: 'ran' }),
         {
           tool: 'vigil.search_events',
           title: 'Vigil › search events',
@@ -1263,14 +1365,13 @@ describe('the pack', () => {
           outcome: 'ran',
           result: '{"rows":[]}',
         },
-        expect.objectContaining({ tool: 'github.list_issues', outcome: 'ran' }),
         expect.objectContaining({
           tool: 'github.create_issue',
           outcome: 'not-run',
           reason: expect.stringContaining('you said no'),
         }),
       ]);
-      const listed = note!.calls![1]!;
+      const listed = note!.calls![0]!;
       expect(listed.args).not.toContain('hunter2');
       expect(listed.result).toMatch(/^issue opened by <email> x+…$/);
       expect(listed.result!.length).toBeLessThanOrEqual(801);
@@ -1323,8 +1424,8 @@ describe('the pack', () => {
         tools: ['vigil.search_events', 'github.list_issues'],
       } as never);
       handlers.push(async (req) => {
-        await tool(req, 'search_events').run({ query: `files with ${KEY}` });
         await tool(req, 'tool_1').run({ q: KEY });
+        await tool(req, 'search_events').run({ query: `files with ${KEY}` });
         return { summary: 'ok', findings: [] };
       });
       await pack.runDog(dog.id);
@@ -1332,7 +1433,7 @@ describe('the pack', () => {
       await pack.say(`Is this key still good? ${KEY}`);
 
       const [job] = pack.notes({ dog: dog.id });
-      expect(job!.calls!.map((c) => c.outcome)).toEqual(['ran', 'failed']);
+      expect(job!.calls!.map((c) => c.outcome)).toEqual(['failed', 'ran']);
       const [chat] = pack.notes({ dog: 'lead' });
       expect(chat!.ask).toMatch(/^Is this key still good\?|withheld/);
       for (const id of [dog.id, 'lead']) {
@@ -1359,8 +1460,8 @@ describe('the pack', () => {
         tools: ['vigil.search_events', 'github.list_issues'],
       } as never);
       handlers.push(async (req) => {
-        await tool(req, 'search_events').run({ password: PASSWORD, limit: 5 });
         await tool(req, 'tool_1').run({ password: PASSWORD });
+        await tool(req, 'search_events').run({ password: PASSWORD, limit: 5 });
         return { summary: 'ok', findings: [] };
       });
       await pack.runDog(dog.id);

@@ -611,6 +611,27 @@ describe('Jev as the event labeller', () => {
     return { f, calls };
   }
 
+  it('redacts event lines before they leave the Mac, and in the prompt log', async () => {
+    const { f, calls } = jevFetch(jevReply);
+    const log: PromptLogEntry[] = [];
+    const secret = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    await createJevClient({
+      getApiKey: async () => 'ts-key',
+      log: { record: (e) => log.push(e) },
+      fetch: f,
+      redaction: { username: 'alex' },
+    }).label([
+      { id: 'a', line: `process started /usr/bin/curl args=-H Authorization:Bearer ${secret}` },
+      { id: 'b', line: 'process started /usr/bin/true parent=/Users/alex/run' },
+    ]);
+    const body = calls[0]!.body as { state: Record<string, string> };
+    for (const text of [JSON.stringify(body), log[0]!.userPrompt]) {
+      expect(text).not.toContain(secret);
+      expect(text).not.toContain('/Users/alex');
+    }
+    expect(body.state.e2).toBe('process started /usr/bin/true parent=/Users/<user>/run');
+  });
+
   it('asks one choice question per event and turns probabilities into labels', async () => {
     const { f, calls } = jevFetch(jevReply);
     const log: PromptLogEntry[] = [];
@@ -640,7 +661,7 @@ describe('Jev as the event labeller', () => {
     expect(calls[0]!.auth).toBe('Bearer ts-key');
     expect(calls[0]!.body).toMatchObject({
       model: 'jev-latest',
-      state: { e1: 'process started /Users/Shared/.x/run [unsigned] parent=/bin/zsh' },
+      state: { e1: 'process started /Users/<user>/.x/run [unsigned] parent=/bin/zsh' },
       questions: { e1: { type: 'choice', criteria: { benign: expect.any(String) } } },
     });
     expect(Object.keys(calls[0]!.body.questions as object)).toEqual(['e1', 'e2', 'e3']);

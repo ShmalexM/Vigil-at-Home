@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { redactValue } from '../redact.js';
 import type { PromptLog } from '../types.js';
 import { isSafeBaseUrl } from './openaiCompatible.js';
 
@@ -41,6 +42,8 @@ export interface JevOptions {
   readonly log: PromptLog;
   readonly fetch?: typeof fetch;
   readonly timeoutMs?: number;
+  /** This Mac's names, for the same redaction the runner gives other providers. */
+  readonly redaction?: { readonly username?: string; readonly hostname?: string };
 }
 
 export interface JevAnswer {
@@ -99,7 +102,11 @@ export function createJevClient(options: JevOptions) {
 
       // Keys are Vigil's own (e1, e2...), so an event id never becomes part of the request shape.
       const keyOf = new Map(events.map((e, i) => [`e${i + 1}`, e.id]));
-      const state = Object.fromEntries(events.map((e, i) => [`e${i + 1}`, e.line]));
+      // This call skips the runner, so it redacts what leaves the Mac itself.
+      const state = redactValue(
+        Object.fromEntries(events.map((e, i) => [`e${i + 1}`, e.line])),
+        options.redaction ?? {},
+      );
       const questions = Object.fromEntries(
         [...keyOf.keys()].map((k) => [
           k,

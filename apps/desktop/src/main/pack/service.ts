@@ -504,8 +504,9 @@ interface ToolCtx {
   requestedByUser: boolean;
   used: string[];
   /**
-   * The run's prompt holds the dog's last report, which could hold outside
-   * text: every call that can change things asks (gate.ts).
+   * The run's prompt holds a tainted report, job or memory fact, or the run
+   * has used a tool, so it could have read outside text: every call that can
+   * change things asks (gate.ts).
    */
   outsideText?: boolean;
 }
@@ -1557,7 +1558,7 @@ export class PackService {
    */
   private memoryFor(
     tools: ReadTool[],
-    used: string[],
+    ctx: ToolCtx,
     about: string,
   ): { data: { entries: unknown[]; notShown: number }; tainted: boolean } {
     if (!this.o.memory) return { data: { entries: [], notShown: 0 }, tainted: false };
@@ -1573,7 +1574,10 @@ export class PackService {
           const found: PromptMemory[] = memory.recall(
             String((args as { words?: string }).words ?? ''),
           );
-          if (found.some((e) => e.tainted)) used.push('vigil.recall_memory');
+          if (found.some((e) => e.tainted)) {
+            ctx.used.push('vigil.recall_memory');
+            ctx.outsideText = true;
+          }
           return found;
         },
       });
@@ -1807,8 +1811,9 @@ export class PackService {
    * A pack dog's prompt for one run, and whether it is tainted: the same
    * item-by-item count as the Lead dog's (leadPrompt). Its job, its last
    * report, the memory that rides along and its connector tools' own text.
-   * Its name only when clean; otherwise its id. A tainted last report also
-   * makes every call that can change things ask (gate.ts).
+   * Its name only when clean; otherwise its id. A tainted last report, job or
+   * memory fact also makes every call that can change things ask (gate.ts); a
+   * connector's own text doesn't, since the person chose that connector.
    */
   private jobPrompt(dog: Dog, ctx: RunCtx): { prompt: Prompt; tainted: boolean } {
     const intake = new Intake();
@@ -1816,9 +1821,9 @@ export class PackService {
     // a call that can change things then waits for the person, as a change
     // the reading path's answer leads to does.
     const outsideText = reportTainted(dog);
-    if (outsideText) ctx.outsideText = true;
     const tools = this.toolsFor(dog, ctx, intake);
-    const memory = this.memoryFor(tools, ctx.used, dog.job);
+    const memory = this.memoryFor(tools, ctx, dog.job);
+    if (outsideText || jobTainted(dog) || memory.tainted) ctx.outsideText = true;
     const name = nameTainted(dog) ? `the dog with id ${dog.id}` : dog.name;
     return {
       prompt: {
@@ -2057,6 +2062,8 @@ export class PackService {
     const stop = ended() ? 'this run has ended.' : this.recheck(dog, t, args);
     if (stop) return notRun(stop);
     ctx.used.push(t.key);
+    // What comes back could steer the model: later calls in this run go by it.
+    ctx.outsideText = true;
     const vigil = t.source === 'vigil';
     this.setMood(
       dog.id,
