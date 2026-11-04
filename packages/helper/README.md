@@ -171,7 +171,12 @@ an event while working fine; Santa logs every program launch.
   and the daemon re-reads the signed pin before repairing it, adopting a newer one. The
   highest generation signed is kept in a signed counter (`pin/app-pin.gen`), so an
   older pin put back while the helper was stopped is refused at start, and pins are
-  checked only with the key loaded at start. `vigil-helper pin-remove`, which the
+  checked only with the key loaded at start. A pin or generation file the helper can't
+  verify (another key, a write cut short) is ignored, never re-signed by the daemon: it is
+  logged once each time it changes and named in `app-pin.json` as `problem`, so the app
+  asks for a helper update, whose `pin-app` signs new files (`pinApp.ts`). Each write goes
+  through a temporary file of its own, so overlapping installs never clobber each
+  other's half-written file. `vigil-helper pin-remove`, which the
   uninstallers run once the helper has stopped, clears the immutable flag and removes
   the pin folder. Like `pin-app` it is a root command line only (not a socket command),
   and it refuses while the daemon answers.

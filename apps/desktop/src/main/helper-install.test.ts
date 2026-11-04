@@ -21,6 +21,7 @@ import {
   adminScriptArgs,
   appPinFile,
   appPinned,
+  appPinProblem,
   appPinTarget,
   ELEVATED_ENTRY,
   elevatedEntry,
@@ -667,6 +668,46 @@ describe('helper install', () => {
       expect(inInstallerFolder('darwin', { execPath, env: {} }), execPath).toBe(
         insideInstalledRoot(execPath, 'darwin'),
       );
+  });
+
+  it('asks once for a helper update when the helper ignores its own pin files, in /Applications too', () => {
+    const { dir } = bundle();
+    const root = mkdtempSync(join(tmpdir(), 'root-'));
+    for (const f of installedHelperFiles(dir, 'darwin', root)) {
+      mkdirSync(dirname(f.installed), { recursive: true });
+      writeFileSync(f.installed, readFileSync(f.bundled));
+    }
+    const app = {
+      execPath: '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home',
+      env: {},
+    };
+    const copy = (body: object) => {
+      mkdirSync(dirname(appPinFile('darwin', root)), { recursive: true });
+      writeFileSync(appPinFile('darwin', root), JSON.stringify(body) + '\n');
+    };
+    copy({});
+    const fine = helperMatch(dir, 'darwin', root, app);
+    expect(fine.installed).toBe('current');
+    expect(appPinProblem('darwin', root)).toBeUndefined();
+    // What the helper writes when it ignores files another key signed (pinStore.ts).
+    const problem = 'the pin file is not the one this helper signed; it is ignored';
+    copy({ problem });
+    expect(appPinProblem('darwin', root)).toBe(problem);
+    const broken = helperMatch(dir, 'darwin', root, app);
+    expect(broken.installed).toBe('outdated');
+    // Its own bundle, so the app asks once for it, and not again once declined.
+    expect(broken.bundle).not.toBe(fine.bundle);
+    expect(helperMatch(dir, 'darwin', root, app)).toEqual(broken);
+    // The update signs new files; the helper's copy names no problem again.
+    copy({});
+    expect(helperMatch(dir, 'darwin', root, app)).toEqual(fine);
+    // Anything else in the copy (an old one, or unreadable) is no problem.
+    for (const body of [{ problem: '' }, { problem: 7 }]) {
+      copy(body);
+      expect(helperMatch(dir, 'darwin', root, app).installed).toBe('current');
+    }
+    writeFileSync(appPinFile('darwin', root), '{');
+    expect(appPinProblem('darwin', root)).toBeUndefined();
   });
 
   it('asks for a helper update when a Downloads app is pinned to another build', () => {

@@ -25,6 +25,11 @@
 //               or stops verifying changes nothing until the helper itself
 //               writes a new one (or a signed one appears). A key with no
 //               pin file beside it at start is reported.
+//   Reported    A file the helper ignores (and a key with no pin) is logged
+//               once each time it changes, however often a repair reads it
+//               again, and named in the readable copy, so the app asks for a
+//               helper update: pin-app, behind the password, signs new ones.
+//               The helper never re-signs a file it couldn't verify itself.
 //   Immutable   Both files carry the immutable flag (chflags uchg on macOS,
 //               chattr +i on Linux where the filesystem has it). The helper
 //               clears it only around its own writes.
@@ -39,7 +44,8 @@
 //               when it is not. It never moves or rewrites anything.
 //
 // A readable copy of the pin (config appPin) is written beside the state for
-// the app to see what is pinned. It is never read here.
+// the app to see what is pinned, and what is wrong with the files, if
+// anything. It is never read here.
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
@@ -149,7 +155,12 @@ export class AppPinStore {
   private key: Buffer | undefined;
   private pin: AppPin | undefined;
   private seen: string | undefined;
+  /** Why the pin file on disk is not the pin in force. */
   private problem: string | undefined;
+  /** Why the generation file read at start was not used. */
+  private genProblem: string | undefined;
+  /** The problems last logged and put in the readable copy, with the pin file they were about. */
+  private reported: string | undefined;
   /** The generation of the pin in memory; a file signed with a lower one is old. */
   private gen = 0;
   /** Device and inode of each file as the helper last left it. */
@@ -184,7 +195,7 @@ export class AppPinStore {
       this.refresh(true);
       if (hadKey && lstatId(this.file) === undefined) {
         this.problem = 'the pin file is missing; no app is pinned until the helper writes one';
-        this.opts.log?.(`app pin: ${this.problem}`);
+        this.report();
       }
     });
   }
@@ -220,8 +231,28 @@ export class AppPinStore {
     this.refresh();
     const s: PinStatus = { pinned: !!this.pin };
     if (this.pin) s.path = this.pin.path;
-    if (this.problem) s.problem = this.problem;
+    const problem = this.problems();
+    if (problem) s.problem = problem;
     return s;
+  }
+
+  private problems(): string | undefined {
+    return [this.problem, this.genProblem].filter(Boolean).join('; ') || undefined;
+  }
+
+  /**
+   * Log the problems and put them in the readable copy, once each time they
+   * or the pin file change: a repair reads the file again every few
+   * minutes, and the same file is the same news.
+   */
+  private report(): void {
+    const problem = this.problems();
+    const key = problem && `${problem}\n${stamp(this.file)}`;
+    if (key === this.reported) return;
+    const before = this.reported;
+    this.reported = key;
+    if (problem) this.opts.log?.(`app pin: ${problem}`);
+    if (problem || before) this.writePublic(this.pin, problem);
   }
 
   /**
@@ -276,6 +307,8 @@ export class AppPinStore {
     this.problem = undefined;
     this.seen = stamp(this.file);
     await this.writeGen();
+    this.genProblem = undefined;
+    this.reported = undefined;
     this.writePublic(pin);
   }
 
@@ -308,15 +341,21 @@ export class AppPinStore {
       if (got.length !== want.length || !timingSafeEqual(got, want)) throw new Error('unsigned');
       const id = lstatId(this.genFile);
       if (id) this.ids.set(this.genFile, id);
+      this.genProblem = undefined;
       return body.gen;
     } catch {
-      this.opts.log?.('app pin: the generation file is not the one this helper signed');
+      // Logged with the pin file's state, once load has read it (report).
+      this.genProblem = 'the generation file is not the one this helper signed';
       return 0;
     }
   }
 
-  /** The app's readable copy; a failure only means the app may ask to set the helper up again. */
-  private writePublic(pin: AppPin | undefined): void {
+  /**
+   * The app's readable copy: the pin, and what is wrong with the files, which
+   * a helper update puts right (helper-install.ts). A failure only means the
+   * app may ask to set the helper up again.
+   */
+  private writePublic(pin: AppPin | undefined, problem?: string): void {
     const path = this.opts.publicFile;
     if (!path) return;
     try {
@@ -329,7 +368,7 @@ export class AppPinStore {
       );
       try {
         fchmodSync(fd, 0o644);
-        writeSync(fd, JSON.stringify(pin ?? {}) + '\n');
+        writeSync(fd, JSON.stringify({ ...pin, ...(problem ? { problem } : {}) }) + '\n');
       } finally {
         closeSync(fd);
       }
@@ -356,17 +395,19 @@ export class AppPinStore {
     const verified = this.verify();
     if (verified === 'invalid') {
       // Never pinned and nothing there: nothing is wrong.
-      if (now === 'missing' && !this.pin && !this.ids.has(this.file)) return;
+      if (now === 'missing' && !this.pin && !this.ids.has(this.file)) return this.report();
       this.problem =
         now === 'missing'
           ? 'the pin file is missing; the helper keeps the pin it loaded'
           : 'the pin file is not the one this helper signed; it is ignored';
-      this.opts.log?.(`app pin: ${this.problem}`);
-      return;
+      return this.report();
     }
     this.pin = verified.pin;
     this.gen = verified.gen;
     this.problem = undefined;
+    // A newer pin some helper process signed comes with its generation file.
+    if (this.genProblem) this.gen = Math.max(this.gen, this.readGen());
+    this.report();
     if (!adopt) return;
     const id = lstatId(this.file);
     if (id) this.ids.set(this.file, id);
@@ -422,27 +463,33 @@ export class AppPinStore {
    * Write `path` whole: clear its immutable flag, write a new file beside
    * it (never following a link, never reusing one), rename it into place,
    * and flag it again. The flag is cleared only here. `text` gets the new
-   * file's device and inode, which the rename keeps.
+   * file's device and inode, which the rename keeps. The new file's name is
+   * this write's own, so two helper processes writing at once (overlapping
+   * installs) never remove or rename each other's half-written file.
    */
   private async writeFile(path: string, mode: number, text: (id: string) => string): Promise<void> {
     this.writing++;
     try {
       if (lstatId(path) !== undefined) await this.flag(path, false);
-      const tmp = `${path}.tmp`;
-      rmSync(tmp, { force: true });
+      const tmp = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
       const fd = openSync(
         tmp,
         constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
         mode,
       );
       try {
-        fchmodSync(fd, mode);
-        const st = fstatSync(fd, { bigint: true });
-        writeSync(fd, text(fileId(st.dev, st.ino)));
-      } finally {
-        closeSync(fd);
+        try {
+          fchmodSync(fd, mode);
+          const st = fstatSync(fd, { bigint: true });
+          writeSync(fd, text(fileId(st.dev, st.ino)));
+        } finally {
+          closeSync(fd);
+        }
+        renameSync(tmp, path);
+      } catch (err) {
+        rmSync(tmp, { force: true });
+        throw err;
       }
-      renameSync(tmp, path);
       await this.flag(path, true);
       const id = lstatId(path);
       if (id) this.ids.set(path, id);
