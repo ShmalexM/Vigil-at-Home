@@ -794,10 +794,17 @@ describe('setup on Linux', () => {
     expect(deb.join('\n')).toContain('1484120AC4E9F8A1A577AEEE97A80C63C9D8B80B');
     expect(deb.join('\n')).toContain('signed-by=/etc/apt/keyrings/osquery.gpg');
     expect(deb.at(-1)).toBe('sudo apt-get update && sudo apt-get install -y osquery');
+    // Before the install, so apt never picks the release with no launch events.
+    expect(deb.at(-2)).toBe(
+      "printf 'Package: osquery\\nPin: version 5.24.0*\\nPin-Priority: -1\\n' | sudo tee /etc/apt/preferences.d/osquery.pref >/dev/null",
+    );
     const rpm = linux('fedora')
       .find((s) => s.id === 'osquery')!
       .commands.map((c) => c.cmd);
     expect(rpm.at(-1)).toBe('sudo dnf install -y --enablerepo=osquery-s3-rpm-repo osquery');
+    expect(rpm.at(-2)).toBe(
+      "sudo sed -i '/^\\[osquery-s3-rpm-repo\\]$/a excludepkgs=osquery-5.24.0*' /etc/yum.repos.d/osquery.repo",
+    );
     const other = linux('other').find((s) => s.id === 'osquery')!;
     expect(other.commands).toEqual([]);
     expect(other.unavailable).toMatch(/osquery\.io/);
