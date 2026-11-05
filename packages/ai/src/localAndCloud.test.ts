@@ -128,6 +128,28 @@ describe('a local model', () => {
     expect(log[0]!.detail).toContain('not complete JSON');
     expect(prompts[1]).toContain('was cut off');
   });
+
+  it('answers on a thinking model that would spend its output cap on thoughts', async () => {
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/api/tags'))
+        return Response.json({ models: [{ name: 'thinker', size: 5 * GB }] });
+      if (url.endsWith('/api/show'))
+        return Response.json({ capabilities: ['completion', 'tools', 'thinking'] });
+      const { think } = JSON.parse(String(init?.body)) as { think?: boolean };
+      const content = think === false ? '{"ok": true}' : '';
+      return Response.json({ message: { role: 'assistant', content } });
+    });
+    try {
+      const ai = createVigilAi({
+        settings: { ...defaultAiSettings('/tmp/v'), mode: 'local' },
+        log: { record: () => {} },
+        pins: memoryPinStore(),
+      });
+      expect(await ai.run(ask)).toMatchObject({ ok: true, value: { ok: true } });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe('OpenAI-style API', () => {

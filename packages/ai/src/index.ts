@@ -170,6 +170,7 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
     createOllamaAdapter({
       baseUrl: settings.ollama.baseUrl,
       ...(settings.ollama.model ? { model: settings.ollama.model } : {}),
+      runtime: { think: false },
     }),
   ];
   const runner = createAiRunner({
