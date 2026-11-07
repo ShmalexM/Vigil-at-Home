@@ -1152,3 +1152,198 @@ describe('agent tracker and the ancestry the sensor hub fills in', () => {
     expect(t.observe(full)).toBe(full);
   });
 });
+
+describe('a seeded agent root’s signature, read from its process', () => {
+  const ANTHROPIC = { teamId: 'Q6L2SF6YDW', signingId: 'Q6L2SF6YDW:com.anthropic.claude-code' };
+  /** Claude Code as ps lists it when it started before Vigil: argv[0], no signature. */
+  const row = (pid = 9500, startedAt = T0, ppid = 530) => ({
+    pid,
+    ppid,
+    startedAt,
+    path: 'claude',
+    args: ['claude'],
+  });
+  function seeded(opts: Partial<TrackerOptions> = {}) {
+    const asked: { pid: number; startedAt: number }[] = [];
+    const tr = tracker({ onSeededRoot: (r) => asked.push(r), ...opts });
+    return { ...tr, asked };
+  }
+
+  it('asks once for a seeded agent root and hands the signature down once it is verified', () => {
+    const { t, launch, asked } = seeded();
+    t.seed([row(), { pid: 9600, ppid: 530, startedAt: T0, path: '/bin/zsh' }]);
+    // Only the agent root, and only once: a later ps read of the same process does not ask again.
+    expect(asked).toEqual([{ pid: 9500, startedAt: T0 }]);
+    t.seed([row()]);
+    expect(asked).toHaveLength(1);
+    expect(t.lookup(9500)?.tag?.teamId).toBeUndefined();
+
+    t.learnRootSignature(9500, T0, ANTHROPIC);
+    const root = t.lookup(9500)!.tag!;
+    expect(root).toMatchObject({ id: 'claude-code', depth: 0, ...ANTHROPIC });
+    // The agent's own `security` read carries the root's signature, as for a launch Vigil saw.
+    const sec = launch('/usr/bin/security', 9500, { signing: 'apple' });
+    expect(sec.process.agent).toEqual({ ...root, depth: 1 });
+    // A shell gets it; what the shell starts does not (see passOn).
+    const sh = launch('/bin/zsh', 9500);
+    expect(launch('/usr/bin/security', sh.process.pid).process.agent?.teamId).toBeUndefined();
+  });
+
+  it('keeps it across a new ps name and a sensor event that names no signature', () => {
+    const { t } = seeded();
+    t.seed([row()]);
+    t.learnRootSignature(9500, T0, { ...ANTHROPIC, executable: CLAUDE_BIN });
+    // ps names it differently on a later read; the program image is the same.
+    t.seed([{ ...row(), path: '/usr/local/bin/claude' }]);
+    expect(t.lookup(9500)?.tag).toMatchObject(ANTHROPIC);
+    // Its first file read names the real executable, but no signature yet.
+    t.observe(fileOpen(proc({ path: CLAUDE_BIN, pid: 9500, ppid: 530 }), '/tmp/a'));
+    expect(t.lookup(9500)).toMatchObject({ path: CLAUDE_BIN, tag: ANTHROPIC });
+  });
+
+  it('drops it for a sensor event naming another program, or an unsigned one', () => {
+    // Another executable than the one codesign verified, with no signature.
+    const a = seeded();
+    a.t.seed([row()]);
+    a.t.learnRootSignature(9500, T0, { ...ANTHROPIC, executable: CLAUDE_BIN });
+    a.t.observe(fileOpen(proc({ path: '/tmp/evil', pid: 9500, ppid: 530 }), '/tmp/a'));
+    expect(a.t.lookup(9500)?.tag?.teamId).toBeUndefined();
+    expect(a.launch('/usr/bin/security', 9500).process.agent?.teamId).toBeUndefined();
+
+    // The verified path, but a sensor says it is unsigned.
+    const b = seeded();
+    b.t.seed([row()]);
+    b.t.learnRootSignature(9500, T0, { ...ANTHROPIC, executable: CLAUDE_BIN });
+    b.t.observe(
+      fileOpen(proc({ path: CLAUDE_BIN, pid: 9500, ppid: 530, signing: 'unsigned' }), '/tmp/a'),
+    );
+    expect(b.t.lookup(9500)?.tag?.teamId).toBeUndefined();
+
+    // No verified executable to compare with: a sensor's path can't be checked.
+    const c = seeded();
+    c.t.seed([row()]);
+    c.t.learnRootSignature(9500, T0, ANTHROPIC);
+    c.t.observe(fileOpen(proc({ path: CLAUDE_BIN, pid: 9500, ppid: 530 }), '/tmp/a'));
+    expect(c.t.lookup(9500)?.tag?.teamId).toBeUndefined();
+  });
+
+  it('accepts an answer that arrives after a sensor named the verified program', () => {
+    const a = seeded();
+    a.t.seed([row()]);
+    a.t.observe(fileOpen(proc({ path: CLAUDE_BIN, pid: 9500, ppid: 530 }), '/tmp/a'));
+    a.t.learnRootSignature(9500, T0, { ...ANTHROPIC, executable: CLAUDE_BIN });
+    expect(a.t.lookup(9500)?.tag).toMatchObject(ANTHROPIC);
+
+    // A sensor named another program: the answer is not about it.
+    const b = seeded();
+    b.t.seed([row()]);
+    b.t.observe(fileOpen(proc({ path: '/tmp/evil', pid: 9500, ppid: 530 }), '/tmp/a'));
+    b.t.learnRootSignature(9500, T0, { ...ANTHROPIC, executable: CLAUDE_BIN });
+    expect(b.t.lookup(9500)?.tag?.teamId).toBeUndefined();
+  });
+
+  it('forgets it when the process exits, so a reused pid lends nothing', () => {
+    const { t, launch } = seeded();
+    t.seed([row()]);
+    t.learnRootSignature(9500, T0, ANTHROPIC);
+    expect(launch('/usr/bin/security', 9500).process.agent?.teamId).toBe(ANTHROPIC.teamId);
+    t.observe(
+      ev({ kind: 'process.exit', process: proc({ path: 'claude', pid: 9500, ppid: 530 }) }),
+    );
+    // Another program forked into pid 9500 without an exec, then ran security.
+    expect(launch('/usr/bin/security', 9500).process.agent?.teamId).toBeUndefined();
+    // An answer still on its way for the exited process counts for nothing.
+    const s = seeded();
+    s.t.seed([row()]);
+    s.t.observe(
+      ev({ kind: 'process.exit', process: proc({ path: 'claude', pid: 9500, ppid: 530 }) }),
+    );
+    s.t.learnRootSignature(9500, T0, ANTHROPIC);
+    expect(s.t.lookup(9500)?.tag?.teamId).toBeUndefined();
+  });
+
+  it('starts over for a reused pid under the same parent', () => {
+    const { t, launch, asked } = seeded();
+    t.seed([row()]);
+    t.learnRootSignature(9500, T0, ANTHROPIC);
+    // Same pid, same parent, born a minute later: another process.
+    t.seed([row(9500, T0 + 60_000)]);
+    expect(t.lookup(9500)?.tag?.teamId).toBeUndefined();
+    expect(launch('/usr/bin/security', 9500).process.agent?.teamId).toBeUndefined();
+    expect(asked).toEqual([
+      { pid: 9500, startedAt: T0 },
+      { pid: 9500, startedAt: T0 + 60_000 },
+    ]);
+  });
+
+  it('gives way to a signature a sensor reports', () => {
+    const { t } = seeded();
+    t.seed([row()]);
+    t.learnRootSignature(9500, T0, ANTHROPIC);
+    const other = { teamId: 'EQHXZ8M8AV', signingId: 'EQHXZ8M8AV:com.example.claude' };
+    t.observe(fileOpen(proc({ path: CLAUDE_BIN, pid: 9500, ppid: 530, ...other }), '/tmp/b'));
+    expect(t.lookup(9500)?.tag).toMatchObject(other);
+  });
+
+  it('never lends a signature to another process with the same pid', () => {
+    // Another start time: the answer was for an earlier process.
+    const a = seeded();
+    a.t.seed([row()]);
+    a.t.learnRootSignature(9500, T0 + 5000, ANTHROPIC);
+    expect(a.t.lookup(9500)?.tag?.teamId).toBeUndefined();
+
+    // The pid was reused (a new parent, a new start) between the question and the answer.
+    const b = seeded();
+    b.t.seed([row()]);
+    b.t.seed([row(9500, T0 + 60_000, 531)]);
+    expect(b.asked).toEqual([
+      { pid: 9500, startedAt: T0 },
+      { pid: 9500, startedAt: T0 + 60_000 },
+    ]);
+    b.t.learnRootSignature(9500, T0, ANTHROPIC);
+    expect(b.t.lookup(9500)?.tag?.teamId).toBeUndefined();
+    b.t.learnRootSignature(9500, T0 + 60_000, ANTHROPIC);
+    expect(b.t.lookup(9500)?.tag).toMatchObject(ANTHROPIC);
+
+    // The process launched (or re-exec'd) a program meanwhile: the launch's own word stands.
+    const c = seeded();
+    c.t.seed([row()]);
+    c.t.observe(exec(proc({ path: '/tmp/evil', pid: 9500, ppid: 530, args: ['claude'] })));
+    c.t.learnRootSignature(9500, T0, ANTHROPIC);
+    expect(c.t.lookup(9500)?.tag?.teamId).toBeUndefined();
+
+    // An answer nobody asked for counts for nothing, and is used at most once.
+    const d = seeded();
+    d.t.learnRootSignature(9500, T0, ANTHROPIC);
+    d.t.seed([{ pid: 9700, ppid: 530, startedAt: T0, path: '/bin/zsh' }]);
+    d.t.learnRootSignature(9700, T0, ANTHROPIC);
+    expect(d.t.lookup(9700)?.tag).toBeUndefined();
+  });
+
+  it('adds nothing for a program with no team ID', () => {
+    const { t, launch } = seeded();
+    t.seed([row()]);
+    t.learnRootSignature(9500, T0, {});
+    expect(t.lookup(9500)?.tag).toEqual({
+      id: 'claude-code',
+      session: expect.any(String),
+      depth: 0,
+    });
+    expect(launch('/usr/bin/security', 9500).process.agent?.teamId).toBeUndefined();
+  });
+
+  it('does not ask about a root a sensor saw launch', () => {
+    const { t, launch, asked } = seeded();
+    const root = launch(CLAUDE_BIN, 501);
+    t.seed([{ pid: root.process.pid, ppid: 501, startedAt: root.ts, path: 'claude' }]);
+    expect(asked).toEqual([]);
+  });
+
+  it('keeps the start time ps gave when the session reuses an earlier one', () => {
+    const { t, asked } = seeded({ priorStart: () => T0 - 900 });
+    t.seed([row()]);
+    expect(asked).toEqual([{ pid: 9500, startedAt: T0 }]);
+    t.learnRootSignature(9500, T0, ANTHROPIC);
+    expect(t.lookup(9500)?.tag).toMatchObject(ANTHROPIC);
+  });
+});
