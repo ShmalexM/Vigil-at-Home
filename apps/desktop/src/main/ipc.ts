@@ -152,7 +152,7 @@ export function registerIpc(
     },
     setAlertView: (view) => {
       core.setAlertView(view);
-      windows.setNeedsYou(core.status().badge);
+      windows.setNeedsYou(core.status().badge + pack.service.approvalCount());
       windows.broadcast('changed');
     },
     setShowAdvanced: (show) => {

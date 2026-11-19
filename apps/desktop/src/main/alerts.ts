@@ -522,7 +522,10 @@ export class AlertService extends EventEmitter<AlertEvents> {
         ? 'released'
         : 'none';
     const inForce = containing.filter((r) => r.status === 'done');
-    const simulated = inForce.length > 0 && inForce.every((r) => r.result?.simulated === true);
+    // Same test as the renderer's provenance(): older dry runs carry only a `dry-` quarantine id.
+    const dry = (r: ActionRecord) =>
+      r.result?.simulated === true || r.result?.quarantineId?.startsWith('dry-') === true;
+    const simulated = inForce.length > 0 && inForce.every(dry);
     const { simulated: wasSimulated = false, ...rest } = alert;
     const next: Alert = { ...rest, containment, ...(simulated ? { simulated } : {}) };
     if (next.containment !== alert.containment || simulated !== wasSimulated) {

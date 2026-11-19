@@ -47,6 +47,13 @@ export interface UndoBlockResult {
 
 type SantaRuleType = NonNullable<Detection['santa']>['ruleType'];
 
+/** What a "malicious" verdict would block (Feedback.blockTarget). */
+export interface BlockTarget {
+  readonly ruleType: SantaRuleType;
+  /** The program's path for a hash rule, otherwise the rule's identifier. */
+  readonly subject: string;
+}
+
 /** The Santa rule a "malicious" verdict adds for this detection, if any. */
 function verdictBlock(d: Detection): NonNullable<Detection['santa']> | undefined {
   if (d.santa) return d.santa;
@@ -141,14 +148,17 @@ export class Feedback {
 
   /**
    * What a "malicious" verdict on this detection would block, for the person
-   * deciding: the program's path, or the rule's identifier if the event has
-   * none. Undefined when the verdict would block nothing.
+   * deciding. A hash names one program, shown by its path when the event has
+   * one. Any other rule type reaches every program that shares the signer, so
+   * it is shown by its identifier. Undefined when the verdict would block nothing.
    */
-  blockTarget(d: Detection): string | undefined {
+  blockTarget(d: Detection): BlockTarget | undefined {
     const santa = verdictBlock(d);
     if (!santa || this.refusedBlock(d)) return undefined;
     const e = d.event;
-    return ('process' in e ? e.process?.path : undefined) ?? santa.identifier;
+    const one = santa.ruleType === 'binary' || santa.ruleType === 'cdhash';
+    const path = one && 'process' in e ? e.process?.path : undefined;
+    return { ruleType: santa.ruleType, subject: path ?? santa.identifier };
   }
 
   /**

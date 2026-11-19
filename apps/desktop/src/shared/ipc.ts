@@ -5,6 +5,7 @@ import {
   Id,
   RuleMode,
   UserDecision,
+  type SantaRuleType,
   type ActionProposal,
   type EventKind,
   type ActionRecord,
@@ -435,7 +436,14 @@ export interface AlertDetail {
   proposals: ActionProposal[];
   rule?: Rule;
   /** What marking this alert a threat would block. Absent when it would block nothing. */
-  blockTarget?: string;
+  blockTarget?: {
+    /** binary and cdhash name one program; the others reach every program sharing the signer. */
+    ruleType: SantaRuleType;
+    /** The program's path for one program, otherwise the team ID, signing ID or certificate. */
+    subject: string;
+    /** True while blocks are simulated because the helper isn't connected. */
+    simulated: boolean;
+  };
 }
 
 /**

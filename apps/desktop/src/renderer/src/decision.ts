@@ -1,4 +1,5 @@
 import type { Action, ActionRecord, ActionProposal, Alert } from '@vigil/core';
+import type { AlertDetail } from '../../shared/ipc';
 import { needsDecision } from '../../shared/attention';
 import { pileMates } from '../../shared/piles';
 
@@ -26,6 +27,32 @@ export function uncontainedAnswers(
   const serious = severity === 'high' || severity === 'critical';
   if (pendingCount > 0) return { lead: serious ? 'contain' : 'that-was-me', notMe: false };
   return { lead: serious ? 'not-me' : 'that-was-me', notMe: true };
+}
+
+/**
+ * What "Treat as a threat" will block, said before the user confirms. A hash
+ * rule blocks one program; a signer rule blocks every program that shares it.
+ * While the helper isn't connected, the block is only simulated, and the words say so.
+ */
+export function blockWords(t: NonNullable<AlertDetail['blockTarget']>): {
+  scope: string;
+  after: string;
+} {
+  const [blocks, stops, stop] = t.simulated
+    ? ['would block', 'would stop', 'would stop']
+    : ['blocks', 'stops', 'stop'];
+  const one = `Vigil ${blocks} this program from running again, so anything else that uses it ${stops} working too:`;
+  const scope = {
+    binary: one,
+    cdhash: one,
+    signingid: `Vigil ${blocks} every program with this signing ID, not just this copy, so anything that uses one ${stops} working:`,
+    teamid: `Vigil ${blocks} every program from this developer, not just this one, so their other apps ${stop} working too:`,
+    certificate: `Vigil ${blocks} every program signed with this certificate, not just this one, so they all ${stop} working:`,
+  }[t.ruleType];
+  const after = t.simulated
+    ? 'Vigil isn’t connected to its helper, so this block is only simulated and the program can still run for now. Reopen on the alert takes this back.'
+    : 'That may ask for your password. Reopen on the alert takes this back.';
+  return { scope, after };
 }
 
 /** Containment from this alert that is still in force and can be undone. */

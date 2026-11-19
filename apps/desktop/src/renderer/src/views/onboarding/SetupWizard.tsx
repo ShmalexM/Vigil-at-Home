@@ -42,7 +42,7 @@ const MODES: { id: SetupMode; icon: ReactNode; title: string; body: string; cost
     id: 'local',
     icon: <Laptop size={20} />,
     title: `On this ${computer} only`,
-    body: `A small model on your ${computer} explains alerts and suggests rules. Nothing leaves your ${computer}, and it works offline.`,
+    body: `A small model on your ${computer} labels events and, with enough memory, explains alerts. Nothing leaves your ${computer}, and it works offline.`,
     cost: 'Up to 1.3 GB of disk, or none if you have a model. Uses memory only while it thinks.',
   },
   {
@@ -187,7 +187,7 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
               title="AI"
               intro={
                 view.mode === 'local'
-                  ? 'The local model explains alerts and suggests rules. It never decides a block: blocking runs on fixed rules and never waits for AI.'
+                  ? 'The local model labels events and, with enough memory, explains alerts. It never decides a block: blocking runs on fixed rules and never waits for AI.'
                   : 'Vigil uses whichever of these you have, in this order. Protection works without any of them: the AI explains alerts and suggests rules, and never decides a block.'
               }
               steps={steps('ai')}

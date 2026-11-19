@@ -347,6 +347,38 @@ describe('event labelling with a small local model', () => {
     expect(classifierRuntime(1).numThread).toBe(1);
   });
 
+  it('keeps a model set in settings off the cloud, like the automatic pick', () => {
+    const cloud = [{ name: 'gpt-oss:120b-cloud', size: 300 }];
+    expect(classifierModelChoice(cloud, 'gpt-oss:120b-cloud', 32 * GB)).toBeUndefined();
+    // Sol review: a local name copied from a cloud model still runs on Ollama's servers.
+    const alias = [{ name: 'labeller:latest', remote_host: 'https://ollama.com:443', size: 300 }];
+    expect(classifierModelChoice(alias, 'labeller', 32 * GB)).toBeUndefined();
+    expect(classifierModelChoice(alias, undefined, 32 * GB)).toBeUndefined();
+    // Even under a name Vigil prefers.
+    const preferred = recommendedClassifierModel(32 * GB);
+    const copied = [{ name: preferred, remote_host: 'https://ollama.com:443', size: 300 }];
+    expect(classifierModelChoice(copied, undefined, 32 * GB)).toBeUndefined();
+  });
+
+  // Sol council review: shortening first could cut a token into a piece no pattern knows.
+  it('redacts an agent command before shortening it', () => {
+    const token = 'ghp_' + 'A1b2C3d4E5'.repeat(4);
+    const command = `${'echo ok; '.repeat(28)}curl -H "Authorization: Bearer ${token}" x`;
+    // The 300-character cut lands inside the token.
+    expect(command.indexOf(token)).toBeLessThan(300);
+    expect(command.indexOf(token) + token.length).toBeGreaterThan(300);
+    const line = eventLine({
+      id: 'e-agent',
+      ts: 1,
+      source: 'test',
+      kind: 'agent.tool_request',
+      agent: { host: 'claude-code' },
+      tool: 'Bash',
+      command,
+    } as SensorEvent);
+    expect(line).not.toContain(token.slice(0, 11));
+  });
+
   it('writes one short line per event', () => {
     expect(eventLine(exec('e1', '/Users/Shared/.x/run'))).toBe(
       'process started /Users/Shared/.x/run [unsigned] parent=/bin/zsh',
@@ -847,6 +879,37 @@ describe('Jev as the event labeller', () => {
         },
       }).classifier!.classify(events);
       expect(urls.some((u) => u.includes('decisions'))).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  // Sol council review, round 2: the wired labeller, not only the picker, refuses a saved cloud model.
+  it('never labels on a cloud model saved in settings', async () => {
+    const chats: string[] = [];
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/api/tags'))
+        return Response.json({ models: [{ name: 'gpt-oss:120b-cloud', size: 300 }] });
+      if (url.endsWith('/api/chat')) {
+        chats.push(String((JSON.parse(String(init?.body)) as { model?: string }).model));
+        return Response.json({
+          message: { role: 'assistant', content: '{"suspicious":[],"unusual":[]}' },
+        });
+      }
+      return new Response('{}', { status: 503 });
+    });
+    try {
+      const defaults = defaultAiSettings('/tmp/v');
+      const settings = {
+        ...defaults,
+        mode: 'local' as const,
+        claude: { ...defaults.claude, enabled: false },
+        classifier: { ...defaults.classifier, enabled: true, model: 'gpt-oss:120b-cloud' },
+      };
+      const ai = createVigilAi({ settings, log: { record: () => {} }, pins: memoryPinStore() });
+      const out = await ai.classifier!.classify([exec('evt-c', '/Users/Shared/.x/run')]);
+      expect(out.ok).toBe(false);
+      expect(chats).toEqual([]);
     } finally {
       vi.unstubAllGlobals();
     }
