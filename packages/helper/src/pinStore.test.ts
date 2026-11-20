@@ -5,6 +5,7 @@ import {
   linkSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -14,10 +15,11 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHmac } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import type { AppPin } from './appPin.js';
 import { quarantine, type QuarantineOptions } from './commands/quarantine.js';
 import { AppPinStore, removePinStore } from './pinStore.js';
+import { pinApp as runPinApp } from './pinApp.js';
 import { pinRemove } from './pinRemove.js';
 import { createServer } from 'node:net';
 import {
@@ -483,5 +485,160 @@ describe('vigil-helper pin-remove', () => {
     expect(await run(sys, 0, sock).code).toBe(0);
     expect(existsSync(state)).toBe(false);
     expect(sys.immutable.size).toBe(0);
+  });
+});
+
+describe('pin files the helper ignores (2026-10-17: logged every few minutes, never replaced)', () => {
+  const publicFile = () => join(root, 'app-pin.json');
+  const copy = () => JSON.parse(readFileSync(publicFile(), 'utf8')) as Record<string, unknown>;
+  /** A daemon starting on the folder, as daemon.ts sets it up. */
+  const daemon = async (logs: string[], sys: Flags = new Flags('darwin')) => {
+    const store = new AppPinStore(sys as unknown as System, {
+      dir: state,
+      publicFile: publicFile(),
+      ownerUid: process.getuid!(),
+      log: (m) => logs.push(m),
+    });
+    await store.load();
+    return store;
+  };
+  /** install.sh's pin-app, for an app in the installer's folder or not. */
+  const pinApp = (target: string, sys: Flags = new Flags('darwin')) =>
+    runPinApp({
+      euid: 0,
+      socket: join(root, 'helper.sock'),
+      dir: state,
+      publicFile: publicFile(),
+      sys: sys as unknown as System,
+      target,
+      installed: ['/Applications/Vigil at Home.app'],
+      ownerUid: process.getuid!(),
+    });
+  const APP = '/Applications/Vigil at Home.app/Contents/MacOS/Vigil at Home';
+  /** A pin and generation file signed with a key that is no longer the one beside them. */
+  const signedByAPreviousKey = async () => {
+    await (await daemon([])).write(PIN);
+    writeFileSync(join(root, 'new.key'), randomBytes(32).toString('hex') + '\n', { mode: 0o600 });
+    renameSync(join(root, 'new.key'), keyFile);
+  };
+
+  it('logs each problem once, however often a repair reads the files again', async () => {
+    await signedByAPreviousKey();
+    const logs: string[] = [];
+    const store = await daemon(logs);
+    expect(store.status()).toEqual({
+      pinned: false,
+      problem:
+        'the pin file is not the one this helper signed; it is ignored; ' +
+        'the generation file is not the one this helper signed',
+    });
+    expect(logs).toEqual([`app pin: ${store.status().problem}`]);
+    // The osquery timer repairs every 5 minutes; status is read on every helper.status.
+    for (let i = 0; i < 12; i++) {
+      await store.repair();
+      store.status();
+      store.current();
+    }
+    expect(logs).toHaveLength(1);
+    // Another file in its place is news, and logged once too.
+    writeFileSync(file + '.new', JSON.stringify({ ...OTHER, mac: 'f'.repeat(64) }));
+    renameSync(file + '.new', file);
+    await store.repair();
+    store.status();
+    expect(logs).toHaveLength(2);
+    // Nothing the helper couldn't verify is ever signed again by it.
+    expect(store.current()).toBeUndefined();
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ mac: 'f'.repeat(64) });
+  });
+
+  it('names the problem in the app’s copy until a helper update signs new files', async () => {
+    await signedByAPreviousKey();
+    await daemon([]);
+    expect(copy()).toEqual({ problem: expect.stringMatching(/not the one this helper signed/) });
+    // Home → Update helper: install.sh stops the helper and runs pin-app.
+    expect(await pinApp(APP)).toBe(0);
+    // The app in /Applications is protected by path, so it has no pin, and nothing is wrong.
+    expect(copy()).toEqual({});
+    const logs: string[] = [];
+    const next = await daemon(logs);
+    expect(next.status()).toEqual({ pinned: false });
+    expect(logs).toEqual([]);
+    // An app outside the installer's folder is pinned again the same way (write(pin)).
+    await next.write(PIN);
+    const after = await daemon(logs);
+    expect(after.status()).toEqual({ pinned: true, path: PIN.path });
+    expect(copy()).toEqual(PIN);
+    expect(logs).toEqual([]);
+  });
+
+  it('reports a generation file it can’t read, and an update replaces it too', async () => {
+    await (await daemon([])).write(PIN);
+    // Left empty: a write cut short, or two installs writing it at once.
+    rmSync(join(state, 'app-pin.gen'));
+    writeFileSync(join(state, 'app-pin.gen'), '');
+    const logs: string[] = [];
+    const store = await daemon(logs);
+    // The pin itself still verifies; only the floor under older pins is gone.
+    expect(store.status()).toEqual({
+      pinned: true,
+      path: PIN.path,
+      problem: 'the generation file is not the one this helper signed',
+    });
+    expect(logs).toEqual(['app pin: the generation file is not the one this helper signed']);
+    expect(copy()).toEqual({ ...PIN, problem: store.status().problem });
+    await store.repair();
+    expect(logs).toHaveLength(1);
+    expect(await pinApp(APP)).toBe(0);
+    const next = await daemon(logs);
+    expect(next.status()).toEqual({ pinned: false });
+    expect(logs).toHaveLength(1);
+  });
+
+  it('clears the problem from the copy when a signed pin is adopted', async () => {
+    await signedByAPreviousKey();
+    const store = await daemon([]);
+    expect(copy().problem).toBeDefined();
+    // pin-app, say, run while the daemon was meant to be stopped: a pin signed with this key.
+    const other = await daemon([]);
+    await other.write(PIN);
+    expect(store.status()).toEqual({ pinned: true, path: PIN.path });
+    expect(copy()).toEqual(PIN);
+  });
+
+  it('pin-app refuses anyone but root, and while the daemon answers', async () => {
+    const errors: string[] = [];
+    const base = {
+      socket: join(root, 'helper.sock'),
+      dir: state,
+      publicFile: publicFile(),
+      sys: new Flags('darwin') as unknown as System,
+      target: APP,
+      installed: ['/Applications/Vigil at Home.app'],
+      ownerUid: process.getuid!(),
+      error: (m: string) => errors.push(m),
+    };
+    expect(await runPinApp({ ...base, euid: 501 })).toBe(1);
+    expect(errors.join()).toMatch(/must run as root/);
+    const server = createServer(() => undefined);
+    await new Promise<void>((r) => server.listen(base.socket, r));
+    try {
+      expect(await runPinApp({ ...base, euid: 0 })).toBe(1);
+      expect(errors.join()).toMatch(/helper is running/);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+    expect(existsSync(state)).toBe(false);
+  });
+
+  it('writes each file through a temporary file of its own, never one another writer has', async () => {
+    const store = await daemon([]);
+    // What another helper process (an overlapping install) has half written.
+    const theirs = `${file}.tmp`;
+    writeFileSync(theirs, 'half');
+    await store.write(PIN);
+    expect(readFileSync(theirs, 'utf8')).toBe('half');
+    rmSync(theirs);
+    // And nothing of its own is left behind.
+    expect(readdirSync(state).sort()).toEqual(['app-pin.gen', 'app-pin.json', 'app-pin.key']);
   });
 });

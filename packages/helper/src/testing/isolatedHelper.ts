@@ -15,7 +15,7 @@ import { runDaemon } from '../daemon.js';
 import { FakeSystem } from './fakeSystem.js';
 
 export interface IsolatedHelper {
-  /** The temporary folder everything lives in; removed by stop(). */
+  /** The temporary folder everything lives in; removed by stop() unless the test made it. */
   root: string;
   paths: HelperPaths;
   socket: string;
@@ -29,6 +29,12 @@ export interface IsolatedHelper {
 export interface IsolatedHelperOptions {
   /** Parent of the temporary folder; the OS temp folder by default. */
   parent?: string;
+  /**
+   * A folder of the test's own (its real path) to start in instead, holding
+   * what an earlier helper left there, as after an update; stop() keeps it.
+   * isolatedPaths names the files in it.
+   */
+  root?: string;
   log?: (msg: string) => void;
 }
 
@@ -41,12 +47,9 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-export async function startIsolatedHelper(
-  opts: IsolatedHelperOptions = {},
-): Promise<IsolatedHelper> {
-  // The real path: the helper compares paths as written, and tmpdir is a link on macOS.
-  const root = realpathSync(mkdtempSync(join(opts.parent ?? tmpdir(), 'vigil-e2e-')));
-  const paths: HelperPaths = {
+/** Where an isolated helper in `root` keeps everything. */
+export function isolatedPaths(root: string): HelperPaths {
+  return {
     ...defaultPaths(join(root, 'support')),
     approvalsDir: join(root, 'approvals'),
     socket: join(root, 'helper.sock'),
@@ -54,6 +57,14 @@ export async function startIsolatedHelper(
     osqueryResults: join(root, 'osquery.log'),
     helperExecutable: join(root, 'vigil-helper'),
   };
+}
+
+export async function startIsolatedHelper(
+  opts: IsolatedHelperOptions = {},
+): Promise<IsolatedHelper> {
+  // The real path: the helper compares paths as written, and tmpdir is a link on macOS.
+  const root = opts.root ?? realpathSync(mkdtempSync(join(opts.parent ?? tmpdir(), 'vigil-e2e-')));
+  const paths = isolatedPaths(root);
   writeFileSync(paths.santaLog as string, '');
   writeFileSync(paths.osqueryResults as string, '');
   const sys = new FakeSystem();
@@ -85,7 +96,7 @@ export async function startIsolatedHelper(
       },
     async stop() {
       await stopDaemon();
-      rmSync(root, { recursive: true, force: true });
+      if (!opts.root) rmSync(root, { recursive: true, force: true });
     },
   };
 }
