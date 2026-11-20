@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   actionErrorText,
   activeContainment,
+  blockWords,
   containLabel,
   isSimulated,
   keepLabel,
@@ -267,5 +268,22 @@ describe('uncontainedAnswers', () => {
   it('lets a suggested action stand in for This wasn’t me', () => {
     expect(uncontainedAnswers('critical', 1)).toEqual({ lead: 'contain', notMe: false });
     expect(uncontainedAnswers('low', 2)).toEqual({ lead: 'that-was-me', notMe: false });
+  });
+});
+
+describe('blockWords', () => {
+  it('says a block is only simulated while the helper is missing', () => {
+    const w = blockWords({ ruleType: 'binary', subject: '/tmp/x', simulated: true });
+    expect(w.scope).toMatch(/^Vigil would block this program/);
+    expect(w.after).toMatch(/connected to its helper, so this block is only simulated/);
+    const real = blockWords({ ruleType: 'binary', subject: '/tmp/x', simulated: false });
+    expect(real.scope).toMatch(/^Vigil blocks this program/);
+    expect(real.after).not.toMatch(/simulated/);
+  });
+  it('names a signer-wide block as more than one program', () => {
+    for (const ruleType of ['teamid', 'certificate', 'signingid'] as const) {
+      const w = blockWords({ ruleType, subject: 'ABCDE12345', simulated: false });
+      expect(w.scope).toMatch(/every program/);
+    }
   });
 });

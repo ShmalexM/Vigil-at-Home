@@ -9,7 +9,8 @@ import { pileUp, untouched } from '../../../shared/piles';
 
 function blockedWords(blocked: number, simulated: number): string {
   const real = blocked === 0 ? 'nothing blocked' : `${blocked} blocked`;
-  return simulated === 0 ? real : `${real} (${simulated} simulated)`;
+  // The two counts don't overlap: "2 blocked, 1 simulated" is three things.
+  return simulated === 0 ? real : `${real}, ${simulated} simulated`;
 }
 
 /** Proof Vigil is running, in one line. */

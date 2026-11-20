@@ -737,7 +737,9 @@ export class VigilCore {
     if (!alert) return null;
     // Pack rules live in the engine, not the rules table; its mode is the one in force.
     const rule = this.detector?.rule(alert.ruleId) ?? this.store.getRule(alert.ruleId);
-    const blockTarget = this.detector?.verdictBlockTarget(id);
+    const target = this.detector?.verdictBlockTarget(id);
+    // Without the helper the block is only simulated; the panel must say so before the verdict.
+    const blockTarget = target && { ...target, simulated: this.executor.simulated ?? this.dryRun };
     return {
       alert,
       events: this.store.getEvents(alert.eventIds),

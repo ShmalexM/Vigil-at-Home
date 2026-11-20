@@ -44,7 +44,7 @@ import { removeLinuxOsquery } from './linuxOsquery.js';
 import { removePinStore } from './pinStore.js';
 import { LINUX_BINARIES, realSystem } from './system.js';
 import type { SensorEvent } from '@vigil/core';
-import type { HelperRan } from './fastpath.js';
+import { MOVE_WAIT_MS, type HelperRan } from './fastpath.js';
 
 const run =
   process.env.VIGIL_LINUX_INTEGRATION === '1' &&
@@ -237,7 +237,9 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
     paths = { ...linuxPaths(join(dir, 'state')), socket: join(dir, 'helper.sock') };
     // A copy of sleep with a few random bytes added: runs the same, but has a
     // hash of its own, so blocking it never blocks the real sleep.
-    evil = join(dir, 'evil-miner');
+    // Named sleep: a multicall sleep (uutils, Ubuntu 26.04) picks what to run
+    // by its file name: named evil-miner, it exits at once.
+    evil = join(dir, 'sleep');
     copyFileSync('/usr/bin/sleep', evil);
     appendFileSync(evil, randomBytes(64));
     spawnSync('chmod', ['755', evil]);
@@ -357,18 +359,30 @@ describe.skipIf(!run)('Vigil on real Linux, app closed', () => {
     const pid = child.pid!;
     // osquery's process events arrive every 5 seconds.
     const killed = await waitUntil(() => !alive(pid), 60_000);
-    // The kill comes first; the report of it reaches this client just after.
-    const report = () => seen.find((s) => s.e.kind === 'process.exec' && s.e.process.pid === pid);
-    if (killed) await waitUntil(() => !!report(), 10_000, 100);
-    const ran = report()?.ran;
+    // The kill comes first. The report of it reaches this client only after
+    // the block by hash that follows, which the helper waits on for up to
+    // MOVE_WAIT_MS.
+    const ranFor = () =>
+      seen
+        .filter((s) => s.e.kind === 'process.exec' && s.e.process.pid === pid)
+        .flatMap((s) => s.ran);
+    const stopped = () =>
+      ranFor().some(
+        (r) =>
+          r.ruleId === 'known-bad-hash' &&
+          r.action.kind === 'process.kill' &&
+          r.action.pid === pid &&
+          r.error === undefined,
+      );
+    if (killed) await waitUntil(stopped, MOVE_WAIT_MS + 10_000, 100);
+    const ran = ranFor();
     expect(
       killed,
       `still running; helper ran ${JSON.stringify(ran)}; launches seen: ${launchesSeen}\n` +
         `${logs.join('\n')}\n${osqueryDiagnosis()}\nosquery eBPF probe:\n${killed ? '' : await bpfProbe()}`,
     ).toBe(true);
     console.log(`launch to kill: ${Date.now() - t0} ms`);
-    expect(ran?.map((r) => r.ruleId)).toContain('known-bad-hash');
-    expect(ran?.find((r) => r.action.kind === 'process.kill')?.error).toBeUndefined();
+    expect(stopped(), `helper ran ${JSON.stringify(ran)}\n${logs.join('\n')}`).toBe(true);
 
     // The hash is now blocked before launch.
     const status = await client!.call<{

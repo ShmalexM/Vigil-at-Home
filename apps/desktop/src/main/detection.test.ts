@@ -208,10 +208,40 @@ describe('Detector', () => {
     const alertId = popups[0]!;
     const detail = core.alertDetail(alertId)!;
     expect(detail.alert.subject?.path).toBeUndefined();
-    expect(detail.blockTarget).toBe(c.target);
+    // DryRunExecutor: no helper, so the panel must say the block is only simulated.
+    expect(detail.blockTarget).toEqual(
+      c.target ? { ruleType: 'binary', subject: c.target, simulated: true } : undefined,
+    );
 
     await core.decide(alertId, { verdict: 'malicious', release: false });
     expect(executor.log.filter((a) => a.kind === 'santa.rule.set')).toHaveLength(c.blocks);
+  });
+
+  // Sol council review: a team-ID rule blocks every program that developer signed, not one path.
+  it('names a signer-wide block by its team ID, not by one program path', async () => {
+    const { core, popups } = setup();
+    core.detector!.engine.upsertRule({
+      ...ownRule('dev', '^/Applications/Bad\\.app/', 'alert'),
+      santa: { ruleType: 'teamid', from: 'process.teamId' },
+    });
+    await core.handleEvent({
+      id: 'ev-team',
+      ts: Date.now(),
+      source: 'test',
+      kind: 'process.exec',
+      process: {
+        pid: 778,
+        path: '/Applications/Bad.app/Contents/MacOS/Bad',
+        sha256: BAD,
+        signing: 'developer_id',
+        teamId: 'ABCDE12345',
+      },
+    });
+    expect(core.alertDetail(popups[0]!)?.blockTarget).toEqual({
+      ruleType: 'teamid',
+      subject: 'ABCDE12345',
+      simulated: true,
+    });
   });
 
   it('never blocks /bin/sh on a malicious verdict, and logs why on the alert', async () => {

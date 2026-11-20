@@ -5,6 +5,7 @@ import {
   classifierModelChoice,
   classifierRuntime,
   createEventClassifier,
+  isLocalWriter,
   recommendedClassifierModel,
   type EventClassifier,
 } from './classifier.js';
@@ -194,12 +195,14 @@ export function createVigilAi(options: VigilAiOptions): VigilAi {
             adapters: [
               createOllamaAdapter({
                 baseUrl: settings.ollama.baseUrl,
-                ...(settings.classifier.model
-                  ? { model: settings.classifier.model }
-                  : {
-                      pickModel: (installed) => classifierModelChoice(installed),
-                      suggestedModel: recommendedClassifierModel(),
-                    }),
+                // A saved model goes through the same check as the automatic pick,
+                // so a `-cloud` name never labels on Ollama's servers.
+                pickModel: (installed) =>
+                  classifierModelChoice(installed, settings.classifier.model),
+                suggestedModel:
+                  settings.classifier.model && isLocalWriter({ name: settings.classifier.model })
+                    ? settings.classifier.model
+                    : recommendedClassifierModel(),
                 runtime,
               }),
             ],

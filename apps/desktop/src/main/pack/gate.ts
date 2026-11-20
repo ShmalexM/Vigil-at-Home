@@ -5,9 +5,10 @@
 //   1. The user switched the tool off: refused.
 //   2. Vigil's rules say stop: refused. Rules say ask: the user is asked.
 //      This holds in every mode, Full access included.
-//   3. The run read outside text it was not given as data only: its own
-//      last report, which could hold someone else's text. Any tool that can
-//      change things asks, whatever the mode or the user's choice for it.
+//   3. The run may have read outside text: it started from a tainted report,
+//      job or memory fact, or a tool already ran in it (a recall counts only
+//      when it found a tainted fact). Any tool that can change things asks,
+//      whatever the mode or the user's choice for it.
 //   4. The user's own choice for the tool: always ask, or always allow.
 //   5. Vigil's own tools, which only read, go ahead. A connector's tools
 //      never count as read-only, whatever their server says (MCP hints are
@@ -38,7 +39,7 @@ export interface GateInput {
   readOnly: boolean;
   /** What Vigil's rules answered; none for Vigil's own tools. */
   rules: { decision: 'deny' | 'ask' | 'none'; reason?: string };
-  /** The run's prompt holds the dog's last report, and that report could hold outside text. */
+  /** The run may have read someone else's text (step 3 above). */
   outsideText?: boolean;
 }
 

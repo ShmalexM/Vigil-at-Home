@@ -2,6 +2,7 @@ import { cpus, totalmem } from 'node:os';
 import type { ProcessRef, SensorEvent } from '@vigil/core';
 import { z } from 'zod';
 import type { JevAnswer, JevClient } from './providers/jev.js';
+import { redactField } from './redact.js';
 import { LOCAL_PROVIDERS, MONTHLY_CAP_HELD } from './types.js';
 
 /** A busy Mac still gets one labelling batch this often. */
@@ -39,17 +40,23 @@ export interface LocalModel {
   readonly name: string;
   readonly size?: number;
   readonly details?: { readonly family?: string };
+  /** Set by Ollama on a cloud model, including a local name copied from one. */
+  readonly remote_host?: string;
+  readonly remote_model?: string;
 }
 
 /**
  * Whether a model can write text on this computer. An embedding or reranking
- * model can't write (bert is their family), and a `-cloud` model runs on
- * Ollama's servers, so it can't be used where nothing may leave this computer.
+ * model can't write (bert is their family), and a cloud model (a `-cloud`
+ * name, or one Ollama lists with a remote host) runs on Ollama's servers, so
+ * it can't be used where nothing may leave this computer.
  */
 export function isLocalWriter(m: LocalModel): boolean {
   return (
     !/embed|rerank|minilm|paraphrase|(^|[/:-])(bge|e5)\b/i.test(m.name) &&
     !/(^|[-:])cloud\b/i.test(m.name) &&
+    !m.remote_host &&
+    !m.remote_model &&
     !/bert/i.test(m.details?.family ?? '')
   );
 }
@@ -71,12 +78,12 @@ export function pickClassifierModel(
   installed: readonly LocalModel[],
   memoryBytes: number = totalmem(),
 ): string | undefined {
-  const names = new Set(installed.flatMap((m) => [m.name, m.name.replace(/:latest$/, '')]));
+  const local = installed.filter(isLocalWriter);
+  const names = new Set(local.flatMap((m) => [m.name, m.name.replace(/:latest$/, '')]));
   const list = memoryBytes < SMALL_BELOW ? CLASSIFIER_MODELS.small : CLASSIFIER_MODELS.regular;
   const known = list.find((m) => names.has(m));
   if (known) return known;
-  return installed
-    .filter(isLocalWriter)
+  return local
     .filter((m) => (m.size ?? 0) <= largestAutomatic(memoryBytes))
     .sort((a, b) => (a.size ?? Infinity) - (b.size ?? Infinity))[0]?.name;
 }
@@ -93,9 +100,9 @@ export function classifierModelChoice(
   memoryBytes: number = totalmem(),
 ): string | undefined {
   if (override) {
-    return installed.some((m) => m.name === override || m.name === `${override}:latest`)
-      ? override
-      : undefined;
+    // A stored name is checked like an automatic pick: a `-cloud` model would label on Ollama's servers.
+    const m = installed.find((m) => m.name === override || m.name === `${override}:latest`);
+    return m && isLocalWriter(m) ? override : undefined;
   }
   return pickClassifierModel(installed, memoryBytes);
 }
@@ -196,7 +203,8 @@ export function eventLine(e: SensorEvent): string {
     case 'system.alert':
       return `macOS ${e.subtype}${e.path ? ` ${e.path}` : ''}${proc(e.process)}`;
     case 'agent.tool_request':
-      return `${e.agent.host} asked to run ${e.tool}${e.command ? ` ${e.command.slice(0, 300)}` : ''}${
+      // Redact before shortening: a cut can leave part of a secret that no longer looks like one.
+      return `${e.agent.host} asked to run ${e.tool}${e.command ? ` ${redactField(e.command).slice(0, 300)}` : ''}${
         e.filePath ? ` on ${e.filePath}` : ''
       }${e.url ? ` ${e.url}` : ''}`;
   }

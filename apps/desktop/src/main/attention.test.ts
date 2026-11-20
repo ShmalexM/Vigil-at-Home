@@ -303,5 +303,16 @@ describe('VigilCore', () => {
       blockedToday: 0,
       simulatedToday: 1,
     });
+    // Sol review: an older dry run carries only a `dry-` quarantine id, and counts as simulated too.
+    core.store.saveAction({
+      id: 'old-dry-run',
+      action: { kind: 'file.quarantine', path: '/tmp/x' },
+      actor: 'rule',
+      reason: 'test',
+      requestedAt: at,
+      status: 'done',
+      result: { at, quarantineId: 'dry-1' },
+    });
+    expect(core.status().watch).toMatchObject({ blockedToday: 0, simulatedToday: 2 });
   });
 });

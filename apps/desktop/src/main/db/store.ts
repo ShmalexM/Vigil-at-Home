@@ -928,12 +928,15 @@ export class Store {
 
   /** Containment a rule carried out since `since`, counting ones the user later released. */
   countRuleBlocksSince(since: number, simulated = false): number {
+    // Same test as AlertService.refresh: older dry runs carry only a `dry-` quarantine id.
+    const dry = `(json_extract(body, '$.result.simulated') IS 1
+      OR IFNULL(json_extract(body, '$.result.quarantineId') LIKE 'dry-%', 0))`;
     const row = this.stmt(
       `SELECT COUNT(*) AS n FROM actions
          WHERE requested_at >= ? AND status IN ('done', 'undone')
            AND json_extract(body, '$.actor') = 'rule'
            AND json_extract(body, '$.undoes') IS NULL
-           AND json_extract(body, '$.result.simulated') IS ${simulated ? '1' : 'NOT 1'}`,
+           AND ${simulated ? dry : `NOT ${dry}`}`,
     ).get(since) as { n: number };
     return row.n;
   }

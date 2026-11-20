@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { vigil } from '../api';
 import {
   activeContainment,
+  blockWords,
   containLabel,
   refusalNote,
   keepLabel,
@@ -12,6 +13,7 @@ import {
   uncontainedAnswers,
 } from '../decision';
 import { releaseFailed } from '../format';
+import type { AlertDetail } from '../../../shared/ipc';
 import { HoldButton } from './HoldButton';
 import { Button } from './ui';
 
@@ -36,7 +38,7 @@ export function DecisionControls({
   proposals: readonly ActionProposal[];
   onDecided: (d: Decided) => void;
   full?: boolean;
-  blockTarget: string | undefined;
+  blockTarget: AlertDetail['blockTarget'];
 }) {
   const [failure, setFailure] = useState<{ id: string; text: string }>();
   const [notMeFor, setNotMeFor] = useState<string>();
@@ -144,14 +146,9 @@ export function DecisionControls({
         <div className="col release-scope" style={{ gap: 6 }}>
           {blockTarget ? (
             <>
-              <span className="t-small">
-                Vigil blocks this program from running again, so anything else that uses it stops
-                working too:
-              </span>
-              <div className="subject mono">{blockTarget}</div>
-              <span className="t-small">
-                That may ask for your password. Reopen on the alert takes this back.
-              </span>
+              <span className="t-small">{blockWords(blockTarget).scope}</span>
+              <div className="subject mono">{blockTarget.subject}</div>
+              <span className="t-small">{blockWords(blockTarget).after}</span>
             </>
           ) : (
             <span className="t-small">
