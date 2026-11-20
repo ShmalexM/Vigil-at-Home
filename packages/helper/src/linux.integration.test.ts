@@ -5,7 +5,7 @@
 
 import { afterAll, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { createServer, connect, type Server } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { identifyProcess, killProcess, suspendProcess } from './commands/process.js';
@@ -48,12 +48,15 @@ describe.skipIf(!run)('helper on real Linux', () => {
   });
 
   it('pauses and stops a process found through /proc', async () => {
+    // /proc names the program itself: on Ubuntu 26.04, /usr/bin/sleep is a
+    // link to uutils' multicall binary.
+    const sleep = realpathSync('/usr/bin/sleep');
     const child = spawn('/usr/bin/sleep', ['30']);
     await new Promise((r) => setTimeout(r, 200));
     const pid = child.pid!;
     const id = await identifyProcess(sys, pid);
-    expect(id?.path).toBe('/usr/bin/sleep');
-    await suspendProcess(sys, pid, { path: '/usr/bin/sleep' });
+    expect(id?.path).toBe(sleep);
+    await suspendProcess(sys, pid, { path: sleep });
     await new Promise((r) => setTimeout(r, 100));
     // Field 3 of /proc/<pid>/stat is the state; T means stopped.
     expect(readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ')[1]![0]).toBe('T');
@@ -61,7 +64,7 @@ describe.skipIf(!run)('helper on real Linux', () => {
       code: 'refused',
     });
     const exited = new Promise((r) => child.once('exit', (_code, sig) => r(sig)));
-    await killProcess(sys, pid, { path: '/usr/bin/sleep' });
+    await killProcess(sys, pid, { path: sleep });
     expect(await exited).toBe('SIGKILL');
   });
 
