@@ -14,7 +14,12 @@ export {
   type CompiledAgentMatcher,
 } from './match.js';
 export { sessionId } from './session-id.js';
-export { parsePsComm, mergePsArgs, MAX_PS_ARGS, type PsRow } from './ps-table.js';
-export { AgentTracker, type SessionStart, type TrackerOptions } from './tracker.js';
+export { parsePsComm, parsePsStart, mergePsArgs, MAX_PS_ARGS, type PsRow } from './ps-table.js';
+export {
+  AgentTracker,
+  type RootSignature,
+  type SessionStart,
+  type TrackerOptions,
+} from './tracker.js';
 export { AgentRegistry, type AgentRecord } from './registry.js';
 export { toolRequestEvent, decide } from './preflight.js';
